@@ -209,7 +209,7 @@ public class SvtAv1Tab : Box, ICodecTab {
 	tune_row.set_title ("Tune");
 	tune_row.set_subtitle ("Optimize for a specific quality metric");
 	tune_combo = new DropDown (new StringList ({
-    		"VQ (Subjective SSIM)", "PSNR", "SSIM"
+    		"VQ (Visual Quality)", "PSNR", "SSIM"
 	}), null);
 	tune_combo.set_valign (Align.CENTER);
 	tune_combo.set_selected (0);

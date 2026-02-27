@@ -55,19 +55,10 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         // ── SVT-AV1 Specific Parameters ─────────────────────────────────────
         string[] svt_params = {};
 
-        // Tune
-        string tune = tab.get_dropdown_text (tab.tune_combo);
-        if (tune != "Auto" && tune.length > 0) {
-            int tune_val = 0;
-            if (tune.contains ("VQ"))        tune_val = 1;
-            else if (tune == "PSNR")         tune_val = 2;
-            else if (tune == "SSIM")         tune_val = 3;
-            else if (tune == "VMAF Neg")     tune_val = 5;
-            else if (tune == "VMAF")         tune_val = 4;
-
-            if (tune_val > 0)
-                svt_params += "tune=%d".printf (tune_val);
-        }
+        // Tune (0 = VQ, 1 = PSNR, 2 = SSIM — VQ is default so only emit for non-default)
+        int tune_val = (int) tab.tune_combo.get_selected ();
+        if (tune_val > 0)
+            svt_params += "tune=%d".printf (tune_val);
 
         // Lookahead
         if (tab.lookahead_expander.enable_expansion) {
