@@ -42,7 +42,8 @@ public class X265Tab : Box, ICodecTab {
     public DropDown   ref_frames_combo  { get; private set; }
     public Switch     weightp_switch    { get; private set; }
     public Switch     pmode_switch      { get; private set; }
-    public Switch     psy_rd_switch     { get; private set; }
+    public Adw.ExpanderRow psy_rd_expander { get; private set; }
+    public SpinButton psy_rd_spin     { get; private set; }
     public Switch     cutree_switch     { get; private set; }
 
     // Deblock
@@ -141,9 +142,9 @@ public class X265Tab : Box, ICodecTab {
         // CRF value
         crf_row = new Adw.ActionRow ();
         crf_row.set_title ("CRF Value");
-        crf_row.set_subtitle ("Lower = better quality (0–51, default 23)");
+        crf_row.set_subtitle ("Lower = better quality (0–51, encoder default 28)");
         crf_spin = new SpinButton.with_range (0, 51, 1);
-        crf_spin.set_value (23);
+        crf_spin.set_value (28);
         crf_spin.set_valign (Align.CENTER);
         crf_row.add_suffix (crf_spin);
         group.add (crf_row);
@@ -270,7 +271,8 @@ public class X265Tab : Box, ICodecTab {
         aq_row.set_title ("AQ Mode");
         aq_row.set_subtitle ("Adaptive Quantization distributes bits across the frame");
         aq_mode_combo = new DropDown (new StringList ({
-            "Automatic", "Disabled", "Variance", "Auto-Variance", "Auto-Variance Biased"
+            "Automatic", "Disabled", "Variance", "Auto-Variance", "Auto-Variance Biased",
+            "Auto-Variance + Edge"
         }), null);
         aq_mode_combo.set_valign (Align.CENTER);
         aq_mode_combo.set_selected (0);
@@ -280,9 +282,10 @@ public class X265Tab : Box, ICodecTab {
         // AQ Strength
         aq_strength_row = new Adw.ActionRow ();
         aq_strength_row.set_title ("AQ Strength");
-        aq_strength_row.set_subtitle ("Higher = more adaptive (0–3)");
-        aq_strength_spin = new SpinButton.with_range (0, 3, 1);
-        aq_strength_spin.set_value (1);
+        aq_strength_row.set_subtitle ("Higher = more adaptive (0.0–3.0, default 1.0)");
+        aq_strength_spin = new SpinButton.with_range (0.0, 3.0, 0.1);
+        aq_strength_spin.set_digits (1);
+        aq_strength_spin.set_value (1.0);
         aq_strength_spin.set_valign (Align.CENTER);
         aq_strength_row.add_suffix (aq_strength_spin);
         aq_strength_row.set_sensitive (false);
@@ -318,7 +321,7 @@ public class X265Tab : Box, ICodecTab {
             { "1", "2", "3", "4", "5" }
         ), null);
         ref_frames_combo.set_valign (Align.CENTER);
-        ref_frames_combo.set_selected (3);
+        ref_frames_combo.set_selected (2);
         ref_row.add_suffix (ref_frames_combo);
         group.add (ref_row);
 
@@ -341,19 +344,19 @@ public class X265Tab : Box, ICodecTab {
         deblock_expander.set_enable_expansion (true);
 
         var alpha_row = new Adw.ActionRow ();
-        alpha_row.set_title ("Alpha (Luma)");
-        alpha_row.set_subtitle ("Strength for luma deblocking (−6 to 0)");
-        deblock_alpha_spin = new SpinButton.with_range (-6, 0, 1);
-        deblock_alpha_spin.set_value (-2);
+        alpha_row.set_title ("tC Offset");
+        alpha_row.set_subtitle ("Transform coefficient boundary strength (−6 to +6, default 0)");
+        deblock_alpha_spin = new SpinButton.with_range (-6, 6, 1);
+        deblock_alpha_spin.set_value (0);
         deblock_alpha_spin.set_valign (Align.CENTER);
         alpha_row.add_suffix (deblock_alpha_spin);
         deblock_expander.add_row (alpha_row);
 
         var beta_row = new Adw.ActionRow ();
-        beta_row.set_title ("Beta (Chroma)");
-        beta_row.set_subtitle ("Strength for chroma deblocking (−6 to 0)");
-        deblock_beta_spin = new SpinButton.with_range (-6, 0, 1);
-        deblock_beta_spin.set_value (-2);
+        beta_row.set_title ("Beta Offset");
+        beta_row.set_subtitle ("Boundary detection threshold (−6 to +6, default 0)");
+        deblock_beta_spin = new SpinButton.with_range (-6, 6, 1);
+        deblock_beta_spin.set_value (0);
         deblock_beta_spin.set_valign (Align.CENTER);
         beta_row.add_suffix (deblock_beta_spin);
         deblock_expander.add_row (beta_row);
@@ -370,24 +373,30 @@ public class X265Tab : Box, ICodecTab {
         pmode_row.set_activatable_widget (pmode_switch);
         group.add (pmode_row);
 
-        // Psy-RD
-        var psyrd_row = new Adw.ActionRow ();
-        psyrd_row.set_title ("Psy-RD");
-        psyrd_row.set_subtitle ("Psychovisual optimization for better subjective quality");
-        psy_rd_switch = new Switch ();
-        psy_rd_switch.set_valign (Align.CENTER);
-        psy_rd_switch.set_active (false);
-        psyrd_row.add_suffix (psy_rd_switch);
-        psyrd_row.set_activatable_widget (psy_rd_switch);
-        group.add (psyrd_row);
+        // Psy-RD (ExpanderRow with value)
+        psy_rd_expander = new Adw.ExpanderRow ();
+        psy_rd_expander.set_title ("Psy-RD");
+        psy_rd_expander.set_subtitle ("Psychovisual optimization for better subjective quality");
+        psy_rd_expander.set_show_enable_switch (true);
+        psy_rd_expander.set_enable_expansion (true);
+
+        var psy_rd_row = new Adw.ActionRow ();
+        psy_rd_row.set_title ("Strength");
+        psy_rd_spin = new SpinButton.with_range (0.0, 5.0, 0.1);
+        psy_rd_spin.set_digits (1);
+        psy_rd_spin.set_value (2.0);
+        psy_rd_spin.set_valign (Align.CENTER);
+        psy_rd_row.add_suffix (psy_rd_spin);
+        psy_rd_expander.add_row (psy_rd_row);
+        group.add (psy_rd_expander);
 
         // Cutree
         var cutree_row = new Adw.ActionRow ();
         cutree_row.set_title ("Cutree");
-        cutree_row.set_subtitle ("Complexity-based rate control for better bit allocation");
+        cutree_row.set_subtitle ("Complexity-based rate control for better bit allocation (enabled by default)");
         cutree_switch = new Switch ();
         cutree_switch.set_valign (Align.CENTER);
-        cutree_switch.set_active (false);
+        cutree_switch.set_active (true);
         cutree_row.add_suffix (cutree_switch);
         cutree_row.set_activatable_widget (cutree_switch);
         group.add (cutree_row);
@@ -554,7 +563,7 @@ public class X265Tab : Box, ICodecTab {
 
         // Rate Control
         rc_mode_combo.set_selected (0);
-        crf_spin.set_value (23);
+        crf_spin.set_value (28);
         qp_spin.set_value (28);
         abr_bitrate_spin.set_value (1000);
         abr_vbv_switch.set_active (false);
@@ -568,18 +577,19 @@ public class X265Tab : Box, ICodecTab {
         lookahead_expander.set_enable_expansion (false);
         lookahead_spin.set_value (40);
         aq_mode_combo.set_selected (0);
-        aq_strength_spin.set_value (1);
+        aq_strength_spin.set_value (1.0);
 
         // Advanced
         sao_switch.set_active (true);
-        ref_frames_combo.set_selected (3);
+        ref_frames_combo.set_selected (2);
         weightp_switch.set_active (true);
         deblock_expander.set_enable_expansion (true);
-        deblock_alpha_spin.set_value (-2);
-        deblock_beta_spin.set_value (-2);
+        deblock_alpha_spin.set_value (0);
+        deblock_beta_spin.set_value (0);
         pmode_switch.set_active (false);
-        psy_rd_switch.set_active (false);
-        cutree_switch.set_active (false);
+        psy_rd_expander.set_enable_expansion (true);
+        psy_rd_spin.set_value (2.0);
+        cutree_switch.set_active (true);
 
         // Audio
         audio_settings.reset_defaults ();

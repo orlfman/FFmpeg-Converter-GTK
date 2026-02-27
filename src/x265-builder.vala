@@ -96,14 +96,16 @@ public class X265Builder : Object, ICodecBuilder {
         if (tab.pmode_switch.active)
             params += "pmode=1";
 
-        // Psy-RD
-        if (tab.psy_rd_switch.active)
-            params += "psy-rd=2.0";
+        // Psy-RD (default enabled at 2.0, emit no-psy-rd when disabled)
+        if (tab.psy_rd_expander.enable_expansion) {
+            double psy_rd = tab.psy_rd_spin.get_value ();
+            params += "psy-rd=%.1f".printf (psy_rd);
+        } else {
+            params += "no-psy-rd";
+        }
 
-        // Cutree
-        if (tab.cutree_switch.active)
-            params += "cutree=1";
-        else
+        // Cutree (default enabled, only emit when disabled)
+        if (!tab.cutree_switch.active)
             params += "cutree=0";
 
         // Lookahead
@@ -113,21 +115,23 @@ public class X265Builder : Object, ICodecBuilder {
         }
 
         // AQ Mode (Automatic=don't set, Disabled=0, Variance=1,
-        //          Auto-Variance=2, Auto-Variance Biased=3)
+        //          Auto-Variance=2, Auto-Variance Biased=3,
+        //          Auto-Variance + Edge=4)
         string aq_mode = tab.get_dropdown_text (tab.aq_mode_combo);
         if (aq_mode != "Automatic") {
             int aq_val = 0;
             switch (aq_mode) {
-                case "Disabled":              aq_val = 0; break;
-                case "Variance":              aq_val = 1; break;
-                case "Auto-Variance":         aq_val = 2; break;
-                case "Auto-Variance Biased":  aq_val = 3; break;
+                case "Disabled":                aq_val = 0; break;
+                case "Variance":                aq_val = 1; break;
+                case "Auto-Variance":           aq_val = 2; break;
+                case "Auto-Variance Biased":    aq_val = 3; break;
+                case "Auto-Variance + Edge":    aq_val = 4; break;
             }
             params += "aq-mode=" + aq_val.to_string ();
 
             if (aq_val > 0) {
-                int strength = (int) tab.aq_strength_spin.get_value ();
-                params += "aq-strength=" + strength.to_string ();
+                double strength = tab.aq_strength_spin.get_value ();
+                params += "aq-strength=" + "%.1f".printf (strength);
             }
         }
 
