@@ -21,6 +21,11 @@ public class MainWindow : Adw.ApplicationWindow {
 
         var toolbar_view = new Adw.ToolbarView ();
         var header = new Adw.HeaderBar ();
+
+        // ── Hamburger menu on the LEFT side of the header bar ──
+        var hamburger = new HamburgerMenu (this);
+        header.pack_start (hamburger.get_button ());
+
         toolbar_view.add_top_bar (header);
 
         var content_box = new Box (Orientation.VERTICAL, 24);

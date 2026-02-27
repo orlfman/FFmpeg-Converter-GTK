@@ -38,6 +38,8 @@ sources = files(
   'src/codec-tab.vala',
   'src/color-correction-dialog.vala',
   'src/information-tab.vala',
+  'src/about-dialog.vala',
+  'src/hamburger-menu.vala',
 )
 
 executable('ffmpeg-converter-gtk',
