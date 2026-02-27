@@ -40,8 +40,7 @@ public class SvtAv1Tab : Box, ICodecTab {
     public Switch restoration_switch     { get; private set; }
     public Switch tf_switch              { get; private set; }
 
-    public Adw.ExpanderRow dlf_expander  { get; private set; }
-    public DropDown  dlf_mode_combo      { get; private set; }
+    public Switch dlf_switch  { get; private set; }
 
     // ── Advanced ─────────────────────────────────────────────────────────────
     public Switch tpl_switch             { get; private set; }
@@ -146,8 +145,8 @@ public class SvtAv1Tab : Box, ICodecTab {
         // CRF Value
         crf_row = new Adw.ActionRow ();
         crf_row.set_title ("CRF Value");
-        crf_row.set_subtitle ("Lower = better quality, larger file (0–63)");
-        crf_spin = new SpinButton.with_range (0, 63, 1);
+        crf_row.set_subtitle ("Lower = better quality, larger file (1–63)");
+        crf_spin = new SpinButton.with_range (1, 63, 1);
         crf_spin.set_value (28);
         crf_spin.set_valign (Align.CENTER);
         crf_row.add_suffix (crf_spin);
@@ -156,8 +155,8 @@ public class SvtAv1Tab : Box, ICodecTab {
         // QP Value
         qp_row = new Adw.ActionRow ();
         qp_row.set_title ("QP Value");
-        qp_row.set_subtitle ("Fixed quantizer — simple quality control (0–63)");
-        qp_spin = new SpinButton.with_range (0, 63, 1);
+        qp_row.set_subtitle ("Fixed quantizer — simple quality control (1–63)");
+        qp_spin = new SpinButton.with_range (1, 63, 1);
         qp_spin.set_value (28);
         qp_spin.set_valign (Align.CENTER);
         qp_row.add_suffix (qp_spin);
@@ -209,7 +208,7 @@ public class SvtAv1Tab : Box, ICodecTab {
 	tune_row.set_title ("Tune");
 	tune_row.set_subtitle ("Optimize for a specific quality metric");
 	tune_combo = new DropDown (new StringList ({
-    		"VQ (Visual Quality)", "PSNR", "SSIM"
+    	    "Auto", "VQ (Visual Quality)", "PSNR", "SSIM"
 	}), null);
 	tune_combo.set_valign (Align.CENTER);
 	tune_combo.set_selected (0);
@@ -222,7 +221,8 @@ public class SvtAv1Tab : Box, ICodecTab {
         level_row.set_subtitle ("AV1 compatibility level — Auto works for most players");
         level_combo = new DropDown (new StringList ({
             "Auto", "2.0", "2.1", "3.0", "3.1", "4.0", "4.1",
-            "5.0", "5.1", "5.2", "5.3", "6.0", "6.1", "6.2", "6.3"
+            "5.0", "5.1", "5.2", "5.3", "6.0", "6.1", "6.2", "6.3",
+            "7.0", "7.1", "7.2", "7.3"
         }), null);
         level_combo.set_valign (Align.CENTER);
         level_combo.set_selected (0);
@@ -324,10 +324,10 @@ public class SvtAv1Tab : Box, ICodecTab {
         // CDEF
         var cdef_row = new Adw.ActionRow ();
         cdef_row.set_title ("CDEF");
-        cdef_row.set_subtitle ("Constrained Directional Enhancement Filter — reduces ringing artifacts");
+        cdef_row.set_subtitle ("Constrained Directional Enhancement Filter — enabled by default");
         cdef_switch = new Switch ();
         cdef_switch.set_valign (Align.CENTER);
-        cdef_switch.set_active (false);
+        cdef_switch.set_active (true);
         cdef_row.add_suffix (cdef_switch);
         cdef_row.set_activatable_widget (cdef_switch);
         group.add (cdef_row);
@@ -335,31 +335,24 @@ public class SvtAv1Tab : Box, ICodecTab {
         // Loop Restoration
         var restore_row = new Adw.ActionRow ();
         restore_row.set_title ("Loop Restoration");
-        restore_row.set_subtitle ("One of the strongest quality features in SVT-AV1 — highly recommended");
+        restore_row.set_subtitle ("One of the strongest quality features in SVT-AV1 — enabled by default");
         restoration_switch = new Switch ();
         restoration_switch.set_valign (Align.CENTER);
-        restoration_switch.set_active (false);
+        restoration_switch.set_active (true);
         restore_row.add_suffix (restoration_switch);
         restore_row.set_activatable_widget (restoration_switch);
         group.add (restore_row);
 
-        // Deblocking Filter (ExpanderRow)
-        dlf_expander = new Adw.ExpanderRow ();
-        dlf_expander.set_title ("Deblocking Filter");
-        dlf_expander.set_subtitle ("Reduces blocking artifacts at transform boundaries");
-        dlf_expander.set_show_enable_switch (true);
-        dlf_expander.set_enable_expansion (false);
-
-        var dlf_mode_row = new Adw.ActionRow ();
-        dlf_mode_row.set_title ("Mode");
-        dlf_mode_combo = new DropDown (new StringList ({
-            "Standard", "Strong"
-        }), null);
-        dlf_mode_combo.set_valign (Align.CENTER);
-        dlf_mode_combo.set_selected (0);
-        dlf_mode_row.add_suffix (dlf_mode_combo);
-        dlf_expander.add_row (dlf_mode_row);
-        group.add (dlf_expander);
+	// Deblocking Filter
+	var dlf_row = new Adw.ActionRow ();
+	dlf_row.set_title ("Deblocking Filter");
+	dlf_row.set_subtitle ("Reduces blocking artifacts at transform boundaries — enabled by default");
+	dlf_switch = new Switch ();
+	dlf_switch.set_valign (Align.CENTER);
+	dlf_switch.set_active (true);
+	dlf_row.add_suffix (dlf_switch);
+	dlf_row.set_activatable_widget (dlf_switch);
+	group.add (dlf_row);
 
         // Temporal Filtering
         var tf_row = new Adw.ActionRow ();
@@ -367,7 +360,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         tf_row.set_subtitle ("Smooths motion for better compression — good for noisy videos");
         tf_switch = new Switch ();
         tf_switch.set_valign (Align.CENTER);
-        tf_switch.set_active (false);
+        tf_switch.set_active (true);
         tf_row.add_suffix (tf_switch);
         tf_row.set_activatable_widget (tf_switch);
         group.add (tf_row);
@@ -390,7 +383,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         tpl_row.set_subtitle ("Improves quality ~3–5% at cost of speed");
         tpl_switch = new Switch ();
         tpl_switch.set_valign (Align.CENTER);
-        tpl_switch.set_active (false);
+        tpl_switch.set_active (true);
         tpl_row.add_suffix (tpl_switch);
         tpl_row.set_activatable_widget (tpl_switch);
         group.add (tpl_row);
@@ -416,7 +409,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         var sr_mode_row = new Adw.ActionRow ();
         sr_mode_row.set_title ("Mode");
         superres_mode_combo = new DropDown (new StringList ({
-            "1 — Fastest", "2 — Fast", "3 — All", "4 — Random"
+            "1 — Fixed", "2 — Random", "3 — QThreshold", "4 — Auto-Select"
         }), null);
         superres_mode_combo.set_valign (Align.CENTER);
         superres_mode_combo.set_selected (0);
@@ -458,7 +451,7 @@ public class SvtAv1Tab : Box, ICodecTab {
             "Disabled", "Forced", "Auto-Detect"
         }), null);
         scm_combo.set_valign (Align.CENTER);
-        scm_combo.set_selected (0);
+        scm_combo.set_selected (2);
         scm_row.add_suffix (scm_combo);
         group.add (scm_row);
 
@@ -694,21 +687,20 @@ public class SvtAv1Tab : Box, ICodecTab {
         grain_denoise_combo.set_selected (0);
 
         // In-Loop Filters
-        cdef_switch.set_active (false);
-        restoration_switch.set_active (false);
-        dlf_expander.set_enable_expansion (false);
-        dlf_mode_combo.set_selected (0);
-        tf_switch.set_active (false);
+        cdef_switch.set_active (true);
+        restoration_switch.set_active (true);
+        dlf_switch.set_active (true);
+        tf_switch.set_active (true);
 
         // Advanced
-        tpl_switch.set_active (false);
+        tpl_switch.set_active (true);
         low_latency_switch.set_active (false);
         superres_expander.set_enable_expansion (false);
         superres_mode_combo.set_selected (0);
         superres_denom_spin.set_value (8);
         sharpness_expander.set_enable_expansion (false);
         sharpness_spin.set_value (1);
-        scm_combo.set_selected (0);
+        scm_combo.set_selected (2);
         fast_decode_combo.set_selected (0);
         qm_expander.set_enable_expansion (false);
         qm_min_spin.set_value (8);

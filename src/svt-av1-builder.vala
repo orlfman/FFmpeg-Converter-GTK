@@ -55,10 +55,10 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         // ── SVT-AV1 Specific Parameters ─────────────────────────────────────
         string[] svt_params = {};
 
-        // Tune (0 = VQ, 1 = PSNR, 2 = SSIM — VQ is default so only emit for non-default)
-        int tune_val = (int) tab.tune_combo.get_selected ();
-        if (tune_val > 0)
-            svt_params += "tune=%d".printf (tune_val);
+	// Tune (Auto = don't pass anything, 1 = VQ/0, 2 = PSNR/1, 3 = SSIM/2)
+	int tune_sel = (int) tab.tune_combo.get_selected ();
+	if (tune_sel > 0)
+    		svt_params += "tune=%d".printf (tune_sel - 1);
 
         // Lookahead
         if (tab.lookahead_expander.enable_expansion) {
@@ -74,8 +74,9 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             else if (aq == "Complexity") aq_val = 2;
             svt_params += "aq-mode=%d".printf (aq_val);
 
-            // AQ Strength (only meaningful for Variance mode)
+            // AQ Strength — uses variance boost (only meaningful for Variance mode)
             if (aq == "Variance") {
+                svt_params += "enable-variance-boost=1";
                 svt_params += "variance-boost-strength=%d".printf (
                     (int) tab.aq_strength_spin.get_value ());
             }
@@ -89,32 +90,29 @@ public class SvtAv1Builder : Object, ICodecBuilder {
                 (int) tab.grain_denoise_combo.get_selected ());
         }
 
-        // CDEF
-        if (tab.cdef_switch.active)
-            svt_params += "enable-cdef=1";
+        // CDEF (default is enabled; switch OFF = disable)
+        if (!tab.cdef_switch.active)
+            svt_params += "enable-cdef=0";
 
-        // Loop Restoration
-        if (tab.restoration_switch.active)
-            svt_params += "enable-restoration=1";
+        // Loop Restoration (default is enabled; switch OFF = disable)
+        if (!tab.restoration_switch.active)
+            svt_params += "enable-restoration=0";
 
-        // Deblocking Filter
-        if (tab.dlf_expander.enable_expansion) {
-            // DropDown: "Standard" = index 0 → mode 1, "Strong" = index 1 → mode 2
-            int dlf_val = (int) tab.dlf_mode_combo.get_selected () + 1;
-            svt_params += "enable-dlf=%d".printf (dlf_val);
-        }
+        // Deblocking Filter (default is enabled; expander ON = override to disable)
+	if (!tab.dlf_switch.active)
+    	    svt_params += "enable-dlf=0";
 
-        // Temporal Filtering
-        if (tab.tf_switch.active)
-            svt_params += "enable-tf=1";
+        // Temporal Filtering (default is enabled; switch OFF = disable)
+        if (!tab.tf_switch.active)
+            svt_params += "enable-tf=0";
 
-        // Spatio-Temporal Prediction
-        if (tab.tpl_switch.active)
-            svt_params += "enable-tpl-la=1";
+        // Spatio-Temporal Prediction (default is enabled; switch OFF = disable)
+        if (!tab.tpl_switch.active)
+            svt_params += "enable-tpl-la=0";
 
-        // Low Latency
+        // Low Latency (1 = low delay, default is 2 = random access)
         if (tab.low_latency_switch.active)
-            svt_params += "pred-struct=0";
+            svt_params += "pred-struct=1";
 
         // Super-Resolution
         if (tab.superres_expander.enable_expansion) {
@@ -131,10 +129,10 @@ public class SvtAv1Builder : Object, ICodecBuilder {
                 (int) tab.sharpness_spin.get_value ());
         }
 
-        // Screen Content Mode
+        // Screen Content Mode (default is scm=2 auto-detect)
         string scm = tab.get_dropdown_text (tab.scm_combo);
-        if (scm != "Disabled") {
-            int scm_val = (scm == "Forced") ? 1 : 2;
+        if (scm != "Auto-Detect") {
+            int scm_val = (scm == "Forced") ? 1 : 0;
             svt_params += "scm=%d".printf (scm_val);
         }
 
@@ -154,14 +152,22 @@ public class SvtAv1Builder : Object, ICodecBuilder {
                 (int) tab.qm_max_spin.get_value ());
         }
 
-        // Tile Rows & Columns
+        // Tile Rows & Columns (SVT-AV1 takes log2 values)
         string tile_r = tab.get_dropdown_text (tab.tile_rows_combo);
-        if (tile_r != "Auto")
-            svt_params += "tile-rows=%s".printf (tile_r);
+        if (tile_r != "Auto") {
+            int tile_r_val = int.parse (tile_r);
+            int tile_r_log2 = 0;
+            while ((1 << tile_r_log2) < tile_r_val) tile_r_log2++;
+            svt_params += "tile-rows=%d".printf (tile_r_log2);
+        }
 
         string tile_c = tab.get_dropdown_text (tab.tile_columns_combo);
-        if (tile_c != "Auto")
-            svt_params += "tile-columns=%s".printf (tile_c);
+        if (tile_c != "Auto") {
+            int tile_c_val = int.parse (tile_c);
+            int tile_c_log2 = 0;
+            while ((1 << tile_c_log2) < tile_c_val) tile_c_log2++;
+            svt_params += "tile-columns=%d".printf (tile_c_log2);
+        }
 
         // Threads
         string threads = tab.get_dropdown_text (tab.threads_combo);
