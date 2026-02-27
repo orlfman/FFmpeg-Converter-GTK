@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-labelledby="title desc" role="img">
+  <title id="title">FFmpeg Converter Icon</title>
+  <desc id="desc">Blue rounded app icon with gear, dual play buttons, and GTK badge</desc>
+
+  <!-- Main blue rounded square background -->
+  <rect 
+    x="26" y="26" width="460" height="460" rx="88" 
+    fill="#1E88E5" />
+
+  <!-- Decorative lighter blue diagonal stripes (top-right, clipped to icon bounds) -->
+  <defs>
+    <clipPath id="icon-clip">
+      <rect x="26" y="26" width="460" height="460" rx="88" />
+    </clipPath>
+  </defs>
+  <g clip-path="url(#icon-clip)">
+    <!-- Stripe 1 -->
+    <rect 
+      x="310" y="-45" width="42" height="580" rx="21" 
+      transform="rotate(-37 380 120)" 
+      fill="#4FC3F7" opacity="0.85"/>
+    <!-- Stripe 2 -->
+    <rect 
+      x="355" y="-55" width="38" height="590" rx="19" 
+      transform="rotate(-37 410 110)" 
+      fill="#4FC3F7" opacity="0.75"/>
+    <!-- Stripe 3 -->
+    <rect 
+      x="395" y="-35" width="35" height="565" rx="17.5" 
+      transform="rotate(-37 445 130)" 
+      fill="#4FC3F7" opacity="0.65"/>
+  </g>
+
+  <!-- Large white circle backing the gear (slightly larger than gear for clean edge) -->
+  <circle cx="256" cy="239" r="159" fill="#FAFAFA" />
+
+  <!-- Gear group (centered slightly above middle to balance GTK badge below) -->
+  <g transform="translate(256 239)">
+    <!-- 1. Main gear body (blue disk) -->
+    <circle r="118" fill="#1976D2" />
+
+    <!-- 2. Gear teeth (12 teeth, protruding outward) -->
+    <g>
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(0)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(30)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(60)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(90)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(120)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(150)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(180)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(210)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(240)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(270)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(300)" fill="#1976D2" />
+      <rect x="-15" y="-144" width="30" height="39" rx="3" transform="rotate(330)" fill="#1976D2" />
+    </g>
+
+    <!-- 3. Inner groove for gear depth (lighter blue) -->
+    <circle r="104" fill="#2196F3" />
+
+    <!-- 4. Central hub (blue) -->
+    <circle r="67.5" fill="#1976D2" />
+
+    <!-- 5. White inner circle for the large play button area -->
+    <circle r="49.5" fill="#FAFAFA" />
+  </g>
+
+  <!-- Large central Play triangle (white on blue, inside gear hub) -->
+  <!-- Positioned to sit perfectly inside the white inner circle -->
+  <path d="M 223 200 L 300 239 L 223 278 Z" fill="#1976D2" />
+
+  <!-- Small white play button circle (bottom-right, overlapping gear) -->
+  <circle cx="355" cy="305" r="53" fill="#FAFAFA" />
+
+  <!-- Small blue play triangle (inside the small white circle) -->
+  <path d="M 342 285 L 382 305 L 342 325 Z" fill="#1976D2" />
+
+  <!-- GTK badge (bottom-left: dark blue rounded rectangle) -->
+  <rect 
+    x="52" y="325" width="112" height="51" rx="15" 
+    fill="#0D4A8E" />
+
+  <!-- GTK text (bold, centered in badge) -->
+  <text 
+    x="108" y="351" 
+    text-anchor="middle" 
+    dominant-baseline="middle" 
+    font-family="'Arial Black', system-ui, sans-serif" 
+    font-size="27" 
+    font-weight="900" 
+    fill="#FFFFFF" 
+    letter-spacing="1.5px">GTK</text>
+
+</svg>

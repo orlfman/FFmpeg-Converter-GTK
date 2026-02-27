@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FFmpeg Converter GTK
+GenericName=Video Converter
+Comment=Modern GTK frontend for high-quality FFmpeg encoding (SVT-AV1 & x265)
+Exec=ffmpeg-converter-gtk %U
+Icon=ffmpeg-converter-gtk
+Terminal=false
+StartupWMClass=com.github.pieman.FFmpegConverterGTK
+Categories=AudioVideo;Video;Utility;Converter;
+MimeType=video/*;audio/*;
+Keywords=ffmpeg;av1;x265;svt-av1;hevc;video;converter;encoder;color correction;crop;hdr;
