@@ -204,17 +204,17 @@ public class SvtAv1Tab : Box, ICodecTab {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Quality & Tuning");
 
-        // Tune
-        var tune_row = new Adw.ActionRow ();
-        tune_row.set_title ("Tune");
-        tune_row.set_subtitle ("Optimize for a specific quality metric");
-        tune_combo = new DropDown (new StringList ({
-            "Auto", "Subjective SSIM (VQ)", "PSNR", "SSIM", "VMAF", "VMAF Neg"
-        }), null);
-        tune_combo.set_valign (Align.CENTER);
-        tune_combo.set_selected (0);
-        tune_row.add_suffix (tune_combo);
-        group.add (tune_row);
+	// Tune
+	var tune_row = new Adw.ActionRow ();
+	tune_row.set_title ("Tune");
+	tune_row.set_subtitle ("Optimize for a specific quality metric");
+	tune_combo = new DropDown (new StringList ({
+    		"VQ (Subjective SSIM)", "PSNR", "SSIM"
+	}), null);
+	tune_combo.set_valign (Align.CENTER);
+	tune_combo.set_selected (0);
+	tune_row.add_suffix (tune_combo);
+	group.add (tune_row);
 
         // Level
         var level_row = new Adw.ActionRow ();
