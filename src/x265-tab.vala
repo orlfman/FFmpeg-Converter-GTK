@@ -481,12 +481,16 @@ public class X265Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_reset_button () {
+        var reset_box = new Box (Orientation.HORIZONTAL, 0);
+        reset_box.set_halign (Align.END);
+        reset_box.set_margin_top (12);
+
         var reset_btn = new Button.with_label ("Reset to Defaults");
         reset_btn.add_css_class ("destructive-action");
-        reset_btn.set_halign (Align.CENTER);
-        reset_btn.set_margin_top (12);
         reset_btn.clicked.connect (reset_defaults);
-        append (reset_btn);
+        reset_box.append (reset_btn);
+
+        append (reset_box);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

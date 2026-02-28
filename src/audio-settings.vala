@@ -38,6 +38,10 @@ public class AudioSettings : Object {
     private Adw.ActionRow flac_compression_row;
     private Adw.ActionRow vorbis_quality_row;
 
+    // State for codec list constraints
+    private string current_container = "mkv";
+    private bool   speed_active = false;
+
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
@@ -219,19 +223,40 @@ public class AudioSettings : Object {
     // Call this when the parent tab's container selection changes.
     // WebM only supports Copy / Opus / Vorbis.
     public void update_for_container (string container) {
+        current_container = container;
+        rebuild_codec_list ();
+    }
+
+    // Call this when the general tab's audio speed toggle changes.
+    // When speed is active, "Copy" is not available (filters require re-encoding).
+    public void update_for_audio_speed (bool active) {
+        speed_active = active;
+        rebuild_codec_list ();
+    }
+
+    private void rebuild_codec_list () {
         string current = get_codec_text ();
 
-	StringList new_list;
-        if (container == "webm") {
-            new_list = new StringList ({ "Copy", "Opus", "Vorbis" });
-        } else if (container == "mp4") {
-            new_list = new StringList ({ "Copy", "AAC", "MP3", "Opus" });
+        // Build the full list for this container
+        string[] codecs;
+        if (current_container == "webm") {
+            codecs = { "Copy", "Opus", "Vorbis" };
+        } else if (current_container == "mp4") {
+            codecs = { "Copy", "AAC", "MP3", "Opus" };
         } else {
-            new_list = new StringList (
-                { "Copy", "Opus", "AAC", "MP3", "FLAC", "Vorbis" }
-            );
+            codecs = { "Copy", "Opus", "AAC", "MP3", "FLAC", "Vorbis" };
         }
 
+        // Strip "Copy" when audio speed is active
+        if (speed_active) {
+            string[] filtered = {};
+            foreach (string c in codecs) {
+                if (c != "Copy") filtered += c;
+            }
+            codecs = filtered;
+        }
+
+        var new_list = new StringList (codecs);
         codec_combo.set_model (new_list);
 
         // Try to restore the previous selection

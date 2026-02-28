@@ -71,7 +71,7 @@ public class FilterBuilder {
             if (pct != 0.0) {
                 double mult = 1.0 + pct / 100.0;
                 double factor = 1.0 / mult;
-                filters += @"setpts=$factor*PTS";
+                filters += "setpts=%.6f*PTS".printf (factor);
             }
         }
 
@@ -145,7 +145,7 @@ public class FilterBuilder {
         }
 
         if (t != 1.0) {
-            parts += @"atempo=$t";
+            parts += "atempo=%.6f".printf (t);
         }
 
         return string.joinv (",", parts);

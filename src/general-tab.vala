@@ -229,7 +229,7 @@ public class GeneralTab : Box {
 
     private void build_rotation_crop_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Rotation & Crop");
+        group.set_title ("Rotation &amp; Crop");
 
         // Rotate / Flip
         var rotate_row = new Adw.ActionRow ();
@@ -291,7 +291,7 @@ public class GeneralTab : Box {
 
     private void build_filters_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Filters & Enhancement");
+        group.set_title ("Filters &amp; Enhancement");
         group.set_description ("Video processing filters");
 
         // Deinterlace
@@ -409,7 +409,7 @@ public class GeneralTab : Box {
 
     private void build_frame_rate_speed_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Frame Rate & Speed");
+        group.set_title ("Frame Rate &amp; Speed");
 
         // Frame Rate
         var fr_row = new Adw.ActionRow ();
@@ -511,7 +511,7 @@ public class GeneralTab : Box {
 
     private void build_timing_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Timing & Metadata");
+        group.set_title ("Timing &amp; Metadata");
 
         // Preserve Metadata
         var meta_row = new Adw.ActionRow ();

@@ -354,6 +354,21 @@ public class TrimTab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  SPEED CONSTRAINT — force re-encode when speed filters are active
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // Call this when the general tab's video/audio speed toggles change.
+    public void update_for_speed (bool video_speed_on, bool audio_speed_on) {
+        bool needs_reencode = video_speed_on || audio_speed_on;
+        if (needs_reencode) {
+            copy_mode_switch.set_active (false);
+            copy_mode_switch.set_sensitive (false);
+        } else {
+            copy_mode_switch.set_sensitive (true);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  SEGMENT MANAGEMENT — Add
     // ═════════════════════════════════════════════════════════════════════════
 

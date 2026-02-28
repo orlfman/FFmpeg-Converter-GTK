@@ -88,6 +88,25 @@ public class MainWindow : Adw.ApplicationWindow {
         general_tab.start_crop_detection (input_file, console_tab);
         });
 
+        // === Audio Speed → disable "Copy" in audio codec lists ===
+        general_tab.audio_speed_check.notify["active"].connect (() => {
+            bool on = general_tab.audio_speed_check.active;
+            svt_tab.audio_settings.update_for_audio_speed (on);
+            x265_tab.audio_settings.update_for_audio_speed (on);
+        });
+
+        // === Video/Audio Speed → force re-encode in Trim tab ===
+        general_tab.video_speed_check.notify["active"].connect (() => {
+            trim_tab.update_for_speed (
+                general_tab.video_speed_check.active,
+                general_tab.audio_speed_check.active);
+        });
+        general_tab.audio_speed_check.notify["active"].connect (() => {
+            trim_tab.update_for_speed (
+                general_tab.video_speed_check.active,
+                general_tab.audio_speed_check.active);
+        });
+
         // === Console Tab ===
         console_tab = new ConsoleTab ();
         var console_scrolled = new ScrolledWindow ();

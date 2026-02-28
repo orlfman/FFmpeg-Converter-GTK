@@ -262,8 +262,10 @@ public class TrimRunner : Object {
                 foreach (string arg in codec_args) cmd += arg;
             }
 
-            // Audio
-            string[] audio_args = get_audio_args ();
+            // Audio (with filter chain merged in)
+            string af = (general_tab != null)
+                ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
+            string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
             // Metadata
@@ -381,6 +383,38 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNAL — Audio args helper
     // ═════════════════════════════════════════════════════════════════════════
+
+    private string[] get_audio_args_with_filters (string af) {
+        string[] audio_args = get_audio_args ();
+
+        if (af == "") return audio_args;
+
+        // Cannot apply audio filters when audio is disabled or stream-copied
+        if (audio_args.length > 0 && (audio_args[0] == "-an" ||
+            (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")))
+            return audio_args;
+
+        // Merge with any -af already emitted by audio-settings
+        string[] merged = {};
+        bool found_af = false;
+        for (int i = 0; i < audio_args.length; i++) {
+            if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
+                merged += "-af";
+                merged += af + "," + audio_args[i + 1];
+                i++;
+                found_af = true;
+            } else {
+                merged += audio_args[i];
+            }
+        }
+
+        if (!found_af) {
+            merged += "-af";
+            merged += af;
+        }
+
+        return merged;
+    }
 
     private string[] get_audio_args () {
         if (reencode_codec_tab is SvtAv1Tab) {
