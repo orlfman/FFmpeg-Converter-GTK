@@ -2,7 +2,7 @@
 
 **Modern GTK4 + libadwaita frontend for FFmpeg**
 
-My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for FFmpeg. Currently supports encoding with SVT-AV1 and x265. Slowly but surely adding more features and refinement.
+My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for FFmpeg. Currently supports encoding with SVT-AV1 and x265. Slowly but surely adding more supported codecs, features and refinement.
 
 ![Screenshot](Screenshot.png)
 
