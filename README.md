@@ -12,6 +12,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 - Automatic crop detection, HDR to SDR tone mapping, scaling, rotation, speed control, and more
 - Smart audio settings (Opus, AAC, MP3, FLAC, normalization, speed adjustment)
 - Live console output and detailed information tab
+- Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, and create individual and concatenate segments
 - Native Adwaita UI
 
 ### Build & Install
