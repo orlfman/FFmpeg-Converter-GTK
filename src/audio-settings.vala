@@ -282,6 +282,14 @@ public class AudioSettings : Object {
 
         // ── Codec-specific options ───────────────────────────────────────────
         if (codec == "Opus") {
+            // libopus rejects non-standard channel layouts like 5.1(side).
+            // This audio filter remaps any input to the closest standard layout
+            // that libopus supports, and mapping_family 1 enables surround.
+            args += "-af";
+            args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
+            args += "-mapping_family";
+            args += "1";
+
             string vbr = get_dropdown_text (opus_vbr_combo);
             if (vbr == "Constrained") {
                 args += "-vbr";
