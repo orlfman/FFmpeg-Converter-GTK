@@ -29,20 +29,8 @@ public class GeneralTab : Box {
     // ── Rotate ───────────────────────────────────────────────────────────────
     public DropDown rotate_combo       { get; private set; }
 
-    // ── Quick Filters ────────────────────────────────────────────────────────
-    public Switch deinterlace          { get; private set; }
-    public Switch deblock              { get; private set; }
-    public Switch denoise              { get; private set; }
-    public Switch sharpen              { get; private set; }
-    public Switch grain                { get; private set; }
-
-    // ── HDR Tone Mapping ─────────────────────────────────────────────────────
-    public Switch     hdr_tonemap      { get; private set; }
-    public DropDown   tonemap_mode     { get; private set; }
-    public SpinButton tonemap_desat    { get; private set; }
-
-    private Adw.ExpanderRow hdr_expander;
-    private Adw.ActionRow   tonemap_desat_row;
+    // ── Video Filters (separate panel) ────────────────────────────────────
+    public VideoFilters video_filters   { get; private set; }
 
     // ── Color Correction ─────────────────────────────────────────────────────
     private Button color_button;
@@ -98,7 +86,12 @@ public class GeneralTab : Box {
         build_scaling_group ();
         build_pixel_format_group ();
         build_rotation_crop_group ();
-        build_filters_group ();
+
+        // Video Filters (separate class for all processing filters + HDR)
+        video_filters = new VideoFilters ();
+        video_filters.set_ten_bit_reference (ten_bit_check);
+        append (video_filters.get_widget ());
+
         build_color_correction_group ();
         build_frame_rate_speed_group ();
         build_audio_group ();
@@ -282,103 +275,6 @@ public class GeneralTab : Box {
         crop_expander.add_row (value_row);
 
         group.add (crop_expander);
-        append (group);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  FILTERS & ENHANCEMENT
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void build_filters_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Filters &amp; Enhancement");
-        group.set_description ("Video processing filters");
-
-        // Deinterlace
-        var di_row = new Adw.ActionRow ();
-        di_row.set_title ("Deinterlace");
-        di_row.set_subtitle ("Remove interlacing artifacts from older video sources");
-        deinterlace = new Switch ();
-        deinterlace.set_valign (Align.CENTER);
-        di_row.add_suffix (deinterlace);
-        di_row.set_activatable_widget (deinterlace);
-        group.add (di_row);
-
-        // Deblock
-        var db_row = new Adw.ActionRow ();
-        db_row.set_title ("Deblock");
-        db_row.set_subtitle ("Reduce blocky compression artifacts");
-        deblock = new Switch ();
-        deblock.set_valign (Align.CENTER);
-        db_row.add_suffix (deblock);
-        db_row.set_activatable_widget (deblock);
-        group.add (db_row);
-
-        // Denoise
-        var dn_row = new Adw.ActionRow ();
-        dn_row.set_title ("Denoise");
-        dn_row.set_subtitle ("Remove video noise and grain with hqdn3d");
-        denoise = new Switch ();
-        denoise.set_valign (Align.CENTER);
-        dn_row.add_suffix (denoise);
-        dn_row.set_activatable_widget (denoise);
-        group.add (dn_row);
-
-        // Sharpen
-        var sh_row = new Adw.ActionRow ();
-        sh_row.set_title ("Super Sharp");
-        sh_row.set_subtitle ("Increase edge sharpness with unsharp mask");
-        sharpen = new Switch ();
-        sharpen.set_valign (Align.CENTER);
-        sh_row.add_suffix (sharpen);
-        sh_row.set_activatable_widget (sharpen);
-        group.add (sh_row);
-
-        // Grain
-        var gr_row = new Adw.ActionRow ();
-        gr_row.set_title ("Add Grain");
-        gr_row.set_subtitle ("Add a film-like grain texture");
-        grain = new Switch ();
-        grain.set_valign (Align.CENTER);
-        gr_row.add_suffix (grain);
-        gr_row.set_activatable_widget (grain);
-        group.add (gr_row);
-
-        // HDR Tone Mapping (ExpanderRow)
-        hdr_tonemap = new Switch ();
-        hdr_tonemap.set_active (false);
-
-        hdr_expander = new Adw.ExpanderRow ();
-        hdr_expander.set_title ("HDR to SDR");
-        hdr_expander.set_subtitle ("Tone map HDR content for standard displays");
-        hdr_expander.set_show_enable_switch (true);
-        hdr_expander.set_enable_expansion (false);
-
-        hdr_tonemap.bind_property ("active", hdr_expander, "enable-expansion",
-            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
-
-        var mode_row = new Adw.ActionRow ();
-        mode_row.set_title ("Mode");
-        tonemap_mode = new DropDown (new StringList (
-            { "Standard", "Less Saturation", "Custom" }
-        ), null);
-        tonemap_mode.set_valign (Align.CENTER);
-        tonemap_mode.set_selected (0);
-        mode_row.add_suffix (tonemap_mode);
-        hdr_expander.add_row (mode_row);
-
-        tonemap_desat_row = new Adw.ActionRow ();
-        tonemap_desat_row.set_title ("Desaturation");
-        tonemap_desat_row.set_subtitle ("Custom desaturation level (0.00 – 1.00)");
-        tonemap_desat = new SpinButton.with_range (0.0, 1.0, 0.01);
-        tonemap_desat.set_value (0.35);
-        tonemap_desat.set_digits (2);
-        tonemap_desat.set_valign (Align.CENTER);
-        tonemap_desat_row.add_suffix (tonemap_desat);
-        tonemap_desat_row.set_visible (false);
-        hdr_expander.add_row (tonemap_desat_row);
-
-        group.add (hdr_expander);
         append (group);
     }
 
@@ -615,11 +511,6 @@ public class GeneralTab : Box {
             if (ten_bit_check.active) eight_bit_check.active = false;
         });
 
-        // HDR tonemap: show/hide desaturation based on mode
-        tonemap_mode.notify["selected"].connect (() => {
-            tonemap_desat_row.set_visible (get_tonemap_text () == "Custom");
-        });
-
         // Frame Rate: show/hide custom entry
         frame_rate_combo.notify["selected"].connect (() => {
             custom_fr_row.set_visible (get_frame_rate_text () == "Custom");
@@ -636,11 +527,6 @@ public class GeneralTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
-
-    private string get_tonemap_text () {
-        var item = tonemap_mode.selected_item as StringObject;
-        return item != null ? item.string : "";
-    }
 
     private string get_frame_rate_text () {
         var item = frame_rate_combo.selected_item as StringObject;

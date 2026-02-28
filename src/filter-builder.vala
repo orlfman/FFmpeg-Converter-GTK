@@ -22,22 +22,14 @@ public class FilterBuilder {
             }
         }
 
-        // 3. Quick Filters
-        if (tab.deinterlace.active) filters += "yadif";
-        if (tab.deblock.active) filters += "deblock";
-        if (tab.denoise.active) filters += "hqdn3d=4:3:6:4.5";
-        if (tab.sharpen.active) filters += "unsharp=5:5:0.8:3:3:0.4";
-        if (tab.grain.active) filters += "noise=alls=12:allf=t";
+        // 3. Video Processing Filters
+        foreach (string f in tab.video_filters.get_processing_filters ()) {
+            filters += f;
+        }
 
         // 4. HDR to SDR Tonemap
-        if (tab.hdr_tonemap.active) {
-            string desat = "0.35";
-            string mode = get_dropdown_text (tab.tonemap_mode);
-            if (mode == "Less Saturation") desat = "0.00";
-            else if (mode == "Custom") desat = tab.tonemap_desat.get_value ().to_string ();
-
-            filters += @"zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=$desat,zscale=t=bt709:m=bt709:r=tv";
-        }
+        string hdr = tab.video_filters.get_hdr_filter ();
+        if (hdr.length > 0) filters += hdr;
 
         // 5. Scale - clean display + zscale for quality filters
         double sw = tab.scale_width_x.get_value ();

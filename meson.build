@@ -29,6 +29,7 @@ sources = files(
   'src/status-area.vala',
   'src/console-tab.vala',
   'src/filter-builder.vala',
+  'src/video-filters.vala',
   'src/svt-av1-builder.vala',
   'src/audio-settings.vala',
   'src/conversion-runner.vala',
