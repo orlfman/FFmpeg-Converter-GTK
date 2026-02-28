@@ -22,6 +22,7 @@ public class AudioSettings : Object {
     public DropDown  sample_rate_combo     { get; private set; }
     public DropDown  bitrate_combo         { get; private set; }
     public DropDown  opus_vbr_combo        { get; private set; }
+    public Switch    opus_surround_fix     { get; private set; }
     public DropDown  aac_quality_combo     { get; private set; }
     public DropDown  mp3_vbr_combo         { get; private set; }
     public DropDown  flac_compression_combo { get; private set; }
@@ -31,6 +32,7 @@ public class AudioSettings : Object {
     private Adw.ActionRow sample_rate_row;
     private Adw.ActionRow bitrate_row;
     private Adw.ActionRow opus_vbr_row;
+    private Adw.ActionRow opus_surround_row;
     private Adw.ActionRow aac_quality_row;
     private Adw.ActionRow mp3_vbr_row;
     private Adw.ActionRow flac_compression_row;
@@ -118,6 +120,18 @@ public class AudioSettings : Object {
         opus_vbr_row.set_visible (false);
         audio_expander.add_row (opus_vbr_row);
 
+        // ── Opus Surround Compatibility ───────────────────────────────────────
+        opus_surround_row = new Adw.ActionRow ();
+        opus_surround_row.set_title ("Surround Compatibility");
+        opus_surround_row.set_subtitle ("Remap non-standard layouts like 5.1(side) so Opus can encode them");
+        opus_surround_fix = new Switch ();
+        opus_surround_fix.set_valign (Align.CENTER);
+        opus_surround_fix.set_active (true);
+        opus_surround_row.add_suffix (opus_surround_fix);
+        opus_surround_row.set_activatable_widget (opus_surround_fix);
+        opus_surround_row.set_visible (false);
+        audio_expander.add_row (opus_surround_row);
+
         // ── AAC Quality ──────────────────────────────────────────────────────
         aac_quality_row = new Adw.ActionRow ();
         aac_quality_row.set_title ("Quality Scale");
@@ -191,6 +205,7 @@ public class AudioSettings : Object {
 
         // Codec-specific rows
         opus_vbr_row.set_visible (codec == "Opus");
+        opus_surround_row.set_visible (codec == "Opus");
         aac_quality_row.set_visible (codec == "AAC");
         mp3_vbr_row.set_visible (codec == "MP3");
         flac_compression_row.set_visible (codec == "FLAC");
@@ -283,10 +298,12 @@ public class AudioSettings : Object {
         // ── Codec-specific options ───────────────────────────────────────────
         if (codec == "Opus") {
             // libopus rejects non-standard channel layouts like 5.1(side).
-            // This audio filter remaps any input to the closest standard layout
-            // that libopus supports, and mapping_family 1 enables surround.
-            args += "-af";
-            args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
+            // When enabled, this filter remaps to the closest standard layout.
+            // It's a no-op when the source already uses a standard layout.
+            if (opus_surround_fix.active) {
+                args += "-af";
+                args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
+            }
             args += "-mapping_family";
             args += "1";
 
@@ -335,6 +352,7 @@ public class AudioSettings : Object {
         sample_rate_combo.set_selected (4);
         bitrate_combo.set_selected (1);
         opus_vbr_combo.set_selected (0);
+        opus_surround_fix.set_active (true);
         aac_quality_combo.set_selected (0);
         mp3_vbr_combo.set_selected (0);
         flac_compression_combo.set_selected (5);
