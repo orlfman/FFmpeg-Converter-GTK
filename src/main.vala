@@ -11,6 +11,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private Button cancel_button;
     private ConsoleTab console_tab;
     private GeneralTab general_tab;
+    private TrimTab trim_tab;
      private Notebook notebook;
 
     public MainWindow (Adw.Application app) {
@@ -65,6 +66,17 @@ public class MainWindow : Adw.ApplicationWindow {
         x265_scroll.set_vexpand (true);
         x265_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
         notebook.append_page (x265_scroll, new Label ("x265"));
+
+        // === Trim Tab ===
+        trim_tab = new TrimTab ();
+        trim_tab.general_tab = general_tab;
+        trim_tab.svt_tab     = svt_tab;
+        trim_tab.x265_tab   = x265_tab;
+        var trim_scrolled = new Gtk.ScrolledWindow ();
+        trim_scrolled.set_vexpand (true);
+        trim_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
+        trim_scrolled.set_child (trim_tab);
+        notebook.append_page (trim_scrolled, new Label ("Trim"));
 
         // === Information Tab ===
         info_tab = new InformationTab ();
@@ -126,10 +138,19 @@ public class MainWindow : Adw.ApplicationWindow {
             string path = file_pickers.input_entry.get_text ();
             info_tab.load_input_info (path);
             info_tab.reset_output ();
+
+            // Load video preview in the Trim tab
+            trim_tab.load_video (path);
         });
 
         // Probe output file and show it after a successful conversion
         converter.conversion_done.connect ((output_path) => {
+            info_tab.load_output_info (output_path);
+            cancel_button.set_sensitive (false);
+        });
+
+        // Wire up Trim tab completion
+        trim_tab.trim_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             cancel_button.set_sensitive (false);
         });
@@ -150,10 +171,25 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (active_codec_tab == null) {
-            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1 or x265) first!");
+            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, or Trim) first!");
             return;
         }
 
+        // ── Trim Tab gets its own conversion path ────────────────────────────
+        if (active_codec_tab is TrimTab) {
+            var trim = (TrimTab) active_codec_tab;
+            trim.start_trim_export (
+                file_pickers.input_entry.get_text (),
+                file_pickers.output_entry.get_text (),
+                status_area.status_label,
+                status_area.progress_bar,
+                console_tab
+            );
+            cancel_button.set_sensitive (true);
+            return;
+        }
+
+        // ── Normal codec conversion path ─────────────────────────────────────
         ICodecBuilder builder = active_codec_tab.get_codec_builder ();
 
         converter.start_conversion (
@@ -170,8 +206,14 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private void on_cancel_clicked () {
-        converter.cancel ();
-        status_area.set_status ("⏹️ Conversion cancelled by user.");
+        // Cancel whichever conversion is active
+        if (trim_tab.is_exporting ()) {
+            trim_tab.cancel_trim ();
+            status_area.set_status ("⏹️ Trim export cancelled by user.");
+        } else {
+            converter.cancel ();
+            status_area.set_status ("⏹️ Conversion cancelled by user.");
+        }
         cancel_button.set_sensitive (false);
     }
 }
