@@ -16,13 +16,15 @@ public class HamburgerMenu {
         menu_button.set_menu_model (menu_model);
         menu_button.set_tooltip_text ("Menu");
 
-        // Register the "about" action on the application
-        var about_action = new GLib.SimpleAction ("about", null);
-        about_action.activate.connect (() => {
-            AboutDialog.show_about (parent_window);
-        });
-
-        parent_window.get_application ().add_action (about_action);
+        // Register the "about" action on the application (only if not already registered)
+        var app = parent_window.get_application ();
+        if (app.lookup_action ("about") == null) {
+            var about_action = new GLib.SimpleAction ("about", null);
+            about_action.activate.connect (() => {
+                AboutDialog.show_about (parent_window);
+            });
+            app.add_action (about_action);
+        }
     }
 
     public Gtk.MenuButton get_button () {
