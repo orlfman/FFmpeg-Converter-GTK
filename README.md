@@ -30,3 +30,11 @@ cd FFmpeg-Converter-GTK
 chmod +x build.sh
 ./build.sh
 ```
+
+### Uninstall
+
+```bash
+cd FFmpeg-Converter-GTK
+chmod +x uninstall.sh
+./uninstall.sh
+```
