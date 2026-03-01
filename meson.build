@@ -49,6 +49,7 @@ sources = files(
   'src/x264-builder.vala',
   'src/vp9-tab.vala',
   'src/vp9-builder.vala',
+  'src/codec-presets.vala'
 )
 
 executable('ffmpeg-converter-gtk',

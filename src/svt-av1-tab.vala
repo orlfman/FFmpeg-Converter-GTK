@@ -3,6 +3,9 @@ using Adw;
 
 public class SvtAv1Tab : Box, ICodecTab {
 
+    // ── Preset ───────────────────────────────────────────────────────────────
+    public DropDown  quality_profile_combo        { get; private set; }
+
     // ── Encoding Basics ──────────────────────────────────────────────────────
     public DropDown  container_combo     { get; private set; }
     public SpinButton preset_spin        { get; private set; }
@@ -60,7 +63,7 @@ public class SvtAv1Tab : Box, ICodecTab {
     public SpinButton qm_max_spin        { get; private set; }
 
     // ── Threading & Keyframes ────────────────────────────────────────────────
-    private Switch two_pass_switch;
+    public Switch two_pass_switch;
     public AudioSettings audio_settings  { get; private set; }
 
     public DropDown  keyint_combo        { get; private set; }
@@ -78,6 +81,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         set_margin_start (24);
         set_margin_end (24);
 
+        build_quality_profile_group ();
         build_encoding_group ();
         build_rate_control_group ();
         build_quality_group ();
@@ -89,6 +93,29 @@ public class SvtAv1Tab : Box, ICodecTab {
         build_reset_button ();
 
         connect_signals ();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  QUALITY PROFILE
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void build_quality_profile_group () {
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Quality Profile");
+        group.set_description ("One-click configurations — settings can be adjusted individually after");
+
+        var row = new Adw.ActionRow ();
+        row.set_title ("Quality Profile");
+        row.set_subtitle ("Configures all settings below — you can still adjust individually");
+        quality_profile_combo = new DropDown (new StringList ({
+            "Custom", "Streaming", "Anime", "Low", "Medium", "High", "Very High"
+        }), null);
+        quality_profile_combo.set_valign (Align.CENTER);
+        quality_profile_combo.set_selected (0);
+        row.add_suffix (quality_profile_combo);
+        group.add (row);
+
+        append (group);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -598,6 +625,13 @@ public class SvtAv1Tab : Box, ICodecTab {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
+        // Preset → apply preset configuration
+        quality_profile_combo.notify["selected"].connect (() => {
+            var item = quality_profile_combo.selected_item as StringObject;
+            if (item != null)
+                CodecPresets.apply_svt_av1 (this, item.string);
+        });
+
         // Rate control mode → show/hide appropriate value row
         rc_mode_combo.notify["selected"].connect (update_rc_visibility);
         update_rc_visibility ();
@@ -656,14 +690,9 @@ public class SvtAv1Tab : Box, ICodecTab {
         return new SvtAv1Builder ();
     }
 
-    // (#6) ICodecTab — polymorphic accessors (eliminate all `is` casts)
     public bool get_two_pass () {
         return two_pass_check.get_active ();
     }
-
-    // get_container() already exists above
-
-    // resolve_keyframe_args() already exists below
 
     public string[] get_audio_args () {
         return audio_settings.get_audio_args ();
