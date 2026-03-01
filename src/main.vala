@@ -6,6 +6,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private SvtAv1Tab svt_tab;
     private X265Tab x265_tab;
     private X264Tab x264_tab;
+    private Vp9Tab vp9_tab;
     private InformationTab info_tab;
     private StatusArea status_area;
     private Converter converter;
@@ -76,12 +77,21 @@ public class MainWindow : Adw.ApplicationWindow {
         x264_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
         notebook.append_page (x264_scroll, new Label ("x264"));
 
+        // === VP9 Tab ===
+        vp9_tab = new Vp9Tab ();
+        var vp9_scroll = new ScrolledWindow ();
+        vp9_scroll.set_child (vp9_tab);
+        vp9_scroll.set_vexpand (true);
+        vp9_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
+        notebook.append_page (vp9_scroll, new Label ("VP9"));
+
         // === Trim Tab ===
         trim_tab = new TrimTab ();
         trim_tab.general_tab = general_tab;
         trim_tab.svt_tab     = svt_tab;
         trim_tab.x265_tab   = x265_tab;
         trim_tab.x264_tab   = x264_tab;
+        trim_tab.vp9_tab    = vp9_tab;
         var trim_scrolled = new Gtk.ScrolledWindow ();
         trim_scrolled.set_vexpand (true);
         trim_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
@@ -104,6 +114,7 @@ public class MainWindow : Adw.ApplicationWindow {
             svt_tab.audio_settings.update_for_audio_speed (on);
             x265_tab.audio_settings.update_for_audio_speed (on);
             x264_tab.audio_settings.update_for_audio_speed (on);
+            vp9_tab.audio_settings.update_for_audio_speed (on);
         });
 
         // === Video/Audio Speed → force re-encode in Trim tab ===

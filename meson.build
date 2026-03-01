@@ -47,6 +47,8 @@ sources = files(
   'src/trim-runner.vala',
   'src/x264-tab.vala',
   'src/x264-builder.vala',
+  'src/vp9-tab.vala',
+  'src/vp9-builder.vala',
 )
 
 executable('ffmpeg-converter-gtk',

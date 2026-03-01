@@ -63,6 +63,7 @@ public class TrimTab : Box, ICodecTab {
     public SvtAv1Tab?  svt_tab      { get; set; default = null; }
     public X265Tab?    x265_tab     { get; set; default = null; }
     public X264Tab?    x264_tab     { get; set; default = null; }
+    public Vp9Tab?     vp9_tab      { get; set; default = null; }
 
     // ── Trim runner ─────────────────────────────────────────────────────────
     private TrimRunner? active_runner = null;
@@ -105,6 +106,8 @@ public class TrimTab : Box, ICodecTab {
             return x265_tab.get_codec_builder ();
         } else if (sel == 2 && x264_tab != null) {
             return x264_tab.get_codec_builder ();
+        } else if (sel == 3 && vp9_tab != null) {
+            return vp9_tab.get_codec_builder ();
         }
 
         return new TrimBuilder ();
@@ -168,6 +171,9 @@ public class TrimTab : Box, ICodecTab {
             } else if (sel == 2 && x264_tab != null) {
                 runner.reencode_builder   = new X264Builder ();
                 runner.reencode_codec_tab = x264_tab;
+            } else if (sel == 3 && vp9_tab != null) {
+                runner.reencode_builder   = new Vp9Builder ();
+                runner.reencode_codec_tab = vp9_tab;
             }
         }
 
@@ -339,7 +345,7 @@ public class TrimTab : Box, ICodecTab {
         reencode_codec_row.set_title ("Re-encode Codec");
         reencode_codec_row.set_subtitle ("Uses the settings from the selected codec tab + all General tab options");
 
-        codec_choice = new DropDown (new StringList ({ "SVT-AV1", "x265", "x264" }), null);
+        codec_choice = new DropDown (new StringList ({ "SVT-AV1", "x265", "x264", "VP9" }), null);
         codec_choice.set_valign (Align.CENTER);
         codec_choice.set_selected (0);
         reencode_codec_row.add_suffix (codec_choice);
