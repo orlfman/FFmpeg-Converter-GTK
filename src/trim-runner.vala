@@ -26,7 +26,7 @@ public class TrimRunner : Object {
 
     // Re-encode delegates (only used when copy_mode == false)
     public ICodecBuilder? reencode_builder { get; set; default = null; }
-    public Object? reencode_codec_tab { get; set; default = null; }
+    public ICodecTab? reencode_codec_tab { get; set; default = null; }
     public GeneralTab? general_tab { get; set; default = null; }
 
     // UI references
@@ -246,15 +246,10 @@ public class TrimRunner : Object {
             if (reencode_builder != null && reencode_codec_tab != null) {
                 string[] codec_args = reencode_builder.get_codec_args (reencode_codec_tab);
 
-                // Resolve keyframe args if applicable
-                if (reencode_codec_tab is SvtAv1Tab && general_tab != null) {
-                    foreach (string kf in ((SvtAv1Tab) reencode_codec_tab)
-                                 .resolve_keyframe_args (input_file, general_tab)) {
-                        codec_args += kf;
-                    }
-                } else if (reencode_codec_tab is X265Tab && general_tab != null) {
-                    foreach (string kf in ((X265Tab) reencode_codec_tab)
-                                 .resolve_keyframe_args (input_file, general_tab)) {
+                // Resolve keyframe args via the interface
+                if (general_tab != null) {
+                    foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
+                                 input_file, general_tab)) {
                         codec_args += kf;
                     }
                 }
@@ -417,10 +412,8 @@ public class TrimRunner : Object {
     }
 
     private string[] get_audio_args () {
-        if (reencode_codec_tab is SvtAv1Tab) {
-            return ((SvtAv1Tab) reencode_codec_tab).audio_settings.get_audio_args ();
-        } else if (reencode_codec_tab is X265Tab) {
-            return ((X265Tab) reencode_codec_tab).audio_settings.get_audio_args ();
+        if (reencode_codec_tab != null) {
+            return reencode_codec_tab.get_audio_args ();
         }
         return { "-c:a", "copy" };
     }
@@ -436,10 +429,9 @@ public class TrimRunner : Object {
         }
 
         // Re-encode: use the codec tab's container
-        if (reencode_codec_tab is SvtAv1Tab) {
-            return "." + ((SvtAv1Tab) reencode_codec_tab).get_container ();
-        } else if (reencode_codec_tab is X265Tab) {
-            return "." + ((X265Tab) reencode_codec_tab).get_container ();
+        if (reencode_codec_tab != null) {
+            string container = reencode_codec_tab.get_container ();
+            if (container.length > 0) return "." + container;
         }
 
         return ".mkv";

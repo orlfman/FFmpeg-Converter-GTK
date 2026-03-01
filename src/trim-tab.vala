@@ -62,6 +62,7 @@ public class TrimTab : Box, ICodecTab {
     public GeneralTab? general_tab  { get; set; default = null; }
     public SvtAv1Tab?  svt_tab      { get; set; default = null; }
     public X265Tab?    x265_tab     { get; set; default = null; }
+    public X264Tab?    x264_tab     { get; set; default = null; }
 
     // ── Trim runner ─────────────────────────────────────────────────────────
     private TrimRunner? active_runner = null;
@@ -102,10 +103,19 @@ public class TrimTab : Box, ICodecTab {
             return svt_tab.get_codec_builder ();
         } else if (sel == 1 && x265_tab != null) {
             return x265_tab.get_codec_builder ();
+        } else if (sel == 2 && x264_tab != null) {
+            return x264_tab.get_codec_builder ();
         }
 
         return new TrimBuilder ();
     }
+
+    // (#6) ICodecTab stubs — TrimTab uses its own conversion path,
+    //       so these are only here to satisfy the interface contract.
+    public bool get_two_pass () { return false; }
+    public string get_container () { return "mkv"; }
+    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) { return {}; }
+    public string[] get_audio_args () { return { "-c:a", "copy" }; }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  PUBLIC API
@@ -155,6 +165,9 @@ public class TrimTab : Box, ICodecTab {
             } else if (sel == 1 && x265_tab != null) {
                 runner.reencode_builder   = new X265Builder ();
                 runner.reencode_codec_tab = x265_tab;
+            } else if (sel == 2 && x264_tab != null) {
+                runner.reencode_builder   = new X264Builder ();
+                runner.reencode_codec_tab = x264_tab;
             }
         }
 
@@ -326,7 +339,7 @@ public class TrimTab : Box, ICodecTab {
         reencode_codec_row.set_title ("Re-encode Codec");
         reencode_codec_row.set_subtitle ("Uses the settings from the selected codec tab + all General tab options");
 
-        codec_choice = new DropDown (new StringList ({ "SVT-AV1", "x265" }), null);
+        codec_choice = new DropDown (new StringList ({ "SVT-AV1", "x265", "x264" }), null);
         codec_choice.set_valign (Align.CENTER);
         codec_choice.set_selected (0);
         reencode_codec_row.add_suffix (codec_choice);

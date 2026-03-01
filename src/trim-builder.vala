@@ -17,7 +17,7 @@ public class TrimBuilder : Object, ICodecBuilder {
         return "copy";
     }
 
-    public string[] get_codec_args (Object codec_tab) {
+    public string[] get_codec_args (ICodecTab codec_tab) {
         return { "-c:v", "copy", "-c:a", "copy" };
     }
 }

@@ -656,6 +656,19 @@ public class SvtAv1Tab : Box, ICodecTab {
         return new SvtAv1Builder ();
     }
 
+    // (#6) ICodecTab — polymorphic accessors (eliminate all `is` casts)
+    public bool get_two_pass () {
+        return two_pass_check.get_active ();
+    }
+
+    // get_container() already exists above
+
+    // resolve_keyframe_args() already exists below
+
+    public string[] get_audio_args () {
+        return audio_settings.get_audio_args ();
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     //  RESET
     // ═══════════════════════════════════════════════════════════════════════════

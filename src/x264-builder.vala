@@ -1,28 +1,35 @@
 using Gtk;
 
-public class X265Builder : Object, ICodecBuilder {
+public class X264Builder : Object, ICodecBuilder {
 
     public string get_codec_name () {
-        return "x265";
+        return "x264";
     }
 
     public string[] get_codec_args (ICodecTab codec_tab) {
-        var tab = codec_tab as X265Tab;
+        var tab = codec_tab as X264Tab;
         if (tab == null) {
-            warning ("X265Builder received wrong tab type");
-            return { "-c:v", "libx265", "-preset", "medium", "-crf", "23" };
+            warning ("X264Builder received wrong tab type");
+            return { "-c:v", "libx264", "-preset", "medium", "-crf", "23" };
         }
         return build_args (tab);
     }
 
-    public static string[] build_args (X265Tab tab) {
+    private static string[] build_args (X264Tab tab) {
         string[] args = {};
 
         // ── Codec + Preset ─────────────────────────────────────────────────
         args += "-c:v";
-        args += "libx265";
+        args += "libx264";
         args += "-preset";
         args += tab.get_active_preset ();
+
+        // ── Profile ────────────────────────────────────────────────────────
+        string profile = tab.get_dropdown_text (tab.profile_combo);
+        if (profile != "Auto" && profile.length > 0) {
+            args += "-profile:v";
+            args += profile.down ();
+        }
 
         // ── Rate Control ───────────────────────────────────────────────────
         string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
@@ -67,19 +74,23 @@ public class X265Builder : Object, ICodecBuilder {
             args += keyint;
         }
 
-        // ── x265-params ────────────────────────────────────────────────────
+        // ── x264opts ───────────────────────────────────────────────────────
         string[] params = {};
-
-        // SAO (default is enabled, so only pass when disabled)
-        if (!tab.sao_switch.active)
-            params += "sao=0";
 
         // Reference frames
         string ref_val = tab.get_dropdown_text (tab.ref_frames_combo);
         if (ref_val.length > 0)
             params += "ref=" + ref_val;
 
-        // Weighted prediction (default enabled, so only pass when disabled)
+        // B-Frames
+        int bframes = (int) tab.bframes_spin.get_value ();
+        params += "bframes=" + bframes.to_string ();
+
+        // B-Frame adaptation
+        int b_adapt = (int) tab.b_adapt_combo.get_selected ();
+        params += "b-adapt=" + b_adapt.to_string ();
+
+        // Weighted prediction (default is smart/2, disabled = 0)
         if (!tab.weightp_switch.active)
             params += "weightp=0";
 
@@ -92,21 +103,37 @@ public class X265Builder : Object, ICodecBuilder {
             params += "no-deblock=1";
         }
 
-        // PMode
-        if (tab.pmode_switch.active)
-            params += "pmode=1";
+        // Motion estimation
+        string me = tab.get_dropdown_text (tab.me_combo);
+        if (me.length > 0)
+            params += "me=" + me;
 
-        // Psy-RD (default enabled at 2.0, emit no-psy-rd when disabled)
+        // ME range
+        int mer = (int) tab.me_range_spin.get_value ();
+        if (mer != 16)
+            params += "merange=" + mer.to_string ();
+
+        // Subpixel refinement (extract leading number from "7 — RD on all")
+        int subme = (int) tab.subme_combo.get_selected ();
+        if (subme != 7)
+            params += "subme=" + subme.to_string ();
+
+        // Psychovisual optimization
         if (tab.psy_rd_expander.enable_expansion) {
             double psy_rd = tab.psy_rd_spin.get_value ();
-            params += "psy-rd=%.1f".printf (psy_rd);
+            double psy_trellis = tab.psy_trellis_spin.get_value ();
+            params += "psy-rd=%.1f,%.2f".printf (psy_rd, psy_trellis);
         } else {
-            params += "no-psy-rd";
+            params += "no-psy";
         }
 
-        // Cutree (default enabled, only emit when disabled)
-        if (!tab.cutree_switch.active)
-            params += "cutree=0";
+        // CABAC (default enabled, only emit when disabled)
+        if (!tab.cabac_switch.active)
+            params += "no-cabac";
+
+        // MB-Tree (default enabled, only emit when disabled)
+        if (!tab.mbtree_switch.active)
+            params += "no-mbtree";
 
         // Lookahead
         if (tab.lookahead_expander.enable_expansion) {
@@ -114,18 +141,16 @@ public class X265Builder : Object, ICodecBuilder {
             params += "rc-lookahead=" + la.to_string ();
         }
 
-        // AQ Mode (Automatic=don't set, Disabled=0, Variance=1,
-        //          Auto-Variance=2, Auto-Variance Biased=3,
-        //          Auto-Variance + Edge=4)
+        // AQ Mode (Automatic = don't set, Disabled = 0, Variance = 1,
+        //          Auto-Variance = 2, Auto-Variance Biased = 3)
         string aq_mode = tab.get_dropdown_text (tab.aq_mode_combo);
         if (aq_mode != "Automatic") {
             int aq_val = 0;
             switch (aq_mode) {
-                case "Disabled":                aq_val = 0; break;
-                case "Variance":                aq_val = 1; break;
-                case "Auto-Variance":           aq_val = 2; break;
-                case "Auto-Variance Biased":    aq_val = 3; break;
-                case "Auto-Variance + Edge":    aq_val = 4; break;
+                case "Disabled":              aq_val = 0; break;
+                case "Variance":              aq_val = 1; break;
+                case "Auto-Variance":         aq_val = 2; break;
+                case "Auto-Variance Biased":  aq_val = 3; break;
             }
             params += "aq-mode=" + aq_val.to_string ();
 
@@ -150,19 +175,18 @@ public class X265Builder : Object, ICodecBuilder {
             params += "nal-hrd=cbr";
         }
 
-        // Threads (pools)
+        // Open GOP
+        if (tab.open_gop_switch.active)
+            params += "open-gop=1";
+
+        // Threads
         string threads = tab.get_dropdown_text (tab.threads_combo);
         if (threads != "Auto" && threads.length > 0)
-            params += "pools=" + threads;
-
-        // Frame threads
-        string ft = tab.get_dropdown_text (tab.frame_threads_combo);
-        if (ft != "Auto" && ft.length > 0)
-            params += "frame-threads=" + ft;
+            params += "threads=" + threads;
 
         // ── Emit the params string ─────────────────────────────────────────
         if (params.length > 0) {
-            args += "-x265-params";
+            args += "-x264opts";
             args += string.joinv (":", params);
         }
 

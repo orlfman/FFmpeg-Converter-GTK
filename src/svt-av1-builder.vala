@@ -6,7 +6,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         return "SVT-AV1";
     }
 
-    public string[] get_codec_args (Object codec_tab) {
+    public string[] get_codec_args (ICodecTab codec_tab) {
         var tab = codec_tab as SvtAv1Tab;
         if (tab == null) {
             warning ("SvtAv1Builder received wrong tab type");
@@ -55,10 +55,10 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         // ── SVT-AV1 Specific Parameters ─────────────────────────────────────
         string[] svt_params = {};
 
-	// Tune (Auto = don't pass anything, 1 = VQ/0, 2 = PSNR/1, 3 = SSIM/2)
-	int tune_sel = (int) tab.tune_combo.get_selected ();
-	if (tune_sel > 0)
-    		svt_params += "tune=%d".printf (tune_sel - 1);
+        // Tune (Auto = don't pass anything, 1 = VQ/0, 2 = PSNR/1, 3 = SSIM/2)
+        int tune_sel = (int) tab.tune_combo.get_selected ();
+        if (tune_sel > 0)
+            svt_params += "tune=%d".printf (tune_sel - 1);
 
         // Lookahead
         if (tab.lookahead_expander.enable_expansion) {
@@ -99,8 +99,8 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             svt_params += "enable-restoration=0";
 
         // Deblocking Filter (default is enabled; expander ON = override to disable)
-	if (!tab.dlf_switch.active)
-    	    svt_params += "enable-dlf=0";
+        if (!tab.dlf_switch.active)
+            svt_params += "enable-dlf=0";
 
         // Temporal Filtering (default is enabled; switch OFF = disable)
         if (!tab.tf_switch.active)
