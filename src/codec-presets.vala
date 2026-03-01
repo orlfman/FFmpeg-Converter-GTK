@@ -1,15 +1,5 @@
 using Gtk;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CodecPresets — One-click encoding configurations
-//
-//  Presets apply recommended settings to a codec tab's widgets.
-//  After applying, the user can still tweak individual settings freely.
-//
-//  Shared presets:  Custom · Streaming · Anime · Low · Medium · High · Very High
-//  x264/VP9 only:  Imageboards (targets ≤ 4 MB file sizes)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 public class CodecPresets : Object {
 
     // ═════════════════════════════════════════════════════════════════════════

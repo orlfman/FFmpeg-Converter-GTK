@@ -1,21 +1,5 @@
 using Gtk;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  VideoPlayer — Embedded video preview with scrubber and transport controls
-//
-//  Provides:
-//    • GtkPicture-based playback via GtkMediaFile (GStreamer backend)
-//    • Timeline scrubber with click-to-seek
-//    • Play / Pause, ±5 s jump, frame-by-frame stepping
-//    • Real-time time code display (HH:MM:SS.mmm)
-//
-//  Usage:
-//      var player = new VideoPlayer ();
-//      parent.append (player);
-//      player.load_file ("/path/to/video.mp4");
-//      double pos = player.get_position_seconds ();
-// ═══════════════════════════════════════════════════════════════════════════════
-
 public class VideoPlayer : Box {
 
     // ── Widgets ──────────────────────────────────────────────────────────────

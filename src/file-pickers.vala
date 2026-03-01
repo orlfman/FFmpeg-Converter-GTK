@@ -54,7 +54,7 @@ public class FilePickers : Box {
         output_row.append (output_browse);
         append (output_row);
 
-        // === Drag & Drop ===
+        // === Drag and Drop ===
         setup_drag_drop ();
     }
 
@@ -199,7 +199,7 @@ public class FilePickers : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  BROWSE DIALOGS (unchanged)
+    //  BROWSE DIALOGS
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_input_browse_clicked () {

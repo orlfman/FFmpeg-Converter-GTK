@@ -11,14 +11,14 @@ public class ConversionRunner {
     }
 
     public void run (string input, string output, bool two_pass) {
-        // (#10) Use GLib.get_real_time for guaranteed-unique temp path
+        // Use GLib.get_real_time for guaranteed-unique temp path
         converter.passlog_base = "/tmp/ffmpeg_passlog_" + GLib.get_real_time ().to_string ();
         string vf = FilterBuilder.build_video_filter_chain (converter.general_tab);
         string af = FilterBuilder.build_audio_filter_chain (converter.general_tab);
         string safe_output = converter.sanitize_filename (output);
         string codec_name = codec_builder.get_codec_name ();
 
-        // (#6) Polymorphic — no more `is` type casts
+        // Polymorphic
         string[] codec_args = codec_builder.get_codec_args (converter.codec_tab);
 
         foreach (string kf_arg in converter.codec_tab.resolve_keyframe_args (
@@ -28,7 +28,6 @@ public class ConversionRunner {
 
         try {
             if (two_pass) {
-                // (#3) Check cancelled before each pass
                 if (converter.is_cancelled ()) return;
 
                 converter.set_phase (ConversionPhase.PASS1);
@@ -84,7 +83,6 @@ public class ConversionRunner {
 
     private string[] build_pass1 (string input, string vf, string passlog_base, string[] codec_args) {
         string[] cmd = { "ffmpeg", "-y" };
-        // (#10) Validated seek timestamp
         if (converter.general_tab.seek_check.active) {
             cmd += "-ss";
             cmd += Converter.build_timestamp (
@@ -98,7 +96,6 @@ public class ConversionRunner {
         cmd += "-pass"; cmd += "1";
         cmd += "-passlogfile"; cmd += passlog_base;
         cmd += "-an";
-        // (#10) Validated time-limit timestamp
         if (converter.general_tab.time_check.active) {
             cmd += "-t";
             cmd += Converter.build_timestamp (
@@ -169,7 +166,7 @@ public class ConversionRunner {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  AUDIO ARGS (#6 — polymorphic, no more type casts)
+    //  AUDIO ARGS
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] get_audio_args_with_filters (string af) {
@@ -183,16 +180,13 @@ public class ConversionRunner {
             (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")))
             return audio_args;
 
-        // Merge the general audio filter chain (atempo, loudnorm) with any
-        // -af already emitted by audio-settings (e.g. Opus surround fix).
         string[] merged = {};
         bool found_af = false;
         for (int i = 0; i < audio_args.length; i++) {
             if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
-                // Merge: prepend our general filters before the codec-specific ones
                 merged += "-af";
                 merged += af + "," + audio_args[i + 1];
-                i++;  // skip the value we just merged
+                i++;
                 found_af = true;
             } else {
                 merged += audio_args[i];
@@ -200,7 +194,6 @@ public class ConversionRunner {
         }
 
         if (!found_af) {
-            // No existing -af from audio-settings, just add ours
             merged += "-af";
             merged += af;
         }
@@ -208,7 +201,6 @@ public class ConversionRunner {
         return merged;
     }
 
-    // (#6) Polymorphic — single call through the interface, no type switches
     private string[] get_audio_args () {
         return converter.codec_tab.get_audio_args ();
     }

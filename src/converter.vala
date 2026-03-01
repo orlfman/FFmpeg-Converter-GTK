@@ -12,7 +12,7 @@ public class Converter : Object {
     // Emitted on the main thread after a successful conversion
     public signal void conversion_done (string output_file);
 
-    // ── Stable dependencies (injected once via constructor) (#7) ────────────
+    // ── Stable dependencies ────────────
     private Label status_label;
     private ProgressBar progress_bar;
     private ConsoleTab console_tab;
@@ -25,7 +25,7 @@ public class Converter : Object {
     public string? passlog_base = null;
     public string last_output_file = "";
 
-    // ── Thread-safe shared state (#1) ───────────────────────────────────────
+    // ── Thread-safe shared state ───────────────────────────────────────
     private Mutex state_mutex = Mutex ();
     private bool is_converting = false;
     private Pid current_pid = 0;
@@ -36,10 +36,10 @@ public class Converter : Object {
     private double total_duration = 0.0;
     private bool use_pulse_mode = false;
     private uint pulse_source = 0;
-    private int64 last_progress_update = 0;  // (#8) throttle
+    private int64 last_progress_update = 0;
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CONSTRUCTOR — inject stable UI deps once (#7)
+    //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
 
     public Converter (Label status_label,
@@ -82,7 +82,7 @@ public class Converter : Object {
     }
 
     /**
-     * Given a path, find a non-conflicting variant by appending -1, -2, etc. (#5)
+     * Given a path, find a non-conflicting variant by appending -1, -2, etc.
      */
     public static string find_unique_path (string path) {
         if (!FileUtils.test (path, FileTest.EXISTS))
@@ -106,7 +106,7 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  START CONVERSION (simplified parameter list) (#7)
+    //  START CONVERSION
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
@@ -197,7 +197,7 @@ public class Converter : Object {
 
             string line;
             while ((line = reader.read_line (null)) != null) {
-                // (#3) Early exit if cancelled
+                // Early exit if cancelled
                 state_mutex.lock ();
                 bool was_cancelled = cancelled;
                 state_mutex.unlock ();
@@ -217,7 +217,6 @@ public class Converter : Object {
                     console_tab.add_line (clean);
                 }
 
-                // (#9) Simplified progress parsing for -progress pipe:2 output
                 double current_sec = -1.0;
 
                 if (clean.has_prefix ("out_time_us=")) {
@@ -230,7 +229,7 @@ public class Converter : Object {
                     current_sec = parse_ffmpeg_timestamp (time_str);
                 }
 
-                // (#8) Throttle progress updates to ~4/sec
+                // Throttle progress updates to ~4/sec
                 if (current_sec >= 0 && total_duration > 0.0) {
                     int64 now = GLib.get_monotonic_time ();
                     if (now - last_progress_update > 250000) {
@@ -258,11 +257,11 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CANCELLATION (#1, #2, #3, #4)
+    //  CANCELLATION
     // ═════════════════════════════════════════════════════════════════════════
 
     public void cancel () {
-        // (#1) Lock to safely read/write shared state
+        // Lock to safely read/write shared state
         state_mutex.lock ();
         if (!is_converting || current_pid <= 0) {
             state_mutex.unlock ();
@@ -288,7 +287,7 @@ public class Converter : Object {
         hide_progress_cancelled ();
         stop_pulsing ();
 
-        // (#4) Posix.kill returns int, does NOT throw — check return value
+        // Posix.kill returns int, does NOT throw — check return value
         if (Posix.kill (pid_to_kill, Posix.Signal.TERM) != 0) {
             print ("Failed to send SIGTERM to PID %d: errno %d\n",
                    pid_to_kill, Posix.errno);
@@ -297,7 +296,7 @@ public class Converter : Object {
                    pid_to_kill, phase.to_string ());
         }
 
-        // (#3) Escalate to SIGKILL after 3 seconds if process is still alive
+        // Escalate to SIGKILL after 3 seconds if process is still alive
         Pid kill_pid = pid_to_kill;
         Timeout.add (3000, () => {
             // Check if process is still running (signal 0 = probe only)
@@ -374,7 +373,7 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  DURATION PROBING (#10 — runs on background thread now)
+    //  DURATION PROBING
     // ═════════════════════════════════════════════════════════════════════════
 
     private double get_video_duration (string input_file) {
@@ -468,7 +467,7 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PHASE MANAGEMENT (#1 — thread-safe)
+    //  PHASE MANAGEMENT
     // ═════════════════════════════════════════════════════════════════════════
 
     internal void set_phase (ConversionPhase phase) {
@@ -485,14 +484,14 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  FILENAME SANITIZATION (#10 — simplified full-width mapping)
+    //  FILENAME SANITIZATION
     // ═════════════════════════════════════════════════════════════════════════
 
     internal string sanitize_filename (string path) {
         string dir = Path.get_dirname (path);
         string name = Path.get_basename (path);
 
-        // (#10) Map everything directly to _ — no confusing intermediate step
+        // Map everything directly to _ — no confusing intermediate step
         string safe = name
             .replace ("：", "_")
             .replace ("？", "_")
@@ -511,7 +510,7 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  SEEK / TIME VALIDATION (#10)
+    //  SEEK / TIME VALIDATION
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
@@ -536,7 +535,7 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  POST-CONVERSION CLEANUP (#1 — thread-safe)
+    //  POST-CONVERSION CLEANUP
     // ═════════════════════════════════════════════════════════════════════════
 
     public void cleanup_after_conversion () {
