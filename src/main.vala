@@ -15,6 +15,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private GeneralTab general_tab;
     private TrimTab trim_tab;
     private Notebook notebook;
+    private HamburgerMenu hamburger;
 
     public MainWindow (Adw.Application app) {
         Object (application: app);
@@ -25,8 +26,11 @@ public class MainWindow : Adw.ApplicationWindow {
         var toolbar_view = new Adw.ToolbarView ();
         var header = new Adw.HeaderBar ();
 
+        // File PICKERS (created early so HamburgerMenu can track input changes)
+        file_pickers = new FilePickers ();
+
         // ── Hamburger menu on the LEFT side of the header bar ──
-        var hamburger = new HamburgerMenu (this);
+        hamburger = new HamburgerMenu (this, file_pickers);
         header.pack_start (hamburger.get_button ());
 
         toolbar_view.add_top_bar (header);
@@ -38,7 +42,6 @@ public class MainWindow : Adw.ApplicationWindow {
         content_box.set_margin_end (32);
 
         // File PICKERS
-        file_pickers = new FilePickers ();
         content_box.append (file_pickers);
 
         // TABS
@@ -193,12 +196,14 @@ public class MainWindow : Adw.ApplicationWindow {
         // Probe output file and show it after a successful conversion
         converter.conversion_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
+            hamburger.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
 
         // Wire up Trim tab completion
         trim_tab.trim_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
+            hamburger.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
     }
