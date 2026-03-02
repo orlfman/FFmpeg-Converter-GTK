@@ -137,10 +137,6 @@ public class TrimTab : Box, ICodecTab {
     public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) { return {}; }
     public string[] get_audio_args () { return { "-c:a", "copy" }; }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PUBLIC API
-    // ═════════════════════════════════════════════════════════════════════════
-
     public void load_video (string path) {
         if (path.length > 0) {
             // Clear any stale crop from the previous video
@@ -569,9 +565,6 @@ public class TrimTab : Box, ICodecTab {
         // Update global crop
         global_crop_value = val;
 
-        // If per-segment mode is on and we have segments, we could
-        // auto-apply to the "selected" segment, but for simplicity
-        // we just track it globally and let the user apply.
         update_crop_display (val, w, h, x, y);
     }
 

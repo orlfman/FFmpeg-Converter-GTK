@@ -126,8 +126,6 @@ public class TrimRunner : Object {
         // ── PATH A: Concat filter (re-encode + multi-segment + combined) ─────
         // This is the most robust path: a single FFmpeg command that decodes
         // all segments, applies per-segment filters, and encodes once.
-        // Fixes: resolution mismatches, PTS discontinuities, B-frame issues,
-        //        frame drops, and A/V desync at segment boundaries.
         bool use_concat_filter = !copy_mode && !export_separate && segments.length > 1;
 
         if (use_concat_filter) {

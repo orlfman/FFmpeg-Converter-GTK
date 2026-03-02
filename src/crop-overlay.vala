@@ -1,23 +1,6 @@
 using Gtk;
 using Gdk;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CropOverlay — Interactive crop rectangle drawn over the video player
-//
-//  Sits as a transparent layer on top of a Gtk.Picture inside a Gtk.Overlay.
-//  The user clicks and drags to create or adjust a crop rectangle, which maps
-//  directly to FFmpeg's  crop=W:H:X:Y  filter.
-//
-//  Features:
-//    • Click-drag to create a new selection
-//    • Drag inside the selection to move it
-//    • Drag corner/edge handles to resize
-//    • Semi-transparent dark scrim outside the crop area
-//    • Rule-of-thirds grid, dimension badge, corner handles
-//    • Emits crop_changed() with video-pixel coordinates
-//    • All values snapped to even numbers (FFmpeg requirement)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 public class CropOverlay : Gtk.DrawingArea {
 
     // ── Video source dimensions (set by VideoPlayer) ─────────────────────────
@@ -404,10 +387,6 @@ public class CropOverlay : Gtk.DrawingArea {
         cr.arc (x + r,     y + r,     r, Math.PI,       3 * Math.PI / 2);
         cr.close_path ();
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  HIT TESTING — Which part of the crop rect did we click?
-    // ═════════════════════════════════════════════════════════════════════════
 
     private int hit_test (double wx, double wy) {
         if (!_has_crop) return DRAG_CREATE;
