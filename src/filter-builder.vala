@@ -2,7 +2,7 @@ using Gtk;
 
 public class FilterBuilder {
 
-    public static string build_video_filter_chain (GeneralTab tab) {
+    public static string build_video_filter_chain (GeneralTab tab, bool skip_crop = false) {
         string[] filters = {};
 
         // 1. Rotation / Flip
@@ -13,8 +13,8 @@ public class FilterBuilder {
         else if (rot == "Horizontal Flip") filters += "hflip";
         else if (rot == "Vertical Flip") filters += "vflip";
 
-        // 2. Crop
-        if (tab.crop_check.active) {
+        // 2. Crop (skipped when the Crop & Trim tab provides its own)
+        if (!skip_crop && tab.crop_check.active) {
             string c = tab.crop_value.text.strip ();
             if (c.length > 0 && c != "w:h:x:y") {
                 if (c.has_prefix ("crop=")) c = c.substring (5);

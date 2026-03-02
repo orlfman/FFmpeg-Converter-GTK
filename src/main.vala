@@ -88,7 +88,7 @@ public class MainWindow : Adw.ApplicationWindow {
         vp9_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
         notebook.append_page (vp9_scroll, new Label ("VP9"));
 
-        // === Trim Tab ===
+        // === Crop & Trim Tab ===
         trim_tab = new TrimTab ();
         trim_tab.general_tab = general_tab;
         trim_tab.svt_tab     = svt_tab;
@@ -99,7 +99,7 @@ public class MainWindow : Adw.ApplicationWindow {
         trim_scrolled.set_vexpand (true);
         trim_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
         trim_scrolled.set_child (trim_tab);
-        notebook.append_page (trim_scrolled, new Label ("Trim"));
+        notebook.append_page (trim_scrolled, new Label ("Crop & Trim"));
 
         // === Information Tab ===
         info_tab = new InformationTab ();
@@ -189,7 +189,7 @@ public class MainWindow : Adw.ApplicationWindow {
             info_tab.load_input_info (path);
             info_tab.reset_output ();
 
-            // Load video preview in the Trim tab
+            // Load video preview in the Crop & Trim tab
             trim_tab.load_video (path);
         });
 
@@ -205,6 +205,16 @@ public class MainWindow : Adw.ApplicationWindow {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
+        });
+
+	// Disable General tab crop when Crop & Trim tab handles cropping
+        trim_tab.mode_changed.connect ((mode) => {
+            bool trim_handles_crop = (mode != 0);  // 0 = TRIM_ONLY
+            general_tab.crop_expander.set_sensitive (!trim_handles_crop);
+            if (trim_handles_crop) {
+                general_tab.crop_expander.set_enable_expansion (false);
+                general_tab.crop_check.set_active (false);
+            }
         });
     }
 
@@ -223,11 +233,11 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (active_codec_tab == null) {
-            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, or Trim) first!");
+            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, or Crop & Trim) first!");
             return;
         }
 
-        // ── Trim Tab gets its own conversion path ────────────────────────────
+        // ── Crop & Trim Tab gets its own conversion path ─────────────────────
         if (active_codec_tab is TrimTab) {
             var trim = (TrimTab) active_codec_tab;
             trim.start_trim_export (
@@ -312,7 +322,7 @@ public class MainWindow : Adw.ApplicationWindow {
         // Cancel whichever conversion is active
         if (trim_tab.is_exporting ()) {
             trim_tab.cancel_trim ();
-            status_area.set_status ("⏹️ Trim export cancelled by user.");
+            status_area.set_status ("⏹️ Export cancelled by user.");
         } else {
             converter.cancel ();
             status_area.set_status ("⏹️ Conversion cancelled by user.");

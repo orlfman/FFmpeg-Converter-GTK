@@ -24,7 +24,7 @@ public class GeneralTab : Box {
     public Button  detect_crop_button  { get; private set; }
     public Entry   crop_value          { get; private set; }
 
-    private Adw.ExpanderRow crop_expander;
+    public Adw.ExpanderRow crop_expander;
 
     // ── Rotate ───────────────────────────────────────────────────────────────
     public DropDown rotate_combo       { get; private set; }

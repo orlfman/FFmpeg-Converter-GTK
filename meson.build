@@ -42,6 +42,7 @@ sources = files(
   'src/about-dialog.vala',
   'src/hamburger-menu.vala',
   'src/video-player.vala',
+  'src/crop-overlay.vala',
   'src/trim-tab.vala',
   'src/trim-builder.vala',
   'src/trim-runner.vala',

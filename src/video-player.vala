@@ -9,12 +9,23 @@ public class VideoPlayer : Box {
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
+    private Gtk.Overlay video_overlay;
+
+    // ── Crop Overlay ─────────────────────────────────────────────────────────
+    private CropOverlay _crop_overlay;
+    public  CropOverlay crop_overlay { get { return _crop_overlay; } }
 
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
     private uint prepare_poll  = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
+
+    // ── Video intrinsic size ─────────────────────────────────────────────────
+    private int _intrinsic_width  = 0;
+    private int _intrinsic_height = 0;
+    public  int intrinsic_width  { get { return _intrinsic_width;  } }
+    public  int intrinsic_height { get { return _intrinsic_height; } }
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void position_changed (double seconds);
@@ -44,7 +55,16 @@ public class VideoPlayer : Box {
         picture.set_vexpand (false);
         picture.set_content_fit (ContentFit.CONTAIN);
 
-        frame.set_child (picture);
+        // Wrap picture in an Overlay so the crop overlay can sit on top
+        video_overlay = new Gtk.Overlay ();
+        video_overlay.set_child (picture);
+
+        // Create crop overlay (hidden by default)
+        _crop_overlay = new CropOverlay ();
+        _crop_overlay.set_visible (false);
+        video_overlay.add_overlay (_crop_overlay);
+
+        frame.set_child (video_overlay);
         append (frame);
 
         // ── Scrubber ─────────────────────────────────────────────────────────
@@ -136,6 +156,8 @@ public class VideoPlayer : Box {
         }
 
         is_playing = false;
+        _intrinsic_width  = 0;
+        _intrinsic_height = 0;
         play_button.set_icon_name ("media-playback-start-symbolic");
 
         var file = GLib.File.new_for_path (path);
@@ -188,6 +210,16 @@ public class VideoPlayer : Box {
             target = target.clamp (0, dur);
         }
         media.seek (target);
+    }
+
+    /**
+     * Show or hide the interactive crop overlay on top of the video.
+     */
+    public void set_crop_active (bool active) {
+        _crop_overlay.set_visible (active);
+        if (active && _intrinsic_width > 0) {
+            _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
+        }
     }
 
     /**
@@ -253,6 +285,15 @@ public class VideoPlayer : Box {
         scrubber.set_value (0.0);
         duration_label.set_text (format_time (dur));
         time_label.set_text (format_time (0.0));
+
+        // Capture intrinsic video dimensions from the paintable
+        if (media != null) {
+            _intrinsic_width  = media.get_intrinsic_width ();
+            _intrinsic_height = media.get_intrinsic_height ();
+
+            // Keep the crop overlay informed of the video size
+            _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
+        }
 
         start_update_timer ();
         media_ready (dur);
