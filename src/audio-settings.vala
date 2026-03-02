@@ -38,6 +38,7 @@ public class AudioSettings : Object {
     private string current_container = ContainerExt.MKV;
     private bool   speed_active = false;
     private bool   normalize_active = false;
+    private bool   concat_filter_active = false;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -235,6 +236,17 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    /**
+     * When the concat filter pipeline is active (multi-segment re-encode
+     * with combined output), audio passes through -filter_complex which
+     * decodes it — stream-copy is impossible.
+     * Mirrors the existing update_for_audio_speed() pattern.
+     */
+    public void update_for_concat_filter (bool active) {
+        concat_filter_active = active;
+        rebuild_codec_list ();
+    }
+
     private void rebuild_codec_list () {
         string current = get_codec_text ();
 
@@ -248,7 +260,7 @@ public class AudioSettings : Object {
                        AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS };
         }
 
-        if (speed_active || normalize_active) {
+        if (speed_active || normalize_active || concat_filter_active) {
             string[] filtered = {};
             foreach (string c in codecs) {
                 if (c != AudioCodecName.COPY) filtered += c;

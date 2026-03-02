@@ -816,6 +816,7 @@ public class TrimTab : Box, ICodecTab {
 
         copy_mode_switch.notify["active"].connect (() => {
             update_codec_row_visibility ();
+            update_concat_audio_constraint ();
         });
 
         // ── Export as separate files ─────────────────────────────────────────
@@ -826,6 +827,9 @@ public class TrimTab : Box, ICodecTab {
         export_separate_switch = new Switch ();
         export_separate_switch.set_valign (Align.CENTER);
         export_separate_switch.set_active (false);
+        export_separate_switch.notify["active"].connect (() => {
+            update_concat_audio_constraint ();
+        });
         separate_row.add_suffix (export_separate_switch);
         separate_row.set_activatable_widget (export_separate_switch);
         output_group.add (separate_row);
@@ -844,10 +848,33 @@ public class TrimTab : Box, ICodecTab {
             copy_mode_switch.set_sensitive (false);
         } else {
             // Restore sensitivity unless crop-only mode overrides
-            if (current_mode != Mode.CROP_ONLY) {
+            if (current_mode != Mode.CROP_ONLY && current_mode != Mode.TRIM_AND_CROP) {
                 copy_mode_switch.set_sensitive (true);
             }
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CONCAT FILTER AUDIO CONSTRAINT
+    //
+    //  PATH A (concat filter) routes audio through -filter_complex, which
+    //  decodes it — making -c:a copy impossible.  When PATH A will be used,
+    //  disable "Copy" in all codec tabs' audio dropdowns so the user picks
+    //  a real codec.  When the conditions change, re-enable it.
+    //
+    //  PATH A conditions: re-encode + multi-segment + combined output
+    //   → !copy_mode && !export_separate && segments.length > 1
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void update_concat_audio_constraint () {
+        bool would_use_concat_filter = !copy_mode_switch.active
+                                       && !export_separate_switch.active
+                                       && segments.length > 1;
+
+        if (svt_tab != null)  svt_tab.audio_settings.update_for_concat_filter (would_use_concat_filter);
+        if (x265_tab != null) x265_tab.audio_settings.update_for_concat_filter (would_use_concat_filter);
+        if (x264_tab != null) x264_tab.audio_settings.update_for_concat_filter (would_use_concat_filter);
+        if (vp9_tab != null)  vp9_tab.audio_settings.update_for_concat_filter (would_use_concat_filter);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -967,6 +994,10 @@ public class TrimTab : Box, ICodecTab {
                 )
             );
         }
+
+        // Update audio copy constraint — PATH A (concat filter) can't do
+        // audio copy, so disable it when that path would be active
+        update_concat_audio_constraint ();
     }
 
     private Gtk.Widget build_segment_row (int index) {

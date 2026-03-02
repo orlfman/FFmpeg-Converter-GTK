@@ -136,6 +136,9 @@ public class TrimRunner : Object {
         // ── PATH A: Concat filter (re-encode + multi-segment + combined) ─────
         // This is the most robust path: a single FFmpeg command that decodes
         // all segments, applies per-segment filters, and encodes once.
+        // Note: audio copy is disabled in the UI when this path is active
+        // (via AudioSettings.update_for_concat_filter), since -filter_complex
+        // decodes audio and makes stream-copy impossible.
         bool use_concat_filter = !copy_mode && !export_separate && segments.length > 1;
 
         if (use_concat_filter) {
