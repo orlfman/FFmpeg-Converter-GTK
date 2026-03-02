@@ -22,6 +22,11 @@ dependencies = [
 
 sources = files(
   'src/main.vala',
+  'src/app-controller.vala',
+  'src/process-runner.vala',
+  'src/conversion-utils.vala',
+  'src/progress-tracker.vala',
+  'src/constants.vala',
   'src/svt-av1-tab.vala',
   'src/general-tab.vala',
   'src/converter.vala',

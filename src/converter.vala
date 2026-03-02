@@ -8,35 +8,101 @@ internal enum ConversionPhase {
     PASS2
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ConversionConfig — Data object bundling everything ConversionRunner needs
+//
+//  Eliminates deep coupling (#3): ConversionRunner no longer reaches into
+//  converter.general_tab, converter.codec_tab, converter.passlog_base, etc.
+//  Instead, all data is snapshot into this config before the background thread
+//  starts.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public class ConversionConfig : Object {
+    // ── FFmpeg arguments ────────────────────────────────────────────────────
+    public string video_filters  { get; set; default = ""; }
+    public string audio_filters  { get; set; default = ""; }
+    public string[] codec_args;
+    public string[] audio_args;
+    public string codec_name     { get; set; default = ""; }
+    public string passlog_base   { get; set; default = ""; }
+
+    // ── Seek / Duration ─────────────────────────────────────────────────────
+    public bool   seek_enabled   { get; set; default = false; }
+    public string seek_timestamp { get; set; default = "00:00:00"; }
+    public bool   time_enabled   { get; set; default = false; }
+    public string time_timestamp { get; set; default = "00:00:00"; }
+
+    // ── Metadata ────────────────────────────────────────────────────────────
+    public bool preserve_metadata { get; set; default = false; }
+    public bool remove_chapters   { get; set; default = false; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Converter — Orchestrates video conversion lifecycle
+//
+//  Responsibilities (after refactoring):
+//   • Coordinates start/cancel of conversions
+//   • Owns the ProcessRunner and ProgressTracker
+//   • Snapshots UI state into ConversionConfig for the background thread
+//   • Reports status/errors to the UI
+//
+//  Extracted to separate classes:
+//   • Path computation, sanitization, timestamps → ConversionUtils namespace
+//   • Progress bar management → ProgressTracker
+//   • FFmpeg process execution → ProcessRunner
+//   • Cross-component wiring → AppController
+// ═══════════════════════════════════════════════════════════════════════════════
+
 public class Converter : Object {
     // Emitted on the main thread after a successful conversion
     public signal void conversion_done (string output_file);
 
     // ── Stable dependencies ────────────
     private Label status_label;
-    private ProgressBar progress_bar;
     private ConsoleTab console_tab;
 
     public GeneralTab general_tab { get; private set; }
 
-    // ── Per-conversion state ────────────────────────────────────────────────
-    public ICodecTab codec_tab;
-    public ICodecBuilder codec_builder;
-    public string? passlog_base = null;
-    public string last_output_file = "";
+    // ── Shared infrastructure ───────────────────────────────────────────────
+    public ProcessRunner process_runner { get; private set; }
+    public ProgressTracker progress_tracker { get; private set; }
 
-    // ── Thread-safe shared state ───────────────────────────────────────
+    // ── Per-conversion state (all guarded by state_mutex) ───────────────────
     private Mutex state_mutex = Mutex ();
     private bool is_converting = false;
-    private Pid current_pid = 0;
     private ConversionPhase current_phase = ConversionPhase.IDLE;
-    private bool cancelled = false;
-
-    // ── Duration / progress ─────────────────────────────────────────────────
     private double total_duration = 0.0;
-    private bool use_pulse_mode = false;
-    private uint pulse_source = 0;
-    private int64 last_progress_update = 0;
+    private string _last_output_file = "";
+    private string? _passlog_base = null;
+
+    // ── Thread-safe accessors ───────────────────────────────────────────────
+    public string last_output_file {
+        owned get {
+            state_mutex.lock ();
+            string v = _last_output_file;
+            state_mutex.unlock ();
+            return v;
+        }
+        set {
+            state_mutex.lock ();
+            _last_output_file = value;
+            state_mutex.unlock ();
+        }
+    }
+
+    public string? passlog_base {
+        owned get {
+            state_mutex.lock ();
+            string? v = _passlog_base;
+            state_mutex.unlock ();
+            return v;
+        }
+        set {
+            state_mutex.lock ();
+            _passlog_base = value;
+            state_mutex.unlock ();
+        }
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -46,63 +112,26 @@ public class Converter : Object {
                       ProgressBar progress_bar,
                       ConsoleTab console_tab,
                       GeneralTab general_tab) {
-        this.status_label = status_label;
-        this.progress_bar = progress_bar;
-        this.console_tab  = console_tab;
-        this.general_tab  = general_tab;
+        this.status_label   = status_label;
+        this.console_tab    = console_tab;
+        this.general_tab    = general_tab;
+        this.process_runner = new ProcessRunner ();
+        this.progress_tracker = new ProgressTracker (progress_bar);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  OUTPUT PATH COMPUTATION (extracted for overwrite check in main.vala) (#5)
+    //  OUTPUT PATH COMPUTATION (backward-compat wrappers → ConversionUtils)
     // ═════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Compute the output file path for a given input file, codec, and folder.
-     * Does NOT start conversion — call start_conversion() afterwards.
-     */
     public static string compute_output_path (string input_file,
                                               string output_folder,
                                               ICodecBuilder builder,
                                               ICodecTab codec_tab) {
-        string out_folder = (output_folder != "")
-            ? output_folder
-            : Path.get_dirname (input_file);
-
-        string codec_name = builder.get_codec_name ().down ();
-        string codec_suffix = codec_name.contains ("av1") ? "av1" : codec_name;
-
-        string container_ext = codec_tab.get_container ();
-        if (container_ext == "") container_ext = "mkv";
-
-        string basename = Path.get_basename (input_file);
-        int dot_pos = basename.last_index_of_char ('.');
-        string name_no_ext = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
-
-        return @"$out_folder/$name_no_ext-$codec_suffix.$container_ext";
+        return ConversionUtils.compute_output_path (input_file, output_folder, builder, codec_tab);
     }
 
-    /**
-     * Given a path, find a non-conflicting variant by appending -1, -2, etc.
-     */
     public static string find_unique_path (string path) {
-        if (!FileUtils.test (path, FileTest.EXISTS))
-            return path;
-
-        string dir = Path.get_dirname (path);
-        string basename = Path.get_basename (path);
-
-        int dot_pos = basename.last_index_of_char ('.');
-        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
-        string ext  = (dot_pos > 0) ? basename.substring (dot_pos) : "";
-
-        int counter = 1;
-        string candidate = path;
-        do {
-            candidate = Path.build_filename (dir, @"$stem-$counter$ext");
-            counter++;
-        } while (FileUtils.test (candidate, FileTest.EXISTS));
-
-        return candidate;
+        return ConversionUtils.find_unique_path (path);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -130,130 +159,145 @@ public class Converter : Object {
             return;
         }
 
-        this.codec_tab    = codec_tab;
-        this.codec_builder = builder;
-        this.last_output_file = output_file;
+        last_output_file = output_file;
 
         status_label.set_text (@"🚀 Starting conversion...\nOutput will be:\n$output_file");
 
         bool two_pass = codec_tab.get_two_pass ();
 
+        // Snapshot all UI state into a ConversionConfig (#3)
+        var config = snapshot_config (input_file, output_file, codec_tab, builder);
+
         state_mutex.lock ();
         is_converting = true;
-        current_pid   = 0;
-        cancelled     = false;
+        current_phase = ConversionPhase.IDLE;
         state_mutex.unlock ();
 
-        show_progress_pulse ();
+        process_runner.reset ();
+        progress_tracker.reset_throttle ();
+        progress_tracker.show_pulse ();
 
         new Thread<void> ("ffmpeg-thread", () => {
-            // (#10) Move ffprobe to the background thread so it doesn't freeze UI
-            total_duration = get_video_duration (input_file);
-            use_pulse_mode = (total_duration <= 0);
+            // Probe duration on background thread (avoids UI freeze)
+            double dur = get_video_duration (input_file);
+            state_mutex.lock ();
+            total_duration = dur;
+            state_mutex.unlock ();
 
-            if (!use_pulse_mode) {
-                // Switch from pulse to determinate mode
-                Idle.add (() => {
-                    stop_pulsing ();
-                    progress_bar.set_fraction (0.0);
-                    progress_bar.set_text ("0.0%");
-                    return Source.REMOVE;
-                });
+            bool pulse = (dur <= 0);
+            progress_tracker.set_pulse_mode (pulse);
+
+            if (!pulse) {
+                progress_tracker.switch_to_determinate ();
             }
 
-            run_conversion (input_file, output_file, two_pass);
+            run_conversion (input_file, output_file, two_pass, config);
         });
     }
 
-    private void run_conversion (string input, string output, bool two_pass) {
-        var runner = new ConversionRunner (this, codec_builder);
+    /**
+     * Snapshot all relevant UI state into a ConversionConfig.
+     * Called on the main thread before spawning the background thread.
+     * This decouples ConversionRunner from live widget state (#3).
+     */
+    private ConversionConfig snapshot_config (string input_file,
+                                              string output_file,
+                                              ICodecTab codec_tab,
+                                              ICodecBuilder builder) {
+        var config = new ConversionConfig ();
+
+        // Passlog
+        string plog = "/tmp/ffmpeg_passlog_" + GLib.get_real_time ().to_string ();
+        passlog_base = plog;
+        config.passlog_base = plog;
+
+        // Filters
+        config.video_filters = FilterBuilder.build_video_filter_chain (general_tab);
+        config.audio_filters = FilterBuilder.build_audio_filter_chain (general_tab);
+
+        // Codec
+        config.codec_name = builder.get_codec_name ();
+        string[] built_codec_args = builder.get_codec_args (codec_tab);
+        foreach (string kf in codec_tab.resolve_keyframe_args (input_file, general_tab)) {
+            built_codec_args += kf;
+        }
+        config.codec_args = built_codec_args;
+
+        // Audio
+        config.audio_args = codec_tab.get_audio_args ();
+
+        // Seek / Duration
+        config.seek_enabled = general_tab.seek_check.active;
+        if (config.seek_enabled) {
+            config.seek_timestamp = ConversionUtils.build_timestamp (
+                general_tab.seek_hh, general_tab.seek_mm, general_tab.seek_ss);
+        }
+        config.time_enabled = general_tab.time_check.active;
+        if (config.time_enabled) {
+            config.time_timestamp = ConversionUtils.build_timestamp (
+                general_tab.time_hh, general_tab.time_mm, general_tab.time_ss);
+        }
+
+        // Metadata
+        config.preserve_metadata = general_tab.preserve_metadata.active;
+        config.remove_chapters   = general_tab.remove_chapters.active;
+
+        return config;
+    }
+
+    private void run_conversion (string input, string output, bool two_pass,
+                                 ConversionConfig config) {
+        var runner = new ConversionRunner (this, config);
         runner.run (input, output, two_pass);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  FFMPEG PROCESS EXECUTION
+    //  FFMPEG PROCESS EXECUTION (delegates to ProcessRunner)
     // ═════════════════════════════════════════════════════════════════════════
 
     internal int execute_ffmpeg (string[] argv, bool is_pass1 = false) {
-        try {
-            var launcher = new SubprocessLauncher (SubprocessFlags.STDERR_PIPE);
-            var process = launcher.spawnv (argv);
+        double pass_start = is_pass1 ? 0.0 : 50.0;
+        double pass_range = 50.0;
 
-            // (#2) Safe PID handling — never store PID 0 or negative
-            string? id_str = process.get_identifier ();
-            if (id_str != null) {
-                int parsed = int.parse (id_str);
-                if (parsed > 0) {
-                    state_mutex.lock ();
-                    current_pid = (Pid) parsed;
-                    state_mutex.unlock ();
-                }
+        int exit = process_runner.execute (argv, (clean) => {
+            // Logging: filter out noisy progress lines
+            bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
+                           clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
+                           clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
+                           clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
+                           clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
+
+            if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
+                clean.contains ("Warning") || clean.contains ("failed")) {
+                console_tab.add_line (clean);
             }
 
-            var reader = new DataInputStream (process.get_stderr_pipe ());
+            // Progress parsing
+            double current_sec = -1.0;
 
-            double pass_start = is_pass1 ? 0.0 : 50.0;
-            double pass_range = 50.0;
-
-            string line;
-            while ((line = reader.read_line (null)) != null) {
-                // Early exit if cancelled
-                state_mutex.lock ();
-                bool was_cancelled = cancelled;
-                state_mutex.unlock ();
-                if (was_cancelled) break;
-
-                string clean = line.strip ();
-                if (clean.length == 0) continue;
-
-                bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
-                               clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
-                               clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
-                               clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
-                               clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
-
-                if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
-                    clean.contains ("Warning") || clean.contains ("failed")) {
-                    console_tab.add_line (clean);
-                }
-
-                double current_sec = -1.0;
-
-                if (clean.has_prefix ("out_time_us=")) {
-                    string us_str = clean.substring ("out_time_us=".length).strip ();
-                    int64 us = int64.parse (us_str);
-                    current_sec = us / 1000000.0;
-                }
-                else if (clean.has_prefix ("out_time=")) {
-                    string time_str = clean.substring ("out_time=".length).strip ();
-                    current_sec = parse_ffmpeg_timestamp (time_str);
-                }
-
-                // Throttle progress updates to ~4/sec
-                if (current_sec >= 0 && total_duration > 0.0) {
-                    int64 now = GLib.get_monotonic_time ();
-                    if (now - last_progress_update > 250000) {
-                        double fraction = (current_sec / total_duration).clamp (0.0, 1.0);
-                        double percent = pass_start + (fraction * pass_range);
-                        update_progress (percent);
-                        last_progress_update = now;
-                    }
-                }
+            if (clean.has_prefix ("out_time_us=")) {
+                string us_str = clean.substring ("out_time_us=".length).strip ();
+                int64 us = int64.parse (us_str);
+                current_sec = us / 1000000.0;
+            }
+            else if (clean.has_prefix ("out_time=")) {
+                string time_str = clean.substring ("out_time=".length).strip ();
+                current_sec = ConversionUtils.parse_ffmpeg_timestamp (time_str);
             }
 
-            process.wait ();
-            int exit_status = process.get_exit_status ();
+            state_mutex.lock ();
+            double dur = total_duration;
+            state_mutex.unlock ();
 
-            print ("\n=== FFmpeg command ===\n%s\n", string.joinv (" ", argv));
-            console_tab.set_command (string.joinv (" ", argv));
+            if (current_sec >= 0 && dur > 0.0) {
+                progress_tracker.update_from_time (current_sec, dur, pass_start, pass_range);
+            }
+        });
 
-            return exit_status;
+        print ("\n=== FFmpeg command ===\n%s\n", string.joinv (" ", argv));
+        console_tab.set_command (string.joinv (" ", argv));
 
-        } catch (Error e) {
-            print ("Failed to launch FFmpeg: %s\n", e.message);
-            console_tab.add_line ("❌ FFmpeg launch error: " + e.message);
-            return -1;
-        }
+        return exit;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -261,18 +305,13 @@ public class Converter : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void cancel () {
-        // Lock to safely read/write shared state
         state_mutex.lock ();
-        if (!is_converting || current_pid <= 0) {
+        if (!is_converting) {
             state_mutex.unlock ();
             return;
         }
-        // Grab local copies, set cancelled flag
-        Pid pid_to_kill = current_pid;
         var phase = current_phase;
-        cancelled = true;
         is_converting = false;
-        current_pid = 0;
         current_phase = ConversionPhase.IDLE;
         state_mutex.unlock ();
 
@@ -284,82 +323,23 @@ public class Converter : Object {
         }
 
         update_status (cancel_msg);
-        hide_progress_cancelled ();
-        stop_pulsing ();
+        progress_tracker.hide_cancelled ();
+        progress_tracker.stop_pulsing ();
 
-        // Posix.kill returns int, does NOT throw — check return value
-        if (Posix.kill (pid_to_kill, Posix.Signal.TERM) != 0) {
-            print ("Failed to send SIGTERM to PID %d: errno %d\n",
-                   pid_to_kill, Posix.errno);
-        } else {
-            print ("Sent SIGTERM to FFmpeg (PID %d) during %s\n",
-                   pid_to_kill, phase.to_string ());
-        }
-
-        // Escalate to SIGKILL after 3 seconds if process is still alive
-        Pid kill_pid = pid_to_kill;
-        Timeout.add (3000, () => {
-            // Check if process is still running (signal 0 = probe only)
-            if (Posix.kill (kill_pid, 0) == 0) {
-                print ("FFmpeg PID %d still alive after 3 s — sending SIGKILL\n", kill_pid);
-                Posix.kill (kill_pid, Posix.Signal.KILL);
-            }
-            return Source.REMOVE;
-        });
+        // Delegate to ProcessRunner (proper kill + SIGKILL escalation)
+        process_runner.cancel ();
 
         cleanup_passlog ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  STATUS / PROGRESS HELPERS
+    //  STATUS HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
     internal void report_error (string message) {
         Idle.add (() => {
             status_label.set_text (@"❌ $message\nCheck the console for details.");
             console_tab.add_line ("❌ " + message);
-            return Source.REMOVE;
-        });
-    }
-
-    /** Show pulsing progress (used initially, before duration is known). */
-    private void show_progress_pulse () {
-        Idle.add (() => {
-            progress_bar.set_visible (true);
-            progress_bar.set_text ("Processing...");
-            start_pulsing ();
-            return Source.REMOVE;
-        });
-    }
-
-    private void hide_progress () {
-        Idle.add (() => {
-            stop_pulsing ();
-            progress_bar.set_fraction (1.0);
-            progress_bar.set_text (use_pulse_mode ? "Done" : "100%");
-
-            Timeout.add (800, () => {
-                progress_bar.set_visible (false);
-                progress_bar.set_text ("Waiting...");
-                return Source.REMOVE;
-            });
-            return Source.REMOVE;
-        });
-    }
-
-    private void hide_progress_cancelled () {
-        Idle.add (() => {
-            stop_pulsing ();
-            progress_bar.set_visible (false);
-            progress_bar.set_text ("Cancelled");
-            return Source.REMOVE;
-        });
-    }
-
-    private void update_progress (double percent) {
-        Idle.add (() => {
-            progress_bar.set_fraction (percent / 100.0);
-            progress_bar.set_text (@"%.1f%%".printf (percent));
             return Source.REMOVE;
         });
     }
@@ -402,31 +382,13 @@ public class Converter : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  TIMESTAMP PARSING
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private double parse_ffmpeg_timestamp (string time_str) {
-        if (time_str == "N/A" || time_str.length == 0) {
-            return -1.0;
-        }
-        string[] parts = time_str.split (":");
-        if (parts.length < 3) return -1.0;
-
-        int hours   = int.parse (parts[0]);
-        int minutes = int.parse (parts[1]);
-        double seconds = double.parse (parts[2]);
-
-        return hours * 3600.0 + minutes * 60.0 + seconds;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
     //  PASSLOG CLEANUP
     // ═════════════════════════════════════════════════════════════════════════
 
     private void cleanup_passlog () {
-        if (passlog_base == null) return;
+        string? plog = passlog_base;
+        if (plog == null) return;
 
-        // Common passlog file patterns for both svt-av1 and x265
         string[] suffixes = {
             "-0.log", "-0.log.mbtree", "-0.log.cutree",
             "-0.log.temp", ".log", ".log.mbtree"
@@ -434,7 +396,7 @@ public class Converter : Object {
 
         foreach (string suffix in suffixes) {
             try {
-                var f = File.new_for_path (passlog_base + suffix);
+                var f = File.new_for_path (plog + suffix);
                 if (f.query_exists ()) f.delete ();
             } catch (Error e) {
                 // Best effort
@@ -442,28 +404,6 @@ public class Converter : Object {
         }
 
         passlog_base = null;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PULSING
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void start_pulsing () {
-        stop_pulsing ();
-        pulse_source = Timeout.add (320, () => {
-            Idle.add (() => {
-                progress_bar.pulse ();
-                return Source.REMOVE;
-            });
-            return Source.CONTINUE;
-        });
-    }
-
-    private void stop_pulsing () {
-        if (pulse_source != 0) {
-            Source.remove (pulse_source);
-            pulse_source = 0;
-        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -477,61 +417,7 @@ public class Converter : Object {
     }
 
     internal bool is_cancelled () {
-        state_mutex.lock ();
-        bool c = cancelled;
-        state_mutex.unlock ();
-        return c;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  FILENAME SANITIZATION
-    // ═════════════════════════════════════════════════════════════════════════
-
-    internal string sanitize_filename (string path) {
-        string dir = Path.get_dirname (path);
-        string name = Path.get_basename (path);
-
-        // Map everything directly to _ — no confusing intermediate step
-        string safe = name
-            .replace ("：", "_")
-            .replace ("？", "_")
-            .replace ("*", "_")
-            .replace ("\"", "_")
-            .replace ("<", "_")
-            .replace (">", "_")
-            .replace ("|", "_")
-            .replace ("/", "_")
-            .replace ("\\", "_")
-            .replace (":", "_");
-
-        safe = safe.strip ().replace (". ", ".").replace (" .", ".");
-
-        return Path.build_filename (dir, safe);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  SEEK / TIME VALIDATION
-    // ═════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Build a validated HH:MM:SS string from the seek/time entry widgets.
-     * Returns a safe timestamp even if entries are empty or non-numeric.
-     */
-    internal static string build_timestamp (Entry hh, Entry mm, Entry ss) {
-        string h = validate_time_field (hh.text, 0, 99);
-        string m = validate_time_field (mm.text, 0, 59);
-        string s = validate_time_field (ss.text, 0, 59);
-        return @"$h:$m:$s";
-    }
-
-    private static string validate_time_field (string raw, int min_val, int max_val) {
-        string trimmed = raw.strip ();
-        if (trimmed.length == 0) return "00";
-
-        int val = int.parse (trimmed);
-        if (val < min_val) val = min_val;
-        if (val > max_val) val = max_val;
-        return "%02d".printf (val);
+        return process_runner.is_cancelled ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -541,12 +427,11 @@ public class Converter : Object {
     public void cleanup_after_conversion () {
         state_mutex.lock ();
         is_converting = false;
-        current_pid   = 0;
         current_phase = ConversionPhase.IDLE;
         state_mutex.unlock ();
 
-        stop_pulsing ();
-        hide_progress ();
+        progress_tracker.stop_pulsing ();
+        progress_tracker.hide ();
         cleanup_passlog ();
     }
 }

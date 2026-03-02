@@ -33,39 +33,29 @@ public class Vp9Builder : Object, ICodecBuilder {
             args += deadline;
         }
 
-        // ── Rate Control ───────────────────────────────────────────────────
+        // ── Rate Control (#14: constants) ──────────────────────────────────
         string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
 
-        switch (rc_mode) {
-            case "CRF":
-                // True constant quality: -crf N -b:v 0
-                args += "-crf";
-                args += ((int) tab.crf_spin.get_value ()).to_string ();
-                args += "-b:v";
-                args += "0";
-                break;
-
-            case "Constrained Quality":
-                // Constrained quality: -crf N -b:v Mk
-                args += "-crf";
-                args += ((int) tab.cq_level_spin.get_value ()).to_string ();
-                args += "-b:v";
-                args += ((int) tab.cq_bitrate_spin.get_value ()).to_string () + "k";
-                break;
-
-            case "VBR":
-                args += "-b:v";
-                args += ((int) tab.vbr_bitrate_spin.get_value ()).to_string () + "k";
-                break;
-
-            case "CBR":
-                args += "-b:v";
-                args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
-                args += "-minrate";
-                args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
-                args += "-maxrate";
-                args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
-                break;
+        if (rc_mode == RateControl.CRF) {
+            args += "-crf";
+            args += ((int) tab.crf_spin.get_value ()).to_string ();
+            args += "-b:v";
+            args += "0";
+        } else if (rc_mode == RateControl.CONSTRAINED_QUALITY) {
+            args += "-crf";
+            args += ((int) tab.cq_level_spin.get_value ()).to_string ();
+            args += "-b:v";
+            args += ((int) tab.cq_bitrate_spin.get_value ()).to_string () + "k";
+        } else if (rc_mode == RateControl.VBR) {
+            args += "-b:v";
+            args += ((int) tab.vbr_bitrate_spin.get_value ()).to_string () + "k";
+        } else if (rc_mode == RateControl.CBR) {
+            args += "-b:v";
+            args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
+            args += "-minrate";
+            args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
+            args += "-maxrate";
+            args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
         }
 
         // ── Tune Content ───────────────────────────────────────────────────
@@ -111,7 +101,7 @@ public class Vp9Builder : Object, ICodecBuilder {
             args += "1";
         }
 
-        // ── Rate Tolerance (undershoot / overshoot) ────────────────────────
+        // ── Rate Tolerance ─────────────────────────────────────────────────
         if (tab.undershoot_expander.enable_expansion) {
             args += "-undershoot-pct";
             args += ((int) tab.undershoot_spin.get_value ()).to_string ();
@@ -119,7 +109,7 @@ public class Vp9Builder : Object, ICodecBuilder {
             args += ((int) tab.overshoot_spin.get_value ()).to_string ();
         }
 
-        // ── Keyframe Interval (numeric only; Custom handled by runner) ────
+        // ── Keyframe Interval ──────────────────────────────────────────────
         string keyint = tab.get_dropdown_text (tab.keyint_combo);
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
             args += "-g";

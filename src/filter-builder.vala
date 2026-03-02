@@ -1,17 +1,24 @@
 using Gtk;
 
-public class FilterBuilder {
+// ═══════════════════════════════════════════════════════════════════════════════
+//  FilterBuilder — Pure utility functions for building FFmpeg filter chains
+//
+//  Converted from a class with only static methods to a namespace (#15).
+//  Uses named constants from constants.vala instead of bare strings (#14).
+// ═══════════════════════════════════════════════════════════════════════════════
 
-    public static string build_video_filter_chain (GeneralTab tab, bool skip_crop = false) {
+namespace FilterBuilder {
+
+    public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false) {
         string[] filters = {};
 
         // 1. Rotation / Flip
         string rot = get_dropdown_text (tab.rotate_combo);
-        if (rot == "90° Clockwise") filters += "transpose=1";
-        else if (rot == "90° Counterclockwise") filters += "transpose=2";
-        else if (rot == "180°") filters += "transpose=1,transpose=1";
-        else if (rot == "Horizontal Flip") filters += "hflip";
-        else if (rot == "Vertical Flip") filters += "vflip";
+        if (rot == Rotation.CW_90) filters += "transpose=1";
+        else if (rot == Rotation.CCW_90) filters += "transpose=2";
+        else if (rot == Rotation.ROTATE_180) filters += "transpose=1,transpose=1";
+        else if (rot == Rotation.HORIZONTAL_FLIP) filters += "hflip";
+        else if (rot == Rotation.VERTICAL_FLIP) filters += "vflip";
 
         // 2. Crop (skipped when the Crop & Trim tab provides its own)
         if (!skip_crop && tab.crop_check.active) {
@@ -35,12 +42,11 @@ public class FilterBuilder {
         double sw = tab.scale_width_x.get_value ();
         double sh = tab.scale_height_x.get_value ();
         if (sw != 1.0 || sh != 1.0) {
-            // prevents the ugly long decimal
             string w = (sw == 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
             string h = (sh == 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
             string alg = get_dropdown_text (tab.scale_algorithm).down ();
 
-            if (alg == "point") {
+            if (alg == ScaleAlgorithm.POINT) {
                 filters += @"scale=w=$w:h=$h:flags=point";
             } else {
                 filters += @"zscale=w=$w:h=$h:filter=$alg";
@@ -52,8 +58,8 @@ public class FilterBuilder {
 
         // 6. Frame Rate
         string fr = get_dropdown_text (tab.frame_rate_combo);
-        if (fr != "Original") {
-            string fps = (fr == "Custom") ? tab.custom_frame_rate.text.strip () : fr;
+        if (fr != FrameRateLabel.ORIGINAL) {
+            string fps = (fr == FrameRateLabel.CUSTOM) ? tab.custom_frame_rate.text.strip () : fr;
             if (fps.length > 0) filters += "fps=" + fps;
         }
 
@@ -72,32 +78,30 @@ public class FilterBuilder {
 
         if (tab.ten_bit_check.active) {
             string f = get_dropdown_text (tab.ten_bit_format);
-            pixfmt = (f.contains("4:2:0")) ? "yuv420p10le" :
-                     (f.contains("4:2:2")) ? "yuv422p10le" : "yuv444p10le";
-        } 
+            pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P10LE :
+                     f.contains (Chroma.C422) ? PixelFormat.YUV422P10LE :
+                                                PixelFormat.YUV444P10LE;
+        }
         else if (tab.eight_bit_check.active) {
             string f = get_dropdown_text (tab.eight_bit_format);
-            pixfmt = (f.contains("4:2:0")) ? "yuv420p" :
-                     (f.contains("4:2:2")) ? "yuv422p" : "yuv444p";
+            pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P :
+                     f.contains (Chroma.C422) ? PixelFormat.YUV422P :
+                                                PixelFormat.YUV444P;
         }
 
         if (pixfmt != "") {
             filters += "format=" + pixfmt;
         }
+
         // Color Correction
         string cc = tab.get_color_filter ();
         if (cc.length > 0)
             filters += cc;
-            
+
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 
-    private static string get_dropdown_text (DropDown dropdown) {
-        var item = dropdown.selected_item as StringObject;
-        return item != null ? item.string : "";
-    }
-    
-        public static string build_audio_filter_chain (GeneralTab tab) {
+    public string build_audio_filter_chain (GeneralTab tab) {
         string[] filters = {};
 
         // Normalize Audio
@@ -118,7 +122,7 @@ public class FilterBuilder {
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 
-    private static string build_atempo_chain (double multiplier) {
+    public string build_atempo_chain (double multiplier) {
         if (multiplier == 1.0) return "";
 
         string[] parts = {};
@@ -142,30 +146,27 @@ public class FilterBuilder {
 
         return string.joinv (",", parts);
     }
-    
-        // Detect Crop helper
-    public static string get_crop_detection_chain (GeneralTab tab) {
+
+    // Detect Crop helper
+    public string get_crop_detection_chain (GeneralTab tab) {
         string[] filters = {};
 
         // 1. Rotation / Flip (must come first)
         string rot = get_dropdown_text (tab.rotate_combo);
-        if (rot == "90° Clockwise") filters += "transpose=1";
-        else if (rot == "90° Counterclockwise") filters += "transpose=2";
-        else if (rot == "180°") filters += "transpose=1,transpose=1";
-        else if (rot == "Horizontal Flip") filters += "hflip";
-        else if (rot == "Vertical Flip") filters += "vflip";
+        if (rot == Rotation.CW_90) filters += "transpose=1";
+        else if (rot == Rotation.CCW_90) filters += "transpose=2";
+        else if (rot == Rotation.ROTATE_180) filters += "transpose=1,transpose=1";
+        else if (rot == Rotation.HORIZONTAL_FLIP) filters += "hflip";
+        else if (rot == Rotation.VERTICAL_FLIP) filters += "vflip";
 
-        // 2. Scale check
-        double sw = tab.scale_width_x.get_value ();
-        double sh = tab.scale_height_x.get_value ();
-        if (sw != 1.0 || sh != 1.0) {
-            // Scale is active
-        }
-
-        // 3. Cropdetect
+        // 2. Cropdetect
         filters += "cropdetect=24:2:0";
 
         return string.joinv (",", filters);
     }
-    
+
+    public string get_dropdown_text (DropDown dropdown) {
+        var item = dropdown.selected_item as StringObject;
+        return item != null ? item.string : "";
+    }
 }

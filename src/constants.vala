@@ -1,0 +1,92 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Constants — Centralized string definitions for the entire application
+//
+//  Using named constants instead of bare strings ("CRF", "Opus", "mkv", etc.)
+//  prevents typos from causing silent runtime failures and makes refactoring
+//  safer. All dropdown labels, FFmpeg codec names, and container extensions
+//  are defined here.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────
+
+namespace RateControl {
+    public const string CRF = "CRF";
+    public const string QP  = "QP";
+    public const string VBR = "VBR";
+    public const string ABR = "ABR";
+    public const string CBR = "CBR";
+    public const string CONSTRAINED_QUALITY = "Constrained Quality";
+    public const string LOSSLESS = "Lossless";
+}
+
+// ── Audio Codec Names (UI labels shown in audio DropDown) ────────────────────
+
+namespace AudioCodecName {
+    public const string COPY   = "Copy";
+    public const string OPUS   = "Opus";
+    public const string AAC    = "AAC";
+    public const string MP3    = "MP3";
+    public const string FLAC   = "FLAC";
+    public const string VORBIS = "Vorbis";
+}
+
+// ── Audio Codec FFmpeg identifiers ───────────────────────────────────────────
+
+namespace AudioCodecFFmpeg {
+    public const string OPUS   = "libopus";
+    public const string AAC    = "aac";
+    public const string MP3    = "libmp3lame";
+    public const string FLAC   = "flac";
+    public const string VORBIS = "libvorbis";
+}
+
+// ── Container Extensions ─────────────────────────────────────────────────────
+
+namespace ContainerExt {
+    public const string MKV  = "mkv";
+    public const string MP4  = "mp4";
+    public const string WEBM = "webm";
+}
+
+// ── Rotation / Flip Labels ───────────────────────────────────────────────────
+
+namespace Rotation {
+    public const string NONE               = "No Rotation";
+    public const string CW_90              = "90° Clockwise";
+    public const string CCW_90             = "90° Counterclockwise";
+    public const string ROTATE_180         = "180°";
+    public const string HORIZONTAL_FLIP    = "Horizontal Flip";
+    public const string VERTICAL_FLIP      = "Vertical Flip";
+}
+
+// ── Pixel Format Strings ─────────────────────────────────────────────────────
+
+namespace PixelFormat {
+    public const string YUV420P      = "yuv420p";
+    public const string YUV422P      = "yuv422p";
+    public const string YUV444P      = "yuv444p";
+    public const string YUV420P10LE  = "yuv420p10le";
+    public const string YUV422P10LE  = "yuv422p10le";
+    public const string YUV444P10LE  = "yuv444p10le";
+}
+
+// ── Chroma Subsampling Labels ────────────────────────────────────────────────
+
+namespace Chroma {
+    public const string C420 = "4:2:0";
+    public const string C422 = "4:2:2";
+    public const string C444 = "4:4:4";
+}
+
+// ── Scaling Algorithms ───────────────────────────────────────────────────────
+
+namespace ScaleAlgorithm {
+    public const string POINT = "point";
+}
+
+// ── Frame Rate Labels ────────────────────────────────────────────────────────
+
+namespace FrameRateLabel {
+    public const string ORIGINAL = "Original";
+    public const string CUSTOM   = "Custom";
+}

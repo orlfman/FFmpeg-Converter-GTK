@@ -10,6 +10,28 @@ public class GeneralTab : Box {
     public DropDown   scale_algorithm  { get; private set; }
     public DropDown   scale_range      { get; private set; }
 
+    // ── Rotation & Crop ──────────────────────────────────────────────────────
+    public DropDown rotate_combo       { get; private set; }
+    public Switch   crop_check         { get; private set; }
+    public Button   detect_crop_button { get; private set; }
+    public Entry    crop_value         { get; private set; }
+
+    public Adw.ExpanderRow crop_expander;
+
+    // ── Timing ───────────────────────────────────────────────────────────────
+    public Switch     seek_check       { get; private set; }
+    public SpinButton seek_hh          { get; private set; }
+    public SpinButton seek_mm          { get; private set; }
+    public SpinButton seek_ss          { get; private set; }
+
+    public Switch     time_check       { get; private set; }
+    public SpinButton time_hh          { get; private set; }
+    public SpinButton time_mm          { get; private set; }
+    public SpinButton time_ss          { get; private set; }
+
+    private Adw.ExpanderRow seek_expander;
+    private Adw.ExpanderRow time_expander;
+
     // ── Pixel Format ─────────────────────────────────────────────────────────
     public Switch   eight_bit_check    { get; private set; }
     public DropDown eight_bit_format   { get; private set; }
@@ -19,20 +41,10 @@ public class GeneralTab : Box {
     private Adw.ActionRow eight_bit_fmt_row;
     private Adw.ActionRow ten_bit_fmt_row;
 
-    // ── Crop ─────────────────────────────────────────────────────────────────
-    public Switch  crop_check          { get; private set; }
-    public Button  detect_crop_button  { get; private set; }
-    public Entry   crop_value          { get; private set; }
-
-    public Adw.ExpanderRow crop_expander;
-
-    // ── Rotate ───────────────────────────────────────────────────────────────
-    public DropDown rotate_combo       { get; private set; }
-
-    // ── Video Filters (separate panel) ────────────────────────────────────
+    // ── Video Filters (separate panel) ───────────────────────────────────────
     public VideoFilters video_filters   { get; private set; }
 
-    // ── Color Correction ─────────────────────────────────────────────────────
+    // ── Color Correction & HDR ───────────────────────────────────────────────
     private Button color_button;
     private ColorCorrectionDialog? color_dialog = null;
 
@@ -58,58 +70,56 @@ public class GeneralTab : Box {
     public Switch preserve_metadata    { get; private set; }
     public Switch remove_chapters      { get; private set; }
 
-    // ── Seek & Time ──────────────────────────────────────────────────────────
-    public Switch seek_check           { get; private set; }
-    public Entry  seek_hh              { get; private set; }
-    public Entry  seek_mm              { get; private set; }
-    public Entry  seek_ss              { get; private set; }
-
-    public Switch time_check           { get; private set; }
-    public Entry  time_hh              { get; private set; }
-    public Entry  time_mm              { get; private set; }
-    public Entry  time_ss              { get; private set; }
-
-    private Adw.ExpanderRow seek_expander;
-    private Adw.ExpanderRow time_expander;
-
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
 
     public GeneralTab () {
         Object (orientation: Orientation.VERTICAL, spacing: 24);
-        set_margin_top (24);
+        set_margin_top (32);
         set_margin_bottom (24);
         set_margin_start (24);
         set_margin_end (24);
 
-        build_scaling_group ();
-        build_pixel_format_group ();
-        build_rotation_crop_group ();
+        // 1. Scaling, rotation, crop — all geometry transforms together
+        build_scaling_transform_group ();
 
-        // Video Filters (separate class for all processing filters + HDR)
+        // 2. Seek & duration — right below scaling for quick trim control
+        build_timing_group ();
+
+        // 3. Pixel format
+        build_pixel_format_group ();
+
+        // 4. Video processing filters (restoration, noise, sharpen, blur, grain)
         video_filters = new VideoFilters ();
         video_filters.set_ten_bit_reference (ten_bit_check);
         append (video_filters.get_widget ());
 
-        build_color_correction_group ();
+        // 5. Color correction + HDR tone mapping
+        build_color_hdr_group ();
+
+        // 6. Frame rate & speed adjustments
         build_frame_rate_speed_group ();
+
+        // 7. Audio normalization
         build_audio_group ();
-        build_timing_group ();
+
+        // 8. Metadata controls
+        build_metadata_group ();
 
         connect_signals ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  SCALING
+    //  1. SCALING & TRANSFORM
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void build_scaling_group () {
+    private void build_scaling_transform_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Scaling");
-        group.set_description ("Resize the video output");
+        group.set_title ("Scaling &amp; Transform");
+        group.set_description ("Resize, rotate, and crop the video");
 
-        // Width multiplier
+        // ── Width Multiplier ─────────────────────────────────────────────────
         var w_row = new Adw.ActionRow ();
         w_row.set_title ("Width Multiplier");
         w_row.set_subtitle ("1.00 = original width");
@@ -120,7 +130,7 @@ public class GeneralTab : Box {
         w_row.add_suffix (scale_width_x);
         group.add (w_row);
 
-        // Height multiplier
+        // ── Height Multiplier ────────────────────────────────────────────────
         var h_row = new Adw.ActionRow ();
         h_row.set_title ("Height Multiplier");
         h_row.set_subtitle ("1.00 = original height");
@@ -131,7 +141,7 @@ public class GeneralTab : Box {
         h_row.add_suffix (scale_height_x);
         group.add (h_row);
 
-        // Algorithm
+        // ── Algorithm ────────────────────────────────────────────────────────
         var alg_row = new Adw.ActionRow ();
         alg_row.set_title ("Algorithm");
         alg_row.set_subtitle ("Scaling filter — Lanczos is best for most content");
@@ -143,7 +153,7 @@ public class GeneralTab : Box {
         alg_row.add_suffix (scale_algorithm);
         group.add (alg_row);
 
-        // Range
+        // ── Color Range ──────────────────────────────────────────────────────
         var range_row = new Adw.ActionRow ();
         range_row.set_title ("Color Range");
         range_row.set_subtitle ("Input preserves the original range");
@@ -155,89 +165,20 @@ public class GeneralTab : Box {
         range_row.add_suffix (scale_range);
         group.add (range_row);
 
-        append (group);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PIXEL FORMAT
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void build_pixel_format_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Pixel Format");
-        group.set_description ("Color depth and chroma subsampling");
-
-        // 8-Bit toggle
-        var eight_row = new Adw.ActionRow ();
-        eight_row.set_title ("8-Bit Color");
-        eight_row.set_subtitle ("Standard dynamic range — compatible with all players");
-        eight_bit_check = new Switch ();
-        eight_bit_check.set_valign (Align.CENTER);
-        eight_bit_check.set_active (false);
-        eight_row.add_suffix (eight_bit_check);
-        eight_row.set_activatable_widget (eight_bit_check);
-        group.add (eight_row);
-
-        // 8-Bit format (hidden until enabled)
-        eight_bit_fmt_row = new Adw.ActionRow ();
-        eight_bit_fmt_row.set_title ("8-Bit Subsampling");
-        eight_bit_format = new DropDown (new StringList (
-            { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" }
-        ), null);
-        eight_bit_format.set_valign (Align.CENTER);
-        eight_bit_format.set_selected (0);
-        eight_bit_fmt_row.add_suffix (eight_bit_format);
-        eight_bit_fmt_row.set_visible (false);
-        group.add (eight_bit_fmt_row);
-
-        // 10-Bit toggle
-        var ten_row = new Adw.ActionRow ();
-        ten_row.set_title ("10-Bit Color");
-        ten_row.set_subtitle ("Higher color depth — better gradients, HDR support");
-        ten_bit_check = new Switch ();
-        ten_bit_check.set_valign (Align.CENTER);
-        ten_bit_check.set_active (false);
-        ten_row.add_suffix (ten_bit_check);
-        ten_row.set_activatable_widget (ten_bit_check);
-        group.add (ten_row);
-
-        // 10-Bit format (hidden until enabled)
-        ten_bit_fmt_row = new Adw.ActionRow ();
-        ten_bit_fmt_row.set_title ("10-Bit Subsampling");
-        ten_bit_format = new DropDown (new StringList (
-            { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" }
-        ), null);
-        ten_bit_format.set_valign (Align.CENTER);
-        ten_bit_format.set_selected (0);
-        ten_bit_fmt_row.add_suffix (ten_bit_format);
-        ten_bit_fmt_row.set_visible (false);
-        group.add (ten_bit_fmt_row);
-
-        append (group);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  ROTATION & CROP
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void build_rotation_crop_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Rotation &amp; Crop");
-
-        // Rotate / Flip
+        // ── Rotate / Flip ────────────────────────────────────────────────────
         var rotate_row = new Adw.ActionRow ();
         rotate_row.set_title ("Rotate / Flip");
         rotate_row.set_subtitle ("Transform the video orientation");
         rotate_combo = new DropDown (new StringList (
-            { "No Rotation", "90° Clockwise", "90° Counterclockwise", "180°",
-              "Horizontal Flip", "Vertical Flip" }
+            { Rotation.NONE, Rotation.CW_90, Rotation.CCW_90, Rotation.ROTATE_180,
+              Rotation.HORIZONTAL_FLIP, Rotation.VERTICAL_FLIP }
         ), null);
         rotate_combo.set_valign (Align.CENTER);
         rotate_combo.set_selected (0);
         rotate_row.add_suffix (rotate_combo);
         group.add (rotate_row);
 
-        // Crop (ExpanderRow)
+        // ── Crop ─────────────────────────────────────────────────────────────
         crop_check = new Switch ();
         crop_check.set_active (false);
 
@@ -247,11 +188,9 @@ public class GeneralTab : Box {
         crop_expander.set_show_enable_switch (true);
         crop_expander.set_enable_expansion (false);
 
-        // Sync hidden Switch ↔ ExpanderRow
         crop_check.bind_property ("active", crop_expander, "enable-expansion",
             BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
 
-        // Detect button row
         var detect_row = new Adw.ActionRow ();
         detect_row.set_title ("Auto-Detect");
         detect_row.set_subtitle ("Analyze 30 seconds of video for black bars");
@@ -262,7 +201,6 @@ public class GeneralTab : Box {
         detect_row.set_activatable_widget (detect_crop_button);
         crop_expander.add_row (detect_row);
 
-        // Crop value row
         var value_row = new Adw.ActionRow ();
         value_row.set_title ("Crop Value");
         value_row.set_subtitle ("Format: width:height:x:y");
@@ -279,13 +217,154 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  COLOR CORRECTION
+    //  2. TIMING
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void build_color_correction_group () {
+    private void build_timing_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Color Correction");
+        group.set_title ("Timing");
+        group.set_description ("Control which portion of the video to encode");
 
+        // ── Seek ─────────────────────────────────────────────────────────────
+        seek_check = new Switch ();
+        seek_check.set_active (false);
+
+        seek_expander = new Adw.ExpanderRow ();
+        seek_expander.set_title ("Seek");
+        seek_expander.set_subtitle ("Start encoding from a specific timestamp");
+        seek_expander.set_show_enable_switch (true);
+        seek_expander.set_enable_expansion (false);
+
+        seek_check.bind_property ("active", seek_expander, "enable-expansion",
+            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
+
+        var seek_entries_row = new Adw.ActionRow ();
+        seek_entries_row.set_title ("Start Time");
+
+        seek_hh = new SpinButton.with_range (0, 99, 1);
+        seek_mm = new SpinButton.with_range (0, 59, 1);
+        seek_ss = new SpinButton.with_range (0, 59, 1);
+
+        var seek_box = build_time_box (seek_hh, seek_mm, seek_ss);
+        seek_entries_row.add_suffix (seek_box);
+        seek_expander.add_row (seek_entries_row);
+        group.add (seek_expander);
+
+        // ── Duration ─────────────────────────────────────────────────────────
+        time_check = new Switch ();
+        time_check.set_active (false);
+
+        time_expander = new Adw.ExpanderRow ();
+        time_expander.set_title ("Duration");
+        time_expander.set_subtitle ("Limit the output to a specific length");
+        time_expander.set_show_enable_switch (true);
+        time_expander.set_enable_expansion (false);
+
+        time_check.bind_property ("active", time_expander, "enable-expansion",
+            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
+
+        var time_entries_row = new Adw.ActionRow ();
+        time_entries_row.set_title ("Length");
+
+        time_hh = new SpinButton.with_range (0, 99, 1);
+        time_mm = new SpinButton.with_range (0, 59, 1);
+        time_ss = new SpinButton.with_range (0, 59, 1);
+
+        var time_box = build_time_box (time_hh, time_mm, time_ss);
+        time_entries_row.add_suffix (time_box);
+        time_expander.add_row (time_entries_row);
+        group.add (time_expander);
+
+        append (group);
+    }
+
+    /**
+     * Build an HH : MM : SS box from three SpinButtons.
+     * SpinButtons enforce numeric-only input and clamped ranges,
+     * eliminating the need for post-hoc validation (#10).
+     */
+    private Box build_time_box (SpinButton hh, SpinButton mm, SpinButton ss) {
+        hh.set_width_chars (3);
+        mm.set_width_chars (3);
+        ss.set_width_chars (3);
+        hh.set_valign (Align.CENTER);
+        mm.set_valign (Align.CENTER);
+        ss.set_valign (Align.CENTER);
+
+        var box = new Box (Orientation.HORIZONTAL, 4);
+        box.set_valign (Align.CENTER);
+        box.append (hh);
+        box.append (new Label (":"));
+        box.append (mm);
+        box.append (new Label (":"));
+        box.append (ss);
+        return box;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  3. PIXEL FORMAT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_pixel_format_group () {
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Pixel Format");
+        group.set_description ("Color depth and chroma subsampling");
+
+        var eight_row = new Adw.ActionRow ();
+        eight_row.set_title ("8-Bit Color");
+        eight_row.set_subtitle ("Standard dynamic range — compatible with all players");
+        eight_bit_check = new Switch ();
+        eight_bit_check.set_valign (Align.CENTER);
+        eight_bit_check.set_active (false);
+        eight_row.add_suffix (eight_bit_check);
+        eight_row.set_activatable_widget (eight_bit_check);
+        group.add (eight_row);
+
+        eight_bit_fmt_row = new Adw.ActionRow ();
+        eight_bit_fmt_row.set_title ("8-Bit Subsampling");
+        eight_bit_format = new DropDown (new StringList (
+            { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" }
+        ), null);
+        eight_bit_format.set_valign (Align.CENTER);
+        eight_bit_format.set_selected (0);
+        eight_bit_fmt_row.add_suffix (eight_bit_format);
+        eight_bit_fmt_row.set_visible (false);
+        group.add (eight_bit_fmt_row);
+
+        var ten_row = new Adw.ActionRow ();
+        ten_row.set_title ("10-Bit Color");
+        ten_row.set_subtitle ("Higher color depth — better gradients, HDR support");
+        ten_bit_check = new Switch ();
+        ten_bit_check.set_valign (Align.CENTER);
+        ten_bit_check.set_active (false);
+        ten_row.add_suffix (ten_bit_check);
+        ten_row.set_activatable_widget (ten_bit_check);
+        group.add (ten_row);
+
+        ten_bit_fmt_row = new Adw.ActionRow ();
+        ten_bit_fmt_row.set_title ("10-Bit Subsampling");
+        ten_bit_format = new DropDown (new StringList (
+            { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" }
+        ), null);
+        ten_bit_format.set_valign (Align.CENTER);
+        ten_bit_format.set_selected (0);
+        ten_bit_fmt_row.add_suffix (ten_bit_format);
+        ten_bit_fmt_row.set_visible (false);
+        group.add (ten_bit_fmt_row);
+
+        append (group);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  5. COLOR & HDR
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_color_hdr_group () {
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Color &amp; HDR");
+        group.set_description ("Color grading and HDR tone mapping");
+
+        // ── Manual Color Correction ──────────────────────────────────────────
         var color_row = new Adw.ActionRow ();
         color_row.set_title ("Adjust Colors");
         color_row.set_subtitle ("Brightness, contrast, saturation, gamma, hue, and more");
@@ -296,30 +375,33 @@ public class GeneralTab : Box {
         color_row.set_activatable_widget (color_button);
         group.add (color_row);
 
+        // ── HDR to SDR (widget owned by VideoFilters, placed here) ───────────
+        group.add (video_filters.get_hdr_expander ());
+
         append (group);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  FRAME RATE & SPEED
+    //  6. FRAME RATE & SPEED
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_frame_rate_speed_group () {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Frame Rate &amp; Speed");
+        group.set_description ("Playback rate adjustments for video and audio");
 
-        // Frame Rate
+        // ── Frame Rate ───────────────────────────────────────────────────────
         var fr_row = new Adw.ActionRow ();
         fr_row.set_title ("Frame Rate");
         fr_row.set_subtitle ("Original preserves the source frame rate");
         frame_rate_combo = new DropDown (new StringList (
-            { "Original", "24", "30", "60", "Custom" }
+            { FrameRateLabel.ORIGINAL, "24", "30", "60", FrameRateLabel.CUSTOM }
         ), null);
         frame_rate_combo.set_valign (Align.CENTER);
         frame_rate_combo.set_selected (0);
         fr_row.add_suffix (frame_rate_combo);
         group.add (fr_row);
 
-        // Custom Frame Rate (hidden until "Custom" selected)
         custom_fr_row = new Adw.ActionRow ();
         custom_fr_row.set_title ("Custom Frame Rate");
         custom_fr_row.set_subtitle ("Enter a specific frame rate value");
@@ -331,7 +413,7 @@ public class GeneralTab : Box {
         custom_fr_row.set_visible (false);
         group.add (custom_fr_row);
 
-        // Video Speed (ExpanderRow)
+        // ── Video Speed ──────────────────────────────────────────────────────
         video_speed_check = new Switch ();
         video_speed_check.set_active (false);
 
@@ -354,7 +436,7 @@ public class GeneralTab : Box {
         video_speed_expander.add_row (vspeed_row);
         group.add (video_speed_expander);
 
-        // Audio Speed (ExpanderRow)
+        // ── Audio Speed ──────────────────────────────────────────────────────
         audio_speed_check = new Switch ();
         audio_speed_check.set_active (false);
 
@@ -381,7 +463,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  AUDIO
+    //  7. AUDIO
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_audio_group () {
@@ -402,14 +484,14 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  TIMING & METADATA
+    //  8. METADATA
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void build_timing_group () {
+    private void build_metadata_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Timing &amp; Metadata");
+        group.set_title ("Metadata");
+        group.set_description ("Control file metadata and chapter markers");
 
-        // Preserve Metadata
         var meta_row = new Adw.ActionRow ();
         meta_row.set_title ("Preserve Metadata");
         meta_row.set_subtitle ("Copy metadata tags from the source file");
@@ -420,7 +502,6 @@ public class GeneralTab : Box {
         meta_row.set_activatable_widget (preserve_metadata);
         group.add (meta_row);
 
-        // Remove Chapters
         var chap_row = new Adw.ActionRow ();
         chap_row.set_title ("Remove Chapters");
         chap_row.set_subtitle ("Strip chapter markers from the output");
@@ -431,68 +512,6 @@ public class GeneralTab : Box {
         chap_row.set_activatable_widget (remove_chapters);
         group.add (chap_row);
 
-        // Seek (ExpanderRow)
-        seek_check = new Switch ();
-        seek_check.set_active (false);
-
-        seek_expander = new Adw.ExpanderRow ();
-        seek_expander.set_title ("Seek");
-        seek_expander.set_subtitle ("Start encoding from a specific timestamp");
-        seek_expander.set_show_enable_switch (true);
-        seek_expander.set_enable_expansion (false);
-
-        seek_check.bind_property ("active", seek_expander, "enable-expansion",
-            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
-
-        var seek_entries_row = new Adw.ActionRow ();
-        seek_entries_row.set_title ("Start Time");
-
-        seek_hh = new Entry (); seek_hh.set_text ("0"); seek_hh.set_width_chars (3);
-        seek_mm = new Entry (); seek_mm.set_text ("0"); seek_mm.set_width_chars (3);
-        seek_ss = new Entry (); seek_ss.set_text ("0"); seek_ss.set_width_chars (3);
-
-        var seek_box = new Box (Orientation.HORIZONTAL, 4);
-        seek_box.set_valign (Align.CENTER);
-        seek_box.append (seek_hh);
-        seek_box.append (new Label (":"));
-        seek_box.append (seek_mm);
-        seek_box.append (new Label (":"));
-        seek_box.append (seek_ss);
-        seek_entries_row.add_suffix (seek_box);
-        seek_expander.add_row (seek_entries_row);
-        group.add (seek_expander);
-
-        // Time / Duration (ExpanderRow)
-        time_check = new Switch ();
-        time_check.set_active (false);
-
-        time_expander = new Adw.ExpanderRow ();
-        time_expander.set_title ("Duration");
-        time_expander.set_subtitle ("Limit the output to a specific length");
-        time_expander.set_show_enable_switch (true);
-        time_expander.set_enable_expansion (false);
-
-        time_check.bind_property ("active", time_expander, "enable-expansion",
-            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
-
-        var time_entries_row = new Adw.ActionRow ();
-        time_entries_row.set_title ("Length");
-
-        time_hh = new Entry (); time_hh.set_text ("0"); time_hh.set_width_chars (3);
-        time_mm = new Entry (); time_mm.set_text ("0"); time_mm.set_width_chars (3);
-        time_ss = new Entry (); time_ss.set_text ("0"); time_ss.set_width_chars (3);
-
-        var time_box = new Box (Orientation.HORIZONTAL, 4);
-        time_box.set_valign (Align.CENTER);
-        time_box.append (time_hh);
-        time_box.append (new Label (":"));
-        time_box.append (time_mm);
-        time_box.append (new Label (":"));
-        time_box.append (time_ss);
-        time_entries_row.add_suffix (time_box);
-        time_expander.add_row (time_entries_row);
-        group.add (time_expander);
-
         append (group);
     }
 
@@ -501,7 +520,6 @@ public class GeneralTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
-        // 8-Bit / 10-Bit mutual exclusion
         eight_bit_check.notify["active"].connect (() => {
             eight_bit_fmt_row.set_visible (eight_bit_check.active);
             if (eight_bit_check.active) ten_bit_check.active = false;
@@ -511,12 +529,10 @@ public class GeneralTab : Box {
             if (ten_bit_check.active) eight_bit_check.active = false;
         });
 
-        // Frame Rate: show/hide custom entry
         frame_rate_combo.notify["selected"].connect (() => {
-            custom_fr_row.set_visible (get_frame_rate_text () == "Custom");
+            custom_fr_row.set_visible (get_frame_rate_text () == FrameRateLabel.CUSTOM);
         });
 
-        // Color Correction dialog
         color_button.clicked.connect (() => {
             if (color_dialog == null)
                 color_dialog = new ColorCorrectionDialog (get_root () as Gtk.Window);
@@ -538,7 +554,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CROP DETECTION
+    //  CROP DETECTION (#13: Streaming read replaces communicate_utf8)
     // ═════════════════════════════════════════════════════════════════════════
 
     public void start_crop_detection (string input_file, ConsoleTab console_tab) {
@@ -572,25 +588,16 @@ public class GeneralTab : Box {
         };
 
         string last_crop = "";
-        GLib.Error? crop_error = null;
 
         try {
-            var launcher = new SubprocessLauncher (SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_MERGE);
+            var launcher = new SubprocessLauncher (
+                SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_MERGE
+            );
             var process = launcher.spawnv (cmd);
+            var reader = new DataInputStream (process.get_stdout_pipe ());
 
-            string stdout_text, stderr_text;
-            try {
-                process.communicate_utf8 (null, null, out stdout_text, out stderr_text);
-            } catch (Error e) {
-                stdout_text = "";
-                stderr_text = "";
-            }
-
-            string output = stdout_text + "\n" + stderr_text;
-            string[] lines = output.split ("\n");
-
-            for (int i = 0; i < lines.length; i++) {
-                string line = lines[i];
+            string line;
+            while ((line = reader.read_line (null)) != null) {
                 if (line.contains ("crop=")) {
                     string crop_val = extract_crop_value (line);
                     if (crop_val.length > 5 && crop_val.contains (":")) {
@@ -599,8 +606,9 @@ public class GeneralTab : Box {
                             int.parse (parts[0]) > 0 &&
                             int.parse (parts[1]) > 0) {
                             last_crop = crop_val;
+                            string log_msg = line.strip ();
                             Idle.add (() => {
-                                console_tab.add_line ("[CropDetect] " + line.strip ());
+                                console_tab.add_line ("[CropDetect] " + log_msg);
                                 return Source.REMOVE;
                             });
                         }
@@ -610,10 +618,11 @@ public class GeneralTab : Box {
 
             process.wait ();
 
+            string result_crop = last_crop;
             Idle.add (() => {
-                if (last_crop.length > 8) {
-                    crop_value.set_text (last_crop);
-                    console_tab.add_line (@"✅ Detected stable crop: $last_crop");
+                if (result_crop.length > 8) {
+                    crop_value.set_text (result_crop);
+                    console_tab.add_line (@"✅ Detected stable crop: $result_crop");
                 } else {
                     crop_value.set_text ("No crop detected");
                     console_tab.add_line ("⚠️ No valid crop= format found");
@@ -623,10 +632,10 @@ public class GeneralTab : Box {
             });
 
         } catch (GLib.Error e) {
-            crop_error = e;
+            string err_msg = e.message;
             Idle.add (() => {
                 crop_value.set_text ("❌ Detection error");
-                console_tab.add_line ("Crop detection failed: " + crop_error.message);
+                console_tab.add_line ("Crop detection failed: " + err_msg);
                 detect_crop_button.sensitive = true;
                 return Source.REMOVE;
             });

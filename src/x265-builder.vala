@@ -24,26 +24,21 @@ public class X265Builder : Object, ICodecBuilder {
         args += "-preset";
         args += tab.get_active_preset ();
 
-        // ── Rate Control ───────────────────────────────────────────────────
+        // ── Rate Control (#14: constants) ──────────────────────────────────
         string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
 
-        switch (rc_mode) {
-            case "CRF":
-                args += "-crf";
-                args += ((int) tab.crf_spin.get_value ()).to_string ();
-                break;
-            case "QP":
-                args += "-qp";
-                args += ((int) tab.qp_spin.get_value ()).to_string ();
-                break;
-            case "ABR":
-                args += "-b:v";
-                args += ((int) tab.abr_bitrate_spin.get_value ()).to_string () + "k";
-                break;
-            case "CBR":
-                args += "-b:v";
-                args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
-                break;
+        if (rc_mode == RateControl.CRF) {
+            args += "-crf";
+            args += ((int) tab.crf_spin.get_value ()).to_string ();
+        } else if (rc_mode == RateControl.QP) {
+            args += "-qp";
+            args += ((int) tab.qp_spin.get_value ()).to_string ();
+        } else if (rc_mode == RateControl.ABR) {
+            args += "-b:v";
+            args += ((int) tab.abr_bitrate_spin.get_value ()).to_string () + "k";
+        } else if (rc_mode == RateControl.CBR) {
+            args += "-b:v";
+            args += ((int) tab.cbr_bitrate_spin.get_value ()).to_string () + "k";
         }
 
         // ── Tune ───────────────────────────────────────────────────────────
@@ -60,7 +55,7 @@ public class X265Builder : Object, ICodecBuilder {
             args += level;
         }
 
-        // ── Keyframe Interval (numeric only; Custom handled by runner) ────
+        // ── Keyframe Interval ──────────────────────────────────────────────
         string keyint = tab.get_dropdown_text (tab.keyint_combo);
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
             args += "-g";
@@ -70,20 +65,16 @@ public class X265Builder : Object, ICodecBuilder {
         // ── x265-params ────────────────────────────────────────────────────
         string[] params = {};
 
-        // SAO (default is enabled, so only pass when disabled)
         if (!tab.sao_switch.active)
             params += "sao=0";
 
-        // Reference frames
         string ref_val = tab.get_dropdown_text (tab.ref_frames_combo);
         if (ref_val.length > 0)
             params += "ref=" + ref_val;
 
-        // Weighted prediction (default enabled, so only pass when disabled)
         if (!tab.weightp_switch.active)
             params += "weightp=0";
 
-        // Deblock filter
         if (tab.deblock_expander.enable_expansion) {
             int alpha = (int) tab.deblock_alpha_spin.get_value ();
             int beta  = (int) tab.deblock_beta_spin.get_value ();
@@ -92,11 +83,9 @@ public class X265Builder : Object, ICodecBuilder {
             params += "no-deblock=1";
         }
 
-        // PMode
         if (tab.pmode_switch.active)
             params += "pmode=1";
 
-        // Psy-RD (default enabled at 2.0, emit no-psy-rd when disabled)
         if (tab.psy_rd_expander.enable_expansion) {
             double psy_rd = tab.psy_rd_spin.get_value ();
             params += "psy-rd=%.1f".printf (psy_rd);
@@ -104,19 +93,14 @@ public class X265Builder : Object, ICodecBuilder {
             params += "no-psy-rd";
         }
 
-        // Cutree (default enabled, only emit when disabled)
         if (!tab.cutree_switch.active)
             params += "cutree=0";
 
-        // Lookahead
         if (tab.lookahead_expander.enable_expansion) {
             int la = (int) tab.lookahead_spin.get_value ();
             params += "rc-lookahead=" + la.to_string ();
         }
 
-        // AQ Mode (Automatic=don't set, Disabled=0, Variance=1,
-        //          Auto-Variance=2, Auto-Variance Biased=3,
-        //          Auto-Variance + Edge=4)
         string aq_mode = tab.get_dropdown_text (tab.aq_mode_combo);
         if (aq_mode != "Automatic") {
             int aq_val = 0;
@@ -135,32 +119,29 @@ public class X265Builder : Object, ICodecBuilder {
             }
         }
 
-        // VBV for ABR mode (when enabled)
-        if (rc_mode == "ABR" && tab.abr_vbv_switch.active) {
+        // VBV for ABR mode
+        if (rc_mode == RateControl.ABR && tab.abr_vbv_switch.active) {
             int br = (int) tab.abr_bitrate_spin.get_value ();
             params += "vbv-maxrate=" + br.to_string ();
             params += "vbv-bufsize=" + br.to_string ();
         }
 
         // VBV + NAL HRD for CBR mode
-        if (rc_mode == "CBR") {
+        if (rc_mode == RateControl.CBR) {
             int br = (int) tab.cbr_bitrate_spin.get_value ();
             params += "vbv-maxrate=" + br.to_string ();
             params += "vbv-bufsize=" + br.to_string ();
             params += "nal-hrd=cbr";
         }
 
-        // Threads (pools)
         string threads = tab.get_dropdown_text (tab.threads_combo);
         if (threads != "Auto" && threads.length > 0)
             params += "pools=" + threads;
 
-        // Frame threads
         string ft = tab.get_dropdown_text (tab.frame_threads_combo);
         if (ft != "Auto" && ft.length > 0)
             params += "frame-threads=" + ft;
 
-        // ── Emit the params string ─────────────────────────────────────────
         if (params.length > 0) {
             args += "-x265-params";
             args += string.joinv (":", params);

@@ -4,12 +4,8 @@ using Adw;
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AudioSettings — Reusable audio encoding widget
 //
-//  Usage from any codec tab:
-//      audio_settings = new AudioSettings ();
-//      append (audio_settings.get_widget ());
-//
-//  From ConversionRunner:
-//      string[] audio_args = tab.audio_settings.get_audio_args ();
+//  Updated (#14): All bare codec/container strings replaced with constants
+//  from constants.vala (AudioCodecName, AudioCodecFFmpeg, ContainerExt).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class AudioSettings : Object {
@@ -39,7 +35,7 @@ public class AudioSettings : Object {
     private Adw.ActionRow vorbis_quality_row;
 
     // State for codec list constraints
-    private string current_container = "mkv";
+    private string current_container = ContainerExt.MKV;
     private bool   speed_active = false;
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -65,7 +61,6 @@ public class AudioSettings : Object {
         group.set_title ("Audio");
         group.set_description ("Audio stream encoding settings");
 
-        // Main expander — enable switch controls Include / Exclude audio
         audio_expander = new Adw.ExpanderRow ();
         audio_expander.set_title ("Include Audio");
         audio_expander.set_subtitle ("Disable to strip audio entirely from the output");
@@ -77,7 +72,8 @@ public class AudioSettings : Object {
         codec_row.set_title ("Codec");
         codec_row.set_subtitle ("Copy passes audio through without re-encoding");
         codec_combo = new DropDown (new StringList (
-            { "Copy", "Opus", "AAC", "MP3", "FLAC", "Vorbis" }
+            { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.AAC,
+              AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS }
         ), null);
         codec_combo.set_valign (Align.CENTER);
         codec_combo.set_selected (0);
@@ -124,7 +120,7 @@ public class AudioSettings : Object {
         opus_vbr_row.set_visible (false);
         audio_expander.add_row (opus_vbr_row);
 
-        // ── Opus Surround Compatibility ───────────────────────────────────────
+        // ── Opus Surround ────────────────────────────────────────────────────
         opus_surround_row = new Adw.ActionRow ();
         opus_surround_row.set_title ("Surround Compatibility");
         opus_surround_row.set_subtitle ("Remap non-standard layouts like 5.1(side) so Opus can encode them");
@@ -201,34 +197,28 @@ public class AudioSettings : Object {
 
     private void update_codec_visibility () {
         string codec = get_codec_text ();
-        bool is_copy = (codec == "Copy");
+        bool is_copy = (codec == AudioCodecName.COPY);
 
-        // Common rows — hidden for Copy
         sample_rate_row.set_visible (!is_copy);
-        bitrate_row.set_visible (!is_copy && codec != "FLAC");
+        bitrate_row.set_visible (!is_copy && codec != AudioCodecName.FLAC);
 
-        // Codec-specific rows
-        opus_vbr_row.set_visible (codec == "Opus");
-        opus_surround_row.set_visible (codec == "Opus");
-        aac_quality_row.set_visible (codec == "AAC");
-        mp3_vbr_row.set_visible (codec == "MP3");
-        flac_compression_row.set_visible (codec == "FLAC");
-        vorbis_quality_row.set_visible (codec == "Vorbis");
+        opus_vbr_row.set_visible (codec == AudioCodecName.OPUS);
+        opus_surround_row.set_visible (codec == AudioCodecName.OPUS);
+        aac_quality_row.set_visible (codec == AudioCodecName.AAC);
+        mp3_vbr_row.set_visible (codec == AudioCodecName.MP3);
+        flac_compression_row.set_visible (codec == AudioCodecName.FLAC);
+        vorbis_quality_row.set_visible (codec == AudioCodecName.VORBIS);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONTAINER FILTERING
     // ═════════════════════════════════════════════════════════════════════════
 
-    // Call this when the parent tab's container selection changes.
-    // WebM only supports Copy / Opus / Vorbis.
     public void update_for_container (string container) {
         current_container = container;
         rebuild_codec_list ();
     }
 
-    // Call this when the general tab's audio speed toggle changes.
-    // When speed is active, "Copy" is not available (filters require re-encoding).
     public void update_for_audio_speed (bool active) {
         speed_active = active;
         rebuild_codec_list ();
@@ -237,21 +227,20 @@ public class AudioSettings : Object {
     private void rebuild_codec_list () {
         string current = get_codec_text ();
 
-        // Build the full list for this container
         string[] codecs;
-        if (current_container == "webm") {
-            codecs = { "Copy", "Opus", "Vorbis" };
-        } else if (current_container == "mp4") {
-            codecs = { "Copy", "AAC", "MP3", "Opus" };
+        if (current_container == ContainerExt.WEBM) {
+            codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.VORBIS };
+        } else if (current_container == ContainerExt.MP4) {
+            codecs = { AudioCodecName.COPY, AudioCodecName.AAC, AudioCodecName.MP3, AudioCodecName.OPUS };
         } else {
-            codecs = { "Copy", "Opus", "AAC", "MP3", "FLAC", "Vorbis" };
+            codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.AAC,
+                       AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS };
         }
 
-        // Strip "Copy" when audio speed is active
         if (speed_active) {
             string[] filtered = {};
             foreach (string c in codecs) {
-                if (c != "Copy") filtered += c;
+                if (c != AudioCodecName.COPY) filtered += c;
             }
             codecs = filtered;
         }
@@ -259,7 +248,6 @@ public class AudioSettings : Object {
         var new_list = new StringList (codecs);
         codec_combo.set_model (new_list);
 
-        // Try to restore the previous selection
         bool found = false;
         for (uint i = 0; i < new_list.get_n_items (); i++) {
             if (new_list.get_string (i) == current) {
@@ -279,28 +267,25 @@ public class AudioSettings : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public string[] get_audio_args () {
-        // Audio disabled → strip audio
         if (!audio_expander.enable_expansion)
             return { "-an" };
 
         string codec = get_codec_text ();
 
-        // Copy → pass through unchanged
-        if (codec == "Copy")
+        if (codec == AudioCodecName.COPY)
             return { "-c:a", "copy" };
 
-        // ── Build full encoding args ─────────────────────────────────────────
         string[] args = {};
 
-        // Codec name
+        // Map UI codec name → FFmpeg codec identifier
         string ffmpeg_codec = "";
         switch (codec) {
-            case "Opus":   ffmpeg_codec = "libopus";    break;
-            case "AAC":    ffmpeg_codec = "aac";         break;
-            case "MP3":    ffmpeg_codec = "libmp3lame";  break;
-            case "FLAC":   ffmpeg_codec = "flac";        break;
-            case "Vorbis": ffmpeg_codec = "libvorbis";   break;
-            default:       return { "-c:a", "copy" };
+            case AudioCodecName.OPUS:   ffmpeg_codec = AudioCodecFFmpeg.OPUS;   break;
+            case AudioCodecName.AAC:    ffmpeg_codec = AudioCodecFFmpeg.AAC;    break;
+            case AudioCodecName.MP3:    ffmpeg_codec = AudioCodecFFmpeg.MP3;    break;
+            case AudioCodecName.FLAC:   ffmpeg_codec = AudioCodecFFmpeg.FLAC;   break;
+            case AudioCodecName.VORBIS: ffmpeg_codec = AudioCodecFFmpeg.VORBIS; break;
+            default:                    return { "-c:a", "copy" };
         }
         args += "-c:a";
         args += ffmpeg_codec;
@@ -313,7 +298,7 @@ public class AudioSettings : Object {
         args += sr.to_string ();
 
         // Bitrate (not applicable for lossless FLAC)
-        if (codec != "FLAC") {
+        if (codec != AudioCodecName.FLAC) {
             string br_text = get_dropdown_text (bitrate_combo);
             string br = br_text.replace (" kbps", "") + "k";
             args += "-b:a";
@@ -321,10 +306,7 @@ public class AudioSettings : Object {
         }
 
         // ── Codec-specific options ───────────────────────────────────────────
-        if (codec == "Opus") {
-            // libopus rejects non-standard channel layouts like 5.1(side).
-            // When enabled, this filter remaps to the closest standard layout.
-            // It's a no-op when the source already uses a standard layout.
+        if (codec == AudioCodecName.OPUS) {
             if (opus_surround_fix.active) {
                 args += "-af";
                 args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
@@ -340,23 +322,23 @@ public class AudioSettings : Object {
                 args += "-vbr";
                 args += "off";
             }
-        } else if (codec == "AAC") {
+        } else if (codec == AudioCodecName.AAC) {
             string q = get_dropdown_text (aac_quality_combo);
             if (q != "Disabled") {
                 args += "-q:a";
                 args += q;
             }
-        } else if (codec == "MP3") {
+        } else if (codec == AudioCodecName.MP3) {
             string q = get_dropdown_text (mp3_vbr_combo);
             if (q != "Disabled") {
                 args += "-q:a";
                 args += q;
             }
-        } else if (codec == "FLAC") {
+        } else if (codec == AudioCodecName.FLAC) {
             string cl = get_dropdown_text (flac_compression_combo);
             args += "-compression_level";
             args += cl;
-        } else if (codec == "Vorbis") {
+        } else if (codec == AudioCodecName.VORBIS) {
             string q = get_dropdown_text (vorbis_quality_combo);
             if (q != "Disabled") {
                 args += "-q:a";
@@ -391,7 +373,7 @@ public class AudioSettings : Object {
 
     private string get_codec_text () {
         var item = codec_combo.selected_item as StringObject;
-        return item != null ? item.string : "Copy";
+        return item != null ? item.string : AudioCodecName.COPY;
     }
 
     private string get_dropdown_text (DropDown dropdown) {

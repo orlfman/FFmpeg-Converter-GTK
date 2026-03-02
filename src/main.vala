@@ -1,6 +1,14 @@
 using Gtk;
 using Adw;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MainWindow — Application window layout and user action handlers
+//
+//  Refactored (#1): Layout separated from behavior (AppController).
+//  Updated: Gtk.Notebook → Adw.ViewStack + ViewSwitcherTitle/ViewSwitcherBar
+//  for modern GNOME navigation with responsive header/bottom-bar fallback.
+// ═══════════════════════════════════════════════════════════════════════════════
+
 public class MainWindow : Adw.ApplicationWindow {
     private FilePickers file_pickers;
     private SvtAv1Tab svt_tab;
@@ -14,8 +22,11 @@ public class MainWindow : Adw.ApplicationWindow {
     private ConsoleTab console_tab;
     private GeneralTab general_tab;
     private TrimTab trim_tab;
-    private Notebook notebook;
+    private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
+
+    // Prevent GC from collecting the controller
+    private AppController controller;
 
     public MainWindow (Adw.Application app) {
         Object (application: app);
@@ -23,213 +34,157 @@ public class MainWindow : Adw.ApplicationWindow {
         set_title ("FFmpeg Converter GTK");
         set_default_size (1280, 720);
 
-        var toolbar_view = new Adw.ToolbarView ();
-        var header = new Adw.HeaderBar ();
+        create_components ();
+        build_layout ();
 
-        // File PICKERS (created early so HamburgerMenu can track input changes)
+        controller = new AppController (
+            file_pickers, general_tab,
+            svt_tab, x265_tab, x264_tab, vp9_tab,
+            info_tab, console_tab, trim_tab,
+            converter, hamburger,
+            cancel_button, status_area
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COMPONENT CREATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void create_components () {
         file_pickers = new FilePickers ();
+        general_tab  = new GeneralTab ();
+        svt_tab      = new SvtAv1Tab ();
+        x265_tab     = new X265Tab ();
+        x264_tab     = new X264Tab ();
+        vp9_tab      = new Vp9Tab ();
+        info_tab     = new InformationTab ();
+        console_tab  = new ConsoleTab ();
+        status_area  = new StatusArea ();
 
-        // ── Hamburger menu on the LEFT side of the header bar ──
-        hamburger = new HamburgerMenu (this, file_pickers);
-        header.pack_start (hamburger.get_button ());
-
-        toolbar_view.add_top_bar (header);
-
-        var content_box = new Box (Orientation.VERTICAL, 24);
-        content_box.set_margin_top (32);
-        content_box.set_margin_bottom (32);
-        content_box.set_margin_start (32);
-        content_box.set_margin_end (32);
-
-        // File PICKERS
-        content_box.append (file_pickers);
-
-        // TABS
-        notebook = new Notebook ();
-        notebook.set_vexpand (true);
-
-        // === General Tab ===
-        general_tab = new GeneralTab ();
-        var general_scrolled = new Gtk.ScrolledWindow ();
-        general_scrolled.set_vexpand (true);
-        general_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
-        general_scrolled.set_child (general_tab);
-        notebook.append_page (general_scrolled, new Label ("General"));
-
-        // === SVT-AV1 Tab ===
-        svt_tab = new SvtAv1Tab ();
-        var svt_scrolled = new Gtk.ScrolledWindow ();
-        svt_scrolled.set_vexpand (true);
-        svt_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
-        svt_scrolled.set_child (svt_tab);
-        notebook.append_page (svt_scrolled, new Label ("SVT-AV1"));
-
-        // === X265 Tab (placed between AV1 and x264) ===
-        x265_tab = new X265Tab ();
-        var x265_scroll = new ScrolledWindow ();
-        x265_scroll.set_child (x265_tab);
-        x265_scroll.set_vexpand (true);
-        x265_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
-        notebook.append_page (x265_scroll, new Label ("x265"));
-
-        // === x264 Tab ===
-        x264_tab = new X264Tab ();
-        var x264_scroll = new ScrolledWindow ();
-        x264_scroll.set_child (x264_tab);
-        x264_scroll.set_vexpand (true);
-        x264_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
-        notebook.append_page (x264_scroll, new Label ("x264"));
-
-        // === VP9 Tab ===
-        vp9_tab = new Vp9Tab ();
-        var vp9_scroll = new ScrolledWindow ();
-        vp9_scroll.set_child (vp9_tab);
-        vp9_scroll.set_vexpand (true);
-        vp9_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
-        notebook.append_page (vp9_scroll, new Label ("VP9"));
-
-        // === Crop & Trim Tab ===
         trim_tab = new TrimTab ();
         trim_tab.general_tab = general_tab;
         trim_tab.svt_tab     = svt_tab;
         trim_tab.x265_tab   = x265_tab;
         trim_tab.x264_tab   = x264_tab;
         trim_tab.vp9_tab    = vp9_tab;
-        var trim_scrolled = new Gtk.ScrolledWindow ();
-        trim_scrolled.set_vexpand (true);
-        trim_scrolled.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
-        trim_scrolled.set_child (trim_tab);
-        notebook.append_page (trim_scrolled, new Label ("Crop & Trim"));
 
-        // === Information Tab ===
-        info_tab = new InformationTab ();
-        notebook.append_page (info_tab, new Label ("Information"));
+        hamburger = new HamburgerMenu (this, file_pickers);
 
-        // === Connect Detect Crop button ===
-        general_tab.detect_crop_button.clicked.connect (() => {
-            string input_file = file_pickers.input_entry.get_text ();
-            general_tab.start_crop_detection (input_file, console_tab);
-        });
-
-        // === Audio Speed → disable "Copy" in audio codec lists ===
-        general_tab.audio_speed_check.notify["active"].connect (() => {
-            bool on = general_tab.audio_speed_check.active;
-            svt_tab.audio_settings.update_for_audio_speed (on);
-            x265_tab.audio_settings.update_for_audio_speed (on);
-            x264_tab.audio_settings.update_for_audio_speed (on);
-            vp9_tab.audio_settings.update_for_audio_speed (on);
-        });
-
-        // === Video/Audio Speed → force re-encode in Trim tab ===
-        general_tab.video_speed_check.notify["active"].connect (() => {
-            trim_tab.update_for_speed (
-                general_tab.video_speed_check.active,
-                general_tab.audio_speed_check.active);
-        });
-        general_tab.audio_speed_check.notify["active"].connect (() => {
-            trim_tab.update_for_speed (
-                general_tab.video_speed_check.active,
-                general_tab.audio_speed_check.active);
-        });
-
-        // === Console Tab ===
-        console_tab = new ConsoleTab ();
-        var console_scrolled = new ScrolledWindow ();
-        console_scrolled.set_vexpand (true);
-        console_scrolled.set_child (console_tab);
-        notebook.append_page (console_scrolled, new Label ("Console"));
-
-        content_box.append (notebook);
-
-        // CANCEL and CONVERT
-        var convert_section = new Box (Orientation.HORIZONTAL, 24);
-        convert_section.set_hexpand (true);
-        convert_section.set_margin_bottom (16);
-
-        // Cancel
-        cancel_button = new Button.with_label ("Cancel");
-        cancel_button.add_css_class ("destructive-action");
-        cancel_button.set_size_request (200, 48);
-        cancel_button.set_sensitive (false);
-        cancel_button.clicked.connect (on_cancel_clicked);
-        convert_section.append (cancel_button);
-
-        var spacer = new Box (Orientation.HORIZONTAL, 0);
-        spacer.set_hexpand (true);
-        convert_section.append (spacer);
-
-        // Convert
-        var convert_button = new Button.with_label ("Convert");
-        convert_button.add_css_class ("suggested-action");
-        convert_button.set_size_request (200, 48);
-        convert_button.clicked.connect (on_convert_clicked);
-        convert_section.append (convert_button);
-
-        content_box.append (convert_section);
-
-        // Status Area
-        status_area = new StatusArea ();
-        content_box.append (status_area);
-
-        toolbar_view.set_content (content_box);
-        set_content (toolbar_view);
-
-        // (#7) Inject stable UI dependencies via constructor
         converter = new Converter (
             status_area.status_label,
             status_area.progress_bar,
             console_tab,
             general_tab
         );
-
-        // === Wire up InformationTab ===
-        // Probe input file whenever it changes
-        file_pickers.input_entry.changed.connect (() => {
-            string path = file_pickers.input_entry.get_text ();
-            info_tab.load_input_info (path);
-            info_tab.reset_output ();
-
-            // Load video preview in the Crop & Trim tab
-            trim_tab.load_video (path);
-        });
-
-        // Probe output file and show it after a successful conversion
-        converter.conversion_done.connect ((output_path) => {
-            info_tab.load_output_info (output_path);
-            hamburger.set_last_output_file (output_path);
-            cancel_button.set_sensitive (false);
-        });
-
-        // Wire up Trim tab completion
-        trim_tab.trim_done.connect ((output_path) => {
-            info_tab.load_output_info (output_path);
-            hamburger.set_last_output_file (output_path);
-            cancel_button.set_sensitive (false);
-        });
-
-        // Disable General tab crop when Crop & Trim tab handles cropping
-        trim_tab.mode_changed.connect ((mode) => {
-            bool trim_handles_crop = (mode != 0);  // 0 = TRIM_ONLY
-            general_tab.crop_expander.set_sensitive (!trim_handles_crop);
-            if (trim_handles_crop) {
-                general_tab.crop_expander.set_enable_expansion (false);
-                general_tab.crop_check.set_active (false);
-            }
-        });
     }
 
-    private void on_convert_clicked () {
-        int current_page = notebook.get_current_page ();
-        var page_widget = notebook.get_nth_page (current_page);
+    // ═════════════════════════════════════════════════════════════════════════
+    //  LAYOUT — Adw.ViewStack + ViewSwitcherTitle + ViewSwitcherBar
+    // ═════════════════════════════════════════════════════════════════════════
 
-        // Unwrap ScrolledWindow
-        ICodecTab active_codec_tab = page_widget as ICodecTab;
-        if (active_codec_tab == null && page_widget is Gtk.ScrolledWindow) {
-            var inner = ((Gtk.ScrolledWindow) page_widget).get_child ();
-            active_codec_tab = inner as ICodecTab;
-            if (active_codec_tab == null && inner is Gtk.Viewport) {
-                active_codec_tab = ((Gtk.Viewport) inner).get_child () as ICodecTab;
-            }
+    private void build_layout () {
+        var toolbar_view = new Adw.ToolbarView ();
+
+        var header = new Adw.HeaderBar ();
+        header.pack_start (hamburger.get_button ());
+
+        view_stack = new Adw.ViewStack ();
+        view_stack.set_vexpand (true);
+
+        add_scrolled_page (view_stack, general_tab, "general",  "General",      "preferences-system-symbolic");
+        add_scrolled_page (view_stack, svt_tab,     "svt-av1",  "SVT-AV1",     "video-x-generic-symbolic");
+        add_scrolled_page (view_stack, x265_tab,    "x265",     "x265",        "video-x-generic-symbolic");
+        add_scrolled_page (view_stack, x264_tab,    "x264",     "x264",        "video-x-generic-symbolic");
+        add_scrolled_page (view_stack, vp9_tab,     "vp9",      "VP9",         "video-x-generic-symbolic");
+        add_scrolled_page (view_stack, trim_tab,    "trim",     "Crop & Trim", "edit-cut-symbolic");
+
+        var info_page = view_stack.add_titled (info_tab, "info", "Information");
+        info_page.set_icon_name ("dialog-information-symbolic");
+
+        add_scrolled_page (view_stack, console_tab, "console",  "Console",     "utilities-terminal-symbolic");
+
+        var switcher_title = new Adw.ViewSwitcherTitle ();
+        switcher_title.set_stack (view_stack);
+        switcher_title.set_title ("FFmpeg Converter GTK");
+        header.set_title_widget (switcher_title);
+
+        toolbar_view.add_top_bar (header);
+
+        // ── Content area ─────────────────────────────────────────────────────
+        var content_box = new Box (Orientation.VERTICAL, 24);
+        content_box.set_margin_top (32);
+        content_box.set_margin_bottom (32);
+        content_box.set_margin_start (32);
+        content_box.set_margin_end (32);
+
+        content_box.append (file_pickers);
+        content_box.append (view_stack);
+        content_box.append (build_button_bar ());
+        content_box.append (status_area);
+
+        toolbar_view.set_content (content_box);
+
+        // ── Bottom bar: revealed when header has no room for tabs ────────────
+        var switcher_bar = new Adw.ViewSwitcherBar ();
+        switcher_bar.set_stack (view_stack);
+        switcher_title.bind_property ("title-visible", switcher_bar, "reveal",
+            BindingFlags.SYNC_CREATE);
+        toolbar_view.add_bottom_bar (switcher_bar);
+
+        set_content (toolbar_view);
+    }
+
+    /** Wrap a widget in a ScrolledWindow and add as a ViewStack page with icon. */
+    private void add_scrolled_page (Adw.ViewStack stack, Widget child,
+                                    string name, string title, string icon) {
+        var scrolled = new ScrolledWindow ();
+        scrolled.set_vexpand (true);
+        scrolled.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
+        scrolled.set_child (child);
+        var page = stack.add_titled (scrolled, name, title);
+        page.set_icon_name (icon);
+    }
+
+    /** Build the Cancel + Convert button row. */
+    private Box build_button_bar () {
+        var bar = new Box (Orientation.HORIZONTAL, 24);
+        bar.set_hexpand (true);
+        bar.set_margin_bottom (16);
+
+        cancel_button = new Button.with_label ("Cancel");
+        cancel_button.add_css_class ("destructive-action");
+        cancel_button.set_size_request (200, 48);
+        cancel_button.set_sensitive (false);
+        cancel_button.clicked.connect (on_cancel_clicked);
+        bar.append (cancel_button);
+
+        var spacer = new Box (Orientation.HORIZONTAL, 0);
+        spacer.set_hexpand (true);
+        bar.append (spacer);
+
+        var convert_button = new Button.with_label ("Convert");
+        convert_button.add_css_class ("suggested-action");
+        convert_button.set_size_request (200, 48);
+        convert_button.clicked.connect (on_convert_clicked);
+        bar.append (convert_button);
+
+        return bar;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  USER ACTIONS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void on_convert_clicked () {
+        string? page = view_stack.visible_child_name;
+        ICodecTab? active_codec_tab = null;
+
+        switch (page) {
+            case "svt-av1": active_codec_tab = svt_tab;  break;
+            case "x265":    active_codec_tab = x265_tab; break;
+            case "x264":    active_codec_tab = x264_tab; break;
+            case "vp9":     active_codec_tab = vp9_tab;  break;
+            case "trim":    active_codec_tab = trim_tab;  break;
         }
 
         if (active_codec_tab == null) {
@@ -243,7 +198,6 @@ public class MainWindow : Adw.ApplicationWindow {
             string input = file_pickers.input_entry.get_text ();
             string out_folder = file_pickers.output_entry.get_text ();
 
-            // Check for overwrite (skipped for export-separate mode)
             string expected = trim.get_expected_output_path (input, out_folder);
             if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
                 show_trim_overwrite_dialog (trim, input, out_folder, expected);
@@ -268,7 +222,6 @@ public class MainWindow : Adw.ApplicationWindow {
 
         ICodecBuilder builder = active_codec_tab.get_codec_builder ();
 
-        // (#5) Compute output path and check for overwrite
         string output_file = Converter.compute_output_path (
             input_file,
             file_pickers.output_entry.get_text (),
@@ -283,7 +236,6 @@ public class MainWindow : Adw.ApplicationWindow {
         }
     }
 
-    // (#5) Show overwrite/rename/cancel dialog
     private void show_overwrite_dialog (string input_file,
                                         string output_file,
                                         ICodecTab codec_tab,
@@ -313,11 +265,9 @@ public class MainWindow : Adw.ApplicationWindow {
                 string unique = Converter.find_unique_path (output_file);
                 begin_conversion (input_file, unique, codec_tab, builder);
             }
-            // "cancel" — do nothing
         });
     }
 
-    // (#5) Show overwrite/rename/cancel dialog for Crop & Trim tab
     private void show_trim_overwrite_dialog (TrimTab trim,
                                               string input_file,
                                               string output_folder,
@@ -348,11 +298,9 @@ public class MainWindow : Adw.ApplicationWindow {
                 );
                 cancel_button.set_sensitive (true);
             }
-            // "cancel" — do nothing
         });
     }
 
-    /** Shared entry point after the overwrite decision is made. */
     private void begin_conversion (string input_file,
                                    string output_file,
                                    ICodecTab codec_tab,
@@ -362,7 +310,6 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private void on_cancel_clicked () {
-        // Cancel whichever conversion is active
         if (trim_tab.is_exporting ()) {
             trim_tab.cancel_trim ();
             status_area.set_status ("⏹️ Export cancelled by user.");

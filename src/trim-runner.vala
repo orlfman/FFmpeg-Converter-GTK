@@ -24,6 +24,10 @@ using GLib;
 //
 //  Supports both stream-copy and re-encode modes.
 //  In re-encode mode, applies the chosen codec + GeneralTab filters.
+//
+//  Refactored: Uses shared ProcessRunner for FFmpeg execution, which
+//  provides thread-safe cancel/PID management and proper Posix.kill()
+//  handling (fixes #5, #6, #8).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimRunner : Object {
@@ -51,9 +55,9 @@ public class TrimRunner : Object {
     // ── Segments ────────────────────────────────────────────────────────────
     private GenericArray<TrimSegment> segments = new GenericArray<TrimSegment> ();
 
-    // ── State ───────────────────────────────────────────────────────────────
-    private bool cancelled = false;
-    private Pid? current_pid = null;
+    // ── Shared process runner (thread-safe cancel/PID/kill) ─────────────────
+    private ProcessRunner runner = new ProcessRunner ();
+
     private string last_output = "";
 
     // ── Signal ──────────────────────────────────────────────────────────────
@@ -73,8 +77,7 @@ public class TrimRunner : Object {
      * Safe to call from the main thread — starts its own Thread.
      */
     public void run () {
-        cancelled = false;
-        current_pid = null;
+        runner.reset ();
 
         if (segments.length == 0) {
             report_status ("⚠️ No segments defined — add at least one segment.");
@@ -94,16 +97,11 @@ public class TrimRunner : Object {
 
     /**
      * Cancel any running FFmpeg process.
+     * Thread-safe — delegates to ProcessRunner which uses proper
+     * mutex-guarded PID tracking and Posix.kill() return-value checking.
      */
     public void cancel () {
-        cancelled = true;
-        if (current_pid != null) {
-            try {
-                Posix.kill (current_pid, Posix.Signal.TERM);
-            } catch (Error e) {
-                // ignore
-            }
-        }
+        runner.cancel ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -170,7 +168,7 @@ public class TrimRunner : Object {
             var segment_files = new GenericArray<string> ();
 
             for (int i = 0; i < segments.length; i++) {
-                if (cancelled) {
+                if (runner.is_cancelled ()) {
                     report_status (@"⏹️ $(operation_label) cancelled.");
                     return;
                 }
@@ -223,7 +221,7 @@ public class TrimRunner : Object {
                 report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$(segment_files[0])");
             } else {
                 // Multi-segment copy mode → demuxer concat
-                if (cancelled) {
+                if (runner.is_cancelled ()) {
                     report_status (@"⏹️ $(operation_label) cancelled.");
                     return;
                 }
@@ -267,26 +265,6 @@ public class TrimRunner : Object {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  PATH A — Single-pass concat filter encode
-    //
-    //  Builds a single FFmpeg command like:
-    //
-    //    ffmpeg -y
-    //      -ss START0 -t DUR0 -i input.mp4
-    //      -ss START1 -t DUR1 -i input.mp4
-    //      -filter_complex "
-    //        [0:v]crop=...,scale=...,setpts=PTS-STARTPTS[v0];
-    //        [0:a]asetpts=PTS-STARTPTS[a0];
-    //        [1:v]crop=...,scale=...,setpts=PTS-STARTPTS[v1];
-    //        [1:a]asetpts=PTS-STARTPTS[a1];
-    //        [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]
-    //      "
-    //      -map [outv] -map [outa]
-    //      <codec_args> <audio_codec_args>
-    //      output.mkv
-    //
-    //  All segments are decoded, filtered, and concatenated within FFmpeg's
-    //  filter graph in a single pass. The concat filter properly resets PTS,
-    //  handles resolution differences, and produces clean segment transitions.
     // ═════════════════════════════════════════════════════════════════════════
 
     private int run_concat_filter_encode (string output) {
@@ -308,14 +286,10 @@ public class TrimRunner : Object {
         bool audio_disabled = (raw_audio_args.length > 0 && raw_audio_args[0] == "-an");
 
         // ── Determine target resolution for concat normalization ─────────────
-        // The concat filter requires all inputs to have the same resolution.
-        // Use the first segment's output dimensions as the target, then scale
-        // all other segments to match.
         int target_w = 0;
         int target_h = 0;
         bool needs_scale_normalize = false;
 
-        // Collect each segment's output dimensions
         int[] seg_widths  = new int[segments.length];
         int[] seg_heights = new int[segments.length];
 
@@ -326,7 +300,6 @@ public class TrimRunner : Object {
         target_w = seg_widths[0];
         target_h = seg_heights[0];
 
-        // Check if any segment differs from the target
         for (int i = 1; i < segments.length; i++) {
             if (seg_widths[i] != target_w || seg_heights[i] != target_h) {
                 needs_scale_normalize = true;
@@ -341,18 +314,14 @@ public class TrimRunner : Object {
         // ── Build filter_complex ─────────────────────────────────────────────
         var fc = new StringBuilder ();
 
-        // Get the GeneralTab audio filter chain (normalize, speed, etc.)
         string general_af = (general_tab != null)
             ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
 
         for (int i = 0; i < segments.length; i++) {
             var seg = segments[i];
 
-            // ── Video chain for this segment ─────────────────────────────────
-            // Per-segment crop + General-tab filters (scale, rotate, pix fmt, etc.)
             string vf = build_segment_vf (seg);
 
-            // Scale to target resolution if segments have differing dimensions
             if (needs_scale_normalize && target_w > 0 && target_h > 0) {
                 string scale_filter = "scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,pad=%d:%d:-1:-1:color=black".printf (
                     target_w, target_h, target_w, target_h);
@@ -363,7 +332,6 @@ public class TrimRunner : Object {
                 }
             }
 
-            // Append PTS reset at the end (ensures clean timestamps)
             if (vf.length > 0) {
                 vf += ",setpts=PTS-STARTPTS";
             } else {
@@ -372,7 +340,6 @@ public class TrimRunner : Object {
 
             fc.append (@"[$i:v]$(vf)[v$i]; ");
 
-            // ── Audio chain for this segment (if audio enabled) ──────────────
             if (!audio_disabled) {
                 string af;
                 if (general_af.length > 0) {
@@ -402,7 +369,6 @@ public class TrimRunner : Object {
         cmd += "-filter_complex";
         cmd += fc.str;
 
-        // ── Map output streams ───────────────────────────────────────────────
         cmd += "-map";
         cmd += "[outv]";
         if (!audio_disabled) {
@@ -423,7 +389,6 @@ public class TrimRunner : Object {
 
             foreach (string arg in codec_args) cmd += arg;
         } else {
-            // Fallback default codec
             cmd += "-c:v";
             cmd += "libx264";
             cmd += "-crf";
@@ -433,9 +398,6 @@ public class TrimRunner : Object {
         }
 
         // ── Audio codec args ─────────────────────────────────────────────────
-        // With filter_complex, audio goes through the filter graph and MUST be
-        // re-encoded. If the user's codec tab says "-c:a copy", we substitute
-        // a sensible default.
         if (audio_disabled) {
             cmd += "-an";
         } else {
@@ -463,27 +425,19 @@ public class TrimRunner : Object {
         return execute_ffmpeg (cmd);
     }
 
-    /**
-     * Get audio codec args suitable for the concat filter path.
-     * The concat filter requires decoded audio, so "-c:a copy" cannot be used.
-     * In that case, substitute a sensible default encoder.
-     */
     private string[] get_audio_codec_args_for_concat () {
         string[] audio_args = get_audio_args ();
 
-        // Can't use copy with filter_complex — audio must be re-encoded
         if (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy") {
-            // Determine a good fallback based on the output container
             string container = (reencode_codec_tab != null)
-                ? reencode_codec_tab.get_container () : "mkv";
+                ? reencode_codec_tab.get_container () : ContainerExt.MKV;
 
-            if (container == "webm") {
+            if (container == ContainerExt.WEBM) {
                 return { "-c:a", "libopus", "-b:a", "128k" };
             }
             return { "-c:a", "aac", "-b:a", "192k" };
         }
 
-        // Strip any -af entries — audio filters are in the filter_complex now
         string[] result = {};
         for (int i = 0; i < audio_args.length; i++) {
             if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
@@ -503,30 +457,24 @@ public class TrimRunner : Object {
     private int extract_segment (TrimSegment seg, string output) {
         string[] cmd = { "ffmpeg", "-y" };
 
-        // Seek to start (input seeking = fast for copy mode)
         cmd += "-ss";
         cmd += format_seconds (seg.start_time);
 
         cmd += "-i";
         cmd += input_file;
 
-        // Duration of this segment
         cmd += "-to";
         cmd += format_seconds (seg.end_time - seg.start_time);
 
-        // Determine if THIS segment needs re-encoding
         bool seg_has_crop = seg.has_crop ();
         bool seg_reencode = !copy_mode || seg_has_crop;
 
         if (!seg_reencode) {
-            // Stream copy — no re-encoding
             cmd += "-c:v";
             cmd += "copy";
             cmd += "-c:a";
             cmd += "copy";
         } else {
-            // Re-encode with chosen codec + filters
-            // Build the video filter chain, prepending crop if present
             string vf = build_segment_vf (seg);
             if (vf != "") {
                 cmd += "-vf";
@@ -545,8 +493,6 @@ public class TrimRunner : Object {
 
                 foreach (string arg in codec_args) cmd += arg;
             } else {
-                // Fallback — if no codec builder but we need re-encode (crop-only case),
-                // use a sensible default
                 cmd += "-c:v";
                 cmd += "libx264";
                 cmd += "-crf";
@@ -555,13 +501,11 @@ public class TrimRunner : Object {
                 cmd += "medium";
             }
 
-            // Audio (with filter chain merged in)
             string af = (general_tab != null)
                 ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
             string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
-            // Metadata
             if (general_tab != null) {
                 if (general_tab.preserve_metadata.active) {
                     cmd += "-map_metadata";
@@ -581,21 +525,15 @@ public class TrimRunner : Object {
         return execute_ffmpeg (cmd);
     }
 
-    /**
-     * Build the -vf chain for a single segment, injecting the segment's
-     * crop filter before the rest of the General-tab filter chain.
-     */
     private string build_segment_vf (TrimSegment seg) {
         string[] filters = {};
 
-        // 1. Per-segment crop (injected FIRST — before any other transforms)
         if (seg.has_crop ()) {
             string c = seg.crop_value.strip ();
             if (c.has_prefix ("crop=")) c = c.substring (5);
             filters += "crop=" + c;
         }
 
-        // 2. General-tab video filter chain (scale, rotate, pixel format, etc.)
         if (general_tab != null) {
             string general_vf = FilterBuilder.build_video_filter_chain (general_tab, seg.has_crop ());
             if (general_vf.length > 0) {
@@ -606,11 +544,6 @@ public class TrimRunner : Object {
         return string.joinv (",", filters);
     }
 
-    /**
-     * Determine the output dimensions for a segment after its crop is applied.
-     * If the segment has a crop "W:H:X:Y", returns (W, H).
-     * If no crop, returns the video's native dimensions.
-     */
     private void parse_segment_output_size (TrimSegment seg, out int w, out int h) {
         w = video_width;
         h = video_height;
@@ -639,7 +572,7 @@ public class TrimRunner : Object {
         try {
             var sb = new StringBuilder ();
             for (int i = 0; i < segment_files.length; i++) {
-                string safe_path = segment_files[i].replace ("'", "'\\''");
+                string safe_path = segment_files[i].replace ("'", "'\\''" );
                 sb.append (@"file '$safe_path'\n");
             }
 
@@ -669,50 +602,36 @@ public class TrimRunner : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  INTERNAL — FFmpeg process execution
+    //  INTERNAL — FFmpeg process execution (delegates to ProcessRunner)
+    //
+    //  This replaces the old TrimRunner.execute_ffmpeg which had:
+    //   • No mutex on current_pid (#8)
+    //   • Broken try/catch on Posix.kill() (#6)
+    //   • Duplicated stderr parsing logic (#5)
     // ═════════════════════════════════════════════════════════════════════════
 
     private int execute_ffmpeg (string[] argv) {
-        try {
-            var launcher = new SubprocessLauncher (SubprocessFlags.STDERR_PIPE);
-            var process = launcher.spawnv (argv);
-            current_pid = (Pid) int.parse (process.get_identifier () ?? "0");
+        int exit = runner.execute (argv, (clean) => {
+            // Filter noisy progress lines — only log interesting ones
+            bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
+                            clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
+                            clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
+                            clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
+                            clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
 
-            var reader = new DataInputStream (process.get_stderr_pipe ());
-
-            string line;
-            while ((line = reader.read_line (null)) != null) {
-                string clean = line.strip ();
-                if (clean.length == 0) continue;
-
-                bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
-                                clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
-                                clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
-                                clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
-                                clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
-
-                if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
-                    clean.contains ("Warning") || clean.contains ("failed")) {
-                    log_line (clean);
-                }
+            if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
+                clean.contains ("Warning") || clean.contains ("failed")) {
+                log_line (clean);
             }
+        });
 
-            process.wait ();
-
-            string full_cmd = string.joinv (" ", argv);
-            log_line ("\n=== FFmpeg command ===\n" + full_cmd);
-            if (console_tab != null) {
-                console_tab.set_command (full_cmd);
-            }
-
-            current_pid = null;
-            return process.get_exit_status ();
-
-        } catch (Error e) {
-            log_line ("❌ FFmpeg launch error: " + e.message);
-            current_pid = null;
-            return -1;
+        string full_cmd = string.joinv (" ", argv);
+        log_line ("\n=== FFmpeg command ===\n" + full_cmd);
+        if (console_tab != null) {
+            console_tab.set_command (full_cmd);
         }
+
+        return exit;
     }
 
     // ═════════════════════════════════════════════════════════════════════════

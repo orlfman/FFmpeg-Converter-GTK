@@ -159,11 +159,19 @@ public class VideoFilters : Object {
         build_sharpening_group ();
         build_blur_group ();
         build_grain_texture_group ();
-        build_hdr_group ();
+        build_hdr_widgets ();
     }
 
     public Widget get_widget () {
         return container;
+    }
+
+    /**
+     * Returns the HDR ExpanderRow so that GeneralTab can place it inside
+     * its own Color & HDR group rather than as a standalone category.
+     */
+    public Adw.ExpanderRow get_hdr_expander () {
+        return hdr_expander;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -693,11 +701,10 @@ public class VideoFilters : Object {
     //  HDR TONE MAPPING
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void build_hdr_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("HDR Tone Mapping");
-        group.set_description ("Convert HDR content for standard displays");
-
+    // HDR widgets are built here but NOT appended to this container.
+    // GeneralTab retrieves hdr_expander via get_hdr_expander() and places
+    // it inside the Color & HDR group for a cleaner layout.
+    private void build_hdr_widgets () {
         hdr_tonemap_check = new Switch ();
         hdr_tonemap_check.set_active (false);
 
@@ -737,10 +744,6 @@ public class VideoFilters : Object {
             string mode = item != null ? item.string : "";
             tonemap_desat_row.set_visible (mode == "Custom");
         });
-
-        group.add (hdr_expander);
-
-        container.append (group);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
