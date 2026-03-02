@@ -206,8 +206,11 @@ public class Converter : Object {
                                               ICodecBuilder builder) {
         var config = new ConversionConfig ();
 
-        // Passlog
-        string plog = "/tmp/ffmpeg_passlog_" + GLib.get_real_time ().to_string ();
+        // Passlog — use $TMPDIR-respecting path instead of hardcoded /tmp (#4)
+        string plog = Path.build_filename (
+            Environment.get_tmp_dir (),
+            "ffmpeg_passlog_" + GLib.get_real_time ().to_string ()
+        );
         passlog_base = plog;
         config.passlog_base = plog;
 
@@ -253,22 +256,24 @@ public class Converter : Object {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  FFMPEG PROCESS EXECUTION (delegates to ProcessRunner)
+    //
+    //  Fix #8: Changed from bool is_pass1 to explicit pass_start / pass_range
+    //  so single-pass encoding correctly reports 0–100% instead of 50–100%.
     // ═════════════════════════════════════════════════════════════════════════
 
-    internal int execute_ffmpeg (string[] argv, bool is_pass1 = false) {
-        double pass_start = is_pass1 ? 0.0 : 50.0;
-        double pass_range = 50.0;
-
+    /**
+     * Execute an FFmpeg command with progress tracking.
+     *
+     * @param argv        The full FFmpeg command-line arguments
+     * @param pass_start  Starting percentage for progress display (default 0)
+     * @param pass_range  Percentage range for this pass (default 100)
+     */
+    internal int execute_ffmpeg (string[] argv,
+                                 double pass_start = 0.0,
+                                 double pass_range = 100.0) {
         int exit = process_runner.execute (argv, (clean) => {
             // Logging: filter out noisy progress lines
-            bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
-                           clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
-                           clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
-                           clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
-                           clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
-
-            if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
-                clean.contains ("Warning") || clean.contains ("failed")) {
+            if (ConversionUtils.should_log_ffmpeg_line (clean)) {
                 console_tab.add_line (clean);
             }
 

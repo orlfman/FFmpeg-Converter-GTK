@@ -7,7 +7,7 @@ using Posix;
 //  Shared by both Converter and TrimRunner. Provides:
 //   • Mutex-guarded PID and cancelled state
 //   • Proper Posix.kill() with return-value checking (not try/catch)
-//   • SIGTERM → SIGKILL escalation after 3 seconds
+//   • SIGTERM → SIGKILL escalation after 3 seconds with generation guard
 //   • Streaming stderr reader with configurable line callback
 //   • Clean cancellation from any thread
 //
@@ -21,6 +21,12 @@ public class ProcessRunner : Object {
     private Mutex state_mutex = Mutex ();
     private Pid current_pid = 0;
     private bool cancelled = false;
+
+    // Generation counter — incremented on each reset().
+    // The SIGKILL escalation timeout captures the generation at cancel time
+    // and skips the kill if reset() has been called since, which means the
+    // PID may have been recycled by the OS for an unrelated process.
+    private int64 cancel_generation = 0;
 
     // ── Optional line callback (for progress parsing, logging, etc.) ────────
     public delegate void LineCallback (string line);
@@ -38,12 +44,12 @@ public class ProcessRunner : Object {
         cancelled = true;
         Pid pid_to_kill = current_pid;
         current_pid = 0;
+        int64 gen = cancel_generation;
         state_mutex.unlock ();
 
         if (pid_to_kill <= 0) return;
 
         // Posix.kill() returns int — does NOT throw exceptions in Vala.
-        // This was a bug in the old TrimRunner (wrapped in try/catch with dead catch block).
         if (Posix.kill (pid_to_kill, Posix.Signal.TERM) != 0) {
             print ("ProcessRunner: Failed to send SIGTERM to PID %d: errno %d\n",
                    pid_to_kill, Posix.errno);
@@ -51,16 +57,26 @@ public class ProcessRunner : Object {
             print ("ProcessRunner: Sent SIGTERM to FFmpeg (PID %d)\n", pid_to_kill);
         }
 
-        // Escalate to SIGKILL after 3 seconds if process is still alive
+        // Escalate to SIGKILL after 3 seconds if process is still alive.
+        //
+        // Timeout.add() always attaches to the global default main context,
+        // so this is safe to call from any thread — the old Idle.add wrapper
+        // was unnecessary.
+        //
+        // The generation guard prevents killing a recycled PID: if reset()
+        // is called before the timeout fires, cancel_generation will have
+        // changed and the kill is skipped.
         Pid kill_pid = pid_to_kill;
-        Idle.add (() => {
-            Timeout.add (3000, () => {
-                if (Posix.kill (kill_pid, 0) == 0) {
-                    print ("ProcessRunner: PID %d still alive after 3s — sending SIGKILL\n", kill_pid);
-                    Posix.kill (kill_pid, Posix.Signal.KILL);
-                }
-                return Source.REMOVE;
-            });
+        int64 kill_gen = gen;
+        Timeout.add (3000, () => {
+            state_mutex.lock ();
+            bool still_valid = (cancel_generation == kill_gen);
+            state_mutex.unlock ();
+
+            if (still_valid && Posix.kill (kill_pid, 0) == 0) {
+                print ("ProcessRunner: PID %d still alive after 3s — sending SIGKILL\n", kill_pid);
+                Posix.kill (kill_pid, Posix.Signal.KILL);
+            }
             return Source.REMOVE;
         });
     }
@@ -78,11 +94,14 @@ public class ProcessRunner : Object {
 
     /**
      * Reset the cancelled flag. Call before starting a new operation.
+     * Increments the generation counter so any pending SIGKILL escalation
+     * from a previous cancel() will be safely skipped.
      */
     public void reset () {
         state_mutex.lock ();
         cancelled = false;
         current_pid = 0;
+        cancel_generation++;
         state_mutex.unlock ();
     }
 

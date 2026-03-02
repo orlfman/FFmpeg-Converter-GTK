@@ -6,7 +6,7 @@ using GLib;
 //
 //  Extracted from Converter to give it a single responsibility.
 //  These are all stateless helpers: path computation, filename sanitization,
-//  timestamp building/parsing, and time field validation.
+//  timestamp building/parsing, time field validation, and FFmpeg log filtering.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace ConversionUtils {
@@ -114,5 +114,43 @@ namespace ConversionUtils {
         double seconds = double.parse (parts[2]);
 
         return hours * 3600.0 + minutes * 60.0 + seconds;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  FFMPEG LOG LINE FILTERING
+    //
+    //  Shared by Converter and TrimRunner to decide which FFmpeg stderr lines
+    //  should be written to the console tab. FFmpeg's -progress pipe:2 output
+    //  produces high-frequency key=value lines (frame=, fps=, speed=, etc.)
+    //  that are useful for progress parsing but clutter the console log.
+    //
+    //  Previously duplicated in both Converter.execute_ffmpeg() and
+    //  TrimRunner.execute_ffmpeg().
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Returns true if the line is a high-frequency FFmpeg progress key=value
+     * line that would clutter the console (frame=, fps=, speed=, etc.).
+     */
+    public bool is_noisy_ffmpeg_line (string line) {
+        return line.has_prefix ("frame=")       || line.has_prefix ("fps=")        ||
+               line.has_prefix ("stream_")      || line.has_prefix ("bitrate=")    ||
+               line.has_prefix ("total_size=")  || line.has_prefix ("out_time")    ||
+               line.has_prefix ("dup_frames=")  || line.has_prefix ("drop_frames=") ||
+               line.has_prefix ("speed=")       || line.has_prefix ("progress=");
+    }
+
+    /**
+     * Returns true if the line should be logged to the console tab.
+     *
+     * All non-noisy lines are logged. Noisy lines are only logged if they
+     * contain important markers (final Lsize summary, errors, warnings).
+     */
+    public bool should_log_ffmpeg_line (string line) {
+        if (!is_noisy_ffmpeg_line (line)) return true;
+
+        // These markers within noisy lines are still worth logging
+        return line.contains ("Lsize=")  || line.contains ("Error")   ||
+               line.contains ("Warning") || line.contains ("failed");
     }
 }

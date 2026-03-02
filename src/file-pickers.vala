@@ -200,6 +200,10 @@ public class FilePickers : Box {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  BROWSE DIALOGS
+    //
+    //  Fix #7: GTK4 FileDialog throws Gtk.DialogError.DISMISSED when the user
+    //  cancels, which is expected. We now log unexpected errors with warning()
+    //  so real failures aren't silently swallowed.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_input_browse_clicked () {
@@ -216,7 +220,10 @@ public class FilePickers : Box {
                 var file = dialog.open.end (res);
                 if (file != null) input_entry.set_text (file.get_path () ?? "");
             } catch (Error e) {
-
+                // Gtk.DialogError.DISMISSED is normal (user clicked Cancel)
+                if (!(e is Gtk.DialogError.DISMISSED)) {
+                    warning ("Input file dialog error: %s", e.message);
+                }
             }
         });
     }
@@ -230,7 +237,10 @@ public class FilePickers : Box {
                 var folder = dialog.select_folder.end (res);
                 if (folder != null) output_entry.set_text (folder.get_path () ?? "");
             } catch (Error e) {
-
+                // Gtk.DialogError.DISMISSED is normal (user clicked Cancel)
+                if (!(e is Gtk.DialogError.DISMISSED)) {
+                    warning ("Output folder dialog error: %s", e.message);
+                }
             }
         });
     }

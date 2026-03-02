@@ -147,6 +147,65 @@ namespace FilterBuilder {
         return string.joinv (",", parts);
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  AUDIO FILTER MERGING
+    //
+    //  Shared by ConversionRunner and TrimRunner. Merges General-tab audio
+    //  filters (e.g. loudnorm, atempo) into the codec tab's audio args,
+    //  respecting -an and -c:a copy (where filters cannot be applied).
+    //
+    //  Previously duplicated in both ConversionRunner.get_audio_args_with_filters()
+    //  and TrimRunner.get_audio_args_with_filters().
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Merge additional audio filters into existing audio args.
+     *
+     * Returns audio_args unmodified when:
+     *  • af is empty (nothing to merge)
+     *  • audio is disabled (-an)
+     *  • audio is stream-copied (-c:a copy) — filters require re-encoding
+     *
+     * Otherwise, if audio_args already contains -af, the new filters are
+     * prepended to the existing chain. If no -af exists, one is appended.
+     *
+     * @param af          Comma-separated audio filter chain (e.g. "loudnorm=...")
+     * @param audio_args  Existing audio arguments from the codec tab
+     * @return            Merged audio arguments
+     */
+    public string[] merge_audio_filters (string af, string[] audio_args) {
+        // Nothing to merge
+        if (af == "") return audio_args;
+
+        // Cannot apply filters when audio is disabled or stream-copied
+        if (audio_args.length > 0 && audio_args[0] == "-an")
+            return audio_args;
+        if (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")
+            return audio_args;
+
+        // Merge: prepend new filters to any existing -af value
+        string[] merged = {};
+        bool found_af = false;
+        for (int i = 0; i < audio_args.length; i++) {
+            if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
+                merged += "-af";
+                merged += af + "," + audio_args[i + 1];
+                i++;
+                found_af = true;
+            } else {
+                merged += audio_args[i];
+            }
+        }
+
+        // No existing -af — append one
+        if (!found_af) {
+            merged += "-af";
+            merged += af;
+        }
+
+        return merged;
+    }
+
     // Detect Crop helper
     public string get_crop_detection_chain (GeneralTab tab) {
         string[] filters = {};

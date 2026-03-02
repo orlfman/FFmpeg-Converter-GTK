@@ -31,7 +31,8 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS1);
                 converter.update_status ("🔄 Pass 1/2: Analyzing video...");
                 string[] pass1 = build_pass1 (input);
-                if (converter.execute_ffmpeg (pass1, true) != 0) {
+                // Fix #8: Pass 1 covers 0%–50% of total progress
+                if (converter.execute_ffmpeg (pass1, 0.0, 50.0) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Pass 1 failed.");
                     return;
@@ -42,7 +43,8 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (@"🔄 Pass 2/2: Encoding final $(config.codec_name) video...");
                 string[] pass2 = build_pass2 (input, safe_output);
-                if (converter.execute_ffmpeg (pass2) != 0) {
+                // Fix #8: Pass 2 covers 50%–100% of total progress
+                if (converter.execute_ffmpeg (pass2, 50.0, 50.0) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Pass 2 failed.");
                     return;
@@ -53,6 +55,7 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (@"🔄 Encoding with $(config.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);
+                // Fix #8: Single pass uses defaults (0.0, 100.0) — full 0%–100% range
                 if (converter.execute_ffmpeg (cmd) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Encoding failed.");
@@ -181,35 +184,6 @@ public class ConversionRunner {
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] get_audio_args_with_filters () {
-        string af = config.audio_filters;
-        string[] audio_args = config.audio_args;
-
-        // If no general audio filters to apply, return as-is
-        if (af == "") return audio_args;
-
-        // Cannot apply audio filters when audio is disabled or stream-copied
-        if (audio_args.length > 0 && (audio_args[0] == "-an" ||
-            (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")))
-            return audio_args;
-
-        string[] merged = {};
-        bool found_af = false;
-        for (int i = 0; i < audio_args.length; i++) {
-            if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
-                merged += "-af";
-                merged += af + "," + audio_args[i + 1];
-                i++;
-                found_af = true;
-            } else {
-                merged += audio_args[i];
-            }
-        }
-
-        if (!found_af) {
-            merged += "-af";
-            merged += af;
-        }
-
-        return merged;
+        return FilterBuilder.merge_audio_filters (config.audio_filters, config.audio_args);
     }
 }

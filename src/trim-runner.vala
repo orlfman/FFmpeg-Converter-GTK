@@ -28,6 +28,10 @@ using GLib;
 //  Refactored: Uses shared ProcessRunner for FFmpeg execution, which
 //  provides thread-safe cancel/PID management and proper Posix.kill()
 //  handling (fixes #5, #6, #8).
+//
+//  Fix #3: Now uses ProgressTracker instead of raw ProgressBar manipulation,
+//  providing consistent progress behavior with Converter (throttling,
+//  pulse-to-determinate transitions, proper hide/cancelled states).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimRunner : Object {
@@ -57,6 +61,9 @@ public class TrimRunner : Object {
 
     // ── Shared process runner (thread-safe cancel/PID/kill) ─────────────────
     private ProcessRunner runner = new ProcessRunner ();
+
+    // ── Progress tracker (fix #3: consistent with Converter) ────────────────
+    private ProgressTracker? tracker = null;
 
     private string last_output = "";
 
@@ -88,7 +95,12 @@ public class TrimRunner : Object {
             return;
         }
 
-        show_progress ();
+        // Fix #3: Create a ProgressTracker for consistent progress behavior
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_determinate ();
+        }
 
         new Thread<void> ("trim-export-thread", () => {
             run_internal ();
@@ -132,7 +144,7 @@ public class TrimRunner : Object {
             );
 
             report_status (@"🔄 $(operation_label) — encoding $(segments.length) segments…");
-            update_progress_fraction (0.1);
+            update_progress (10.0);
 
             int exit = run_concat_filter_encode (output_path);
             if (exit != 0) {
@@ -140,7 +152,7 @@ public class TrimRunner : Object {
             } else {
                 last_output = output_path;
                 report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$output_path");
-                update_progress_fraction (1.0);
+                update_progress (100.0);
 
                 string done = output_path;
                 Idle.add (() => {
@@ -149,7 +161,7 @@ public class TrimRunner : Object {
                 });
             }
 
-            hide_progress ();
+            finish_progress ();
             return;
         }
 
@@ -199,7 +211,7 @@ public class TrimRunner : Object {
                 }
 
                 report_status (@"🔄 Extracting $seg_label…");
-                update_progress_fraction ((double) i / segments.length);
+                update_progress ((double) i / segments.length * 100.0);
 
                 int exit = extract_segment (seg, seg_output);
                 if (exit != 0) {
@@ -233,7 +245,7 @@ public class TrimRunner : Object {
                 last_output = concat_output;
 
                 report_status ("🔄 Concatenating segments…");
-                update_progress_fraction (0.9);
+                update_progress (90.0);
 
                 int concat_exit = concat_demuxer (segment_files, tmp_dir, concat_output);
                 if (concat_exit != 0) {
@@ -244,7 +256,7 @@ public class TrimRunner : Object {
                 report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$concat_output");
             }
 
-            update_progress_fraction (1.0);
+            update_progress (100.0);
 
             string done_path = last_output;
             Idle.add (() => {
@@ -259,7 +271,7 @@ public class TrimRunner : Object {
                 DirUtils.remove (tmp_dir);
             }
 
-            hide_progress ();
+            finish_progress ();
         }
     }
 
@@ -613,14 +625,7 @@ public class TrimRunner : Object {
     private int execute_ffmpeg (string[] argv) {
         int exit = runner.execute (argv, (clean) => {
             // Filter noisy progress lines — only log interesting ones
-            bool is_noisy = clean.has_prefix ("frame=") || clean.has_prefix ("fps=") ||
-                            clean.has_prefix ("stream_") || clean.has_prefix ("bitrate=") ||
-                            clean.has_prefix ("total_size=") || clean.has_prefix ("out_time") ||
-                            clean.has_prefix ("dup_frames=") || clean.has_prefix ("drop_frames=") ||
-                            clean.has_prefix ("speed=") || clean.has_prefix ("progress=");
-
-            if (!is_noisy || clean.contains ("Lsize=") || clean.contains ("Error") ||
-                clean.contains ("Warning") || clean.contains ("failed")) {
+            if (ConversionUtils.should_log_ffmpeg_line (clean)) {
                 log_line (clean);
             }
         });
@@ -639,33 +644,7 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] get_audio_args_with_filters (string af) {
-        string[] audio_args = get_audio_args ();
-
-        if (af == "") return audio_args;
-
-        if (audio_args.length > 0 && (audio_args[0] == "-an" ||
-            (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")))
-            return audio_args;
-
-        string[] merged = {};
-        bool found_af = false;
-        for (int i = 0; i < audio_args.length; i++) {
-            if (audio_args[i] == "-af" && i + 1 < audio_args.length) {
-                merged += "-af";
-                merged += af + "," + audio_args[i + 1];
-                i++;
-                found_af = true;
-            } else {
-                merged += audio_args[i];
-            }
-        }
-
-        if (!found_af) {
-            merged += "-af";
-            merged += af;
-        }
-
-        return merged;
+        return FilterBuilder.merge_audio_filters (af, get_audio_args ());
     }
 
     private string[] get_audio_args () {
@@ -693,7 +672,41 @@ public class TrimRunner : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  INTERNAL — UI update helpers (always Idle.add for thread safety)
+    //  INTERNAL — Progress helpers (fix #3: delegates to ProgressTracker)
+    //
+    //  Using ProgressTracker provides:
+    //   • Throttled updates (~4/sec) to avoid main loop flooding
+    //   • Consistent hide behavior (shows "Done" briefly, then fades)
+    //   • Proper cancelled state (immediate hide with "Cancelled" text)
+    //   • Same visual behavior as Converter's progress
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Update progress as a percentage (0–100).
+     * No-op if no ProgressBar was provided.
+     */
+    private void update_progress (double percent) {
+        if (tracker != null) {
+            tracker.update_percent (percent);
+        }
+    }
+
+    /**
+     * Complete the progress display.
+     * Uses hide_cancelled() if the operation was cancelled, otherwise hide().
+     */
+    private void finish_progress () {
+        if (tracker == null) return;
+
+        if (runner.is_cancelled ()) {
+            tracker.hide_cancelled ();
+        } else {
+            tracker.hide ();
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Status reporting (always Idle.add for thread safety)
     // ═════════════════════════════════════════════════════════════════════════
 
     private void report_status (string message) {
@@ -724,42 +737,6 @@ public class TrimRunner : Object {
         if (console_tab != null) {
             console_tab.add_line (text);
         }
-    }
-
-    private void show_progress () {
-        Idle.add (() => {
-            if (progress_bar != null) {
-                progress_bar.set_visible (true);
-                progress_bar.set_fraction (0.0);
-                progress_bar.set_text (@"$(operation_label)…");
-            }
-            return Source.REMOVE;
-        });
-    }
-
-    private void update_progress_fraction (double fraction) {
-        Idle.add (() => {
-            if (progress_bar != null) {
-                progress_bar.set_fraction (fraction.clamp (0.0, 1.0));
-                progress_bar.set_text ("%.0f%%".printf (fraction * 100.0));
-            }
-            return Source.REMOVE;
-        });
-    }
-
-    private void hide_progress () {
-        Idle.add (() => {
-            if (progress_bar != null) {
-                progress_bar.set_fraction (1.0);
-                progress_bar.set_text ("Done");
-                Timeout.add (800, () => {
-                    progress_bar.set_visible (false);
-                    progress_bar.set_text ("Waiting…");
-                    return Source.REMOVE;
-                });
-            }
-            return Source.REMOVE;
-        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
