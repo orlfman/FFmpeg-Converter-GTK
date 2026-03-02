@@ -105,6 +105,8 @@ public class TrimTab : Box, ICodecTab {
         set_margin_start (24);
         set_margin_end (24);
 
+        inject_segment_css ();
+
         build_mode_selector ();
         build_player_section ();
         build_crop_controls ();
@@ -363,6 +365,103 @@ public class TrimTab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  CSS — Segment time entry validation styles
+    //
+    //  Injected once for the entire app. Uses translucent borders that work
+    //  well with both light and dark Adwaita themes.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private static bool segment_css_injected = false;
+
+    private static void inject_segment_css () {
+        if (segment_css_injected) return;
+        segment_css_injected = true;
+
+        var css = new CssProvider ();
+        css.load_from_string (
+            "entry.segment-valid {\n" +
+            "    border-color: @success_color;\n" +
+            "    box-shadow: 0 0 0 1px alpha(@success_color, 0.35);\n" +
+            "    transition: border-color 150ms ease, box-shadow 150ms ease;\n" +
+            "}\n" +
+            "entry.segment-error {\n" +
+            "    border-color: @error_color;\n" +
+            "    box-shadow: 0 0 0 1px alpha(@error_color, 0.35);\n" +
+            "    transition: border-color 150ms ease, box-shadow 150ms ease;\n" +
+            "}\n"
+        );
+        StyleContext.add_provider_for_display (
+            Gdk.Display.get_default (),
+            css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SEGMENT TIME VALIDATION
+    //
+    //  Fix #6: Validate start/end time entries and show red/green borders.
+    //
+    //  Checks:
+    //   • Value is non-negative
+    //   • Start time < end time for the same segment
+    //   • Value does not exceed video duration (when known)
+    //
+    //  Called on every keystroke (changed signal) for live feedback,
+    //  and on Enter (activate signal) to gate whether the edit is committed.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Validate a time entry and apply the appropriate CSS class.
+     *
+     * @param entry          The Entry widget to style
+     * @param parsed_value   The parsed time in seconds
+     * @param other_value    The other boundary of the segment (end if this is start, vice versa)
+     * @param is_start       true if this entry is the start time, false for end time
+     * @return               true if the value is valid
+     */
+    private bool validate_segment_time (Entry entry, double parsed_value,
+                                        double other_value, bool is_start) {
+        string? error_reason = null;
+
+        // 1. Non-negative
+        if (parsed_value < 0.0) {
+            error_reason = "Time cannot be negative";
+        }
+
+        // 2. Start must be before end
+        if (error_reason == null) {
+            if (is_start && parsed_value >= other_value) {
+                error_reason = "Start must be before end";
+            } else if (!is_start && parsed_value <= other_value) {
+                error_reason = "End must be after start";
+            }
+        }
+
+        // 3. Within video duration (when known)
+        if (error_reason == null) {
+            double duration = player.get_duration_seconds ();
+            if (duration > 0.0 && parsed_value > duration) {
+                error_reason = "Exceeds video duration";
+            }
+        }
+
+        // Apply visual feedback
+        entry.remove_css_class ("segment-valid");
+        entry.remove_css_class ("segment-error");
+
+        if (error_reason != null) {
+            entry.add_css_class ("segment-error");
+            entry.set_tooltip_text (error_reason);
+            return false;
+        } else {
+            entry.add_css_class ("segment-valid");
+            entry.set_tooltip_text ("Valid");
+            return true;
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  UI — Mode Selector
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -417,8 +516,8 @@ public class TrimTab : Box, ICodecTab {
         }
         export_separate_switch.set_sensitive (show_trim);
 
-        // Crop always requires re-encode
-        if (m == Mode.CROP_ONLY) {
+        // Crop always requires re-encode (both Crop Only and Crop & Trim)
+        if (m == Mode.CROP_ONLY || m == Mode.TRIM_AND_CROP) {
             copy_mode_switch.set_active (false);
             copy_mode_switch.set_sensitive (false);
         } else if (speed_locked) {
@@ -897,10 +996,21 @@ public class TrimTab : Box, ICodecTab {
         start_entry.set_tooltip_text ("Start time (editable)");
 
         int idx_start = index;
+
+        // Fix #6: Live validation on every keystroke
+        start_entry.changed.connect (() => {
+            double parsed = VideoPlayer.parse_time (start_entry.get_text ());
+            validate_segment_time (start_entry, parsed, segments[idx_start].end_time, true);
+        });
+
+        // Fix #6: Only commit the value if validation passes
         start_entry.activate.connect (() => {
             double new_val = VideoPlayer.parse_time (start_entry.get_text ());
-            segments[idx_start].start_time = new_val;
-            rebuild_segment_rows ();
+            bool valid = validate_segment_time (start_entry, new_val, segments[idx_start].end_time, true);
+            if (valid) {
+                segments[idx_start].start_time = new_val;
+                rebuild_segment_rows ();
+            }
         });
         row.add_suffix (start_entry);
 
@@ -921,10 +1031,21 @@ public class TrimTab : Box, ICodecTab {
         end_entry.set_tooltip_text ("End time (editable)");
 
         int idx_end = index;
+
+        // Fix #6: Live validation on every keystroke
+        end_entry.changed.connect (() => {
+            double parsed = VideoPlayer.parse_time (end_entry.get_text ());
+            validate_segment_time (end_entry, parsed, segments[idx_end].start_time, false);
+        });
+
+        // Fix #6: Only commit the value if validation passes
         end_entry.activate.connect (() => {
             double new_val = VideoPlayer.parse_time (end_entry.get_text ());
-            segments[idx_end].end_time = new_val;
-            rebuild_segment_rows ();
+            bool valid = validate_segment_time (end_entry, new_val, segments[idx_end].start_time, false);
+            if (valid) {
+                segments[idx_end].end_time = new_val;
+                rebuild_segment_rows ();
+            }
         });
         row.add_suffix (end_entry);
 

@@ -177,7 +177,10 @@ namespace FilterBuilder {
         // Nothing to merge
         if (af == "") return audio_args;
 
-        // Cannot apply filters when audio is disabled or stream-copied
+        // Cannot apply filters when audio is disabled or stream-copied.
+        // Note: AudioSettings.update_for_normalize() prevents the user from
+        // selecting "Copy" when normalize is enabled, so the copy case here
+        // is only reached when no audio filters are actually needed.
         if (audio_args.length > 0 && audio_args[0] == "-an")
             return audio_args;
         if (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")

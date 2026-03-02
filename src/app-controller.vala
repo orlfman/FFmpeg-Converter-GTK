@@ -63,6 +63,7 @@ public class AppController : Object {
         wire_crop_detection ();
         wire_audio_speed_constraint ();
         wire_video_speed_constraint ();
+        wire_normalize_audio_constraint ();
         wire_conversion_done ();
         wire_trim_done ();
         wire_trim_mode_changed ();
@@ -97,6 +98,20 @@ public class AppController : Object {
             x265_tab.audio_settings.update_for_audio_speed (on);
             x264_tab.audio_settings.update_for_audio_speed (on);
             vp9_tab.audio_settings.update_for_audio_speed (on);
+        });
+    }
+
+    // ── Normalize audio → disable "Copy" in all codec tab audio lists ───────
+    //    Mirrors wire_audio_speed_constraint: loudnorm is an audio filter
+    //    and audio filters require re-encoding (copy won't apply them).
+
+    private void wire_normalize_audio_constraint () {
+        general_tab.normalize_audio.notify["active"].connect (() => {
+            bool on = general_tab.normalize_audio.active;
+            svt_tab.audio_settings.update_for_normalize (on);
+            x265_tab.audio_settings.update_for_normalize (on);
+            x264_tab.audio_settings.update_for_normalize (on);
+            vp9_tab.audio_settings.update_for_normalize (on);
         });
     }
 

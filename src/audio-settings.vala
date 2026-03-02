@@ -37,6 +37,7 @@ public class AudioSettings : Object {
     // State for codec list constraints
     private string current_container = ContainerExt.MKV;
     private bool   speed_active = false;
+    private bool   normalize_active = false;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -224,6 +225,16 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    /**
+     * When audio normalization (loudnorm) is enabled, stream-copy must be
+     * disabled because audio filters require re-encoding.
+     * Mirrors the existing update_for_audio_speed() pattern.
+     */
+    public void update_for_normalize (bool active) {
+        normalize_active = active;
+        rebuild_codec_list ();
+    }
+
     private void rebuild_codec_list () {
         string current = get_codec_text ();
 
@@ -237,7 +248,7 @@ public class AudioSettings : Object {
                        AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS };
         }
 
-        if (speed_active) {
+        if (speed_active || normalize_active) {
             string[] filtered = {};
             foreach (string c in codecs) {
                 if (c != AudioCodecName.COPY) filtered += c;
