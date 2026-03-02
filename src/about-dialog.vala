@@ -7,7 +7,7 @@ namespace AboutDialog {
         var about = new Adw.AboutDialog ();
 
         about.set_application_name ("FFmpeg Converter GTK");
-        about.set_version ("1.0");
+        about.set_version ("1.1");
         about.set_application_icon ("ffmpeg-converter-gtk");
         about.set_developer_name ("orlfman");
         about.set_website ("https://github.com/orlfman/FFmpeg-Converter-GTK");

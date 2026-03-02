@@ -13,7 +13,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 - Smart audio settings (Opus, AAC, MP3, FLAC, normalization, speed adjustment)
 - Live console output and detailed information tab
 - Extensive color and light correction and alteration. Full RGB manipulation.
-- Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, and create individual and concatenate segments
+- Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate.
 - Native Adwaita UI
 
 ### Dependency

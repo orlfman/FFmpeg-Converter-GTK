@@ -148,6 +148,9 @@ public class TrimTab : Box, ICodecTab {
             global_crop_value = "";
             update_crop_display ("", 0, 0, 0, 0);
 
+            // Clear any stale trim state from the previous video
+            reset_trim_state ();
+
             player.load_file (path);
         }
     }
@@ -296,6 +299,71 @@ public class TrimTab : Box, ICodecTab {
 
     public bool is_exporting () {
         return active_runner != null;
+    }
+
+    /**
+     * Compute the expected output path(s) for the overwrite check.
+     * Returns the first path that already exists on disk, or "" if none exist.
+     * Handles both combined output and export-separate modes.
+     */
+    public string get_expected_output_path (string input_file, string output_folder) {
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string input_ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+
+        // Determine extension
+        string out_ext;
+        if (copy_mode_switch.active) {
+            out_ext = input_ext;
+        } else {
+            int sel = (int) codec_choice.get_selected ();
+            ICodecTab? tab = null;
+            if (sel == 0) tab = svt_tab;
+            else if (sel == 1) tab = x265_tab;
+            else if (sel == 2) tab = x264_tab;
+            else if (sel == 3) tab = vp9_tab;
+
+            if (tab != null) {
+                string container = tab.get_container ();
+                out_ext = (container.length > 0) ? "." + container : ".mkv";
+            } else {
+                out_ext = ".mkv";
+            }
+        }
+
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        if (export_separate_switch.active) {
+            // Check each expected segment file
+            int count = (current_mode == Mode.CROP_ONLY) ? 1 : segments.length;
+            for (int i = 0; i < count; i++) {
+                string num = pad_segment_number (i + 1);
+                string seg_path = Path.build_filename (
+                    out_dir, @"$name_no_ext-segment-$num$out_ext"
+                );
+                if (FileUtils.test (seg_path, FileTest.EXISTS)) {
+                    return seg_path;
+                }
+            }
+            return "";
+        }
+
+        // Combined output
+        string suffix;
+        if (current_mode == Mode.CROP_ONLY) suffix = "-cropped";
+        else if (current_mode == Mode.TRIM_AND_CROP) suffix = "-cropped-trimmed";
+        else suffix = "-trimmed";
+
+        return Path.build_filename (out_dir, @"$name_no_ext$suffix$out_ext");
+    }
+
+    private static string pad_segment_number (int n) {
+        if (n < 10) return "00" + n.to_string ();
+        if (n < 100) return "0" + n.to_string ();
+        return n.to_string ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -588,6 +656,13 @@ public class TrimTab : Box, ICodecTab {
         add_at_btn.clicked.connect (on_add_at_position);
         add_row.add_suffix (add_at_btn);
 
+        var reset_segments_btn = new Button.with_label ("Reset");
+        reset_segments_btn.set_valign (Align.CENTER);
+        reset_segments_btn.add_css_class ("destructive-action");
+        reset_segments_btn.set_tooltip_text ("Remove all segments and reset marks");
+        reset_segments_btn.clicked.connect (reset_trim_state);
+        add_row.add_suffix (reset_segments_btn);
+
         mark_group.add (add_row);
         append (mark_group);
     }
@@ -681,6 +756,22 @@ public class TrimTab : Box, ICodecTab {
                 copy_mode_switch.set_sensitive (true);
             }
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SEGMENT MANAGEMENT — Reset
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void reset_trim_state () {
+        // Clear all segments
+        segments = new GenericArray<TrimSegment> ();
+        rebuild_segment_rows ();
+
+        // Reset mark in/out
+        mark_in = 0.0;
+        mark_out = 0.0;
+        mark_in_label.set_text ("00:00:00.000");
+        mark_out_label.set_text ("00:00:00.000");
     }
 
     // ═════════════════════════════════════════════════════════════════════════

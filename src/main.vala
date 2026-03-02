@@ -207,7 +207,7 @@ public class MainWindow : Adw.ApplicationWindow {
             cancel_button.set_sensitive (false);
         });
 
-	// Disable General tab crop when Crop & Trim tab handles cropping
+        // Disable General tab crop when Crop & Trim tab handles cropping
         trim_tab.mode_changed.connect ((mode) => {
             bool trim_handles_crop = (mode != 0);  // 0 = TRIM_ONLY
             general_tab.crop_expander.set_sensitive (!trim_handles_crop);
@@ -240,14 +240,22 @@ public class MainWindow : Adw.ApplicationWindow {
         // ── Crop & Trim Tab gets its own conversion path ─────────────────────
         if (active_codec_tab is TrimTab) {
             var trim = (TrimTab) active_codec_tab;
-            trim.start_trim_export (
-                file_pickers.input_entry.get_text (),
-                file_pickers.output_entry.get_text (),
-                status_area.status_label,
-                status_area.progress_bar,
-                console_tab
-            );
-            cancel_button.set_sensitive (true);
+            string input = file_pickers.input_entry.get_text ();
+            string out_folder = file_pickers.output_entry.get_text ();
+
+            // Check for overwrite (skipped for export-separate mode)
+            string expected = trim.get_expected_output_path (input, out_folder);
+            if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+                show_trim_overwrite_dialog (trim, input, out_folder, expected);
+            } else {
+                trim.start_trim_export (
+                    input, out_folder,
+                    status_area.status_label,
+                    status_area.progress_bar,
+                    console_tab
+                );
+                cancel_button.set_sensitive (true);
+            }
             return;
         }
 
@@ -304,6 +312,41 @@ public class MainWindow : Adw.ApplicationWindow {
             } else if (response == "rename") {
                 string unique = Converter.find_unique_path (output_file);
                 begin_conversion (input_file, unique, codec_tab, builder);
+            }
+            // "cancel" — do nothing
+        });
+    }
+
+    // (#5) Show overwrite/rename/cancel dialog for Crop & Trim tab
+    private void show_trim_overwrite_dialog (TrimTab trim,
+                                              string input_file,
+                                              string output_folder,
+                                              string expected_path) {
+        string basename = Path.get_basename (expected_path);
+
+        var dialog = new Adw.AlertDialog (
+            "File Already Exists",
+            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
+        );
+
+        dialog.add_response ("cancel", "Cancel");
+        dialog.add_response ("overwrite", "Overwrite");
+
+        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_default_response ("cancel");
+        dialog.set_close_response ("cancel");
+
+        dialog.choose.begin (this, null, (obj, res) => {
+            string response = dialog.choose.end (res);
+
+            if (response == "overwrite") {
+                trim.start_trim_export (
+                    input_file, output_folder,
+                    status_area.status_label,
+                    status_area.progress_bar,
+                    console_tab
+                );
+                cancel_button.set_sensitive (true);
             }
             // "cancel" — do nothing
         });
