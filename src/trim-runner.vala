@@ -40,6 +40,7 @@ public class TrimRunner : Object {
     public string input_file { get; set; }
     public string output_folder { get; set; }
     public bool copy_mode { get; set; default = true; }
+    public bool keyframe_cut { get; set; default = true; }
     public bool export_separate { get; set; default = false; }
     public string output_suffix { get; set; default = "-trimmed"; }
     public string operation_label { get; set; default = "Trim export"; }
@@ -472,17 +473,40 @@ public class TrimRunner : Object {
     private int extract_segment (TrimSegment seg, string output) {
         string[] cmd = { "ffmpeg", "-y" };
 
-        cmd += "-ss";
-        cmd += format_seconds (seg.start_time);
-
-        cmd += "-i";
-        cmd += input_file;
-
-        cmd += "-to";
-        cmd += format_seconds (seg.end_time - seg.start_time);
-
         bool seg_has_crop = seg.has_crop ();
         bool seg_reencode = !copy_mode || seg_has_crop;
+
+        // When copy mode with keyframe cut enabled (default), place -ss before
+        // -i for fast input-level seeking (snaps to nearest keyframe).
+        // When keyframe cut is disabled, place -ss after -i for precise
+        // timestamp positioning (slower, reads from beginning).
+        bool input_seeking = !seg_reencode && keyframe_cut;
+
+        if (input_seeking) {
+            // Input seeking: -ss before -i, duration-based -to
+            cmd += "-ss";
+            cmd += format_seconds (seg.start_time);
+            cmd += "-i";
+            cmd += input_file;
+            cmd += "-to";
+            cmd += format_seconds (seg.end_time - seg.start_time);
+        } else if (!seg_reencode) {
+            // Copy mode with precise cut: -ss after -i, absolute -to
+            cmd += "-i";
+            cmd += input_file;
+            cmd += "-ss";
+            cmd += format_seconds (seg.start_time);
+            cmd += "-to";
+            cmd += format_seconds (seg.end_time);
+        } else {
+            // Re-encode: input seeking is fine (will decode anyway)
+            cmd += "-ss";
+            cmd += format_seconds (seg.start_time);
+            cmd += "-i";
+            cmd += input_file;
+            cmd += "-to";
+            cmd += format_seconds (seg.end_time - seg.start_time);
+        }
 
         if (!seg_reencode) {
             cmd += "-c:v";

@@ -71,6 +71,8 @@ public class TrimTab : Box, ICodecTab {
 
     // ── Output mode ──────────────────────────────────────────────────────────
     private Switch copy_mode_switch;
+    private Switch keyframe_cut_switch;
+    private Adw.ActionRow keyframe_cut_row;
     private Adw.ActionRow reencode_codec_row;
     private DropDown codec_choice;
     private Switch export_separate_switch;
@@ -235,6 +237,7 @@ public class TrimTab : Box, ICodecTab {
         // decide copy vs re-encode, so don't globally force re-encode
         bool global_force = force_reencode && !export_separate_switch.active;
         runner.copy_mode       = copy_mode_switch.active && !global_force;
+        runner.keyframe_cut    = keyframe_cut_switch.active;
         runner.export_separate = export_separate_switch.active;
         runner.video_width     = player.intrinsic_width;
         runner.video_height    = player.intrinsic_height;
@@ -793,7 +796,7 @@ public class TrimTab : Box, ICodecTab {
         // ── Copy Streams toggle ──────────────────────────────────────────────
         var copy_row = new Adw.ActionRow ();
         copy_row.set_title ("Copy Streams (Fast)");
-        copy_row.set_subtitle ("No re-encoding — cuts at nearest keyframes");
+        copy_row.set_subtitle ("No re-encoding — fast stream copy");
 
         copy_mode_switch = new Switch ();
         copy_mode_switch.set_valign (Align.CENTER);
@@ -801,6 +804,19 @@ public class TrimTab : Box, ICodecTab {
         copy_row.add_suffix (copy_mode_switch);
         copy_row.set_activatable_widget (copy_mode_switch);
         output_group.add (copy_row);
+
+        // ── Keyframe Cut toggle (only visible when copy mode is ON) ──────────
+        keyframe_cut_row = new Adw.ActionRow ();
+        keyframe_cut_row.set_title ("Cut at Nearest Keyframe");
+        keyframe_cut_row.set_subtitle ("Faster but may shift cut points to the nearest keyframe. Disable for precise timestamps (slower).");
+
+        keyframe_cut_switch = new Switch ();
+        keyframe_cut_switch.set_valign (Align.CENTER);
+        keyframe_cut_switch.set_active (true);
+        keyframe_cut_row.add_suffix (keyframe_cut_switch);
+        keyframe_cut_row.set_activatable_widget (keyframe_cut_switch);
+        keyframe_cut_row.set_visible (copy_mode_switch.active);
+        output_group.add (keyframe_cut_row);
 
         // ── Re-encode Codec selector ─────────────────────────────────────────
         reencode_codec_row = new Adw.ActionRow ();
@@ -817,6 +833,7 @@ public class TrimTab : Box, ICodecTab {
         copy_mode_switch.notify["active"].connect (() => {
             update_codec_row_visibility ();
             update_concat_audio_constraint ();
+            keyframe_cut_row.set_visible (copy_mode_switch.active);
         });
 
         // ── Export as separate files ─────────────────────────────────────────
