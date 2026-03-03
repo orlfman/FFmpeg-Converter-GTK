@@ -454,7 +454,7 @@ public class SubtitlesTab : Box {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Apply Changes");
         group.set_description (
-            "Remux the video with your subtitle modifications — video and audio stay untouched (fast, no re-encoding)"
+            "Remux the video with your subtitle modifications — video and audio stay untouched (no re-encoding)"
         );
 
         // Container format
