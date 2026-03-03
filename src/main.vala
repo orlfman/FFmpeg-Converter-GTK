@@ -22,6 +22,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private ConsoleTab console_tab;
     private GeneralTab general_tab;
     private TrimTab trim_tab;
+    private SubtitlesTab subtitles_tab;
     private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
 
@@ -41,6 +42,7 @@ public class MainWindow : Adw.ApplicationWindow {
             file_pickers, general_tab,
             svt_tab, x265_tab, x264_tab, vp9_tab,
             info_tab, console_tab, trim_tab,
+            subtitles_tab,
             converter, hamburger,
             cancel_button, status_area
         );
@@ -67,6 +69,14 @@ public class MainWindow : Adw.ApplicationWindow {
         trim_tab.x265_tab   = x265_tab;
         trim_tab.x264_tab   = x264_tab;
         trim_tab.vp9_tab    = vp9_tab;
+
+        subtitles_tab = new SubtitlesTab ();
+        subtitles_tab.file_pickers = file_pickers;
+        subtitles_tab.set_ui_refs (
+            status_area.status_label,
+            status_area.progress_bar,
+            console_tab
+        );
 
         hamburger = new HamburgerMenu (this, file_pickers);
 
@@ -97,6 +107,7 @@ public class MainWindow : Adw.ApplicationWindow {
         add_scrolled_page (view_stack, x264_tab,    "x264",     "x264",        "video-x-generic-symbolic");
         add_scrolled_page (view_stack, vp9_tab,     "vp9",      "VP9",         "video-x-generic-symbolic");
         add_scrolled_page (view_stack, trim_tab,    "trim",     "Crop & Trim", "edit-cut-symbolic");
+        add_scrolled_page (view_stack, subtitles_tab, "subtitles", "Subtitles", "media-view-subtitles-symbolic");
 
         var info_page = view_stack.add_titled (info_tab, "info", "Information");
         info_page.set_icon_name ("dialog-information-symbolic");
@@ -310,7 +321,10 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private void on_cancel_clicked () {
-        if (trim_tab.is_exporting ()) {
+        if (subtitles_tab.is_busy ()) {
+            subtitles_tab.cancel_operation ();
+            status_area.set_status ("⏹️ Subtitle operation cancelled by user.");
+        } else if (trim_tab.is_exporting ()) {
             trim_tab.cancel_trim ();
             status_area.set_status ("⏹️ Export cancelled by user.");
         } else {

@@ -23,6 +23,7 @@ public class AppController : Object {
     private InformationTab info_tab;
     private ConsoleTab console_tab;
     private TrimTab trim_tab;
+    private SubtitlesTab subtitles_tab;
     private Converter converter;
     private HamburgerMenu hamburger;
     private Button cancel_button;
@@ -37,23 +38,25 @@ public class AppController : Object {
                           InformationTab info_tab,
                           ConsoleTab console_tab,
                           TrimTab trim_tab,
+                          SubtitlesTab subtitles_tab,
                           Converter converter,
                           HamburgerMenu hamburger,
                           Button cancel_button,
                           StatusArea status_area) {
-        this.file_pickers = file_pickers;
-        this.general_tab  = general_tab;
-        this.svt_tab      = svt_tab;
-        this.x265_tab     = x265_tab;
-        this.x264_tab     = x264_tab;
-        this.vp9_tab      = vp9_tab;
-        this.info_tab     = info_tab;
-        this.console_tab  = console_tab;
-        this.trim_tab     = trim_tab;
-        this.converter    = converter;
-        this.hamburger    = hamburger;
-        this.cancel_button = cancel_button;
-        this.status_area  = status_area;
+        this.file_pickers   = file_pickers;
+        this.general_tab    = general_tab;
+        this.svt_tab        = svt_tab;
+        this.x265_tab       = x265_tab;
+        this.x264_tab       = x264_tab;
+        this.vp9_tab        = vp9_tab;
+        this.info_tab       = info_tab;
+        this.console_tab    = console_tab;
+        this.trim_tab       = trim_tab;
+        this.subtitles_tab  = subtitles_tab;
+        this.converter      = converter;
+        this.hamburger      = hamburger;
+        this.cancel_button  = cancel_button;
+        this.status_area    = status_area;
 
         wire_all ();
     }
@@ -67,9 +70,10 @@ public class AppController : Object {
         wire_conversion_done ();
         wire_trim_done ();
         wire_trim_mode_changed ();
+        wire_subtitle_done ();
     }
 
-    // ── Input file changed → probe info, load trim preview ──────────────────
+    // ── Input file changed → probe info, load trim preview, load subtitles ──
 
     private void wire_file_input_changed () {
         file_pickers.input_entry.changed.connect (() => {
@@ -77,6 +81,7 @@ public class AppController : Object {
             info_tab.load_input_info (path);
             info_tab.reset_output ();
             trim_tab.load_video (path);
+            subtitles_tab.load_video (path);
         });
     }
 
@@ -160,6 +165,16 @@ public class AppController : Object {
                 general_tab.crop_expander.set_enable_expansion (false);
                 general_tab.crop_check.set_active (false);
             }
+        });
+    }
+
+    // ── Subtitle operation done → probe output, update hamburger, disable cancel ──
+
+    private void wire_subtitle_done () {
+        subtitles_tab.subtitle_done.connect ((output_path) => {
+            info_tab.load_output_info (output_path);
+            hamburger.set_last_output_file (output_path);
+            cancel_button.set_sensitive (false);
         });
     }
 }
