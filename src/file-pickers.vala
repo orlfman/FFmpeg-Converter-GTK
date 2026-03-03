@@ -54,6 +54,12 @@ public class FilePickers : Box {
         output_row.append (output_browse);
         append (output_row);
 
+        // Pre-populate from settings if a default output directory is configured
+        string default_dir = AppSettings.get_default ().default_output_dir;
+        if (default_dir.length > 0 && FileUtils.test (default_dir, FileTest.IS_DIR)) {
+            output_entry.set_text (default_dir);
+        }
+
         // === Drag and Drop ===
         setup_drag_drop ();
     }

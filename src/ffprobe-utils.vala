@@ -10,7 +10,8 @@ namespace FfprobeUtils {
     public double probe_input_fps (string input_file) {
         try {
             string[] cmd = {
-                "ffprobe", "-v", "quiet",
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=r_frame_rate",
                 "-of", "csv=p=0",

@@ -84,7 +84,7 @@ public class ConversionRunner {
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] build_pass1 (string input) {
-        string[] cmd = { "ffmpeg", "-y" };
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
             cmd += "-ss";
@@ -115,7 +115,7 @@ public class ConversionRunner {
     }
 
     private string[] build_pass2 (string input, string safe_output) {
-        string[] cmd = { "ffmpeg", "-y" };
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
             cmd += "-ss";
@@ -149,7 +149,7 @@ public class ConversionRunner {
     }
 
     private string[] build_single_pass (string input, string safe_output) {
-        string[] cmd = { "ffmpeg", "-y" };
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
             cmd += "-ss";

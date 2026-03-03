@@ -20,6 +20,7 @@ public class HamburgerMenu {
         // ── Top-level menu ───────────────────────────────────────────────────
         var menu_model = new GLib.Menu ();
         menu_model.append_submenu ("Playback", playback_menu);
+        menu_model.append ("Preferences", "app.preferences");
         menu_model.append ("About FFmpeg Converter GTK", "app.about");
 
         // Create the menu button with the hamburger icon
@@ -38,6 +39,16 @@ public class HamburgerMenu {
                 AboutDialog.show_about (parent_window);
             });
             app.add_action (about_action);
+        }
+
+        // Preferences
+        if (app.lookup_action ("preferences") == null) {
+            var prefs_action = new GLib.SimpleAction ("preferences", null);
+            prefs_action.activate.connect (() => {
+                var dialog = new SettingsDialog ();
+                dialog.present (parent_window);
+            });
+            app.add_action (prefs_action);
         }
 
         // View Input Video

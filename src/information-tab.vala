@@ -488,7 +488,7 @@ public class InformationTab : Box {
         // ── Run ffprobe ───────────────────────────────────────────────────────
         try {
             string[] cmd = {
-                "ffprobe", "-v", "error",
+                AppSettings.get_default ().ffprobe_path, "-v", "error",
                 "-show_format", "-show_streams",
                 file_path
             };
@@ -766,7 +766,7 @@ public class InformationTab : Box {
     private static string count_keyframes (string file_path) {
         try {
             string[] cmd = {
-                "ffprobe", "-v", "error",
+                AppSettings.get_default ().ffprobe_path, "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "packet=flags",
                 "-of", "csv=p=0",

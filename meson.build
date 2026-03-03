@@ -7,11 +7,8 @@ project('ffmpeg-converter-gtk',
     'buildtype=debugoptimized'
   ]
 )
-
 gnome = import('gnome')
-
 add_project_arguments('--target-glib=2.0', '--pkg=posix', language : 'vala')
-
 dependencies = [
   dependency('glib-2.0'),
   dependency('gobject-2.0'),
@@ -19,7 +16,6 @@ dependencies = [
   dependency('gtk4'),
   dependency('libadwaita-1'),
 ]
-
 sources = files(
   'src/main.vala',
   'src/app-controller.vala',
@@ -56,9 +52,10 @@ sources = files(
   'src/vp9-tab.vala',
   'src/vp9-builder.vala',
   'src/codec-presets.vala',
+  'src/app-settings.vala',
+  'src/settings-dialog.vala',
   'src/ffprobe-utils.vala'
 )
-
 executable('ffmpeg-converter-gtk',
   sources,
   dependencies : dependencies,

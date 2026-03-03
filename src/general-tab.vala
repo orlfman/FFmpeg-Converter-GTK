@@ -579,7 +579,8 @@ public class GeneralTab : Box {
         string vf = FilterBuilder.get_crop_detection_chain (this);
 
         string[] cmd = {
-            "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats",
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "info", "-nostats",
             "-i", input_file,
             "-vf", vf,
             "-f", "null",

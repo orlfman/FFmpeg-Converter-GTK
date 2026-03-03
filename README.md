@@ -9,11 +9,12 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 ### Features
 
 - Dedicated tabs for **SVT-AV1**, **x265**, **x264**, and **VP9** with deep encoder control
-- Automatic crop detection for black bars, HDR to SDR tone mapping, scaling, rotation, speed control, and more
-- Smart audio settings (Opus, AAC, MP3, FLAC, normalization, speed adjustment)
-- Live console output and detailed information tab
+- Automatic, one-click crop detection for black bars, HDR to SDR tone mapping, scaling, rotation, speed control, and way more
+- Audio codec support for AAC, FLAC, MP3, MP3, Opus, and Vorbis
+- Live console output for debugging, and detailed information tab for video metadata
 - Extensive color and light correction and alteration. Full RGB manipulation.
-- Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate.
+- Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. You can select regions with your mouse, in the video player and crop away! Even cropping on a per segment basis + concatenate.
+- By default uses system FFmpeg but you can set custom paths for FFmpeg and its tools like FFprobe for you can use different FFmpeg versions.
 - Native Adwaita UI
 
 ### Dependency

@@ -364,7 +364,8 @@ public class Converter : Object {
     private double get_video_duration (string input_file) {
         try {
             string[] cmd = {
-                "ffprobe", "-v", "quiet",
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
                 "-print_format", "csv=p=0",
                 "-show_entries", "format=duration",
                 input_file

@@ -284,7 +284,7 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private int run_concat_filter_encode (string output) {
-        string[] cmd = { "ffmpeg", "-y" };
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         // ── Add each segment as a separate input with seeking ────────────────
         for (int i = 0; i < segments.length; i++) {
@@ -471,7 +471,7 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private int extract_segment (TrimSegment seg, string output) {
-        string[] cmd = { "ffmpeg", "-y" };
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         bool seg_has_crop = seg.has_crop ();
         bool seg_reencode = !copy_mode || seg_has_crop;
@@ -628,7 +628,7 @@ public class TrimRunner : Object {
         }
 
         string[] cmd = {
-            "ffmpeg", "-y",
+            AppSettings.get_default ().ffmpeg_path, "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", list_path,
