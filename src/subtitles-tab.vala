@@ -39,6 +39,10 @@ public class SubtitlesTab : Box {
     private GenericArray<ExternalSubtitle> added_subtitles  = new GenericArray<ExternalSubtitle> ();
     private bool _is_busy = false;
 
+    // ── Drag-and-drop state ──────────────────────────────────────────────────
+    private int _drag_from_detected = -1;
+    private int _drag_from_added    = -1;
+
     // ── Dynamic sections (rebuilt when data changes) ─────────────────────────
     private Box detected_section;
     private Box add_section;
@@ -49,7 +53,6 @@ public class SubtitlesTab : Box {
     private Button   extract_button;
     private DropDown container_combo;
     private Adw.ActionRow container_compat_row;
-    private Button   apply_button;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -117,14 +120,14 @@ public class SubtitlesTab : Box {
             group.set_header_suffix (count_label);
 
             for (int i = 0; i < detected_streams.length; i++) {
-                group.add (build_detected_row (detected_streams[i]));
+                group.add (build_detected_row (detected_streams[i], i));
             }
         }
 
         detected_section.append (group);
     }
 
-    private Adw.ExpanderRow build_detected_row (SubtitleStream stream) {
+    private Adw.ExpanderRow build_detected_row (SubtitleStream stream, int idx) {
         var expander = new Adw.ExpanderRow ();
 
         // Title: "#0  ·  subrip  ·  eng"
@@ -137,6 +140,33 @@ public class SubtitlesTab : Box {
             expander.set_subtitle (stream.title);
 
         expander.add_prefix (make_icon ("media-view-subtitles-symbolic"));
+
+        // ── Drag-and-drop reorder ────────────────────────────────────────────
+        var drag_source = new DragSource ();
+        drag_source.set_actions (Gdk.DragAction.MOVE);
+        int drag_idx = idx;
+        drag_source.prepare.connect ((x, y) => {
+            _drag_from_detected = drag_idx;
+            _drag_from_added = -1;
+            var val = Value (typeof (string));
+            val.set_string ("detected");
+            return new Gdk.ContentProvider.for_value (val);
+        });
+        drag_source.drag_begin.connect ((source, drag) => {
+            var paintable = new WidgetPaintable (expander);
+            source.set_icon (paintable, 0, 0);
+        });
+        expander.add_controller (drag_source);
+
+        var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
+        drop_target.drop.connect ((value, x, y) => {
+            if (_drag_from_detected >= 0 && _drag_from_detected != drag_idx) {
+                reorder_detected (_drag_from_detected, drag_idx);
+            }
+            _drag_from_detected = -1;
+            return true;
+        });
+        expander.add_controller (drop_target);
 
         // ── Include/exclude via enable-switch ────────────────────────────────
         expander.set_show_enable_switch (true);
@@ -328,6 +358,33 @@ public class SubtitlesTab : Box {
         expander.set_subtitle (ext.language.length > 0 ? ext.language : "no language set");
         expander.add_prefix (make_icon ("document-new-symbolic"));
 
+        // ── Drag-and-drop reorder ────────────────────────────────────────────
+        var drag_source = new DragSource ();
+        drag_source.set_actions (Gdk.DragAction.MOVE);
+        int drag_idx = index;
+        drag_source.prepare.connect ((x, y) => {
+            _drag_from_added = drag_idx;
+            _drag_from_detected = -1;
+            var val = Value (typeof (string));
+            val.set_string ("added");
+            return new Gdk.ContentProvider.for_value (val);
+        });
+        drag_source.drag_begin.connect ((source, drag) => {
+            var paintable = new WidgetPaintable (expander);
+            source.set_icon (paintable, 0, 0);
+        });
+        expander.add_controller (drag_source);
+
+        var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
+        drop_target.drop.connect ((value, x, y) => {
+            if (_drag_from_added >= 0 && _drag_from_added != drag_idx) {
+                reorder_added (_drag_from_added, drag_idx);
+            }
+            _drag_from_added = -1;
+            return true;
+        });
+        expander.add_controller (drop_target);
+
         // Remove button
         var rm_btn = new Button.from_icon_name ("user-trash-symbolic");
         rm_btn.add_css_class ("flat");
@@ -452,9 +509,9 @@ public class SubtitlesTab : Box {
 
     private void build_apply_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Apply Changes");
+        group.set_title ("Output Settings");
         group.set_description (
-            "Remux the video with your subtitle modifications — video and audio stay untouched (no re-encoding)"
+            "Configure the output container — video and audio stay untouched (fast, lossless remux)"
         );
 
         // Container format
@@ -479,18 +536,6 @@ public class SubtitlesTab : Box {
             update_container_compat_info ();
         });
 
-        // Apply button
-        var apply_row = new Adw.ActionRow ();
-        apply_row.set_title ("Apply Subtitle Changes");
-        apply_row.set_subtitle ("Write the output file with all modifications");
-        apply_button = new Button.with_label ("Apply");
-        apply_button.add_css_class ("suggested-action");
-        apply_button.set_valign (Align.CENTER);
-        apply_button.set_sensitive (false);
-        apply_row.add_suffix (apply_button);
-        apply_row.set_activatable_widget (apply_button);
-        group.add (apply_row);
-
         append (group);
     }
 
@@ -500,7 +545,6 @@ public class SubtitlesTab : Box {
 
     private void connect_signals () {
         extract_button.clicked.connect (on_extract_clicked);
-        apply_button.clicked.connect (on_apply_clicked);
 
         runner.operation_done.connect ((path) => {
             _is_busy = false;
@@ -787,7 +831,34 @@ public class SubtitlesTab : Box {
     //  APPLY HANDLER
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void on_apply_clicked () {
+    /** Whether the subtitles tab has enough state to apply changes. */
+    public bool can_apply () {
+        if (current_input_file.length == 0) return false;
+        bool has_streams = (detected_streams.length > 0);
+        bool has_added   = (added_subtitles.length > 0);
+        return (has_streams || has_added) && !_is_busy;
+    }
+
+    /** Compute the output path that start_apply() would produce. */
+    public string get_expected_output_path () {
+        if (current_input_file == "") return "";
+
+        string basename = Path.get_basename (current_input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name = (dot > 0) ? basename.substring (0, dot) : basename;
+
+        string dir = Path.get_dirname (current_input_file);
+        if (file_pickers != null) {
+            string out_dir = file_pickers.output_entry.get_text ().strip ();
+            if (out_dir.length > 0)
+                dir = out_dir;
+        }
+
+        string ext = get_output_extension ();
+        return Path.build_filename (dir, name + "-subs" + ext);
+    }
+
+    public void start_apply () {
         if (current_input_file == "") return;
 
         string basename = Path.get_basename (current_input_file);
@@ -852,6 +923,45 @@ public class SubtitlesTab : Box {
         rebuild_add_group ();
     }
 
+    /** Drag-and-drop: move a detected stream from one position to another. */
+    private void reorder_detected (int from, int to) {
+        if (from == to) return;
+        if (from < 0 || from >= detected_streams.length) return;
+        if (to   < 0 || to   >= detected_streams.length) return;
+
+        var stream = detected_streams[from];
+        if (from < to) {
+            for (int i = from; i < to; i++)
+                detected_streams[i] = detected_streams[i + 1];
+        } else {
+            for (int i = from; i > to; i--)
+                detected_streams[i] = detected_streams[i - 1];
+        }
+        detected_streams[to] = stream;
+
+        rebuild_detected_group ();
+        rebuild_extract_combo ();
+    }
+
+    /** Drag-and-drop: move an added subtitle from one position to another. */
+    private void reorder_added (int from, int to) {
+        if (from == to) return;
+        if (from < 0 || from >= added_subtitles.length) return;
+        if (to   < 0 || to   >= added_subtitles.length) return;
+
+        var ext = added_subtitles[from];
+        if (from < to) {
+            for (int i = from; i < to; i++)
+                added_subtitles[i] = added_subtitles[i + 1];
+        } else {
+            for (int i = from; i > to; i--)
+                added_subtitles[i] = added_subtitles[i - 1];
+        }
+        added_subtitles[to] = ext;
+
+        rebuild_add_group ();
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  DEFAULT FLAG — Only one track across all lists
     // ═════════════════════════════════════════════════════════════════════════
@@ -901,7 +1011,6 @@ public class SubtitlesTab : Box {
         bool actionable  = has_streams || has_added;
 
         extract_button.set_sensitive (has_file && has_streams && !_is_busy);
-        apply_button.set_sensitive   (has_file && actionable  && !_is_busy);
 
         // Refresh compat info in case the input file changed (affects "Source")
         if (container_compat_row != null)

@@ -199,7 +199,24 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (active_codec_tab == null) {
-            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, or Crop & Trim) first!");
+            // ── Subtitles Tab gets its own path (remux, no encoding) ─────────
+            if (page == "subtitles") {
+                if (!subtitles_tab.can_apply ()) {
+                    status_area.set_status ("⚠️ Load a file with subtitle tracks or add external subtitles first!");
+                    return;
+                }
+
+                string expected = subtitles_tab.get_expected_output_path ();
+                if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+                    show_subtitle_overwrite_dialog (expected);
+                } else {
+                    subtitles_tab.start_apply ();
+                    cancel_button.set_sensitive (true);
+                }
+                return;
+            }
+
+            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, Crop & Trim, or Subtitles) first!");
             return;
         }
 
@@ -307,6 +324,31 @@ public class MainWindow : Adw.ApplicationWindow {
                     status_area.progress_bar,
                     console_tab
                 );
+                cancel_button.set_sensitive (true);
+            }
+        });
+    }
+
+    private void show_subtitle_overwrite_dialog (string expected_path) {
+        string basename = Path.get_basename (expected_path);
+
+        var dialog = new Adw.AlertDialog (
+            "File Already Exists",
+            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
+        );
+
+        dialog.add_response ("cancel", "Cancel");
+        dialog.add_response ("overwrite", "Overwrite");
+
+        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_default_response ("cancel");
+        dialog.set_close_response ("cancel");
+
+        dialog.choose.begin (this, null, (obj, res) => {
+            string response = dialog.choose.end (res);
+
+            if (response == "overwrite") {
+                subtitles_tab.start_apply ();
                 cancel_button.set_sensitive (true);
             }
         });
