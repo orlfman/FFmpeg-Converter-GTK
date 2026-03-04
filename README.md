@@ -6,6 +6,38 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 
 ![Screenshot](Screenshots/Screenshot.png)
 
+<details>
+  <summary><h3>Screenshots</h3></summary>
+
+  <table>
+    <tr>
+      <td align="center"><b>Main</b><br><img src="Screenshots/Screenshot.png" width="400"></td>
+      <td align="center"><b>SVT-AV1</b><br><img src="Screenshots/Screenshot-SVT-AV1.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>x265</b><br><img src="Screenshots/Screenshot-x265.png" width="400"></td>
+      <td align="center"><b>x264</b><br><img src="Screenshots/Screenshot-x264.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>VP9</b><br><img src="Screenshots/Screenshot-VP9.png" width="400"></td>
+      <td align="center"><b>Subtitles</b><br><img src="Screenshots/Screenshot-Subtitles.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Crop</b><br><img src="Screenshots/Screenshot-Crop.png" width="400"></td>
+      <td align="center"><b>Trim</b><br><img src="Screenshots/Screenshot-Trim.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Crop & Trim</b><br><img src="Screenshots/Screenshot-Crop-Trim.png" width="400"></td>
+      <td align="center"><b>Information</b><br><img src="Screenshots/Screenshot-Information.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Console</b><br><img src="Screenshots/Screenshot-Console.png" width="400"></td>
+      <td align="center"><b>Preferences</b><br><img src="Screenshots/Screenshot-Preferences.png" width="400"></td>
+    </tr>
+  </table>
+
+</details>
+
 ### Features
 
 - Dedicated tabs for **SVT-AV1**, **x265**, **x264**, and **VP9** with deep encoder control
@@ -41,34 +73,8 @@ chmod +x uninstall.sh
 ./uninstall.sh
 ```
 
-<details>
-  <summary><h3>Screenshots</h3></summary>
+### Acknowledgments
 
-  <table>
-    <tr>
-      <td align="center"><b>Main</b><br><img src="Screenshots/Screenshot.png" width="400"></td>
-      <td align="center"><b>SVT-AV1</b><br><img src="Screenshots/Screenshot-SVT-AV1.png" width="400"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>x265</b><br><img src="Screenshots/Screenshot-x265.png" width="400"></td>
-      <td align="center"><b>x264</b><br><img src="Screenshots/Screenshot-x264.png" width="400"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>VP9</b><br><img src="Screenshots/Screenshot-VP9.png" width="400"></td>
-      <td align="center"><b>Subtitles</b><br><img src="Screenshots/Screenshot-Subtitles.png" width="400"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>Crop</b><br><img src="Screenshots/Screenshot-Crop.png" width="400"></td>
-      <td align="center"><b>Trim</b><br><img src="Screenshots/Screenshot-Trim.png" width="400"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>Crop & Trim</b><br><img src="Screenshots/Screenshot-Crop-Trim.png" width="400"></td>
-      <td align="center"><b>Information</b><br><img src="Screenshots/Screenshot-Information.png" width="400"></td>
-    </tr>
-    <tr>
-      <td align="center"><b>Console</b><br><img src="Screenshots/Screenshot-Console.png" width="400"></td>
-      <td align="center"><b>Preferences</b><br><img src="Screenshots/Screenshot-Preferences.png" width="400"></td>
-    </tr>
-  </table>
-
-</details>
+This application is a frontend for [FFmpeg](https://ffmpeg.org) and does not bundle or distribute FFmpeg. 
+FFmpeg is a trademark of [Fabrice Bellard](http://bellard.org/). 
+Users are responsible for installing FFmpeg separately on their system.
