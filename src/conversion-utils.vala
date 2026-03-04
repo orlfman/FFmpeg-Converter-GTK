@@ -3,10 +3,6 @@ using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ConversionUtils — Pure utility functions for the conversion pipeline
-//
-//  Extracted from Converter to give it a single responsibility.
-//  These are all stateless helpers: path computation, filename sanitization,
-//  timestamp building/parsing, time field validation, and FFmpeg log filtering.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace ConversionUtils {
@@ -87,9 +83,7 @@ namespace ConversionUtils {
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Build a validated HH:MM:SS string from SpinButton widgets (#10).
-     * SpinButtons already enforce numeric range, so this is simpler and
-     * more reliable than the old Entry-based version.
+     * Build a validated HH:MM:SS string from SpinButton widgets.
      */
     public string build_timestamp (SpinButton hh, SpinButton mm, SpinButton ss) {
         int h = hh.get_value_as_int ();
@@ -123,9 +117,6 @@ namespace ConversionUtils {
     //  should be written to the console tab. FFmpeg's -progress pipe:2 output
     //  produces high-frequency key=value lines (frame=, fps=, speed=, etc.)
     //  that are useful for progress parsing but clutter the console log.
-    //
-    //  Previously duplicated in both Converter.execute_ffmpeg() and
-    //  TrimRunner.execute_ffmpeg().
     // ═════════════════════════════════════════════════════════════════════════
 
     /**

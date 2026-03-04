@@ -280,8 +280,6 @@ public class GeneralTab : Box {
 
     /**
      * Build an HH : MM : SS box from three SpinButtons.
-     * SpinButtons enforce numeric-only input and clamped ranges,
-     * eliminating the need for post-hoc validation (#10).
      */
     private Box build_time_box (SpinButton hh, SpinButton mm, SpinButton ss) {
         hh.set_width_chars (3);
@@ -375,7 +373,7 @@ public class GeneralTab : Box {
         color_row.set_activatable_widget (color_button);
         group.add (color_row);
 
-        // ── HDR to SDR (widget owned by VideoFilters, placed here) ───────────
+        // ── HDR to SDR ───────────
         group.add (video_filters.get_hdr_expander ());
 
         append (group);
@@ -554,7 +552,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CROP DETECTION (#13: Streaming read replaces communicate_utf8)
+    //  CROP DETECTION
     // ═════════════════════════════════════════════════════════════════════════
 
     public void start_crop_detection (string input_file, ConsoleTab console_tab) {

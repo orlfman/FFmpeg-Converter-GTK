@@ -2,17 +2,7 @@ using Gtk;
 using Adw;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  ConsoleTab — Enhanced FFmpeg console output viewer
-//
-//  Features:
-//   • Color-coded output (errors red, warnings yellow, success green)
-//   • Progress line collapsing — repetitive FFmpeg updates fold into one
-//   • Log level filter bar — toggle visibility of errors / warnings / info / progress
-//   • Copy & Save — one-click clipboard copy or export to .txt
-//   • Stats footer — live error / warning / line counts with click-to-navigate
-//   • Font size +/− controls
-//   • Clickable errors — click an error to highlight all errors + copy via popover
-//   • Full-text search with prev/next navigation
+//  ConsoleTab
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ConsoleTab : Box {
@@ -80,12 +70,8 @@ public class ConsoleTab : Box {
     private StringBuilder pending_lines = new StringBuilder ();
     private bool flush_scheduled = false;
     private const uint FLUSH_INTERVAL_MS = 200;
-
-    // Cap the buffer so multi-hour encodes don't eat RAM.
-    // ~200 000 chars ≈ 4 000–6 000 lines of typical FFmpeg output.
     private const int MAX_BUFFER_CHARS = 200000;
 
-    // Track search matches for prev/next navigation
     private int search_match_count = 0;
     private int search_current_index = -1;
 
@@ -228,7 +214,7 @@ public class ConsoleTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  UI — Search Bar (hidden by default)
+    //  UI — Search Bar
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_search_bar () {
@@ -343,11 +329,6 @@ public class ConsoleTab : Box {
         return btn;
     }
 
-    /**
-     * Show or hide all lines of a given category using the tag's
-     * invisible property.  When invisible is true the text remains
-     * in the buffer but is not rendered.
-     */
     private void apply_filter (string category, bool visible) {
         TextTag? tag = null;
         if (category == "error")         tag = tag_error;
@@ -584,10 +565,6 @@ public class ConsoleTab : Box {
     //  System monospace font + font size
     // ═════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Read the preferred monospace font from GNOME desktop settings.
-     * Falls back to generic "monospace" 10pt if unavailable.
-     */
     private void resolve_system_font () {
         try {
             var settings = new GLib.Settings ("org.gnome.desktop.interface");
@@ -659,7 +636,7 @@ public class ConsoleTab : Box {
             "foreground", "#ffffff"
         );
         tag_error_click = buffer.create_tag ("error-click",
-            "background", "#e7485620"   // Translucent red wash
+            "background", "#e7485620"   // Translucent red
         );
     }
 
@@ -667,11 +644,6 @@ public class ConsoleTab : Box {
     //  Line classification
     // ═════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Classify a single line of FFmpeg output and return the
-     * appropriate tag. Every line gets a tag so filtering works
-     * for all categories.
-     */
     private unowned TextTag classify_line (string line) {
         // Progress lines first — they may contain numeric "error" counts
         if (is_progress_line (line)) {
@@ -700,18 +672,11 @@ public class ConsoleTab : Box {
         return tag_info;
     }
 
-    /**
-     * Detect FFmpeg progress-style lines that should be collapsed.
-     * Matches both the combined one-line progress format and
-     * individual key=value pairs from -progress pipe:2.
-     */
     private static bool is_progress_line (string line) {
-        // Combined progress line: "frame= 123 fps=30 ... speed=1.5x"
         if (line.contains ("frame=") &&
             (line.contains ("speed=") || line.contains ("time=") || line.contains ("bitrate="))) {
             return true;
         }
-        // Individual progress key=value pairs
         if (line.has_prefix ("frame=")      || line.has_prefix ("fps=")        ||
             line.has_prefix ("bitrate=")    || line.has_prefix ("total_size=") ||
             line.has_prefix ("out_time")    || line.has_prefix ("speed=")      ||
@@ -753,10 +718,6 @@ public class ConsoleTab : Box {
         highlight_all_matches (query);
     }
 
-    /**
-     * Walk the buffer and apply the highlight tag to every occurrence
-     * of the query string (case-insensitive).
-     */
     private void highlight_all_matches (string query) {
         var buffer = console_view.buffer;
         TextIter search_start;
@@ -802,9 +763,6 @@ public class ConsoleTab : Box {
         jump_to_match (search_current_index);
     }
 
-    /**
-     * Scroll to the Nth match and apply the "active" highlight.
-     */
     private void jump_to_match (int index) {
         string query = search_entry.get_text ().strip ();
         if (query.length == 0) return;
@@ -814,12 +772,10 @@ public class ConsoleTab : Box {
         TextIter match_start;
         TextIter match_end;
 
-        // Remove previous active highlight, keep passive highlights
         TextIter buf_start, buf_end;
         buffer.get_bounds (out buf_start, out buf_end);
         buffer.remove_tag (tag_search_active, buf_start, buf_end);
 
-        // Walk to the Nth match
         buffer.get_start_iter (out search_start);
         int current = 0;
 
@@ -886,7 +842,7 @@ public class ConsoleTab : Box {
         var clipboard = console_view.get_clipboard ();
         clipboard.set_text (text);
 
-        // Brief visual feedback — flash a checkmark icon
+        // Brief visual feedback — flash a check mark icon
         copy_button.set_icon_name ("object-select-symbolic");
         Timeout.add (1200, () => {
             copy_button.set_icon_name ("edit-copy-symbolic");
@@ -911,7 +867,7 @@ public class ConsoleTab : Box {
                     null, null
                 );
             } catch (Error e) {
-                // User cancelled or write error — silent
+                // User canceled or write error — silent
             }
         });
     }

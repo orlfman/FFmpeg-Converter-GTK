@@ -151,7 +151,7 @@ public class InformationTab : Box {
         scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
         scroll.set_vexpand (true);
 
-        // Adw.Clamp gives a nice centred, max-width layout
+        // Adw.Clamp gives a nice centered, max-width layout
         var clamp = new Adw.Clamp ();
         clamp.set_maximum_size (840);
         clamp.set_tightening_threshold (640);

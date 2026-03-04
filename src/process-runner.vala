@@ -11,8 +11,6 @@ using Posix;
 //   • Streaming stderr reader with configurable line callback
 //   • Clean cancellation from any thread
 //
-//  This eliminates the duplicated execute_ffmpeg / cancel patterns that
-//  previously existed in both Converter and TrimRunner.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ProcessRunner : Object {

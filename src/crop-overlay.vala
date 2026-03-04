@@ -130,7 +130,7 @@ public class CropOverlay : Gtk.DrawingArea {
             _crop_x = double.parse (parts[2]);
             _crop_y = double.parse (parts[3]);
 
-            // Clamp to video bounds (matches drag gesture behavior)
+            // Clamp to video bounds
             if (_video_width > 0 && _video_height > 0) {
                 _crop_w = _crop_w.clamp (0, _video_width);
                 _crop_h = _crop_h.clamp (0, _video_height);
@@ -243,7 +243,7 @@ public class CropOverlay : Gtk.DrawingArea {
             return;
         }
 
-        // Map crop rect to widget coords
+        // Map crop rectangle to widget coords
         double rx, ry;
         video_to_widget (_crop_x, _crop_y, out rx, out ry);
         double rw = video_w_to_widget (_crop_w);
@@ -368,7 +368,7 @@ public class CropOverlay : Gtk.DrawingArea {
         double bw = te.width + pad * 2;
         double bh = te.height + pad * 2;
 
-        // Position badge below the crop rect (or above if near bottom)
+        // Position badge below the crop rectangle (or above if near bottom)
         double bx = rx + (rw - bw) / 2.0;
         double by = ry + rh + 8.0;
 
@@ -687,7 +687,7 @@ public class CropOverlay : Gtk.DrawingArea {
         case DRAG_T:
         case DRAG_B: {
             // Height is the driven dimension, width follows.
-            // Centre horizontally, keep the anchored edge fixed.
+            // Center horizontally, keep the anchored edge fixed.
             double cx = _crop_x + _crop_w / 2.0;
             _crop_w = _crop_h * ratio;
             _crop_x = cx - _crop_w / 2.0;
@@ -696,7 +696,7 @@ public class CropOverlay : Gtk.DrawingArea {
         case DRAG_L:
         case DRAG_R: {
             // Width is the driven dimension, height follows.
-            // Centre vertically, keep the anchored edge fixed.
+            // Center vertically, keep the anchored edge fixed.
             double cy = _crop_y + _crop_h / 2.0;
             _crop_h = _crop_w / ratio;
             _crop_y = cy - _crop_h / 2.0;

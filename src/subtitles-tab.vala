@@ -4,22 +4,6 @@ using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SubtitlesTab — Manage subtitle streams in a video file
-//
-//  Features:
-//   • Auto-detect subtitle tracks when an input file is loaded
-//   • Extract any subtitle track to a standalone file (.srt, .ass, .vtt, .sub)
-//   • Add external subtitle files with language, title, default/forced metadata
-//   • Remove unwanted subtitle tracks via per-track include/exclude switches
-//   • Reorder subtitle tracks (move up / move down)
-//   • Set default and forced disposition flags per track
-//   • Apply all changes via lossless remux (no video/audio re-encoding)
-//
-//  Architecture:
-//   Follows the same patterns as GeneralTab and TrimTab:
-//   • Adw.PreferencesGroup sections for organized layout
-//   • Background thread probing via SubtitlesRunner
-//   • Thread-safe UI updates via Idle.add
-//   • Emits subtitle_done signal for AppController coordination
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class SubtitlesTab : Box {

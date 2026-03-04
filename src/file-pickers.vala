@@ -206,10 +206,6 @@ public class FilePickers : Box {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  BROWSE DIALOGS
-    //
-    //  Fix #7: GTK4 FileDialog throws Gtk.DialogError.DISMISSED when the user
-    //  cancels, which is expected. We now log unexpected errors with warning()
-    //  so real failures aren't silently swallowed.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_input_browse_clicked () {

@@ -18,10 +18,10 @@ public class VideoPlayer : Box {
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
     private uint prepare_poll  = 0;
-    private uint scrub_reset_source = 0;   // Fix: track scrubber anti-fight timeout
+    private uint scrub_reset_source = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
-    private bool prepared_handled = false;  // Fix: guard against double on_media_prepared
+    private bool prepared_handled = false;
 
     // ── Video intrinsic size ─────────────────────────────────────────────────
     private int _intrinsic_width  = 0;
@@ -172,8 +172,6 @@ public class VideoPlayer : Box {
         media = Gtk.MediaFile.for_file (file);
         picture.set_paintable (media);
 
-        // Probe the real frame rate in the background so frame stepping
-        // uses the actual fps instead of a hard-coded 30fps assumption.
         string probe_path = path;
         new Thread<void> ("fps-probe", () => {
             double probed = FfprobeUtils.probe_input_fps (probe_path);
@@ -185,13 +183,12 @@ public class VideoPlayer : Box {
 
         // Two-pronged approach to detect when GStreamer finishes probing:
         //  1. Property notification (ideal, fires immediately when ready)
-        //  2. Polling fallback (catches cases where notify fires before we connect)
+        //  2. Polling fallback (catches cases where notify fires before connects)
         media.notify["prepared"].connect (() => {
             on_media_prepared ();
         });
 
-        // Poll every 100 ms until prepared (handles the race where notify
-        // already fired before our signal handler was connected)
+        // Poll every 100 ms until prepared
         prepare_poll = Timeout.add (100, () => {
             if (media != null && media.is_prepared ()) {
                 on_media_prepared ();
@@ -414,7 +411,7 @@ public class VideoPlayer : Box {
                 time_label.set_text (format_time (pos));
                 position_changed (pos);
 
-                // Sync our play state if GStreamer stopped on its own
+                // Sync the play state if GStreamer stopped on its own
                 // (e.g. reached end of file)
                 bool gst_playing = media.get_playing ();
                 if (is_playing && !gst_playing) {

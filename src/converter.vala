@@ -10,11 +10,6 @@ internal enum ConversionPhase {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ConversionConfig — Data object bundling everything ConversionRunner needs
-//
-//  Eliminates deep coupling (#3): ConversionRunner no longer reaches into
-//  converter.general_tab, converter.codec_tab, converter.passlog_base, etc.
-//  Instead, all data is snapshot into this config before the background thread
-//  starts.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ConversionConfig : Object {
@@ -165,7 +160,7 @@ public class Converter : Object {
 
         bool two_pass = codec_tab.get_two_pass ();
 
-        // Snapshot all UI state into a ConversionConfig (#3)
+        // Snapshot all UI state into a ConversionConfig
         var config = snapshot_config (input_file, output_file, codec_tab, builder);
 
         state_mutex.lock ();
@@ -198,7 +193,7 @@ public class Converter : Object {
     /**
      * Snapshot all relevant UI state into a ConversionConfig.
      * Called on the main thread before spawning the background thread.
-     * This decouples ConversionRunner from live widget state (#3).
+     * This decouples ConversionRunner from live widget state.
      */
     private ConversionConfig snapshot_config (string input_file,
                                               string output_file,
@@ -206,7 +201,7 @@ public class Converter : Object {
                                               ICodecBuilder builder) {
         var config = new ConversionConfig ();
 
-        // Passlog — use $TMPDIR-respecting path instead of hardcoded /tmp (#4)
+        // Passlog — use $TMPDIR-respecting path
         string plog = Path.build_filename (
             Environment.get_tmp_dir (),
             "ffmpeg_passlog_" + GLib.get_real_time ().to_string ()
@@ -256,9 +251,6 @@ public class Converter : Object {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  FFMPEG PROCESS EXECUTION (delegates to ProcessRunner)
-    //
-    //  Fix #8: Changed from bool is_pass1 to explicit pass_start / pass_range
-    //  so single-pass encoding correctly reports 0–100% instead of 50–100%.
     // ═════════════════════════════════════════════════════════════════════════
 
     /**

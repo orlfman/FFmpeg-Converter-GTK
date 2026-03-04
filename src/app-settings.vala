@@ -52,7 +52,7 @@ public class AppSettings : Object {
     public signal void settings_changed ();
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CONSTRUCTOR — private (singleton)
+    //  CONSTRUCTOR — private
     // ═════════════════════════════════════════════════════════════════════════
 
     private AppSettings () {
@@ -62,10 +62,6 @@ public class AppSettings : Object {
 
         load ();
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PUBLIC ACCESSORS — Thread-safe getters and setters
-    // ═════════════════════════════════════════════════════════════════════════
 
     public string ffmpeg_path {
         owned get {

@@ -24,14 +24,6 @@ using GLib;
 //
 //  Supports both stream-copy and re-encode modes.
 //  In re-encode mode, applies the chosen codec + GeneralTab filters.
-//
-//  Refactored: Uses shared ProcessRunner for FFmpeg execution, which
-//  provides thread-safe cancel/PID management and proper Posix.kill()
-//  handling (fixes #5, #6, #8).
-//
-//  Fix #3: Now uses ProgressTracker instead of raw ProgressBar manipulation,
-//  providing consistent progress behavior with Converter (throttling,
-//  pulse-to-determinate transitions, proper hide/cancelled states).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimRunner : Object {

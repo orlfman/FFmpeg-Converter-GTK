@@ -2,13 +2,6 @@ using Gtk;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ConversionRunner — Builds and executes FFmpeg commands for encoding
-//
-//  Refactored (#3): No longer reaches into converter.general_tab, codec_tab,
-//  or passlog_base. Instead, receives a ConversionConfig with all data
-//  pre-snapshot from the main thread. This:
-//   • Eliminates cross-thread widget access
-//   • Makes the runner testable with mock configs
-//   • Decouples encoding logic from UI widget state
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ConversionRunner {
@@ -31,7 +24,6 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS1);
                 converter.update_status ("🔄 Pass 1/2: Analyzing video...");
                 string[] pass1 = build_pass1 (input);
-                // Fix #8: Pass 1 covers 0%–50% of total progress
                 if (converter.execute_ffmpeg (pass1, 0.0, 50.0) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Pass 1 failed.");
@@ -43,7 +35,6 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (@"🔄 Pass 2/2: Encoding final $(config.codec_name) video...");
                 string[] pass2 = build_pass2 (input, safe_output);
-                // Fix #8: Pass 2 covers 50%–100% of total progress
                 if (converter.execute_ffmpeg (pass2, 50.0, 50.0) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Pass 2 failed.");
@@ -55,7 +46,6 @@ public class ConversionRunner {
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (@"🔄 Encoding with $(config.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);
-                // Fix #8: Single pass uses defaults (0.0, 100.0) — full 0%–100% range
                 if (converter.execute_ffmpeg (cmd) != 0) {
                     if (!converter.is_cancelled ())
                         converter.report_error ("Encoding failed.");
@@ -80,7 +70,7 @@ public class ConversionRunner {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  COMMAND BUILDERS
-    //  All data comes from ConversionConfig — no widget access (#3)
+    //  All data comes from ConversionConfig
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] build_pass1 (string input) {

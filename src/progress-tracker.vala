@@ -3,10 +3,6 @@ using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ProgressTracker — Progress bar and pulsing management
-//
-//  Extracted from Converter to give it a single responsibility.
-//  Handles determinate progress, indeterminate pulsing, and visibility
-//  transitions. All UI updates are dispatched via Idle.add for thread safety.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ProgressTracker : Object {

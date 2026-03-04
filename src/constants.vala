@@ -1,10 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Constants — Centralized string definitions for the entire application
-//
-//  Using named constants instead of bare strings ("CRF", "Opus", "mkv", etc.)
-//  prevents typos from causing silent runtime failures and makes refactoring
-//  safer. All dropdown labels, FFmpeg codec names, and container extensions
-//  are defined here.
+//  Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────

@@ -2,9 +2,6 @@ using Gtk;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  FilterBuilder — Pure utility functions for building FFmpeg filter chains
-//
-//  Converted from a class with only static methods to a namespace (#15).
-//  Uses named constants from constants.vala instead of bare strings (#14).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace FilterBuilder {
@@ -148,18 +145,10 @@ namespace FilterBuilder {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  AUDIO FILTER MERGING
-    //
-    //  Shared by ConversionRunner and TrimRunner. Merges General-tab audio
-    //  filters (e.g. loudnorm, atempo) into the codec tab's audio args,
-    //  respecting -an and -c:a copy (where filters cannot be applied).
-    //
-    //  Previously duplicated in both ConversionRunner.get_audio_args_with_filters()
-    //  and TrimRunner.get_audio_args_with_filters().
+    //  AUDIO FILTER
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Merge additional audio filters into existing audio args.
      *
      * Returns audio_args unmodified when:
      *  • af is empty (nothing to merge)

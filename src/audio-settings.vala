@@ -3,9 +3,6 @@ using Adw;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AudioSettings — Reusable audio encoding widget
-//
-//  Updated (#14): All bare codec/container strings replaced with constants
-//  from constants.vala (AudioCodecName, AudioCodecFFmpeg, ContainerExt).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class AudioSettings : Object {
@@ -229,7 +226,6 @@ public class AudioSettings : Object {
     /**
      * When audio normalization (loudnorm) is enabled, stream-copy must be
      * disabled because audio filters require re-encoding.
-     * Mirrors the existing update_for_audio_speed() pattern.
      */
     public void update_for_normalize (bool active) {
         normalize_active = active;
@@ -240,7 +236,6 @@ public class AudioSettings : Object {
      * When the concat filter pipeline is active (multi-segment re-encode
      * with combined output), audio passes through -filter_complex which
      * decodes it — stream-copy is impossible.
-     * Mirrors the existing update_for_audio_speed() pattern.
      */
     public void update_for_concat_filter (bool active) {
         concat_filter_active = active;

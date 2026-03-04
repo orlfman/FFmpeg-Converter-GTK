@@ -3,10 +3,6 @@ using Adw;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MainWindow — Application window layout and user action handlers
-//
-//  Refactored (#1): Layout separated from behavior (AppController).
-//  Updated: Gtk.Notebook → Adw.ViewStack + ViewSwitcherTitle/ViewSwitcherBar
-//  for modern GNOME navigation with responsive header/bottom-bar fallback.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class MainWindow : Adw.ApplicationWindow {
