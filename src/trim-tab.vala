@@ -574,7 +574,7 @@ public class TrimTab : Box, ICodecTab {
     private void build_crop_controls () {
         crop_group = new Adw.PreferencesGroup ();
         crop_group.set_title ("Crop");
-        crop_group.set_description ("Draw a rectangle on the video to define the crop area, or type values manually");
+        crop_group.set_description ("Draw a rectangle on the video to define the crop area, or type values manually. Hold Shift while dragging to lock aspect ratio");
         crop_group.set_visible (false);
 
         // ── Crop value display ───────────────────────────────────────────────

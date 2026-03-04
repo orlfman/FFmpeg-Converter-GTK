@@ -26,6 +26,7 @@ public class CropOverlay : Gtk.DrawingArea {
     private double drag_orig_y;
     private double drag_orig_w;
     private double drag_orig_h;
+    private double drag_aspect_ratio;  // w/h ratio captured at drag start for Shift lock
 
     // Resize handle identifiers
     private const int DRAG_NONE      = 0;
@@ -128,6 +129,15 @@ public class CropOverlay : Gtk.DrawingArea {
             _crop_h = double.parse (parts[1]);
             _crop_x = double.parse (parts[2]);
             _crop_y = double.parse (parts[3]);
+
+            // Clamp to video bounds (matches drag gesture behavior)
+            if (_video_width > 0 && _video_height > 0) {
+                _crop_w = _crop_w.clamp (0, _video_width);
+                _crop_h = _crop_h.clamp (0, _video_height);
+                _crop_x = _crop_x.clamp (0, _video_width  - _crop_w);
+                _crop_y = _crop_y.clamp (0, _video_height - _crop_h);
+            }
+
             _has_crop = (_crop_w > 0 && _crop_h > 0);
             queue_draw ();
             if (_has_crop)
@@ -305,7 +315,7 @@ public class CropOverlay : Gtk.DrawingArea {
         cr.select_font_face ("sans-serif", Cairo.FontSlant.NORMAL, Cairo.FontWeight.NORMAL);
         cr.set_font_size (13);
         Cairo.TextExtents te;
-        string hint = "Click and drag to define crop area";
+        string hint = "Click and drag to crop · Hold Shift to lock aspect ratio";
         cr.text_extents (hint, out te);
         cr.move_to (cx - te.width / 2.0, cy + arm + 20);
         cr.show_text (hint);
@@ -452,6 +462,8 @@ public class CropOverlay : Gtk.DrawingArea {
         drag_orig_y = _crop_y;
         drag_orig_w = _crop_w;
         drag_orig_h = _crop_h;
+        drag_aspect_ratio = (_crop_w > 0 && _crop_h > 0)
+            ? _crop_w / _crop_h : 1.0;
 
         if (drag_mode == DRAG_CREATE) {
             _crop_x = vx;
@@ -523,6 +535,30 @@ public class CropOverlay : Gtk.DrawingArea {
             break;
         }
 
+        // ── Shift-held aspect ratio constraint ───────────────────────────────
+        // Create: locks to the video's native aspect ratio
+        // Resize: locks to the crop's aspect ratio at drag start
+        if (drag_mode != DRAG_MOVE && drag_mode != DRAG_NONE) {
+            bool shift_held = false;
+            var ev = gesture.get_current_event ();
+            if (ev != null) {
+                shift_held = (ev.get_modifier_state () & Gdk.ModifierType.SHIFT_MASK) != 0;
+            }
+
+            if (shift_held) {
+                double ratio;
+                if (drag_mode == DRAG_CREATE) {
+                    // Lock to the video's native aspect ratio
+                    ratio = (_video_width > 0 && _video_height > 0)
+                        ? (double) _video_width / _video_height : 1.0;
+                } else {
+                    // Lock to the crop's aspect ratio from drag start
+                    ratio = drag_aspect_ratio;
+                }
+                apply_aspect_constraint (ratio, drag_mode);
+            }
+        }
+
         queue_draw ();
         emit_crop ();
     }
@@ -541,9 +577,18 @@ public class CropOverlay : Gtk.DrawingArea {
             }
         }
 
+        int finished_mode = drag_mode;
         drag_mode = DRAG_NONE;
         queue_draw ();
         emit_crop ();
+
+        // Refresh cursor to match the final mouse position so it doesn't
+        // stay stuck as the drag cursor until the user moves the mouse.
+        if (finished_mode != DRAG_NONE) {
+            double start_wx, start_wy;
+            gesture.get_start_point (out start_wx, out start_wy);
+            on_motion (null, start_wx + offset_x, start_wy + offset_y);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -590,10 +635,87 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  ASPECT RATIO CONSTRAINT (Shift-held during drag)
+    //
+    //  Adjusts _crop_w/_crop_h to match the target w/h ratio while keeping
+    //  the appropriate anchor point fixed for each drag mode:
+    //   • Corner drags: opposite corner is the anchor
+    //   • Edge drags:   opposite edge is the anchor, other axis re-centres
+    //   • Create:       top-left of the new rect is the anchor
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void apply_aspect_constraint (double ratio, int mode) {
+        if (_crop_w <= 0 || _crop_h <= 0 || ratio <= 0) return;
+
+        double current = _crop_w / _crop_h;
+        bool too_wide = current > ratio;
+
+        switch (mode) {
+        case DRAG_CREATE:
+        case DRAG_BR:
+            // Anchor: top-left corner (_crop_x, _crop_y stay)
+            if (too_wide) _crop_w = _crop_h * ratio;
+            else          _crop_h = _crop_w / ratio;
+            break;
+
+        case DRAG_TL: {
+            // Anchor: bottom-right corner
+            double br_x = _crop_x + _crop_w;
+            double br_y = _crop_y + _crop_h;
+            if (too_wide) _crop_w = _crop_h * ratio;
+            else          _crop_h = _crop_w / ratio;
+            _crop_x = br_x - _crop_w;
+            _crop_y = br_y - _crop_h;
+            break;
+        }
+        case DRAG_TR: {
+            // Anchor: bottom-left corner (_crop_x stays)
+            double bl_y = _crop_y + _crop_h;
+            if (too_wide) _crop_w = _crop_h * ratio;
+            else          _crop_h = _crop_w / ratio;
+            _crop_y = bl_y - _crop_h;
+            break;
+        }
+        case DRAG_BL: {
+            // Anchor: top-right corner (_crop_y stays)
+            double tr_x = _crop_x + _crop_w;
+            if (too_wide) _crop_w = _crop_h * ratio;
+            else          _crop_h = _crop_w / ratio;
+            _crop_x = tr_x - _crop_w;
+            break;
+        }
+        case DRAG_T:
+        case DRAG_B: {
+            // Height is the driven dimension, width follows.
+            // Centre horizontally, keep the anchored edge fixed.
+            double cx = _crop_x + _crop_w / 2.0;
+            _crop_w = _crop_h * ratio;
+            _crop_x = cx - _crop_w / 2.0;
+            break;
+        }
+        case DRAG_L:
+        case DRAG_R: {
+            // Width is the driven dimension, height follows.
+            // Centre vertically, keep the anchored edge fixed.
+            double cy = _crop_y + _crop_h / 2.0;
+            _crop_h = _crop_w / ratio;
+            _crop_y = cy - _crop_h / 2.0;
+            break;
+        }
+        }
+
+        // Clamp to video bounds after constraint
+        if (_crop_x < 0) _crop_x = 0;
+        if (_crop_y < 0) _crop_y = 0;
+        if (_crop_x + _crop_w > _video_width)  _crop_w = _video_width  - _crop_x;
+        if (_crop_y + _crop_h > _video_height) _crop_h = _video_height - _crop_y;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  CURSOR — change based on hover position
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void on_motion (Gtk.EventControllerMotion ctrl, double x, double y) {
+    private void on_motion (Gtk.EventControllerMotion? ctrl, double x, double y) {
         if (drag_mode != DRAG_NONE) return;  // don't change cursor while dragging
 
         int hit = hit_test (x, y);
@@ -635,6 +757,7 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     private static int snap_even (int val) {
-        return (val / 2) * 2;
+        // Round to nearest even number (not truncate)
+        return ((val + 1) / 2) * 2;
     }
 }
