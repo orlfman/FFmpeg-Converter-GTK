@@ -129,9 +129,9 @@ public class SvtAv1Builder : Object, ICodecBuilder {
 
         if (tab.qm_expander.enable_expansion) {
             svt_params += "enable-qm=1";
-            svt_params += "min-qm-level=%d".printf (
+            svt_params += "qm-min=%d".printf (
                 (int) tab.qm_min_spin.get_value ());
-            svt_params += "max-qm-level=%d".printf (
+            svt_params += "qm-max=%d".printf (
                 (int) tab.qm_max_spin.get_value ());
         }
 
