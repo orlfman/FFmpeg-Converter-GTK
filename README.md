@@ -34,6 +34,9 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
       <td align="center"><b>Console</b><br><img src="Screenshots/Screenshot-Console.png" width="400"></td>
       <td align="center"><b>Preferences</b><br><img src="Screenshots/Screenshot-Preferences.png" width="400"></td>
     </tr>
+        <tr>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-ColorCorrection.png" width="400"></td>
+    </tr>
   </table>
 
 </details>
