@@ -4,7 +4,7 @@
 
 My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for FFmpeg. Currently supports encoding with SVT-AV1, x265, x264, and VP9. Slowly but surely adding more supported codecs, features and refinement.
 
-![Screenshot](Screenshot.png)
+![Screenshot](Screenshots/Screenshot.png)
 
 ### Features
 
