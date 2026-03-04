@@ -5,6 +5,7 @@ BINARY_NAME="ffmpeg-converter-gtk"
 INSTALL_DIR="/usr/local/bin"
 DESKTOP_DEST="/usr/share/applications/ffmpeg-converter-gtk.desktop"
 ICON_DEST="/usr/share/icons/hicolor/scalable/apps/ffmpeg-converter-gtk.svg"
+CONFIG_DIR="$HOME/.config/FFmpeg-Converter-GTK"
 
 # Track results
 declare -a removed_items=()
@@ -16,7 +17,7 @@ echo
 
 # Check what's installed first
 echo "Checking installed files..."
-for path in "$INSTALL_DIR/$BINARY_NAME" "$DESKTOP_DEST" "$ICON_DEST"; do
+for path in "$INSTALL_DIR/$BINARY_NAME" "$DESKTOP_DEST" "$ICON_DEST" "$CONFIG_DIR"; do
     if [ -e "$path" ]; then
         echo "  Found: $path"
         found_any=1
@@ -68,6 +69,20 @@ remove_file() {
 remove_file "$INSTALL_DIR/$BINARY_NAME" "binary"
 remove_file "$DESKTOP_DEST" ".desktop entry"
 remove_file "$ICON_DEST" "application icon"
+
+# Remove user config directory (no sudo needed)
+if [ -d "$CONFIG_DIR" ]; then
+    echo "→ Removing config directory: $CONFIG_DIR"
+    if rm -rf "$CONFIG_DIR"; then
+        echo "  ✅ Done"
+        removed_items+=("config directory")
+    else
+        echo "  ❌ Failed to remove $CONFIG_DIR"
+        failed_items+=("config directory")
+    fi
+else
+    echo "→ Config directory not found — skipping"
+fi
 
 # Refresh caches only if we actually removed something
 if [ ${#removed_items[@]} -gt 0 ]; then
