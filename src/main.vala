@@ -366,9 +366,6 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
     //  UNIFIED OVERWRITE DIALOG
     //
-    //  The three previous dialog methods (show_overwrite_dialog,
-    //  show_trim_overwrite_dialog, show_subtitle_overwrite_dialog) were ~90%
-    //  identical.  This single helper handles all variants:
     //
     //   • offer_rename = true  → Cancel / Auto-Rename / Overwrite
     //   • offer_rename = false → Cancel / Overwrite
