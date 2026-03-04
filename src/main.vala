@@ -15,6 +15,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private StatusArea status_area;
     private Converter converter;
     private Button cancel_button;
+    private Button convert_button;
     private ConsoleTab console_tab;
     private GeneralTab general_tab;
     private TrimTab trim_tab;
@@ -144,6 +145,17 @@ public class MainWindow : Adw.ApplicationWindow {
         toolbar_view.add_bottom_bar (switcher_bar);
 
         set_content (toolbar_view);
+
+        // Disable the Convert button on tabs where it has no function
+        view_stack.notify["visible-child-name"].connect (update_convert_sensitivity);
+        update_convert_sensitivity ();
+    }
+
+    /** Enable the Convert button only on tabs that support conversion. */
+    private void update_convert_sensitivity () {
+        string? page = view_stack.visible_child_name;
+        bool active = page != "general" && page != "info" && page != "console";
+        convert_button.set_sensitive (active);
     }
 
     /** Wrap a widget in a ScrolledWindow and add as a ViewStack page with icon. */
@@ -174,7 +186,7 @@ public class MainWindow : Adw.ApplicationWindow {
         spacer.set_hexpand (true);
         bar.append (spacer);
 
-        var convert_button = new Button.with_label ("Convert");
+        convert_button = new Button.with_label ("Convert");
         convert_button.add_css_class ("suggested-action");
         convert_button.set_size_request (200, 48);
         convert_button.clicked.connect (on_convert_clicked);

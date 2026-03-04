@@ -154,6 +154,13 @@ public class ColorCorrectionDialog : Adw.Window {
 
         toolbar_view.set_content (main_box);
         set_content (toolbar_view);
+
+        // Prevent the title-bar close button from destroying the window;
+        // just hide it so it can be re-presented later.
+        close_request.connect (() => {
+            hide ();
+            return true;   // stop default destroy
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
