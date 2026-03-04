@@ -682,11 +682,11 @@ public class SubtitlesTab : Box {
         return _is_busy;
     }
 
-    public void set_ui_refs (Label status, ProgressBar bar, ConsoleTab console) {
-        runner.status_label = status;
-        runner.progress_bar = bar;
+    public void set_ui_refs (StatusArea status_area, ConsoleTab console) {
+        runner.status_label = status_area.status_label;
+        runner.progress_bar = status_area.progress_bar;
         runner.console_tab  = console;
-        _status_label = status;
+        _status_label = status_area.status_label;
     }
 
     private Label? _status_label = null;

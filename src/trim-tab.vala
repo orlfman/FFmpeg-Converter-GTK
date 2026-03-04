@@ -160,9 +160,12 @@ public class TrimTab : Box, ICodecTab {
      */
     public void start_trim_export (string input_file,
                                    string output_folder,
-                                   Label status_label,
-                                   ProgressBar progress_bar,
+                                   StatusArea status_area,
                                    ConsoleTab console_tab) {
+        // Extract child widgets for internal use — TrimRunner still receives
+        // them individually, keeping its internals unchanged for now.
+        Label status_label = status_area.status_label;
+        ProgressBar progress_bar = status_area.progress_bar;
 
         // For Crop Only mode, create a virtual full-video segment
         if (current_mode == Mode.CROP_ONLY) {

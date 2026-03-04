@@ -39,21 +39,22 @@ public class ConversionConfig : Object {
 //   • Coordinates start/cancel of conversions
 //   • Owns the ProcessRunner and ProgressTracker
 //   • Snapshots UI state into ConversionConfig for the background thread
-//   • Reports status/errors to the UI
+//   • Reports status/errors to the UI via StatusArea
 //
 //  Extracted to separate classes:
 //   • Path computation, sanitization, timestamps → ConversionUtils namespace
 //   • Progress bar management → ProgressTracker
 //   • FFmpeg process execution → ProcessRunner
 //   • Cross-component wiring → AppController
+//   • Duration probing → FfprobeUtils
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class Converter : Object {
     // Emitted on the main thread after a successful conversion
     public signal void conversion_done (string output_file);
 
-    // ── Stable dependencies ────────────
-    private Label status_label;
+    // ── Stable dependencies ─────────────────────────────────────────────────
+    private StatusArea status_area;
     private ConsoleTab console_tab;
 
     public GeneralTab general_tab { get; private set; }
@@ -101,17 +102,19 @@ public class Converter : Object {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
+    //
+    //  Accepts StatusArea instead of raw Label + ProgressBar so that callers
+    //  (MainWindow) don't need to reach into StatusArea's internals.
     // ═════════════════════════════════════════════════════════════════════════
 
-    public Converter (Label status_label,
-                      ProgressBar progress_bar,
+    public Converter (StatusArea status_area,
                       ConsoleTab console_tab,
                       GeneralTab general_tab) {
-        this.status_label   = status_label;
+        this.status_area    = status_area;
         this.console_tab    = console_tab;
         this.general_tab    = general_tab;
         this.process_runner = new ProcessRunner ();
-        this.progress_tracker = new ProgressTracker (progress_bar);
+        this.progress_tracker = new ProgressTracker (status_area.progress_bar);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -144,19 +147,19 @@ public class Converter : Object {
         state_mutex.lock ();
         if (is_converting) {
             state_mutex.unlock ();
-            status_label.set_text ("⚠️ A conversion is already running!");
+            status_area.set_status ("⚠️ A conversion is already running!");
             return;
         }
         state_mutex.unlock ();
 
         if (input_file == "") {
-            status_label.set_text ("⚠️ Please select an input file first!");
+            status_area.set_status ("⚠️ Please select an input file first!");
             return;
         }
 
         last_output_file = output_file;
 
-        status_label.set_text (@"🚀 Starting conversion...\nOutput will be:\n$output_file");
+        status_area.set_status (@"🚀 Starting conversion...\nOutput will be:\n$output_file");
 
         bool two_pass = codec_tab.get_two_pass ();
 
@@ -173,8 +176,8 @@ public class Converter : Object {
         progress_tracker.show_pulse ();
 
         new Thread<void> ("ffmpeg-thread", () => {
-            // Probe duration on background thread (avoids UI freeze)
-            double dur = get_video_duration (input_file);
+            // Probe duration on background thread via shared utility
+            double dur = FfprobeUtils.probe_duration (input_file);
             state_mutex.lock ();
             total_duration = dur;
             state_mutex.unlock ();
@@ -334,49 +337,13 @@ public class Converter : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     internal void report_error (string message) {
-        Idle.add (() => {
-            status_label.set_text (@"❌ $message\nCheck the console for details.");
-            console_tab.add_line ("❌ " + message);
-            return Source.REMOVE;
-        });
+        status_area.set_status (@"❌ $message\nCheck the console for details.");
+        console_tab.add_line ("❌ " + message);
     }
 
     internal void update_status (string message) {
-        Idle.add (() => {
-            status_label.set_text (message);
-            console_tab.add_line (message);
-            return Source.REMOVE;
-        });
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  DURATION PROBING
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private double get_video_duration (string input_file) {
-        try {
-            string[] cmd = {
-                AppSettings.get_default ().ffprobe_path,
-                "-v", "quiet",
-                "-print_format", "csv=p=0",
-                "-show_entries", "format=duration",
-                input_file
-            };
-            string stdout_buf, stderr_buf;
-            int status;
-
-            Process.spawn_sync (null, cmd, null,
-                                SpawnFlags.SEARCH_PATH,
-                                null, out stdout_buf, out stderr_buf, out status);
-
-            if (status == 0) {
-                double dur = double.parse (stdout_buf.strip ());
-                if (dur > 0) return dur;
-            }
-        } catch (Error e) {
-            print ("ffprobe error: %s\n", e.message);
-        }
-        return 0.0;
+        status_area.set_status (message);
+        console_tab.add_line (message);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

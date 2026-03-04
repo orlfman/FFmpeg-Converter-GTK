@@ -47,4 +47,39 @@ namespace FfprobeUtils {
         }
         return 0.0;
     }
+
+    /**
+     * Probe the total duration of @input_file in seconds using ffprobe.
+     * Returns 0.0 on any failure so callers can treat it as "unknown duration"
+     * and fall back to pulse-mode progress.
+     *
+     * Previously lived in Converter — moved here so any component that needs
+     * duration (Converter, TrimRunner, SubtitlesRunner) can use it without
+     * depending on Converter.
+     */
+    public double probe_duration (string input_file) {
+        try {
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "csv=p=0",
+                "-show_entries", "format=duration",
+                input_file
+            };
+            string stdout_buf, stderr_buf;
+            int status;
+
+            Process.spawn_sync (null, cmd, null,
+                                SpawnFlags.SEARCH_PATH,
+                                null, out stdout_buf, out stderr_buf, out status);
+
+            if (status == 0) {
+                double dur = double.parse (stdout_buf.strip ());
+                if (dur > 0) return dur;
+            }
+        } catch (Error e) {
+            print ("ffprobe duration error: %s\n", e.message);
+        }
+        return 0.0;
+    }
 }

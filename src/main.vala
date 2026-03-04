@@ -2,6 +2,22 @@ using Gtk;
 using Adw;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  ActiveOperation — Tracks which operation is running for clean cancellation
+//
+//  Instead of interrogating three different objects (subtitles_tab.is_busy,
+//  trim_tab.is_exporting, converter) to figure out what to cancel, we
+//  explicitly track which operation was started.  This eliminates the implicit
+//  priority chain and ensures cancel always dispatches to the right target.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+private enum ActiveOperation {
+    IDLE,
+    CONVERTING,
+    TRIMMING,
+    SUBTITLE_APPLY
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  MainWindow — Application window layout and user action handlers
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -26,6 +42,9 @@ public class MainWindow : Adw.ApplicationWindow {
     // Prevent GC from collecting the controller
     private AppController controller;
 
+    // Explicit operation tracking for clean cancel dispatch
+    private ActiveOperation current_operation = ActiveOperation.IDLE;
+
     public MainWindow (Adw.Application app) {
         Object (application: app);
 
@@ -43,10 +62,26 @@ public class MainWindow : Adw.ApplicationWindow {
             converter, hamburger,
             cancel_button, status_area
         );
+
+        // Reset operation state when any operation completes.
+        // (AppController separately handles info_tab, hamburger, and
+        // cancel_button for these same signals — multiple handlers are fine.)
+        converter.conversion_done.connect (() => {
+            current_operation = ActiveOperation.IDLE;
+        });
+        trim_tab.trim_done.connect (() => {
+            current_operation = ActiveOperation.IDLE;
+        });
+        subtitles_tab.subtitle_done.connect (() => {
+            current_operation = ActiveOperation.IDLE;
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  COMPONENT CREATION
+    //
+    //  Components receive StatusArea (not raw Label + ProgressBar) so this
+    //  class doesn't reach into StatusArea's internal widget structure.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void create_components () {
@@ -74,20 +109,11 @@ public class MainWindow : Adw.ApplicationWindow {
         subtitles_tab.x265_tab     = x265_tab;
         subtitles_tab.x264_tab     = x264_tab;
         subtitles_tab.vp9_tab      = vp9_tab;
-        subtitles_tab.set_ui_refs (
-            status_area.status_label,
-            status_area.progress_bar,
-            console_tab
-        );
+        subtitles_tab.set_ui_refs (status_area, console_tab);
 
         hamburger = new HamburgerMenu (this, file_pickers);
 
-        converter = new Converter (
-            status_area.status_label,
-            status_area.progress_bar,
-            console_tab,
-            general_tab
-        );
+        converter = new Converter (status_area, console_tab, general_tab);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -151,10 +177,16 @@ public class MainWindow : Adw.ApplicationWindow {
         update_convert_sensitivity ();
     }
 
-    /** Enable the Convert button only on tabs that support conversion. */
+    /**
+     * Enable the Convert button only on tabs that support conversion.
+     *
+     * Uses a whitelist so that new tabs default to disabled rather than
+     * accidentally enabled.
+     */
     private void update_convert_sensitivity () {
         string? page = view_stack.visible_child_name;
-        bool active = page != "general" && page != "info" && page != "console";
+        bool active = page == "svt-av1" || page == "x265" || page == "x264"
+                   || page == "vp9"     || page == "trim" || page == "subtitles";
         convert_button.set_sensitive (active);
     }
 
@@ -196,180 +228,131 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  USER ACTIONS
+    //  USER ACTIONS — Convert
+    //
+    //  The old on_convert_clicked handled four code paths in a single 75-line
+    //  method.  Now it's a short dispatcher that delegates to per-path
+    //  methods, each with its own validation and overwrite logic.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_convert_clicked () {
         string? page = view_stack.visible_child_name;
-        ICodecTab? active_codec_tab = null;
 
-        switch (page) {
-            case "svt-av1": active_codec_tab = svt_tab;  break;
-            case "x265":    active_codec_tab = x265_tab; break;
-            case "x264":    active_codec_tab = x264_tab; break;
-            case "vp9":     active_codec_tab = vp9_tab;  break;
-            case "trim":    active_codec_tab = trim_tab;  break;
-        }
-
-        if (active_codec_tab == null) {
-            // ── Subtitles Tab gets its own path (remux, no encoding) ─────────
-            if (page == "subtitles") {
-                if (!subtitles_tab.can_apply ()) {
-                    status_area.set_status ("⚠️ Load a file with subtitle tracks or add external subtitles first!");
-                    return;
-                }
-
-                string expected = subtitles_tab.get_expected_output_path ();
-                if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
-                    show_subtitle_overwrite_dialog (expected);
-                } else {
-                    subtitles_tab.start_apply ();
-                    cancel_button.set_sensitive (true);
-                }
-                return;
-            }
-
-            status_area.set_status ("⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, Crop & Trim, or Subtitles) first!");
+        // ── Subtitles has its own path (remux / burn-in, no codec tab) ────
+        if (page == "subtitles") {
+            start_subtitle_apply ();
             return;
         }
 
-        // ── Crop & Trim Tab gets its own conversion path ─────────────────────
-        if (active_codec_tab is TrimTab) {
-            var trim = (TrimTab) active_codec_tab;
-            string input = file_pickers.input_entry.get_text ();
-            string out_folder = file_pickers.output_entry.get_text ();
-
-            string expected = trim.get_expected_output_path (input, out_folder);
-            if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
-                show_trim_overwrite_dialog (trim, input, out_folder, expected);
-            } else {
-                trim.start_trim_export (
-                    input, out_folder,
-                    status_area.status_label,
-                    status_area.progress_bar,
-                    console_tab
-                );
-                cancel_button.set_sensitive (true);
-            }
+        // ── Look up the codec tab for all other convertible pages ─────────
+        ICodecTab? codec_tab = lookup_codec_tab (page);
+        if (codec_tab == null) {
+            status_area.set_status (
+                "⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, Crop & Trim, or Subtitles) first!");
             return;
         }
 
-        // ── Normal codec conversion path ─────────────────────────────────────
+        // ── Validate input file early (covers both trim and codec paths) ──
         string input_file = file_pickers.input_entry.get_text ();
         if (input_file == "") {
             status_area.set_status ("⚠️ Please select an input file first!");
             return;
         }
 
-        ICodecBuilder builder = active_codec_tab.get_codec_builder ();
+        // ── Dispatch to the appropriate conversion path ───────────────────
+        if (codec_tab is TrimTab) {
+            start_trim_operation ((TrimTab) codec_tab, input_file);
+        } else {
+            start_codec_conversion (input_file, codec_tab);
+        }
+    }
+
+    /**
+     * Map a ViewStack page name to its ICodecTab.
+     * Returns null for non-convertible pages.
+     */
+    private ICodecTab? lookup_codec_tab (string? page) {
+        switch (page) {
+            case "svt-av1": return svt_tab;
+            case "x265":    return x265_tab;
+            case "x264":    return x264_tab;
+            case "vp9":     return vp9_tab;
+            case "trim":    return trim_tab;
+            default:         return null;
+        }
+    }
+
+    // ── Subtitles path ───────────────────────────────────────────────────────
+
+    private void start_subtitle_apply () {
+        if (!subtitles_tab.can_apply ()) {
+            status_area.set_status (
+                "⚠️ Load a file with subtitle tracks or add external subtitles first!");
+            return;
+        }
+
+        string expected = subtitles_tab.get_expected_output_path ();
+        if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    subtitles_tab.start_apply (true);
+                    activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+                },
+                () => {
+                    subtitles_tab.start_apply (false);
+                    activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+                }
+            );
+        } else {
+            subtitles_tab.start_apply ();
+            activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+        }
+    }
+
+    // ── Crop & Trim path ─────────────────────────────────────────────────────
+
+    private void start_trim_operation (TrimTab trim, string input_file) {
+        string out_folder = file_pickers.output_entry.get_text ();
+        string expected = trim.get_expected_output_path (input_file, out_folder);
+
+        if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, false,
+                () => {
+                    trim.start_trim_export (
+                        input_file, out_folder, status_area, console_tab);
+                    activate_cancel (ActiveOperation.TRIMMING);
+                }
+            );
+        } else {
+            trim.start_trim_export (
+                input_file, out_folder, status_area, console_tab);
+            activate_cancel (ActiveOperation.TRIMMING);
+        }
+    }
+
+    // ── Normal codec conversion path ─────────────────────────────────────────
+
+    private void start_codec_conversion (string input_file, ICodecTab codec_tab) {
+        ICodecBuilder builder = codec_tab.get_codec_builder ();
 
         string output_file = Converter.compute_output_path (
             input_file,
             file_pickers.output_entry.get_text (),
             builder,
-            active_codec_tab
+            codec_tab
         );
 
         if (FileUtils.test (output_file, FileTest.EXISTS)) {
-            show_overwrite_dialog (input_file, output_file, active_codec_tab, builder);
+            confirm_overwrite (output_file, true,
+                () => { begin_conversion (input_file, output_file, codec_tab, builder); },
+                () => {
+                    string unique = Converter.find_unique_path (output_file);
+                    begin_conversion (input_file, unique, codec_tab, builder);
+                }
+            );
         } else {
-            begin_conversion (input_file, output_file, active_codec_tab, builder);
+            begin_conversion (input_file, output_file, codec_tab, builder);
         }
-    }
-
-    private void show_overwrite_dialog (string input_file,
-                                        string output_file,
-                                        ICodecTab codec_tab,
-                                        ICodecBuilder builder) {
-        string basename = Path.get_basename (output_file);
-
-        var dialog = new Adw.AlertDialog (
-            "File Already Exists",
-            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
-        );
-
-        dialog.add_response ("cancel", "Cancel");
-        dialog.add_response ("rename", "Auto-Rename");
-        dialog.add_response ("overwrite", "Overwrite");
-
-        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
-        dialog.set_response_appearance ("rename", Adw.ResponseAppearance.SUGGESTED);
-        dialog.set_default_response ("rename");
-        dialog.set_close_response ("cancel");
-
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-
-            if (response == "overwrite") {
-                begin_conversion (input_file, output_file, codec_tab, builder);
-            } else if (response == "rename") {
-                string unique = Converter.find_unique_path (output_file);
-                begin_conversion (input_file, unique, codec_tab, builder);
-            }
-        });
-    }
-
-    private void show_trim_overwrite_dialog (TrimTab trim,
-                                              string input_file,
-                                              string output_folder,
-                                              string expected_path) {
-        string basename = Path.get_basename (expected_path);
-
-        var dialog = new Adw.AlertDialog (
-            "File Already Exists",
-            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
-        );
-
-        dialog.add_response ("cancel", "Cancel");
-        dialog.add_response ("overwrite", "Overwrite");
-
-        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
-        dialog.set_default_response ("cancel");
-        dialog.set_close_response ("cancel");
-
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-
-            if (response == "overwrite") {
-                trim.start_trim_export (
-                    input_file, output_folder,
-                    status_area.status_label,
-                    status_area.progress_bar,
-                    console_tab
-                );
-                cancel_button.set_sensitive (true);
-            }
-        });
-    }
-
-    private void show_subtitle_overwrite_dialog (string expected_path) {
-        string basename = Path.get_basename (expected_path);
-
-        var dialog = new Adw.AlertDialog (
-            "File Already Exists",
-            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
-        );
-
-        dialog.add_response ("cancel", "Cancel");
-        dialog.add_response ("rename", "Auto-Rename");
-        dialog.add_response ("overwrite", "Overwrite");
-
-        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
-        dialog.set_response_appearance ("rename", Adw.ResponseAppearance.SUGGESTED);
-        dialog.set_default_response ("rename");
-        dialog.set_close_response ("cancel");
-
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-
-            if (response == "overwrite") {
-                subtitles_tab.start_apply (true);
-                cancel_button.set_sensitive (true);
-            } else if (response == "rename") {
-                subtitles_tab.start_apply (false);
-                cancel_button.set_sensitive (true);
-            }
-        });
     }
 
     private void begin_conversion (string input_file,
@@ -377,29 +360,120 @@ public class MainWindow : Adw.ApplicationWindow {
                                    ICodecTab codec_tab,
                                    ICodecBuilder builder) {
         converter.start_conversion (input_file, output_file, codec_tab, builder);
+        activate_cancel (ActiveOperation.CONVERTING);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  UNIFIED OVERWRITE DIALOG
+    //
+    //  The three previous dialog methods (show_overwrite_dialog,
+    //  show_trim_overwrite_dialog, show_subtitle_overwrite_dialog) were ~90%
+    //  identical.  This single helper handles all variants:
+    //
+    //   • offer_rename = true  → Cancel / Auto-Rename / Overwrite
+    //   • offer_rename = false → Cancel / Overwrite
+    //
+    //  Callers pass callbacks for what should happen on each choice.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private delegate void OverwriteCallback ();
+
+    private void confirm_overwrite (string output_path,
+                                    bool offer_rename,
+                                    owned OverwriteCallback on_overwrite,
+                                    owned OverwriteCallback? on_rename = null) {
+        string basename = Path.get_basename (output_path);
+
+        var dialog = new Adw.AlertDialog (
+            "File Already Exists",
+            @"\"$basename\" already exists in the output folder.\n\nWhat would you like to do?"
+        );
+
+        dialog.add_response ("cancel", "Cancel");
+
+        if (offer_rename) {
+            dialog.add_response ("rename", "Auto-Rename");
+            dialog.set_response_appearance ("rename", Adw.ResponseAppearance.SUGGESTED);
+            dialog.set_default_response ("rename");
+        } else {
+            dialog.set_default_response ("cancel");
+        }
+
+        dialog.add_response ("overwrite", "Overwrite");
+        dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_close_response ("cancel");
+
+        dialog.choose.begin (this, null, (obj, res) => {
+            string response = dialog.choose.end (res);
+
+            if (response == "overwrite") {
+                on_overwrite ();
+            } else if (response == "rename" && on_rename != null) {
+                on_rename ();
+            }
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  OPERATION LIFECYCLE HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** Record the active operation and enable the Cancel button. */
+    private void activate_cancel (ActiveOperation operation) {
+        current_operation = operation;
         cancel_button.set_sensitive (true);
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  USER ACTIONS — Cancel
+    //
+    //  Dispatches to the correct cancel target based on the tracked
+    //  operation, instead of probing multiple objects to guess which
+    //  one is active.
+    // ═════════════════════════════════════════════════════════════════════════
+
     private void on_cancel_clicked () {
-        if (subtitles_tab.is_busy ()) {
-            subtitles_tab.cancel_operation ();
-            status_area.set_status ("⏹️ Subtitle operation cancelled by user.");
-        } else if (trim_tab.is_exporting ()) {
-            trim_tab.cancel_trim ();
-            status_area.set_status ("⏹️ Export cancelled by user.");
-        } else {
-            converter.cancel ();
-            status_area.set_status ("⏹️ Conversion cancelled by user.");
+        switch (current_operation) {
+            case ActiveOperation.SUBTITLE_APPLY:
+                subtitles_tab.cancel_operation ();
+                status_area.set_status ("⏹️ Subtitle operation cancelled by user.");
+                break;
+
+            case ActiveOperation.TRIMMING:
+                trim_tab.cancel_trim ();
+                status_area.set_status ("⏹️ Export cancelled by user.");
+                break;
+
+            case ActiveOperation.CONVERTING:
+                converter.cancel ();
+                status_area.set_status ("⏹️ Conversion cancelled by user.");
+                break;
+
+            default:
+                break;
         }
+
+        current_operation = ActiveOperation.IDLE;
         cancel_button.set_sensitive (false);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Application entry point
+//
+//  activate fires on every activation — including when the user clicks the
+//  dock icon while the app is already running.  We check for an existing
+//  window and just present it, rather than spawning a duplicate.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 int main (string[] args) {
     var app = new Adw.Application ("com.github.pieman.FFmpegConverterGTK", ApplicationFlags.DEFAULT_FLAGS);
 
     app.activate.connect (() => {
-        var win = new MainWindow (app);
+        var win = app.get_active_window () as MainWindow;
+        if (win == null) {
+            win = new MainWindow (app);
+        }
         win.present ();
     });
 

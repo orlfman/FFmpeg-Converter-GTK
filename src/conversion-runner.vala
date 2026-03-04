@@ -69,11 +69,17 @@ public class ConversionRunner {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  COMMAND BUILDERS
-    //  All data comes from ConversionConfig
+    //  SHARED COMMAND PREFIX
+    //
+    //  All three command builders share the same prefix:
+    //    ffmpeg -y [-ss timestamp] -i input [-vf filters] [codec_args...]
+    //
+    //  Extracting this avoids duplicating seek, input, filter, and codec
+    //  argument logic three times — a bug fix in any of these now only
+    //  needs to happen in one place.
     // ═════════════════════════════════════════════════════════════════════════
 
-    private string[] build_pass1 (string input) {
+    private string[] build_common_prefix (string input) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
@@ -88,83 +94,79 @@ public class ConversionRunner {
         }
 
         foreach (string arg in config.codec_args) cmd += arg;
+
+        return cmd;
+    }
+
+    /**
+     * Build the shared time-limit and progress-pipe arguments.
+     * Returns an array that the caller appends to its command.
+     */
+    private string[] build_time_and_progress_args () {
+        string[] args = {};
+
+        if (config.time_enabled) {
+            args += "-t";
+            args += config.time_timestamp;
+        }
+
+        args += "-progress"; args += "pipe:2";
+        return args;
+    }
+
+    /**
+     * Build metadata flags when the output is a real file (not /dev/null).
+     * Returns an array that the caller appends to its command.
+     */
+    private string[] build_metadata_args () {
+        string[] args = {};
+
+        if (config.preserve_metadata) { args += "-map_metadata"; args += "0"; }
+        if (config.remove_chapters)   { args += "-map_chapters"; args += "-1"; }
+
+        return args;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COMMAND BUILDERS
+    //  All data comes from ConversionConfig via build_common_prefix.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private string[] build_pass1 (string input) {
+        string[] cmd = build_common_prefix (input);
 
         cmd += "-pass"; cmd += "1";
         cmd += "-passlogfile"; cmd += config.passlog_base;
         cmd += "-an";
 
-        if (config.time_enabled) {
-            cmd += "-t";
-            cmd += config.time_timestamp;
-        }
+        foreach (string a in build_time_and_progress_args ()) cmd += a;
 
         cmd += "-f"; cmd += "null";
-        cmd += "-progress"; cmd += "pipe:2";
         cmd += "/dev/null";
         return cmd;
     }
 
     private string[] build_pass2 (string input, string safe_output) {
-        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
-
-        if (config.seek_enabled) {
-            cmd += "-ss";
-            cmd += config.seek_timestamp;
-        }
-
-        cmd += "-i"; cmd += input;
-
-        if (config.video_filters != "") {
-            cmd += "-vf"; cmd += config.video_filters;
-        }
-
-        foreach (string arg in config.codec_args) cmd += arg;
+        string[] cmd = build_common_prefix (input);
 
         cmd += "-pass"; cmd += "2";
         cmd += "-passlogfile"; cmd += config.passlog_base;
 
-        if (config.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
-        if (config.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
-
-        if (config.time_enabled) {
-            cmd += "-t";
-            cmd += config.time_timestamp;
-        }
-
+        foreach (string a in build_metadata_args ()) cmd += a;
+        foreach (string a in build_time_and_progress_args ()) cmd += a;
         foreach (string a in get_audio_args_with_filters ()) cmd += a;
 
-        cmd += "-progress"; cmd += "pipe:2";
         cmd += safe_output;
         return cmd;
     }
 
     private string[] build_single_pass (string input, string safe_output) {
-        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+        string[] cmd = build_common_prefix (input);
 
-        if (config.seek_enabled) {
-            cmd += "-ss";
-            cmd += config.seek_timestamp;
-        }
-
-        cmd += "-i"; cmd += input;
-
-        if (config.video_filters != "") {
-            cmd += "-vf"; cmd += config.video_filters;
-        }
-
-        foreach (string arg in config.codec_args) cmd += arg;
-
-        if (config.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
-        if (config.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
-
-        if (config.time_enabled) {
-            cmd += "-t";
-            cmd += config.time_timestamp;
-        }
-
+        foreach (string a in build_metadata_args ()) cmd += a;
+        foreach (string a in build_time_and_progress_args ()) cmd += a;
         foreach (string a in get_audio_args_with_filters ()) cmd += a;
 
-        cmd += "-progress"; cmd += "pipe:2";
         cmd += safe_output;
         return cmd;
     }
