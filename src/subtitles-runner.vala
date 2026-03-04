@@ -72,30 +72,16 @@ public class SubtitlesRunner : Object {
     public ConsoleTab?  console_tab  { get; set; default = null; }
 
     // Signals
-    public signal void probe_done ();
     public signal void operation_done (string output_path);
     public signal void operation_failed (string message);
 
-    // Last probe result — read this in the probe_done handler
-    public GenericArray<SubtitleStream> last_probe_result = new GenericArray<SubtitleStream> ();
-
     // ═════════════════════════════════════════════════════════════════════════
-    //  PROBE — Discover subtitle streams in an input file
+    //  PROBE — Discover subtitle streams in an input file (synchronous)
     //
-    //  Runs on a background thread; stores result in last_probe_result,
-    //  then emits probe_done on the main thread.
+    //  Called from load_video()'s background thread.  Returns the parsed
+    //  stream list directly — the caller is responsible for marshalling
+    //  back to the main thread via Idle.add().
     // ═════════════════════════════════════════════════════════════════════════
-
-    public void probe_subtitles (string input_file) {
-        new Thread<void> ("subtitle-probe", () => {
-            var streams = probe_sync (input_file);
-            Idle.add (() => {
-                last_probe_result = streams;
-                probe_done ();
-                return Source.REMOVE;
-            });
-        });
-    }
 
     public GenericArray<SubtitleStream> probe_sync (string input_file) {
         var streams = new GenericArray<SubtitleStream> ();
@@ -328,7 +314,7 @@ public class SubtitlesRunner : Object {
         // order[] contains indices where:
         //   0..existing.length-1 = existing stream at that sub_index
         //   existing.length..N   = added subtitle at index (val - existing.length)
-        int output_sub_idx = 0;
+        bool has_subtitle_maps = false;
         for (int i = 0; i < order.length; i++) {
             int idx = order[i];
 
@@ -338,19 +324,20 @@ public class SubtitlesRunner : Object {
                 if (s.marked_remove) continue;
 
                 cmd += "-map"; cmd += @"0:s:$(s.sub_index)";
+                has_subtitle_maps = true;
             } else {
                 // External subtitle file
                 int ext_idx = idx - existing.length;
                 if (ext_idx >= 0 && ext_idx < added.length) {
                     int input_num = 1 + ext_idx;
                     cmd += "-map"; cmd += @"$(input_num):0";
+                    has_subtitle_maps = true;
                 }
             }
-            output_sub_idx++;
         }
 
         // If no subtitle maps were added, explicitly disable subtitles
-        if (output_sub_idx == 0) {
+        if (!has_subtitle_maps) {
             cmd += "-sn";
         }
 
@@ -427,8 +414,12 @@ public class SubtitlesRunner : Object {
         log_line ("=== Subtitle Remux ===");
         log_line (string.joinv (" ", cmd));
 
+        bool saw_format_mismatch = false;
         int exit = runner.execute (cmd, (line) => {
             log_line (line);
+            if (line.contains ("only possible from text to text or bitmap to bitmap")) {
+                saw_format_mismatch = true;
+            }
         });
 
         if (runner.is_cancelled ()) {
@@ -443,9 +434,211 @@ public class SubtitlesRunner : Object {
                 operation_done (result);
                 return Source.REMOVE;
             });
+        } else if (saw_format_mismatch) {
+            report_error (
+                "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
+                "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
+                "are not interchangeable. Use a container that supports the original format (MKV is safest), " +
+                "or use Burn In mode to hardcode bitmap subtitles into the video."
+            );
         } else {
             report_error (@"Remux failed (exit code $exit).");
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  BURN IN — Hardcode subtitles into video frames (full re-encode)
+    //
+    //  Two filter paths:
+    //   • Text subs (SRT, ASS, VTT, SSA):  -vf "subtitles=..."
+    //   • Bitmap subs (PGS, VobSub, DVB):  -filter_complex "[0:v][0:s:N]overlay"
+    //
+    //  All config is snapshot on the main thread and passed as params
+    //  to avoid cross-thread widget access.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public void burn_in_subtitle (string input_file,
+                                   string output_path,
+                                   int sub_stream_index,
+                                   string? external_sub_path,
+                                   bool is_bitmap,
+                                   owned string[] codec_args,
+                                   owned string[] audio_args,
+                                   string video_filters,
+                                   string audio_filters,
+                                   bool preserve_metadata,
+                                   bool remove_chapters) {
+        runner.reset ();
+        report_status ("🔄 Burning in subtitles (full re-encode)…");
+
+        // Create tracker on main thread (GTK widgets must not be touched from bg)
+        ProgressTracker? tracker = null;
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_pulse ();
+        }
+
+        new Thread<void> ("subtitle-burn-in", () => {
+            // Probe duration for progress tracking
+            double duration = probe_duration (input_file);
+
+            if (tracker != null) {
+                if (duration > 0) {
+                    tracker.switch_to_determinate ();
+                }
+            }
+
+            // ── Build FFmpeg command ─────────────────────────────────────────
+            string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+
+            bool has_external_bitmap = (external_sub_path != null && is_bitmap);
+
+            cmd += "-i";
+            cmd += input_file;
+
+            // External bitmap subs need a second input
+            if (has_external_bitmap) {
+                cmd += "-i";
+                cmd += external_sub_path;
+            }
+
+            // ── Determine audio state ────────────────────────────────────────
+            bool audio_disabled = (audio_args.length > 0 && audio_args[0] == "-an");
+
+            // ── Build subtitle filter + combine with general video filters ───
+            if (is_bitmap) {
+                // Bitmap path → -filter_complex with overlay
+                string overlay_src;
+                if (has_external_bitmap) {
+                    overlay_src = "[0:v][1:0]overlay";
+                } else {
+                    overlay_src = @"[0:v][0:s:$(sub_stream_index)]overlay";
+                }
+
+                string fc;
+                if (video_filters.length > 0) {
+                    fc = overlay_src + "," + video_filters + "[outv]";
+                } else {
+                    fc = overlay_src + "[outv]";
+                }
+
+                cmd += "-filter_complex";
+                cmd += fc;
+                cmd += "-map";
+                cmd += "[outv]";
+                if (!audio_disabled) {
+                    cmd += "-map";
+                    cmd += "0:a?";
+                }
+            } else {
+                // Text path → -vf with subtitles= filter
+                string sub_filter;
+                if (external_sub_path != null) {
+                    sub_filter = "subtitles=" + escape_filter_path (external_sub_path);
+                } else {
+                    sub_filter = "subtitles=" + escape_filter_path (input_file)
+                                 + @":si=$(sub_stream_index)";
+                }
+
+                string full_vf;
+                if (video_filters.length > 0) {
+                    full_vf = sub_filter + "," + video_filters;
+                } else {
+                    full_vf = sub_filter;
+                }
+
+                cmd += "-vf";
+                cmd += full_vf;
+                cmd += "-map";
+                cmd += "0:v";
+                if (!audio_disabled) {
+                    cmd += "-map";
+                    cmd += "0:a?";
+                }
+            }
+
+            // ── Codec args ───────────────────────────────────────────────────
+            foreach (string arg in codec_args) cmd += arg;
+
+            // ── Audio args (merged with General-tab audio filters) ───────────
+            if (audio_disabled) {
+                cmd += "-an";
+            } else {
+                string[] merged = FilterBuilder.merge_audio_filters (audio_filters, audio_args);
+                foreach (string a in merged) cmd += a;
+            }
+
+            // ── Metadata ─────────────────────────────────────────────────────
+            if (preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
+            if (remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
+
+            cmd += "-progress";
+            cmd += "pipe:2";
+            cmd += output_path;
+
+            log_line ("=== Subtitle Burn-In ===");
+            log_line (string.joinv (" ", cmd));
+            if (console_tab != null) {
+                string full_cmd = string.joinv (" ", cmd);
+                Idle.add (() => {
+                    console_tab.set_command (full_cmd);
+                    return Source.REMOVE;
+                });
+            }
+
+            bool saw_format_mismatch = false;
+            int exit = runner.execute (cmd, (line) => {
+                // Log interesting lines only
+                if (ConversionUtils.should_log_ffmpeg_line (line)) {
+                    log_line (line);
+                }
+
+                if (line.contains ("only possible from text to text or bitmap to bitmap")) {
+                    saw_format_mismatch = true;
+                }
+
+                // Progress parsing
+                if (tracker != null && duration > 0) {
+                    double current = parse_progress_time (line);
+                    if (current >= 0) {
+                        tracker.update_from_time (current, duration, 0.0, 100.0);
+                    }
+                }
+            });
+
+            // Cleanup tracker
+            if (tracker != null) {
+                if (runner.is_cancelled ()) {
+                    tracker.hide_cancelled ();
+                } else {
+                    tracker.hide ();
+                }
+            }
+
+            if (runner.is_cancelled ()) {
+                report_status ("⏹️ Burn-in cancelled.");
+                return;
+            }
+
+            if (exit == 0) {
+                string result = output_path;
+                report_status (@"✅ Subtitles burned in!\n\nSaved to:\n$result");
+                Idle.add (() => {
+                    operation_done (result);
+                    return Source.REMOVE;
+                });
+            } else if (saw_format_mismatch) {
+                report_error (
+                    "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
+                    "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
+                    "are not interchangeable. For bitmap subtitles, make sure the burn-in track " +
+                    "is correctly detected as bitmap — the overlay filter will be used automatically."
+                );
+            } else {
+                report_error (@"Burn-in failed (exit code $exit).");
+            }
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -456,17 +649,12 @@ public class SubtitlesRunner : Object {
         runner.cancel ();
     }
 
-    public bool is_running () {
-        // Simple check: if we haven't cancelled and runner exists
-        return !runner.is_cancelled ();
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     //  STATUS HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
     /** Check if a codec is a bitmap-based subtitle format. */
-    private bool is_bitmap_codec (string codec) {
+    public static bool is_bitmap_codec (string codec) {
         return codec == "hdmv_pgs_subtitle"
             || codec == "pgssub"
             || codec == "dvd_subtitle"
@@ -486,15 +674,12 @@ public class SubtitlesRunner : Object {
     }
 
     private void report_error (string message) {
-        Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (@"❌ $message\nCheck the console for details.");
-            return Source.REMOVE;
-        });
         log_line ("❌ " + message);
 
         string err = message;
         Idle.add (() => {
+            if (status_label != null)
+                status_label.set_text (@"❌ $err\nCheck the console for details.");
             operation_failed (err);
             return Source.REMOVE;
         });
@@ -502,7 +687,71 @@ public class SubtitlesRunner : Object {
 
     private void log_line (string text) {
         if (console_tab != null) {
-            console_tab.add_line (text);
+            Idle.add (() => {
+                console_tab.add_line (text);
+                return Source.REMOVE;
+            });
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  BURN-IN HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** Probe video duration in seconds (runs synchronously — call from bg thread). */
+    private double probe_duration (string input_file) {
+        try {
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "csv=p=0",
+                "-show_entries", "format=duration",
+                input_file
+            };
+            string stdout_buf, stderr_buf;
+            int status;
+            Process.spawn_sync (null, cmd, null,
+                                SpawnFlags.SEARCH_PATH,
+                                null, out stdout_buf, out stderr_buf, out status);
+            if (status == 0) {
+                double dur = double.parse (stdout_buf.strip ());
+                if (dur > 0) return dur;
+            }
+        } catch (Error e) {
+            log_line ("ffprobe duration error: " + e.message);
+        }
+        return 0.0;
+    }
+
+    /**
+     * Escape a file path for use inside FFmpeg's subtitles= filter option.
+     *
+     * FFmpeg filter option syntax treats \, :, ', [, ], ;, = as special.
+     * Each must be backslash-escaped so the filter parser reads them literally.
+     */
+    private static string escape_filter_path (string path) {
+        var sb = new StringBuilder ();
+        for (int i = 0; i < path.length; i++) {
+            uint8 c = path.data[i];
+            if (c == '\\' || c == ':' || c == '\'' || c == '[' || c == ']' || c == ';' || c == '=') {
+                sb.append_c ('\\');
+            }
+            sb.append_c ((char) c);
+        }
+        return sb.str;
+    }
+
+    /** Parse FFmpeg progress output for current encoding position. */
+    private static double parse_progress_time (string line) {
+        if (line.has_prefix ("out_time_us=")) {
+            string val = line.substring ("out_time_us=".length).strip ();
+            int64 us = int64.parse (val);
+            return us / 1000000.0;
+        }
+        if (line.has_prefix ("out_time=")) {
+            string val = line.substring ("out_time=".length).strip ();
+            return ConversionUtils.parse_ffmpeg_timestamp (val);
+        }
+        return -1.0;
     }
 }

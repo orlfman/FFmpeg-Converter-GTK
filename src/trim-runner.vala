@@ -405,6 +405,7 @@ public class TrimRunner : Object {
 
             foreach (string arg in codec_args) cmd += arg;
         } else {
+            log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
             cmd += "-c:v";
             cmd += "libx264";
             cmd += "-crf";
@@ -532,6 +533,7 @@ public class TrimRunner : Object {
 
                 foreach (string arg in codec_args) cmd += arg;
             } else {
+                log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
                 cmd += "-c:v";
                 cmd += "libx264";
                 cmd += "-crf";
@@ -650,18 +652,18 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private int execute_ffmpeg (string[] argv) {
+        string full_cmd = string.joinv (" ", argv);
+        log_line ("\n=== FFmpeg command ===\n" + full_cmd);
+        if (console_tab != null) {
+            console_tab.set_command (full_cmd);
+        }
+
         int exit = runner.execute (argv, (clean) => {
             // Filter noisy progress lines — only log interesting ones
             if (ConversionUtils.should_log_ffmpeg_line (clean)) {
                 log_line (clean);
             }
         });
-
-        string full_cmd = string.joinv (" ", argv);
-        log_line ("\n=== FFmpeg command ===\n" + full_cmd);
-        if (console_tab != null) {
-            console_tab.set_command (full_cmd);
-        }
 
         return exit;
     }
@@ -794,7 +796,8 @@ public class TrimRunner : Object {
             }
             DirUtils.remove (path);
         } catch (Error e) {
-            // Best-effort cleanup
+            // Best-effort cleanup — log so orphaned temp files are visible
+            print ("TrimRunner: cleanup_dir failed for %s: %s\n", path, e.message);
         }
     }
 }

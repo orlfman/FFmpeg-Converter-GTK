@@ -18,14 +18,20 @@ public class VideoPlayer : Box {
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
     private uint prepare_poll  = 0;
+    private uint scrub_reset_source = 0;   // Fix: track scrubber anti-fight timeout
     private bool user_scrubbing = false;
     private bool is_playing = false;
+    private bool prepared_handled = false;  // Fix: guard against double on_media_prepared
 
     // ── Video intrinsic size ─────────────────────────────────────────────────
     private int _intrinsic_width  = 0;
     private int _intrinsic_height = 0;
     public  int intrinsic_width  { get { return _intrinsic_width;  } }
     public  int intrinsic_height { get { return _intrinsic_height; } }
+
+    // ── Video frame rate (probed via ffprobe for accurate frame stepping) ──
+    private double _fps = 0.0;
+    public  double fps { get { return _fps; } }
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void position_changed (double seconds);
@@ -158,11 +164,24 @@ public class VideoPlayer : Box {
         is_playing = false;
         _intrinsic_width  = 0;
         _intrinsic_height = 0;
+        _fps = 0.0;
+        prepared_handled = false;
         play_button.set_icon_name ("media-playback-start-symbolic");
 
         var file = GLib.File.new_for_path (path);
         media = Gtk.MediaFile.for_file (file);
         picture.set_paintable (media);
+
+        // Probe the real frame rate in the background so frame stepping
+        // uses the actual fps instead of a hard-coded 30fps assumption.
+        string probe_path = path;
+        new Thread<void> ("fps-probe", () => {
+            double probed = FfprobeUtils.probe_input_fps (probe_path);
+            Idle.add (() => {
+                _fps = probed;
+                return Source.REMOVE;
+            });
+        });
 
         // Two-pronged approach to detect when GStreamer finishes probing:
         //  1. Property notification (ideal, fires immediately when ready)
@@ -228,6 +247,10 @@ public class VideoPlayer : Box {
     public void cleanup () {
         stop_update_timer ();
         stop_prepare_poll ();
+        if (scrub_reset_source != 0) {
+            Source.remove (scrub_reset_source);
+            scrub_reset_source = 0;
+        }
         if (media != null) {
             media.set_playing (false);
         }
@@ -275,6 +298,10 @@ public class VideoPlayer : Box {
 
     private void on_media_prepared () {
         if (media == null || !media.is_prepared ()) return;
+
+        // Guard against both the notify signal and the poll timer firing
+        if (prepared_handled) return;
+        prepared_handled = true;
 
         stop_prepare_poll ();
 
@@ -335,8 +362,9 @@ public class VideoPlayer : Box {
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
         }
-        // ~33 ms per frame at 30 fps — a reasonable default
-        seek_relative (direction * (1.0 / 30.0));
+        // Use the probed frame rate when available, fall back to 30 fps
+        double effective_fps = (_fps > 0.0) ? _fps : 30.0;
+        seek_relative (direction * (1.0 / effective_fps));
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -356,10 +384,17 @@ public class VideoPlayer : Box {
         media.seek (seek_pos);
         time_label.set_text (format_time (new_value));
 
+        // Cancel any previous anti-fight timeout to prevent stacking
+        if (scrub_reset_source != 0) {
+            Source.remove (scrub_reset_source);
+            scrub_reset_source = 0;
+        }
+
         // Release the flag after a short delay so the update timer
         // doesn't fight with drag events.
-        Timeout.add (120, () => {
+        scrub_reset_source = Timeout.add (120, () => {
             user_scrubbing = false;
+            scrub_reset_source = 0;
             return Source.REMOVE;
         });
 

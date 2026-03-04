@@ -33,6 +33,13 @@ public class SubtitlesTab : Box {
     // External reference — set by MainWindow after construction
     public FilePickers? file_pickers { get; set; default = null; }
 
+    // Codec tab references for burn-in re-encode (set by MainWindow)
+    public GeneralTab? general_tab { get; set; default = null; }
+    public ICodecTab?  svt_tab     { get; set; default = null; }
+    public ICodecTab?  x265_tab    { get; set; default = null; }
+    public ICodecTab?  x264_tab    { get; set; default = null; }
+    public ICodecTab?  vp9_tab     { get; set; default = null; }
+
     // ── State ────────────────────────────────────────────────────────────────
     private string current_input_file = "";
     private GenericArray<SubtitleStream>   detected_streams = new GenericArray<SubtitleStream> ();
@@ -51,8 +58,14 @@ public class SubtitlesTab : Box {
     private DropDown extract_track_combo;
     private DropDown extract_format_combo;
     private Button   extract_button;
+    private DropDown mode_combo;
     private DropDown container_combo;
     private Adw.ActionRow container_compat_row;
+
+    // ── Burn-in widgets ──────────────────────────────────────────────────────
+    private Adw.PreferencesGroup burn_in_group;
+    private DropDown burn_track_combo;
+    private DropDown burn_codec_combo;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -78,8 +91,11 @@ public class SubtitlesTab : Box {
         append (add_section);
         rebuild_add_group ();
 
-        // 4. Apply (built once)
-        build_apply_group ();
+        // 4. Output settings (built once)
+        build_output_group ();
+
+        // 5. Burn-in config (built once, shown/hidden by mode)
+        build_burn_in_group ();
 
         connect_signals ();
         update_ui_state ();
@@ -216,12 +232,11 @@ public class SubtitlesTab : Box {
         default_sw.set_active (stream.is_default);
         default_sw.set_valign (Align.CENTER);
         default_sw.notify["active"].connect (() => {
-            stream.is_default = default_sw.active;
             if (default_sw.active) {
-                // Only one track should be default — clear all others
+                // Only one track should be default — clear all others first
                 clear_all_defaults ();
-                stream.is_default = true;
             }
+            stream.is_default = default_sw.active;
         });
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
@@ -396,6 +411,7 @@ public class SubtitlesTab : Box {
             if (idx >= 0 && idx < added_subtitles.length) {
                 added_subtitles.remove_index (idx);
                 rebuild_add_group ();
+                rebuild_burn_track_combo ();
                 update_ui_state ();
             }
         });
@@ -442,11 +458,10 @@ public class SubtitlesTab : Box {
         default_sw.set_active (ext.is_default);
         default_sw.set_valign (Align.CENTER);
         default_sw.notify["active"].connect (() => {
-            ext.is_default = default_sw.active;
             if (default_sw.active) {
                 clear_all_defaults ();
-                ext.is_default = true;
             }
+            ext.is_default = default_sw.active;
         });
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
@@ -504,15 +519,27 @@ public class SubtitlesTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  4. APPLY CHANGES (static — built once)
+    //  4. OUTPUT SETTINGS (static — built once)
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void build_apply_group () {
+    private void build_output_group () {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Output Settings");
         group.set_description (
-            "Configure the output container — video and audio stay untouched (fast, lossless remux)"
+            "Configure how subtitle changes are applied to the output file"
         );
+
+        // Mode selector: Remux or Burn In
+        var mode_row = new Adw.ActionRow ();
+        mode_row.set_title ("Mode");
+        mode_row.set_subtitle ("Remux is fast (no re-encode) — Burn In draws text onto every frame");
+        mode_combo = new DropDown (new StringList (
+            { "Remux (soft subtitles)", "Burn In (hardcode into video)" }
+        ), null);
+        mode_combo.set_valign (Align.CENTER);
+        mode_combo.set_selected (0);
+        mode_row.add_suffix (mode_combo);
+        group.add (mode_row);
 
         // Container format
         var container_row = new Adw.ActionRow ();
@@ -536,7 +563,64 @@ public class SubtitlesTab : Box {
             update_container_compat_info ();
         });
 
+        // Mode switching — show/hide burn-in group
+        mode_combo.notify["selected"].connect (() => {
+            bool burn_in = (mode_combo.get_selected () == 1);
+            burn_in_group.set_visible (burn_in);
+            update_container_compat_info ();
+            update_ui_state ();
+        });
+
         append (group);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  5. BURN-IN CONFIGURATION (static — built once, visibility toggles)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_burn_in_group () {
+        burn_in_group = new Adw.PreferencesGroup ();
+        burn_in_group.set_title ("Burn-In Configuration");
+        burn_in_group.set_description (
+            "Full video re-encode — subtitles are permanently drawn onto every frame"
+        );
+
+        // Track to burn in
+        var track_row = new Adw.ActionRow ();
+        track_row.set_title ("Subtitle Track");
+        track_row.set_subtitle ("Which subtitle to hardcode into the video");
+        burn_track_combo = new DropDown (new StringList ({ "No tracks available" }), null);
+        burn_track_combo.set_valign (Align.CENTER);
+        burn_track_combo.set_sensitive (false);
+        track_row.add_suffix (burn_track_combo);
+        burn_in_group.add (track_row);
+
+        // Codec selector
+        var codec_row = new Adw.ActionRow ();
+        codec_row.set_title ("Video Codec");
+        codec_row.set_subtitle ("Encoding settings are taken from the selected codec tab");
+        burn_codec_combo = new DropDown (new StringList (
+            { "SVT-AV1", "x265", "x264", "VP9" }
+        ), null);
+        burn_codec_combo.set_valign (Align.CENTER);
+        burn_codec_combo.set_selected (0);
+        codec_row.add_suffix (burn_codec_combo);
+        burn_in_group.add (codec_row);
+
+        // Info row
+        var info_row = new Adw.ActionRow ();
+        info_row.set_title ("Re-encode Required");
+        info_row.set_subtitle (
+            "This will re-encode the entire video using the codec and General tab settings — " +
+            "much slower than remux, but produces a single self-contained file"
+        );
+        info_row.add_prefix (make_icon ("dialog-warning-symbolic"));
+        burn_in_group.add (info_row);
+
+        // Hidden by default — shown when mode = Burn In
+        burn_in_group.set_visible (false);
+
+        append (burn_in_group);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -569,6 +653,7 @@ public class SubtitlesTab : Box {
             detected_streams = new GenericArray<SubtitleStream> ();
             rebuild_detected_group ();
             rebuild_extract_combo ();
+            rebuild_burn_track_combo ();
             update_ui_state ();
             return;
         }
@@ -596,6 +681,7 @@ public class SubtitlesTab : Box {
                 detected_streams = streams;
                 rebuild_detected_group ();
                 rebuild_extract_combo ();
+                rebuild_burn_track_combo ();
                 update_ui_state ();
                 return Source.REMOVE;
             });
@@ -616,7 +702,10 @@ public class SubtitlesTab : Box {
         runner.status_label = status;
         runner.progress_bar = bar;
         runner.console_tab  = console;
+        _status_label = status;
     }
+
+    private Label? _status_label = null;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  EXTRACT HANDLER
@@ -718,6 +807,18 @@ public class SubtitlesTab : Box {
      * Update the compatibility info row based on the selected container.
      */
     private void update_container_compat_info () {
+        // In burn-in mode, show re-encode info instead of subtitle compat
+        if (is_burn_in_mode ()) {
+            container_compat_row.set_title ("Burn-In — Container from codec tab");
+            container_compat_row.set_subtitle (
+                "Output container is determined by the selected codec tab's settings"
+            );
+            // Container combo is irrelevant in burn-in mode
+            container_combo.set_sensitive (false);
+            return;
+        }
+
+        container_combo.set_sensitive (true);
         string ext = get_output_extension ();
         string title;
         string subtitle;
@@ -820,6 +921,7 @@ public class SubtitlesTab : Box {
                 }
 
                 rebuild_add_group ();
+                rebuild_burn_track_combo ();
                 update_ui_state ();
             } catch (Error e) {
                 // User cancelled
@@ -832,11 +934,24 @@ public class SubtitlesTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     /** Whether the subtitles tab has enough state to apply changes. */
+    /** Whether the current mode is burn-in. */
+    public bool is_burn_in_mode () {
+        return mode_combo.get_selected () == 1;
+    }
+
     public bool can_apply () {
         if (current_input_file.length == 0) return false;
-        bool has_streams = (detected_streams.length > 0);
-        bool has_added   = (added_subtitles.length > 0);
-        return (has_streams || has_added) && !_is_busy;
+        if (_is_busy) return false;
+
+        if (is_burn_in_mode ()) {
+            // Burn-in needs at least one track to burn
+            return burn_track_combo.get_sensitive ();
+        } else {
+            // Remux needs at least one stream or added file
+            bool has_streams = (detected_streams.length > 0);
+            bool has_added   = (added_subtitles.length > 0);
+            return has_streams || has_added;
+        }
     }
 
     /** Compute the output path that start_apply() would produce. */
@@ -854,18 +969,28 @@ public class SubtitlesTab : Box {
                 dir = out_dir;
         }
 
-        string ext = get_output_extension ();
-        return Path.build_filename (dir, name + "-subs" + ext);
+        string suffix = is_burn_in_mode () ? "-burnin" : "-subs";
+        string ext = is_burn_in_mode () ? get_burn_in_extension () : get_output_extension ();
+        return Path.build_filename (dir, name + suffix + ext);
     }
 
-    public void start_apply () {
+    public void start_apply (bool allow_overwrite = false) {
         if (current_input_file == "") return;
 
+        if (is_burn_in_mode ()) {
+            start_burn_in (allow_overwrite);
+        } else {
+            start_remux (allow_overwrite);
+        }
+    }
+
+    // ── Remux path (existing logic) ──────────────────────────────────────────
+
+    private void start_remux (bool allow_overwrite) {
         string basename = Path.get_basename (current_input_file);
         int dot = basename.last_index_of_char ('.');
         string name = (dot > 0) ? basename.substring (0, dot) : basename;
 
-        // Use the output folder if set, otherwise fall back to input file's directory
         string dir = Path.get_dirname (current_input_file);
         if (file_pickers != null) {
             string out_dir = file_pickers.output_entry.get_text ().strip ();
@@ -874,7 +999,8 @@ public class SubtitlesTab : Box {
         }
 
         string ext = get_output_extension ();
-        string output = find_unique (Path.build_filename (dir, name + "-subs" + ext));
+        string raw_path = Path.build_filename (dir, name + "-subs" + ext);
+        string output = allow_overwrite ? raw_path : find_unique (raw_path);
 
         // Build final order: existing (non-removed) in current order, then added
         var order = new GenericArray<int> ();
@@ -888,6 +1014,129 @@ public class SubtitlesTab : Box {
         _is_busy = true;
         update_ui_state ();
         runner.remux_subtitles (current_input_file, output, detected_streams, added_subtitles, order);
+    }
+
+    // ── Burn-in path (full re-encode) ────────────────────────────────────────
+
+    private void start_burn_in (bool allow_overwrite) {
+        string basename = Path.get_basename (current_input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name = (dot > 0) ? basename.substring (0, dot) : basename;
+
+        string dir = Path.get_dirname (current_input_file);
+        if (file_pickers != null) {
+            string out_dir = file_pickers.output_entry.get_text ().strip ();
+            if (out_dir.length > 0)
+                dir = out_dir;
+        }
+
+        string ext = get_burn_in_extension ();
+        string raw_path = Path.build_filename (dir, name + "-burnin" + ext);
+        string output = allow_overwrite ? raw_path : find_unique (raw_path);
+
+        // Resolve which track to burn in
+        int combo_sel = (int) burn_track_combo.get_selected ();
+        int sub_stream_index = -1;
+        string? external_sub_path = null;
+        bool is_bitmap = false;
+
+        // Map combo index to internal/external track
+        // The combo lists non-removed internal tracks first, then external files
+        int non_removed_count = 0;
+        for (int i = 0; i < detected_streams.length; i++) {
+            if (!detected_streams[i].marked_remove) {
+                if (non_removed_count == combo_sel) {
+                    sub_stream_index = detected_streams[i].sub_index;
+                    is_bitmap = SubtitlesRunner.is_bitmap_codec (
+                        detected_streams[i].codec_name.down ());
+                    break;
+                }
+                non_removed_count++;
+            }
+        }
+
+        if (sub_stream_index < 0) {
+            // Must be an external file
+            int ext_idx = combo_sel - non_removed_count;
+            if (ext_idx >= 0 && ext_idx < added_subtitles.length) {
+                external_sub_path = added_subtitles[ext_idx].file_path;
+                // Guess bitmap from extension
+                string lower = external_sub_path.down ();
+                is_bitmap = lower.has_suffix (".sup") || lower.has_suffix (".sub");
+            }
+        }
+
+        // Snapshot codec + general tab settings on the main thread
+        ICodecTab? codec_tab = get_selected_codec_tab ();
+        ICodecBuilder? builder = get_selected_codec_builder ();
+
+        if (codec_tab == null || builder == null) {
+            report_burn_in_error ("No codec tab available for the selected codec.");
+            return;
+        }
+
+        string[] codec_args = builder.get_codec_args (codec_tab);
+        if (general_tab != null) {
+            foreach (string kf in codec_tab.resolve_keyframe_args (
+                         current_input_file, general_tab)) {
+                codec_args += kf;
+            }
+        }
+
+        string[] audio_args = codec_tab.get_audio_args ();
+        string vf = (general_tab != null)
+            ? FilterBuilder.build_video_filter_chain (general_tab) : "";
+        string af = (general_tab != null)
+            ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
+        bool preserve_meta = (general_tab != null) ? general_tab.preserve_metadata.active : false;
+        bool no_chapters    = (general_tab != null) ? general_tab.remove_chapters.active : false;
+
+        _is_busy = true;
+        update_ui_state ();
+
+        runner.burn_in_subtitle (
+            current_input_file, output,
+            sub_stream_index, external_sub_path, is_bitmap,
+            codec_args, audio_args, vf, af,
+            preserve_meta, no_chapters
+        );
+    }
+
+    /** Get the ICodecTab for the burn-in codec selector. */
+    private ICodecTab? get_selected_codec_tab () {
+        switch (burn_codec_combo.get_selected ()) {
+            case 0:  return svt_tab;
+            case 1:  return x265_tab;
+            case 2:  return x264_tab;
+            case 3:  return vp9_tab;
+            default: return svt_tab;
+        }
+    }
+
+    /** Get the ICodecBuilder for the burn-in codec selector. */
+    private ICodecBuilder? get_selected_codec_builder () {
+        switch (burn_codec_combo.get_selected ()) {
+            case 0:  return new SvtAv1Builder ();
+            case 1:  return new X265Builder ();
+            case 2:  return new X264Builder ();
+            case 3:  return new Vp9Builder ();
+            default: return new SvtAv1Builder ();
+        }
+    }
+
+    /** Output extension for burn-in — comes from the selected codec tab's container. */
+    private string get_burn_in_extension () {
+        ICodecTab? tab = get_selected_codec_tab ();
+        if (tab != null) {
+            string container = tab.get_container ();
+            if (container.length > 0) return "." + container;
+        }
+        return ".mkv";
+    }
+
+    private void report_burn_in_error (string message) {
+        if (_status_label != null)
+            _status_label.set_text (@"⚠️ $message");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -910,6 +1159,7 @@ public class SubtitlesTab : Box {
 
         rebuild_detected_group ();
         rebuild_extract_combo ();
+        rebuild_burn_track_combo ();
     }
 
     private void move_added (int index, int dir) {
@@ -921,6 +1171,7 @@ public class SubtitlesTab : Box {
         added_subtitles[n] = tmp;
 
         rebuild_add_group ();
+        rebuild_burn_track_combo ();
     }
 
     /** Drag-and-drop: move a detected stream from one position to another. */
@@ -941,6 +1192,7 @@ public class SubtitlesTab : Box {
 
         rebuild_detected_group ();
         rebuild_extract_combo ();
+        rebuild_burn_track_combo ();
     }
 
     /** Drag-and-drop: move an added subtitle from one position to another. */
@@ -960,6 +1212,7 @@ public class SubtitlesTab : Box {
         added_subtitles[to] = ext;
 
         rebuild_add_group ();
+        rebuild_burn_track_combo ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1000,6 +1253,49 @@ public class SubtitlesTab : Box {
         extract_track_combo.set_sensitive (true);
     }
 
+    /**
+     * Rebuild the burn-in track combo — lists both detected internal tracks
+     * and added external files.
+     */
+    private void rebuild_burn_track_combo () {
+        int total = detected_streams.length + added_subtitles.length;
+        if (total == 0) {
+            burn_track_combo.set_model (new StringList ({ "No tracks available" }));
+            burn_track_combo.set_sensitive (false);
+            return;
+        }
+
+        string[] labels = {};
+
+        // Internal detected tracks
+        for (int i = 0; i < detected_streams.length; i++) {
+            var s = detected_streams[i];
+            if (s.marked_remove) continue;  // skip removed tracks
+            string c = s.codec_name.length > 0 ? s.codec_name : "unknown";
+            string l = (s.language.length > 0 && s.language != "und") ? s.language : "";
+            string lbl = @"Internal #$(i) — $(c)";
+            if (l.length > 0)       lbl += @" ($(l))";
+            if (s.title.length > 0) lbl += @" — $(s.title)";
+            labels += lbl;
+        }
+
+        // External added files
+        for (int i = 0; i < added_subtitles.length; i++) {
+            string basename = Path.get_basename (added_subtitles[i].file_path);
+            labels += @"External — $(basename)";
+        }
+
+        if (labels.length == 0) {
+            burn_track_combo.set_model (new StringList ({ "No tracks available" }));
+            burn_track_combo.set_sensitive (false);
+            return;
+        }
+
+        burn_track_combo.set_model (new StringList (labels));
+        burn_track_combo.set_selected (0);
+        burn_track_combo.set_sensitive (true);
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  UI STATE
     // ═════════════════════════════════════════════════════════════════════════
@@ -1008,9 +1304,11 @@ public class SubtitlesTab : Box {
         bool has_file    = (current_input_file.length > 0);
         bool has_streams = (detected_streams.length > 0);
         bool has_added   = (added_subtitles.length > 0);
-        bool actionable  = has_streams || has_added;
 
         extract_button.set_sensitive (has_file && has_streams && !_is_busy);
+
+        // Burn-in widgets
+        burn_codec_combo.set_sensitive (!_is_busy);
 
         // Refresh compat info in case the input file changed (affects "Source")
         if (container_compat_row != null)

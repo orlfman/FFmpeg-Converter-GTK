@@ -1020,8 +1020,16 @@ public class TrimTab : Box, ICodecTab {
     private Gtk.Widget build_segment_row (int index) {
         var seg = segments[index];
 
+        // ── Closure safety ───────────────────────────────────────────────────
+        // Vala closures capture variables by reference.  Although `index` is a
+        // method parameter (not a loop variable), we capture it into a single
+        // local so that every lambda below closes over the same per-row value.
+        // Do NOT remove this — without it, future refactors that inline this
+        // method into a loop would silently break.
+        int idx = index;
+
         var row = new Adw.ActionRow ();
-        row.set_title ("#%d".printf (index + 1));
+        row.set_title ("#%d".printf (idx + 1));
 
         // Build subtitle with optional crop indicator
         string time_str = "%s → %s  (%s)".printf (
@@ -1043,20 +1051,18 @@ public class TrimTab : Box, ICodecTab {
         start_entry.add_css_class ("monospace");
         start_entry.set_tooltip_text ("Start time (editable)");
 
-        int idx_start = index;
-
         // Fix #6: Live validation on every keystroke
         start_entry.changed.connect (() => {
             double parsed = VideoPlayer.parse_time (start_entry.get_text ());
-            validate_segment_time (start_entry, parsed, segments[idx_start].end_time, true);
+            validate_segment_time (start_entry, parsed, segments[idx].end_time, true);
         });
 
         // Fix #6: Only commit the value if validation passes
         start_entry.activate.connect (() => {
             double new_val = VideoPlayer.parse_time (start_entry.get_text ());
-            bool valid = validate_segment_time (start_entry, new_val, segments[idx_start].end_time, true);
+            bool valid = validate_segment_time (start_entry, new_val, segments[idx].end_time, true);
             if (valid) {
-                segments[idx_start].start_time = new_val;
+                segments[idx].start_time = new_val;
                 rebuild_segment_rows ();
             }
         });
@@ -1078,20 +1084,18 @@ public class TrimTab : Box, ICodecTab {
         end_entry.add_css_class ("monospace");
         end_entry.set_tooltip_text ("End time (editable)");
 
-        int idx_end = index;
-
         // Fix #6: Live validation on every keystroke
         end_entry.changed.connect (() => {
             double parsed = VideoPlayer.parse_time (end_entry.get_text ());
-            validate_segment_time (end_entry, parsed, segments[idx_end].start_time, false);
+            validate_segment_time (end_entry, parsed, segments[idx].start_time, false);
         });
 
         // Fix #6: Only commit the value if validation passes
         end_entry.activate.connect (() => {
             double new_val = VideoPlayer.parse_time (end_entry.get_text ());
-            bool valid = validate_segment_time (end_entry, new_val, segments[idx_end].start_time, false);
+            bool valid = validate_segment_time (end_entry, new_val, segments[idx].start_time, false);
             if (valid) {
-                segments[idx_end].end_time = new_val;
+                segments[idx].end_time = new_val;
                 rebuild_segment_rows ();
             }
         });
@@ -1108,10 +1112,9 @@ public class TrimTab : Box, ICodecTab {
             crop_btn.set_valign (Align.CENTER);
             crop_btn.add_css_class ("flat");
             if (seg.has_crop ()) crop_btn.add_css_class ("accent");
-            int idx_crop = index;
             crop_btn.clicked.connect (() => {
                 string cv = player.crop_overlay.get_crop_string ();
-                segments[idx_crop].crop_value = cv;
+                segments[idx].crop_value = cv;
                 rebuild_segment_rows ();
             });
             row.add_suffix (crop_btn);
@@ -1122,9 +1125,8 @@ public class TrimTab : Box, ICodecTab {
         seek_btn.set_tooltip_text ("Seek player to segment start");
         seek_btn.set_valign (Align.CENTER);
         seek_btn.add_css_class ("flat");
-        int idx_seek = index;
         seek_btn.clicked.connect (() => {
-            player.seek_to (segments[idx_seek].start_time);
+            player.seek_to (segments[idx].start_time);
         });
         row.add_suffix (seek_btn);
 
@@ -1134,9 +1136,8 @@ public class TrimTab : Box, ICodecTab {
         up_btn.set_valign (Align.CENTER);
         up_btn.add_css_class ("flat");
         up_btn.set_sensitive (index > 0);
-        int idx_up = index;
         up_btn.clicked.connect (() => {
-            if (idx_up > 0) swap_segments (idx_up, idx_up - 1);
+            if (idx > 0) swap_segments (idx, idx - 1);
         });
         row.add_suffix (up_btn);
 
@@ -1146,9 +1147,8 @@ public class TrimTab : Box, ICodecTab {
         down_btn.set_valign (Align.CENTER);
         down_btn.add_css_class ("flat");
         down_btn.set_sensitive (index < segments.length - 1);
-        int idx_down = index;
         down_btn.clicked.connect (() => {
-            if (idx_down < segments.length - 1) swap_segments (idx_down, idx_down + 1);
+            if (idx < segments.length - 1) swap_segments (idx, idx + 1);
         });
         row.add_suffix (down_btn);
 
@@ -1158,9 +1158,8 @@ public class TrimTab : Box, ICodecTab {
         delete_btn.set_valign (Align.CENTER);
         delete_btn.add_css_class ("flat");
         delete_btn.add_css_class ("error");
-        int idx_del = index;
         delete_btn.clicked.connect (() => {
-            remove_segment (idx_del);
+            remove_segment (idx);
         });
         row.add_suffix (delete_btn);
 

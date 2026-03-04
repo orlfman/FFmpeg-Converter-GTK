@@ -72,6 +72,11 @@ public class MainWindow : Adw.ApplicationWindow {
 
         subtitles_tab = new SubtitlesTab ();
         subtitles_tab.file_pickers = file_pickers;
+        subtitles_tab.general_tab  = general_tab;
+        subtitles_tab.svt_tab      = svt_tab;
+        subtitles_tab.x265_tab     = x265_tab;
+        subtitles_tab.x264_tab     = x264_tab;
+        subtitles_tab.vp9_tab      = vp9_tab;
         subtitles_tab.set_ui_refs (
             status_area.status_label,
             status_area.progress_bar,
@@ -338,17 +343,22 @@ public class MainWindow : Adw.ApplicationWindow {
         );
 
         dialog.add_response ("cancel", "Cancel");
+        dialog.add_response ("rename", "Auto-Rename");
         dialog.add_response ("overwrite", "Overwrite");
 
         dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
-        dialog.set_default_response ("cancel");
+        dialog.set_response_appearance ("rename", Adw.ResponseAppearance.SUGGESTED);
+        dialog.set_default_response ("rename");
         dialog.set_close_response ("cancel");
 
         dialog.choose.begin (this, null, (obj, res) => {
             string response = dialog.choose.end (res);
 
             if (response == "overwrite") {
-                subtitles_tab.start_apply ();
+                subtitles_tab.start_apply (true);
+                cancel_button.set_sensitive (true);
+            } else if (response == "rename") {
+                subtitles_tab.start_apply (false);
                 cancel_button.set_sensitive (true);
             }
         });
