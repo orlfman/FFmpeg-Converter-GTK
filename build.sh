@@ -7,9 +7,9 @@ BUILD_DIR="$PROJECT_DIR/builddir"
 BINARY_NAME="ffmpeg-converter-gtk"
 INSTALL_DIR="/usr/local/bin"
 
-DESKTOP_SOURCE="$PROJECT_DIR/FFmpegConverterGTK.desktop"
+DESKTOP_SOURCE="$PROJECT_DIR/Resources/FFmpegConverterGTK.desktop"
 DESKTOP_DEST="/usr/share/applications/ffmpeg-converter-gtk.desktop"
-ICON_SOURCE="$PROJECT_DIR/ffmpeg-converter-gtk.svg"
+ICON_SOURCE="$PROJECT_DIR/Resources/ffmpeg-converter-gtk.svg"
 ICON_DEST="/usr/share/icons/hicolor/scalable/apps/ffmpeg-converter-gtk.svg"
 
 # Track what was installed for summary
