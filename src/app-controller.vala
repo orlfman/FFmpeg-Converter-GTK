@@ -28,6 +28,7 @@ public class AppController : Object {
     private HamburgerMenu hamburger;
     private Button cancel_button;
     private StatusArea status_area;
+    private Adw.ViewStack view_stack;
 
     public AppController (FilePickers file_pickers,
                           GeneralTab general_tab,
@@ -42,7 +43,8 @@ public class AppController : Object {
                           Converter converter,
                           HamburgerMenu hamburger,
                           Button cancel_button,
-                          StatusArea status_area) {
+                          StatusArea status_area,
+                          Adw.ViewStack view_stack) {
         this.file_pickers   = file_pickers;
         this.general_tab    = general_tab;
         this.svt_tab        = svt_tab;
@@ -57,6 +59,7 @@ public class AppController : Object {
         this.hamburger      = hamburger;
         this.cancel_button  = cancel_button;
         this.status_area    = status_area;
+        this.view_stack     = view_stack;
 
         wire_all ();
     }
@@ -69,7 +72,7 @@ public class AppController : Object {
         wire_normalize_audio_constraint ();
         wire_conversion_done ();
         wire_trim_done ();
-        wire_trim_mode_changed ();
+        wire_trim_tab_focus ();
         wire_subtitle_done ();
     }
 
@@ -155,17 +158,52 @@ public class AppController : Object {
         });
     }
 
-    // ── Trim mode changed → disable General tab crop when trim handles it ───
+    // ── Crop & Trim tab focus → lock / unlock conflicting General tab controls ─
+    //
+    //  Locking is tab-scoped: the General tab's seek/time/crop controls are
+    //  only blocked while the Crop & Trim tab is the visible page.  Navigating
+    //  to any other tab (codec tabs, General, etc.) fully restores them so the
+    //  user can use them for normal conversions.
+    //
+    //  On navigate-to-trim  → apply current Crop & Trim mode's locks.
+    //  On navigate-away     → pass -1 to fully unlock everything.
+    //  On mode change while in focus → re-apply new mode's locks.
+    //
+    //  The mode_changed signal in TrimTab's apply_mode() still fires, but
+    //  we only honour it when the trim tab is actually visible.
 
-    private void wire_trim_mode_changed () {
-        trim_tab.mode_changed.connect ((mode) => {
-            bool trim_handles_crop = (mode != 0);  // 0 = TRIM_ONLY
-            general_tab.crop_expander.set_sensitive (!trim_handles_crop);
-            if (trim_handles_crop) {
-                general_tab.crop_expander.set_enable_expansion (false);
-                general_tab.crop_check.set_active (false);
-            }
+    private void wire_trim_tab_focus () {
+        // ── React to tab switches ────────────────────────────────────────────
+        view_stack.notify["visible-child-name"].connect (() => {
+            sync_general_tab_locks ();
         });
+
+        // ── Also re-apply whenever the mode dropdown changes inside TrimTab ──
+        // apply_mode() already calls general_tab.notify_trim_tab_mode, but
+        // now that call is guarded in TrimTab only when in focus — handled
+        // below via sync_general_tab_locks — so we hook mode changes here too.
+        // TrimTab emits nothing useful for this anymore; we rely on the
+        // view_stack signal for focus and on apply_mode's direct call for
+        // in-focus mode changes (which already checks general_tab != null).
+        // Nothing extra needed here — apply_mode handles it directly when focused.
+
+        // ── Set correct initial state (app starts on General tab, not Trim) ──
+        sync_general_tab_locks ();
+    }
+
+    /**
+     * Apply or remove General tab locks based on whether the Crop & Trim tab
+     * is the currently visible page.
+     */
+    private void sync_general_tab_locks () {
+        string? page = view_stack.visible_child_name;
+        if (page == "trim") {
+            // Trim tab is in focus — lock based on its current mode
+            general_tab.notify_trim_tab_mode (trim_tab.get_current_mode ());
+        } else {
+            // Any other tab — unlock everything in the General tab
+            general_tab.notify_trim_tab_mode (-1);
+        }
     }
 
     // ── Subtitle operation done → probe output, update hamburger, disable cancel ──

@@ -60,7 +60,8 @@ public class MainWindow : Adw.ApplicationWindow {
             info_tab, console_tab, trim_tab,
             subtitles_tab,
             converter, hamburger,
-            cancel_button, status_area
+            cancel_button, status_area,
+            view_stack
         );
 
         // Reset operation state when any operation completes.

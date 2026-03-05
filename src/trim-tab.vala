@@ -82,7 +82,17 @@ public class TrimTab : Box, ICodecTab {
     private Adw.PreferencesGroup output_group;
 
     // ── External references (set by MainWindow) ──────────────────────────────
-    public GeneralTab? general_tab  { get; set; default = null; }
+    private GeneralTab? _general_tab = null;
+    public GeneralTab? general_tab {
+        get { return _general_tab; }
+        set {
+            _general_tab = value;
+            // NOTE: We intentionally do NOT call notify_trim_tab_mode here.
+            // Locking only activates when the Crop & Trim tab is actually in
+            // focus.  AppController.wire_trim_tab_focus() owns that logic and
+            // fires on every ViewStack page change, including the initial state.
+        }
+    }
     public SvtAv1Tab?  svt_tab      { get; set; default = null; }
     public X265Tab?    x265_tab     { get; set; default = null; }
     public X264Tab?    x264_tab     { get; set; default = null; }
@@ -94,7 +104,6 @@ public class TrimTab : Box, ICodecTab {
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void trim_done (string output_path);
-    public signal void mode_changed (int mode);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -140,6 +149,9 @@ public class TrimTab : Box, ICodecTab {
     public string get_container () { return "mkv"; }
     public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) { return {}; }
     public string[] get_audio_args () { return { "-c:a", "copy" }; }
+
+    /** Returns the current operation mode as an int (0=Trim Only, 1=Crop Only, 2=Crop & Trim). */
+    public int get_current_mode () { return (int) current_mode; }
 
     public void load_video (string path) {
         if (path.length > 0) {
@@ -535,7 +547,14 @@ public class TrimTab : Box, ICodecTab {
         }
 
         update_codec_row_visibility ();
-        mode_changed ((int) m);
+
+        // ── Update General tab locks when mode changes ────────────────────────
+        // apply_mode() is only reachable via the mode dropdown, which requires
+        // this tab to already be focused — no focus guard needed here.
+        // AppController.sync_general_tab_locks() handles focus transitions.
+        if (general_tab != null) {
+            general_tab.notify_trim_tab_mode ((int) m);
+        }
     }
 
     /**

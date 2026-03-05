@@ -552,6 +552,94 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  CROP & TRIM TAB COORDINATION
+    //
+    //  Called by TrimTab whenever its operation mode changes so that conflicting
+    //  controls in the General tab are locked out:
+    //
+    //    • Trim Only  (mode 0) — seek/time are owned by the trim segments;
+    //                            lock seek + duration here.
+    //    • Crop Only  (mode 1) — crop is handled by the interactive overlay;
+    //                            lock crop here.
+    //    • Crop&Trim  (mode 2) — both apply; lock seek/time AND crop here.
+    //
+    //  When a group is locked we:
+    //    1. Force-collapse and deactivate the expander so no stale values leak
+    //       into the FFmpeg command line.
+    //    2. Mark the row insensitive so it is visually greyed out.
+    //    3. Set a tooltip explaining why.
+    //
+    //  When unlocked we restore sensitivity and clear the tooltip.  We do NOT
+    //  re-expand or re-activate — the user may have intentionally left them off.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private static string LOCK_REASON = "Managed by the Crop & Trim tab — switch to \"Crop Only\" mode there to use this here";
+    private static string LOCK_REASON_CROP = "Managed by the Crop & Trim tab — switch to \"Trim Only\" mode there to use this here";
+
+    /**
+     * Called by AppController whenever the Crop & Trim tab gains or loses
+     * focus, and whenever its operation mode changes while in focus.
+     *
+     * @param mode  0 = Trim Only  → lock seek/time only
+     *              1 = Crop Only  → lock crop only
+     *              2 = Crop&Trim  → lock seek/time AND crop
+     *             -1 = tab not in focus → unlock everything
+     */
+    public void notify_trim_tab_mode (int mode) {
+        if (mode == -1) {
+            // Crop & Trim tab is not the active tab — unlock everything so
+            // the General tab can be used freely with any codec tab.
+            set_timing_locked (false);
+            set_crop_locked (false);
+            return;
+        }
+
+        // Seek / Duration are conflicted when trim segments are in play
+        bool lock_timing = (mode == 0 || mode == 2);   // TRIM_ONLY or TRIM_AND_CROP
+        // Crop is conflicted when the interactive overlay is in play
+        bool lock_crop   = (mode == 1 || mode == 2);   // CROP_ONLY or TRIM_AND_CROP
+
+        set_timing_locked (lock_timing);
+        set_crop_locked (lock_crop);
+    }
+
+    private void set_timing_locked (bool locked) {
+        if (locked) {
+            // Collapse and deactivate first so the values don't reach ffmpeg
+            seek_check.set_active (false);
+            time_check.set_active (false);
+            seek_expander.set_enable_expansion (false);
+            time_expander.set_enable_expansion (false);
+
+            seek_expander.set_sensitive (false);
+            time_expander.set_sensitive (false);
+
+            seek_expander.set_tooltip_text (LOCK_REASON);
+            time_expander.set_tooltip_text (LOCK_REASON);
+        } else {
+            seek_expander.set_sensitive (true);
+            time_expander.set_sensitive (true);
+
+            seek_expander.set_tooltip_text ("");
+            time_expander.set_tooltip_text ("");
+        }
+    }
+
+    private void set_crop_locked (bool locked) {
+        if (locked) {
+            // Collapse and deactivate so the crop value doesn't reach ffmpeg
+            crop_check.set_active (false);
+            crop_expander.set_enable_expansion (false);
+
+            crop_expander.set_sensitive (false);
+            crop_expander.set_tooltip_text (LOCK_REASON_CROP);
+        } else {
+            crop_expander.set_sensitive (true);
+            crop_expander.set_tooltip_text ("");
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  CROP DETECTION
     // ═════════════════════════════════════════════════════════════════════════
 
