@@ -82,11 +82,11 @@ It doesn’t rely on some magic lookup table. Instead, it runs **two quick calib
 - Full calibration numbers dumped to the Console tab if you’re the curious type
 
 ### When it can’t hit the target
-It won’t just shrug and give up. It tells you exactly why and what to change — e.g. “trim to 42 seconds” or “scale down to ~720p and you’ll make it.”
+It won’t just give up. It tells you exactly why and what to change: “trim to 42 seconds” or “scale down to "X."”
 
-You can set your default target size (4 MB is the usual imageboard sweet spot) in **Preferences → Smart Optimizer**, with handy quick buttons for common limits.
+You can set your default target size in **Preferences - Smart Optimizer**.
 
-**No more “encode… check size… re-encode… swear… repeat.”**  
+**No more encode, check size, re-encode, repeat.**  
 Just pick the mode and go.
 
 ---
