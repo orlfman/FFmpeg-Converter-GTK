@@ -36,15 +36,15 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
     </tr>
      <tr>
       <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-ColorCorrection.png" width="400"></td>
-      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Settings.png" width="400"></td>
+      <td align="center"><b>Smart Optimizer Preferences</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Settings.png" width="400"></td>
     </tr>
     <tr>
-      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer.png" width="400"></td>
-      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Invalid.png" width="400"></td>
+      <td align="center"><b>Smart Optimizer</b><br><img src="Screenshots/Screenshot-SmartOptimizer.png" width="400"></td>
+      <td align="center"><b>Smart Optimizer Invalid</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Invalid.png" width="400"></td>
     </tr>
     <tr>
-      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Success.png" width="400"></td>
-      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Filesize-Reduction.png" width="400"></td>
+      <td align="center"><b>Smart Optimizer Success</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Success.png" width="400"></td>
+      <td align="center"><b>Smart Optimizer File Size Reduction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Filesize-Reduction.png" width="400"></td>
     </tr>
   </table>
 
