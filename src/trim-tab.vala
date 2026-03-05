@@ -266,16 +266,16 @@ public class TrimTab : Box, ICodecTab {
             runner.general_tab = general_tab;
             int sel = (int) codec_choice.get_selected ();
             if (sel == 0 && svt_tab != null) {
-                runner.reencode_builder   = new SvtAv1Builder ();
+                runner.reencode_builder   = svt_tab.get_codec_builder ();
                 runner.reencode_codec_tab = svt_tab;
             } else if (sel == 1 && x265_tab != null) {
-                runner.reencode_builder   = new X265Builder ();
+                runner.reencode_builder   = x265_tab.get_codec_builder ();
                 runner.reencode_codec_tab = x265_tab;
             } else if (sel == 2 && x264_tab != null) {
-                runner.reencode_builder   = new X264Builder ();
+                runner.reencode_builder   = x264_tab.get_codec_builder ();
                 runner.reencode_codec_tab = x264_tab;
             } else if (sel == 3 && vp9_tab != null) {
-                runner.reencode_builder   = new Vp9Builder ();
+                runner.reencode_builder   = vp9_tab.get_codec_builder ();
                 runner.reencode_codec_tab = vp9_tab;
             }
         }

@@ -12,6 +12,21 @@ public class X264Tab : Box, ICodecTab {
     public DropDown  preset_combo       { get; private set; }
     public DropDown  profile_combo      { get; private set; }
 
+    // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
+    private GeneralTab? _general_tab = null;
+    public GeneralTab? general_tab {
+        get { return _general_tab; }
+        set {
+            _general_tab = value;
+            if (_general_tab != null) {
+                _general_tab.eight_bit_check.notify["active"].connect (apply_profile_format_requirements);
+                _general_tab.ten_bit_check.notify["active"].connect (apply_profile_format_requirements);
+                _general_tab.eight_bit_format.notify["selected"].connect (apply_profile_format_requirements);
+                _general_tab.ten_bit_format.notify["selected"].connect (apply_profile_format_requirements);
+            }
+        }
+    }
+
     // ── Rate Control ─────────────────────────────────────────────────────────
     public DropDown   rc_mode_combo     { get; private set; }
     public SpinButton crf_spin          { get; private set; }
@@ -19,9 +34,7 @@ public class X264Tab : Box, ICodecTab {
     public SpinButton abr_bitrate_spin  { get; private set; }
     public Switch     abr_vbv_switch    { get; private set; }
     public SpinButton cbr_bitrate_spin  { get; private set; }
-    public CheckButton two_pass_check   { get; private set; }
-
-    public Switch two_pass_switch;
+    public Switch     two_pass_switch    { get; private set; }
     private Adw.ActionRow crf_row;
     private Adw.ActionRow qp_row;
     private Adw.ActionRow abr_row;
@@ -161,7 +174,7 @@ public class X264Tab : Box, ICodecTab {
         profile_row.set_title ("Profile");
         profile_row.set_subtitle ("Higher profiles support more features — Auto selects based on settings");
         profile_combo = new DropDown (new StringList ({
-            "Auto", "Baseline", "Main", "High", "High10"
+            "Auto", "Baseline", "Main", "High", "High10", "High422", "High444"
         }), null);
         profile_combo.set_valign (Align.CENTER);
         profile_combo.set_selected (0);
@@ -246,13 +259,10 @@ public class X264Tab : Box, ICodecTab {
         cbr_row.set_visible (false);
         group.add (cbr_row);
 
-        // Two-pass
+        // Two-pass (#2: simplified — no hidden CheckButton)
         two_pass_row = new Adw.ActionRow ();
         two_pass_row.set_title ("Two-Pass Encoding");
         two_pass_row.set_subtitle ("Better quality — available for ABR and CBR modes");
-
-        two_pass_check = new CheckButton ();
-        two_pass_check.set_visible (false);
 
         two_pass_switch = new Switch ();
         two_pass_switch.set_valign (Align.CENTER);
@@ -260,10 +270,6 @@ public class X264Tab : Box, ICodecTab {
         two_pass_row.add_suffix (two_pass_switch);
         two_pass_row.set_activatable_widget (two_pass_switch);
         two_pass_row.set_visible (false);
-
-        two_pass_switch.notify["active"].connect (() => {
-            two_pass_check.set_active (two_pass_switch.active);
-        });
 
         group.add (two_pass_row);
         append (group);
@@ -653,6 +659,9 @@ public class X264Tab : Box, ICodecTab {
         rc_mode_combo.notify["selected"].connect (update_rc_visibility);
         update_rc_visibility ();
 
+        // Profile → auto-configure General tab pixel format for compatibility
+        profile_combo.notify["selected"].connect (apply_profile_format_requirements);
+
         // AQ Mode → enable/disable strength
         aq_mode_combo.notify["selected"].connect (() => {
             string mode = get_dropdown_text (aq_mode_combo);
@@ -695,20 +704,67 @@ public class X264Tab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  HELPERS
+    //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
+    //
+    //  x264 profile constraints:
+    //    Baseline / Main / High  → 8-bit only, 4:2:0 only
+    //    High10                  → 10-bit, 4:2:0 only
+    //    High422                 → 8 or 10-bit, 4:2:0 or 4:2:2
+    //    High444                 → 8 or 10-bit, any chroma
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private bool _applying_profile = false;
+
+    private void apply_profile_format_requirements () {
+        if (_general_tab == null || _applying_profile) return;
+
+        string profile = get_dropdown_text (profile_combo);
+
+        if (profile == "Auto") return;
+
+        _applying_profile = true;
+
+        bool has_8bit  = _general_tab.eight_bit_check.active;
+        bool has_10bit = _general_tab.ten_bit_check.active;
+
+        if (profile == "Baseline" || profile == "Main" || profile == "High") {
+            // 8-bit only, 4:2:0 only
+            if (has_10bit) _general_tab.ten_bit_check.set_active (false);
+            if (!has_8bit) _general_tab.eight_bit_check.set_active (true);
+            _general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+        }
+        else if (profile == "High10") {
+            // 10-bit, 4:2:0 only
+            if (has_8bit) _general_tab.eight_bit_check.set_active (false);
+            if (!has_10bit) _general_tab.ten_bit_check.set_active (true);
+            _general_tab.ten_bit_format.set_selected (0);  // 4:2:0
+        }
+        else if (profile == "High422") {
+            // 8 or 10-bit, 4:2:0 or 4:2:2 — clamp 4:4:4 down to 4:2:2
+            if (has_8bit && (int) _general_tab.eight_bit_format.get_selected () == 2)
+                _general_tab.eight_bit_format.set_selected (1);  // 4:2:2
+            if (has_10bit && (int) _general_tab.ten_bit_format.get_selected () == 2)
+                _general_tab.ten_bit_format.set_selected (1);  // 4:2:2
+        }
+        // High444: any 8/10-bit, any chroma — no constraints
+
+        _applying_profile = false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  HELPERS (#1: delegated to CodecUtils)
     // ═════════════════════════════════════════════════════════════════════════
 
     public string get_dropdown_text (DropDown dropdown) {
-        var item = dropdown.selected_item as StringObject;
-        return item != null ? item.string : "";
+        return CodecUtils.get_dropdown_text (dropdown);
     }
 
     public string get_container () {
-        return get_dropdown_text (container_combo);
+        return CodecUtils.get_dropdown_text (container_combo);
     }
 
     public string get_active_preset () {
-        return get_dropdown_text (preset_combo);
+        return CodecUtils.get_dropdown_text (preset_combo);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -716,11 +772,12 @@ public class X264Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     public ICodecBuilder get_codec_builder () {
-        return new X264Builder ();
+        return new X264Builder (this);
     }
 
+    // (#2) Read the Switch directly — no hidden CheckButton needed
     public bool get_two_pass () {
-        return two_pass_check.get_active ();
+        return two_pass_switch.active;
     }
 
     public string[] get_audio_args () {
@@ -744,7 +801,6 @@ public class X264Tab : Box, ICodecTab {
         abr_bitrate_spin.set_value (2000);
         abr_vbv_switch.set_active (false);
         cbr_bitrate_spin.set_value (2000);
-        two_pass_check.set_active (false);
         two_pass_switch.set_active (false);
 
         // Quality & Tuning
@@ -791,42 +847,10 @@ public class X264Tab : Box, ICodecTab {
     //  CUSTOM KEYFRAME RESOLUTION
     // ═════════════════════════════════════════════════════════════════════════
 
+    // (#1) Delegate to shared implementation in CodecUtils
     public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
-        string keyint = get_dropdown_text (keyint_combo);
-
-        if (keyint != "Custom")
-            return {};
-
-        int mode = (int) custom_keyframe_combo.get_selected ();
-        int seconds = (mode == 0 || mode == 1) ? 2 : 5;
-        bool use_fixed_time = (mode == 0 || mode == 2);
-
-        if (use_fixed_time) {
-            return { "-force_key_frames",
-                     @"expr:gte(t,n_forced*$seconds)" };
-        }
-
-        double fps = 0.0;
-
-        string fr_text = get_dropdown_text (general_tab.frame_rate_combo);
-        if (fr_text == "Custom") {
-            string custom_fr = general_tab.custom_frame_rate.text.strip ();
-            if (custom_fr.length > 0)
-                fps = double.parse (custom_fr);
-        } else if (fr_text != "Original") {
-            fps = double.parse (fr_text);
-        }
-
-        if (fps < 5.0)
-            fps = FfprobeUtils.probe_input_fps (input_file);
-
-        if (fps < 5.0 || fps > 500.0)
-            return { "-g", "240" };
-
-        int gop = (int) (seconds * fps + 0.5);
-        if (gop < 10) gop = 240;
-
-        return { "-g", gop.to_string () };
+        return CodecUtils.resolve_custom_keyframe_args (
+            keyint_combo, custom_keyframe_combo, input_file, general_tab);
     }
 
 }

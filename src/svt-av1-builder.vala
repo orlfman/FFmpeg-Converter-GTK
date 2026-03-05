@@ -2,16 +2,17 @@ using Gtk;
 
 public class SvtAv1Builder : Object, ICodecBuilder {
 
+    private weak SvtAv1Tab tab;
+
+    public SvtAv1Builder (SvtAv1Tab tab) {
+        this.tab = tab;
+    }
+
     public string get_codec_name () {
         return "SVT-AV1";
     }
 
-    public string[] get_codec_args (ICodecTab codec_tab) {
-        var tab = codec_tab as SvtAv1Tab;
-        if (tab == null) {
-            warning ("SvtAv1Builder received wrong tab type");
-            return { "-c:v", "libsvtav1", "-preset", "8", "-crf", "28" };
-        }
+    public string[] get_codec_args () {
         return build_args (tab);
     }
 
@@ -24,8 +25,30 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         args += "-preset";
         args += ((int) tab.preset_spin.get_value ()).to_string ();
 
-        // ── Rate Control (#14: constants) ────────────────────────────────────
-        string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
+        // ── Profile → Pixel Format ──────────────────────────────────────────
+        // AV1 profiles are determined by chroma format. Instead of -profile:v
+        // (which validates before seeing frames), we force -pix_fmt so FFmpeg
+        // delivers the correct format to the encoder, and SVT-AV1 auto-selects
+        // the matching profile.
+        string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
+        if (profile != "Auto" && profile != "Main") {
+            bool is_10bit = (tab.general_tab != null && tab.general_tab.ten_bit_check.active);
+
+            if (profile == "High") {
+                // High (profile 1): requires 4:4:4
+                args += "-pix_fmt";
+                args += is_10bit ? "yuv444p10le" : "yuv444p";
+            } else if (profile == "Professional") {
+                // Professional (profile 2): 8-bit needs 4:2:2, 10-bit allows any
+                if (!is_10bit) {
+                    args += "-pix_fmt";
+                    args += "yuv422p";
+                }
+            }
+        }
+
+        // ── Rate Control ────────────────────────────────────────────────────
+        string rc_mode = CodecUtils.get_dropdown_text (tab.rc_mode_combo);
 
         if (rc_mode == RateControl.CRF) {
             args += "-crf";
@@ -39,14 +62,14 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         }
 
         // ── Level ────────────────────────────────────────────────────────────
-        string level = tab.get_dropdown_text (tab.level_combo);
+        string level = CodecUtils.get_dropdown_text (tab.level_combo);
         if (level != "Auto" && level.length > 0) {
             args += "-level";
             args += level;
         }
 
         // ── Keyframe Interval ────────────────────────────────────────────────
-        string keyint = tab.get_dropdown_text (tab.keyint_combo);
+        string keyint = CodecUtils.get_dropdown_text (tab.keyint_combo);
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
             args += "-g";
             args += keyint;
@@ -63,7 +86,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             svt_params += "lookahead=%d".printf ((int) tab.lookahead_spin.get_value ());
         }
 
-        string aq = tab.get_dropdown_text (tab.aq_mode_combo);
+        string aq = CodecUtils.get_dropdown_text (tab.aq_mode_combo);
         if (aq != "Automatic") {
             int aq_val = 0;
             if (aq == "Disabled")       aq_val = 0;
@@ -115,13 +138,13 @@ public class SvtAv1Builder : Object, ICodecBuilder {
                 (int) tab.sharpness_spin.get_value ());
         }
 
-        string scm = tab.get_dropdown_text (tab.scm_combo);
+        string scm = CodecUtils.get_dropdown_text (tab.scm_combo);
         if (scm != "Auto-Detect") {
             int scm_val = (scm == "Forced") ? 1 : 0;
             svt_params += "scm=%d".printf (scm_val);
         }
 
-        string fd = tab.get_dropdown_text (tab.fast_decode_combo);
+        string fd = CodecUtils.get_dropdown_text (tab.fast_decode_combo);
         if (fd != "Disabled") {
             int fd_val = fd.contains ("1") ? 1 : 2;
             svt_params += "fast-decode=%d".printf (fd_val);
@@ -135,7 +158,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
                 (int) tab.qm_max_spin.get_value ());
         }
 
-        string tile_r = tab.get_dropdown_text (tab.tile_rows_combo);
+        string tile_r = CodecUtils.get_dropdown_text (tab.tile_rows_combo);
         if (tile_r != "Auto") {
             int tile_r_val = int.parse (tile_r);
             int tile_r_log2 = 0;
@@ -143,7 +166,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             svt_params += "tile-rows=%d".printf (tile_r_log2);
         }
 
-        string tile_c = tab.get_dropdown_text (tab.tile_columns_combo);
+        string tile_c = CodecUtils.get_dropdown_text (tab.tile_columns_combo);
         if (tile_c != "Auto") {
             int tile_c_val = int.parse (tile_c);
             int tile_c_log2 = 0;
@@ -151,7 +174,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             svt_params += "tile-columns=%d".printf (tile_c_log2);
         }
 
-        string threads = tab.get_dropdown_text (tab.threads_combo);
+        string threads = CodecUtils.get_dropdown_text (tab.threads_combo);
         if (threads != "Auto")
             svt_params += "lp=%s".printf (threads);
 

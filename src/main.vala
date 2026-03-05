@@ -88,8 +88,11 @@ public class MainWindow : Adw.ApplicationWindow {
         file_pickers = new FilePickers ();
         general_tab  = new GeneralTab ();
         svt_tab      = new SvtAv1Tab ();
+        svt_tab.general_tab = general_tab;
         x265_tab     = new X265Tab ();
+        x265_tab.general_tab = general_tab;
         x264_tab     = new X264Tab ();
+        x264_tab.general_tab = general_tab;
         vp9_tab      = new Vp9Tab ();
         info_tab     = new InformationTab ();
         console_tab  = new ConsoleTab ();

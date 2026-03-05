@@ -56,7 +56,8 @@ sources = files(
   'src/settings-dialog.vala',
   'src/subtitles-tab.vala',
   'src/subtitles-runner.vala',
-  'src/ffprobe-utils.vala'
+  'src/ffprobe-utils.vala',
+  'src/codec-utils.vala'
 )
 executable('ffmpeg-converter-gtk',
   sources,

@@ -9,17 +9,34 @@ public class SvtAv1Tab : Box, ICodecTab {
     // ── Encoding Basics ──────────────────────────────────────────────────────
     public DropDown  container_combo     { get; private set; }
     public SpinButton preset_spin        { get; private set; }
+    public DropDown  profile_combo       { get; private set; }
+
+    // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
+    private GeneralTab? _general_tab = null;
+    public GeneralTab? general_tab {
+        get { return _general_tab; }
+        set {
+            _general_tab = value;
+            if (_general_tab != null) {
+                _general_tab.eight_bit_check.notify["active"].connect (apply_profile_format_requirements);
+                _general_tab.ten_bit_check.notify["active"].connect (apply_profile_format_requirements);
+                _general_tab.eight_bit_format.notify["selected"].connect (apply_profile_format_requirements);
+                _general_tab.ten_bit_format.notify["selected"].connect (apply_profile_format_requirements);
+            }
+        }
+    }
 
     // ── Rate Control ─────────────────────────────────────────────────────────
     public DropDown  rc_mode_combo       { get; private set; }
     public SpinButton crf_spin           { get; private set; }
     public SpinButton qp_spin            { get; private set; }
     public SpinButton vbr_bitrate_spin   { get; private set; }
-    public CheckButton two_pass_check    { get; private set; }
+    public Switch    two_pass_switch     { get; private set; }
 
     private Adw.ActionRow crf_row;
     private Adw.ActionRow qp_row;
     private Adw.ActionRow vbr_row;
+    private Adw.ActionRow two_pass_row;
 
     // ── Quality & Tuning ─────────────────────────────────────────────────────
     public DropDown  tune_combo          { get; private set; }
@@ -42,8 +59,7 @@ public class SvtAv1Tab : Box, ICodecTab {
     public Switch cdef_switch            { get; private set; }
     public Switch restoration_switch     { get; private set; }
     public Switch tf_switch              { get; private set; }
-
-    public Switch dlf_switch  { get; private set; }
+    public Switch dlf_switch             { get; private set; }
 
     // ── Advanced ─────────────────────────────────────────────────────────────
     public Switch tpl_switch             { get; private set; }
@@ -63,7 +79,6 @@ public class SvtAv1Tab : Box, ICodecTab {
     public SpinButton qm_max_spin        { get; private set; }
 
     // ── Threading & Keyframes ────────────────────────────────────────────────
-    public Switch two_pass_switch;
     public AudioSettings audio_settings  { get; private set; }
 
     public DropDown  keyint_combo        { get; private set; }
@@ -87,7 +102,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         build_quality_group ();
         build_grain_group ();
         build_in_loop_filters_group ();
-	build_advanced_group ();
+        build_advanced_group ();
         build_audio_group ();
         build_threading_group ();
         build_reset_button ();
@@ -147,6 +162,20 @@ public class SvtAv1Tab : Box, ICodecTab {
         preset_row.add_suffix (preset_spin);
         group.add (preset_row);
 
+        // Profile — AV1 profiles control chroma format compatibility.
+        // Main = 4:2:0 only, High = 4:4:4, Professional = 4:2:2+ (at 8-bit).
+        // Selecting a non-Auto profile auto-configures the General tab format.
+        var profile_row = new Adw.ActionRow ();
+        profile_row.set_title ("Profile");
+        profile_row.set_subtitle ("Auto is recommended — High/Professional require specific pixel formats");
+        profile_combo = new DropDown (new StringList ({
+            "Auto", "Main", "High", "Professional"
+        }), null);
+        profile_combo.set_valign (Align.CENTER);
+        profile_combo.set_selected (0);
+        profile_row.add_suffix (profile_combo);
+        group.add (profile_row);
+
         append (group);
     }
 
@@ -159,11 +188,13 @@ public class SvtAv1Tab : Box, ICodecTab {
         group.set_title ("Rate Control");
         group.set_description ("How the encoder allocates bits");
 
-        // Mode
+        // Mode — now includes Constrained Quality (#6)
         var mode_row = new Adw.ActionRow ();
         mode_row.set_title ("Mode");
         mode_row.set_subtitle ("CRF balances quality and size automatically");
-        rc_mode_combo = new DropDown (new StringList ({ "CRF", "QP", "VBR" }), null);
+        rc_mode_combo = new DropDown (new StringList ({
+            "CRF", "QP", "VBR"
+        }), null);
         rc_mode_combo.set_valign (Align.CENTER);
         rc_mode_combo.set_selected (0);
         mode_row.add_suffix (rc_mode_combo);
@@ -201,22 +232,15 @@ public class SvtAv1Tab : Box, ICodecTab {
         vbr_row.set_visible (false);
         group.add (vbr_row);
 
-        // Two-Pass
-        var two_pass_row = new Adw.ActionRow ();
+        // Two-Pass (#2: simplified — no hidden CheckButton)
+        two_pass_row = new Adw.ActionRow ();
         two_pass_row.set_title ("Two-Pass Encoding");
         two_pass_row.set_subtitle ("Slower but better quality distribution");
-        two_pass_check = new CheckButton ();
-        two_pass_check.set_valign (Align.CENTER);
-        two_pass_check.set_active (false);
-        // Use a Switch for visual consistency
         two_pass_switch = new Switch ();
         two_pass_switch.set_valign (Align.CENTER);
+        two_pass_switch.set_active (false);
         two_pass_row.add_suffix (two_pass_switch);
         two_pass_row.set_activatable_widget (two_pass_switch);
-        // Keep the CheckButton in sync for converter.vala compatibility
-        two_pass_switch.notify["active"].connect (() => {
-            two_pass_check.set_active (two_pass_switch.active);
-        });
         group.add (two_pass_row);
 
         append (group);
@@ -230,17 +254,17 @@ public class SvtAv1Tab : Box, ICodecTab {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Quality & Tuning");
 
-	// Tune
-	var tune_row = new Adw.ActionRow ();
-	tune_row.set_title ("Tune");
-	tune_row.set_subtitle ("Optimize for a specific quality metric");
-	tune_combo = new DropDown (new StringList ({
-    	    "Auto", "VQ (Visual Quality)", "PSNR", "SSIM"
-	}), null);
-	tune_combo.set_valign (Align.CENTER);
-	tune_combo.set_selected (0);
-	tune_row.add_suffix (tune_combo);
-	group.add (tune_row);
+        // Tune
+        var tune_row = new Adw.ActionRow ();
+        tune_row.set_title ("Tune");
+        tune_row.set_subtitle ("Optimize for a specific quality metric");
+        tune_combo = new DropDown (new StringList ({
+            "Auto", "VQ (Visual Quality)", "PSNR", "SSIM"
+        }), null);
+        tune_combo.set_valign (Align.CENTER);
+        tune_combo.set_selected (0);
+        tune_row.add_suffix (tune_combo);
+        group.add (tune_row);
 
         // Level
         var level_row = new Adw.ActionRow ();
@@ -370,16 +394,16 @@ public class SvtAv1Tab : Box, ICodecTab {
         restore_row.set_activatable_widget (restoration_switch);
         group.add (restore_row);
 
-	// Deblocking Filter
-	var dlf_row = new Adw.ActionRow ();
-	dlf_row.set_title ("Deblocking Filter");
-	dlf_row.set_subtitle ("Reduces blocking artifacts at transform boundaries — enabled by default");
-	dlf_switch = new Switch ();
-	dlf_switch.set_valign (Align.CENTER);
-	dlf_switch.set_active (true);
-	dlf_row.add_suffix (dlf_switch);
-	dlf_row.set_activatable_widget (dlf_switch);
-	group.add (dlf_row);
+        // Deblocking Filter
+        var dlf_row = new Adw.ActionRow ();
+        dlf_row.set_title ("Deblocking Filter");
+        dlf_row.set_subtitle ("Reduces blocking artifacts at transform boundaries — enabled by default");
+        dlf_switch = new Switch ();
+        dlf_switch.set_valign (Align.CENTER);
+        dlf_switch.set_active (true);
+        dlf_row.add_suffix (dlf_switch);
+        dlf_row.set_activatable_widget (dlf_switch);
+        group.add (dlf_row);
 
         // Temporal Filtering
         var tf_row = new Adw.ActionRow ();
@@ -524,14 +548,14 @@ public class SvtAv1Tab : Box, ICodecTab {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  THREADING & KEYFRAMES
+    //  AUDIO & THREADING
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void build_audio_group () {
         audio_settings = new AudioSettings ();
         append (audio_settings.get_widget ());
     }
-    
+
     private void build_threading_group () {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Threading & Keyframes");
@@ -632,13 +656,16 @@ public class SvtAv1Tab : Box, ICodecTab {
                 CodecPresets.apply_svt_av1 (this, item.string);
         });
 
+        // Profile → auto-configure General tab pixel format for compatibility
+        profile_combo.notify["selected"].connect (apply_profile_format_requirements);
+
         // Rate control mode → show/hide appropriate value row
         rc_mode_combo.notify["selected"].connect (update_rc_visibility);
         update_rc_visibility ();
 
         // AQ Mode → enable/disable strength
         aq_mode_combo.notify["selected"].connect (() => {
-            string mode = get_dropdown_text (aq_mode_combo);
+            string mode = CodecUtils.get_dropdown_text (aq_mode_combo);
             aq_strength_row.set_sensitive (mode == "Variance");
         });
 
@@ -658,44 +685,111 @@ public class SvtAv1Tab : Box, ICodecTab {
         container_combo.notify["selected"].connect (() => {
             audio_settings.update_for_container (get_container ());
         });
-        
+
         // Custom keyframe mode visibility
         keyint_combo.notify["selected"].connect (() => {
-            string ki = get_dropdown_text (keyint_combo);
+            string ki = CodecUtils.get_dropdown_text (keyint_combo);
             custom_keyframe_row.set_visible (ki == "Custom");
         });
     }
 
     private void update_rc_visibility () {
-        string mode = get_dropdown_text (rc_mode_combo);
-        crf_row.set_visible (mode == "CRF");
-        qp_row.set_visible (mode == "QP");
-        vbr_row.set_visible (mode == "VBR");
+        string mode = CodecUtils.get_dropdown_text (rc_mode_combo);
+        crf_row.set_visible (mode == RateControl.CRF);
+        qp_row.set_visible (mode == RateControl.QP);
+        vbr_row.set_visible (mode == RateControl.VBR);
+        // Two-pass available for all modes
+        two_pass_row.set_visible (true);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  HELPERS
+    //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
+    //
+    //  AV1 profiles are tied to chroma subsampling:
+    //    Main         (0) → 4:2:0 only
+    //    High         (1) → 4:4:4 only
+    //    Professional (2) → 8-bit: 4:2:2 only / 10-bit: any chroma
+    //
+    //  When the user selects a non-Auto profile, we auto-configure the
+    //  General tab's pixel format so the encode won't fail.
     // ═══════════════════════════════════════════════════════════════════════════
 
+    private bool _applying_profile = false;
+
+    private void apply_profile_format_requirements () {
+        if (_general_tab == null || _applying_profile) return;
+
+        string profile = CodecUtils.get_dropdown_text (profile_combo);
+
+        if (profile == "Auto") return;
+
+        _applying_profile = true;
+
+        bool has_8bit  = _general_tab.eight_bit_check.active;
+        bool has_10bit = _general_tab.ten_bit_check.active;
+
+        if (profile == "Main") {
+            // Main: 4:2:0 only — enable 8-bit if nothing is set
+            if (!has_8bit && !has_10bit)
+                _general_tab.eight_bit_check.set_active (true);
+            if (_general_tab.eight_bit_check.active)
+                _general_tab.eight_bit_format.set_selected (0);   // 4:2:0
+            if (_general_tab.ten_bit_check.active)
+                _general_tab.ten_bit_format.set_selected (0);     // 4:2:0
+        }
+        else if (profile == "High") {
+            // High: 4:4:4 only — prefer 10-bit if nothing is set
+            if (!has_8bit && !has_10bit)
+                _general_tab.ten_bit_check.set_active (true);
+            if (_general_tab.eight_bit_check.active)
+                _general_tab.eight_bit_format.set_selected (2);   // 4:4:4
+            if (_general_tab.ten_bit_check.active)
+                _general_tab.ten_bit_format.set_selected (2);     // 4:4:4
+        }
+        else if (profile == "Professional") {
+            // Professional: 8-bit requires 4:2:2, 10-bit allows anything
+            if (!has_8bit && !has_10bit) {
+                _general_tab.eight_bit_check.set_active (true);
+                _general_tab.eight_bit_format.set_selected (1);   // 4:2:2
+            } else if (_general_tab.eight_bit_check.active) {
+                _general_tab.eight_bit_format.set_selected (1);   // 4:2:2
+            }
+            // 10-bit: all chroma formats are valid — don't constrain
+        }
+
+        _applying_profile = false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  ICodecTab INTERFACE
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // (#1) Local helper delegates to CodecUtils (keeps API consistent across tabs)
     public string get_dropdown_text (DropDown dropdown) {
-        var item = dropdown.selected_item as StringObject;
-        return item != null ? item.string : "";
+        return CodecUtils.get_dropdown_text (dropdown);
     }
 
     public string get_container () {
-        return get_dropdown_text (container_combo);
+        return CodecUtils.get_dropdown_text (container_combo);
     }
 
     public ICodecBuilder get_codec_builder () {
-        return new SvtAv1Builder ();
+        return new SvtAv1Builder (this);
     }
 
+    // (#2) Read the Switch directly — no hidden CheckButton needed
     public bool get_two_pass () {
-        return two_pass_check.get_active ();
+        return two_pass_switch.active;
     }
 
     public string[] get_audio_args () {
         return audio_settings.get_audio_args ();
+    }
+
+    // (#1) Delegate to shared implementation in CodecUtils
+    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
+        return CodecUtils.resolve_custom_keyframe_args (
+            keyint_combo, custom_keyframe_combo, input_file, general_tab);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -706,13 +800,13 @@ public class SvtAv1Tab : Box, ICodecTab {
         // Encoding
         container_combo.set_selected (0);
         preset_spin.set_value (8);
+        profile_combo.set_selected (0);
 
         // Rate Control
         rc_mode_combo.set_selected (0);
         crf_spin.set_value (28);
         qp_spin.set_value (28);
         vbr_bitrate_spin.set_value (2000);
-        two_pass_check.set_active (false);
         two_pass_switch.set_active (false);
 
         // Quality & Tuning
@@ -748,7 +842,7 @@ public class SvtAv1Tab : Box, ICodecTab {
         qm_min_spin.set_value (8);
         qm_max_spin.set_value (11);
 
-	audio_settings.reset_defaults ();
+        audio_settings.reset_defaults ();
 
         // Threading & Keyframes
         keyint_combo.set_selected (0);
@@ -758,55 +852,5 @@ public class SvtAv1Tab : Box, ICodecTab {
         tile_columns_combo.set_selected (0);
 
         update_rc_visibility ();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  CUSTOM KEYFRAME RESOLUTION
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // Called from ConversionRunner on the encoding thread.
-    // Returns the FFmpeg args for keyframe placement, or {} if the builder
-    // already handles it (i.e. the user picked a numeric interval or Auto).
-    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
-        string keyint = get_dropdown_text (keyint_combo);
-
-        // Not "Custom" — the builder emits -g for numeric values
-        if (keyint != "Custom")
-            return {};
-
-        int mode = (int) custom_keyframe_combo.get_selected ();
-        // 0 = 2 s fixed, 1 = 2 s × fps, 2 = 5 s fixed, 3 = 5 s × fps
-        int seconds = (mode == 0 || mode == 1) ? 2 : 5;
-        bool use_fixed_time = (mode == 0 || mode == 2);
-
-        if (use_fixed_time) {
-            return { "-force_key_frames",
-                     @"expr:gte(t,n_forced*$seconds)" };
-        }
-
-        // ── fps-based: check General tab first, then probe ───────────────────
-        double fps = 0.0;
-
-        string fr_text = get_dropdown_text (general_tab.frame_rate_combo);
-        if (fr_text == "Custom") {
-            string custom_fr = general_tab.custom_frame_rate.text.strip ();
-            if (custom_fr.length > 0)
-                fps = double.parse (custom_fr);
-        } else if (fr_text != "Original") {
-            fps = double.parse (fr_text);
-        }
-
-        // If still unknown, probe the input file
-        if (fps < 5.0)
-            fps = FfprobeUtils.probe_input_fps (input_file);
-
-        // Sanity — fall back to a safe default
-        if (fps < 5.0 || fps > 500.0)
-            return { "-g", "240" };
-
-        int gop = (int) Math.round (seconds * fps);
-        if (gop < 10) gop = 240;
-
-        return { "-g", gop.to_string () };
     }
 }

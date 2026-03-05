@@ -19,9 +19,7 @@ public class Vp9Tab : Box, ICodecTab {
     public SpinButton cq_bitrate_spin   { get; private set; }
     public SpinButton vbr_bitrate_spin  { get; private set; }
     public SpinButton cbr_bitrate_spin  { get; private set; }
-    public CheckButton two_pass_check   { get; private set; }
-
-    public Switch two_pass_switch;
+    public Switch     two_pass_switch    { get; private set; }
     private Adw.ActionRow crf_row;
     private Adw.ActionRow cq_level_row;
     private Adw.ActionRow cq_bitrate_row;
@@ -229,13 +227,10 @@ public class Vp9Tab : Box, ICodecTab {
         cbr_row.set_visible (false);
         group.add (cbr_row);
 
-        // Two-pass
+        // Two-pass (#2: simplified — no hidden CheckButton)
         two_pass_row = new Adw.ActionRow ();
         two_pass_row.set_title ("Two-Pass Encoding");
         two_pass_row.set_subtitle ("Strongly recommended for VP9 — much better quality distribution");
-
-        two_pass_check = new CheckButton ();
-        two_pass_check.set_visible (false);
 
         two_pass_switch = new Switch ();
         two_pass_switch.set_valign (Align.CENTER);
@@ -243,10 +238,6 @@ public class Vp9Tab : Box, ICodecTab {
         two_pass_row.add_suffix (two_pass_switch);
         two_pass_row.set_activatable_widget (two_pass_switch);
         two_pass_row.set_visible (false);
-
-        two_pass_switch.notify["active"].connect (() => {
-            two_pass_check.set_active (two_pass_switch.active);
-        });
 
         group.add (two_pass_row);
         append (group);
@@ -554,16 +545,15 @@ public class Vp9Tab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  HELPERS
+    //  HELPERS (#1: delegated to CodecUtils)
     // ═════════════════════════════════════════════════════════════════════════
 
     public string get_dropdown_text (DropDown dropdown) {
-        var item = dropdown.selected_item as StringObject;
-        return item != null ? item.string : "";
+        return CodecUtils.get_dropdown_text (dropdown);
     }
 
     public string get_container () {
-        return get_dropdown_text (container_combo);
+        return CodecUtils.get_dropdown_text (container_combo);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -571,11 +561,12 @@ public class Vp9Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     public ICodecBuilder get_codec_builder () {
-        return new Vp9Builder ();
+        return new Vp9Builder (this);
     }
 
+    // (#2) Read the Switch directly — no hidden CheckButton needed
     public bool get_two_pass () {
-        return two_pass_check.get_active ();
+        return two_pass_switch.active;
     }
 
     public string[] get_audio_args () {
@@ -599,7 +590,6 @@ public class Vp9Tab : Box, ICodecTab {
         cq_bitrate_spin.set_value (2000);
         vbr_bitrate_spin.set_value (2000);
         cbr_bitrate_spin.set_value (2000);
-        two_pass_check.set_active (false);
         two_pass_switch.set_active (false);
 
         // Quality & Tuning
@@ -637,42 +627,10 @@ public class Vp9Tab : Box, ICodecTab {
     //  CUSTOM KEYFRAME RESOLUTION
     // ═════════════════════════════════════════════════════════════════════════
 
+    // (#1) Delegate to shared implementation in CodecUtils
     public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
-        string keyint = get_dropdown_text (keyint_combo);
-
-        if (keyint != "Custom")
-            return {};
-
-        int mode = (int) custom_keyframe_combo.get_selected ();
-        int seconds = (mode == 0 || mode == 1) ? 2 : 5;
-        bool use_fixed_time = (mode == 0 || mode == 2);
-
-        if (use_fixed_time) {
-            return { "-force_key_frames",
-                     @"expr:gte(t,n_forced*$seconds)" };
-        }
-
-        double fps = 0.0;
-
-        string fr_text = get_dropdown_text (general_tab.frame_rate_combo);
-        if (fr_text == "Custom") {
-            string custom_fr = general_tab.custom_frame_rate.text.strip ();
-            if (custom_fr.length > 0)
-                fps = double.parse (custom_fr);
-        } else if (fr_text != "Original") {
-            fps = double.parse (fr_text);
-        }
-
-        if (fps < 5.0)
-            fps = FfprobeUtils.probe_input_fps (input_file);
-
-        if (fps < 5.0 || fps > 500.0)
-            return { "-g", "240" };
-
-        int gop = (int) (seconds * fps + 0.5);
-        if (gop < 10) gop = 240;
-
-        return { "-g", gop.to_string () };
+        return CodecUtils.resolve_custom_keyframe_args (
+            keyint_combo, custom_keyframe_combo, input_file, general_tab);
     }
 
 }

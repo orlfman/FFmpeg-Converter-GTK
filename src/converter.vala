@@ -218,7 +218,8 @@ public class Converter : Object {
 
         // Codec
         config.codec_name = builder.get_codec_name ();
-        string[] built_codec_args = builder.get_codec_args (codec_tab);
+        // (#3) Builder already holds a typed tab reference — no parameter needed
+        string[] built_codec_args = builder.get_codec_args ();
         foreach (string kf in codec_tab.resolve_keyframe_args (input_file, general_tab)) {
             built_codec_args += kf;
         }

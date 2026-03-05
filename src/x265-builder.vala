@@ -2,16 +2,17 @@ using Gtk;
 
 public class X265Builder : Object, ICodecBuilder {
 
+    private weak X265Tab tab;
+
+    public X265Builder (X265Tab tab) {
+        this.tab = tab;
+    }
+
     public string get_codec_name () {
         return "x265";
     }
 
-    public string[] get_codec_args (ICodecTab codec_tab) {
-        var tab = codec_tab as X265Tab;
-        if (tab == null) {
-            warning ("X265Builder received wrong tab type");
-            return { "-c:v", "libx265", "-preset", "medium", "-crf", "23" };
-        }
+    public string[] get_codec_args () {
         return build_args (tab);
     }
 
@@ -24,8 +25,15 @@ public class X265Builder : Object, ICodecBuilder {
         args += "-preset";
         args += tab.get_active_preset ();
 
-        // ── Rate Control (#14: constants) ──────────────────────────────────
-        string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
+        // ── Profile ──────────────────────────────────────────────────────────
+        string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
+        if (profile != "Auto" && profile.length > 0) {
+            args += "-profile:v";
+            args += profile.down ();
+        }
+
+        // ── Rate Control ──────────────────────────────────────────────────
+        string rc_mode = CodecUtils.get_dropdown_text (tab.rc_mode_combo);
 
         if (rc_mode == RateControl.CRF) {
             args += "-crf";
@@ -42,21 +50,21 @@ public class X265Builder : Object, ICodecBuilder {
         }
 
         // ── Tune ───────────────────────────────────────────────────────────
-        string tune = tab.get_dropdown_text (tab.tune_combo);
+        string tune = CodecUtils.get_dropdown_text (tab.tune_combo);
         if (tune != "Auto" && tune.length > 0) {
             args += "-tune";
             args += tune;
         }
 
         // ── Level ──────────────────────────────────────────────────────────
-        string level = tab.get_dropdown_text (tab.level_combo);
+        string level = CodecUtils.get_dropdown_text (tab.level_combo);
         if (level != "Auto" && level.length > 0) {
             args += "-level:v";
             args += level;
         }
 
         // ── Keyframe Interval ──────────────────────────────────────────────
-        string keyint = tab.get_dropdown_text (tab.keyint_combo);
+        string keyint = CodecUtils.get_dropdown_text (tab.keyint_combo);
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
             args += "-g";
             args += keyint;
@@ -68,7 +76,7 @@ public class X265Builder : Object, ICodecBuilder {
         if (!tab.sao_switch.active)
             params += "sao=0";
 
-        string ref_val = tab.get_dropdown_text (tab.ref_frames_combo);
+        string ref_val = CodecUtils.get_dropdown_text (tab.ref_frames_combo);
         if (ref_val.length > 0)
             params += "ref=" + ref_val;
 
@@ -101,7 +109,7 @@ public class X265Builder : Object, ICodecBuilder {
             params += "rc-lookahead=" + la.to_string ();
         }
 
-        string aq_mode = tab.get_dropdown_text (tab.aq_mode_combo);
+        string aq_mode = CodecUtils.get_dropdown_text (tab.aq_mode_combo);
         if (aq_mode != "Automatic") {
             int aq_val = 0;
             switch (aq_mode) {
@@ -126,19 +134,19 @@ public class X265Builder : Object, ICodecBuilder {
             params += "vbv-bufsize=" + br.to_string ();
         }
 
-        // VBV + NAL HRD for CBR mode
+        // VBV + strict CBR for CBR mode
         if (rc_mode == RateControl.CBR) {
             int br = (int) tab.cbr_bitrate_spin.get_value ();
             params += "vbv-maxrate=" + br.to_string ();
             params += "vbv-bufsize=" + br.to_string ();
-            params += "nal-hrd=cbr";
+            params += "strict-cbr=1";
         }
 
-        string threads = tab.get_dropdown_text (tab.threads_combo);
+        string threads = CodecUtils.get_dropdown_text (tab.threads_combo);
         if (threads != "Auto" && threads.length > 0)
             params += "pools=" + threads;
 
-        string ft = tab.get_dropdown_text (tab.frame_threads_combo);
+        string ft = CodecUtils.get_dropdown_text (tab.frame_threads_combo);
         if (ft != "Auto" && ft.length > 0)
             params += "frame-threads=" + ft;
 

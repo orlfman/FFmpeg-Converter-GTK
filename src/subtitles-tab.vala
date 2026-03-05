@@ -1052,14 +1052,14 @@ public class SubtitlesTab : Box {
 
         // Snapshot codec + general tab settings on the main thread
         ICodecTab? codec_tab = get_selected_codec_tab ();
-        ICodecBuilder? builder = get_selected_codec_builder ();
 
-        if (codec_tab == null || builder == null) {
+        if (codec_tab == null) {
             report_burn_in_error ("No codec tab available for the selected codec.");
             return;
         }
 
-        string[] codec_args = builder.get_codec_args (codec_tab);
+        ICodecBuilder builder = codec_tab.get_codec_builder ();
+        string[] codec_args = builder.get_codec_args ();
         if (general_tab != null) {
             foreach (string kf in codec_tab.resolve_keyframe_args (
                          current_input_file, general_tab)) {
@@ -1097,15 +1097,12 @@ public class SubtitlesTab : Box {
         }
     }
 
-    /** Get the ICodecBuilder for the burn-in codec selector. */
+    /** Get the ICodecBuilder for the burn-in codec selector.
+     *  Delegates to the tab's get_codec_builder() so the builder
+     *  is constructed with the typed tab reference automatically. */
     private ICodecBuilder? get_selected_codec_builder () {
-        switch (burn_codec_combo.get_selected ()) {
-            case 0:  return new SvtAv1Builder ();
-            case 1:  return new X265Builder ();
-            case 2:  return new X264Builder ();
-            case 3:  return new Vp9Builder ();
-            default: return new SvtAv1Builder ();
-        }
+        ICodecTab? tab = get_selected_codec_tab ();
+        return tab != null ? tab.get_codec_builder () : null;
     }
 
     /** Output extension for burn-in — comes from the selected codec tab's container. */

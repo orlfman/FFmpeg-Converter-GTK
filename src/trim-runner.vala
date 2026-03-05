@@ -386,7 +386,7 @@ public class TrimRunner : Object {
 
         // ── Video codec args ─────────────────────────────────────────────────
         if (reencode_builder != null && reencode_codec_tab != null) {
-            string[] codec_args = reencode_builder.get_codec_args (reencode_codec_tab);
+            string[] codec_args = reencode_builder.get_codec_args ();
 
             if (general_tab != null) {
                 foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
@@ -514,7 +514,7 @@ public class TrimRunner : Object {
             }
 
             if (reencode_builder != null && reencode_codec_tab != null) {
-                string[] codec_args = reencode_builder.get_codec_args (reencode_codec_tab);
+                string[] codec_args = reencode_builder.get_codec_args ();
 
                 if (general_tab != null) {
                     foreach (string kf in reencode_codec_tab.resolve_keyframe_args (

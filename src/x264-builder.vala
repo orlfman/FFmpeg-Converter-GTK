@@ -2,16 +2,17 @@ using Gtk;
 
 public class X264Builder : Object, ICodecBuilder {
 
+    private weak X264Tab tab;
+
+    public X264Builder (X264Tab tab) {
+        this.tab = tab;
+    }
+
     public string get_codec_name () {
         return "x264";
     }
 
-    public string[] get_codec_args (ICodecTab codec_tab) {
-        var tab = codec_tab as X264Tab;
-        if (tab == null) {
-            warning ("X264Builder received wrong tab type");
-            return { "-c:v", "libx264", "-preset", "medium", "-crf", "23" };
-        }
+    public string[] get_codec_args () {
         return build_args (tab);
     }
 
@@ -25,14 +26,14 @@ public class X264Builder : Object, ICodecBuilder {
         args += tab.get_active_preset ();
 
         // ── Profile ────────────────────────────────────────────────────────
-        string profile = tab.get_dropdown_text (tab.profile_combo);
+        string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
         if (profile != "Auto" && profile.length > 0) {
             args += "-profile:v";
             args += profile.down ();
         }
 
-        // ── Rate Control (#14: constants) ──────────────────────────────────
-        string rc_mode = tab.get_dropdown_text (tab.rc_mode_combo);
+        // ── Rate Control ──────────────────────────────────────────────────
+        string rc_mode = CodecUtils.get_dropdown_text (tab.rc_mode_combo);
 
         if (rc_mode == RateControl.CRF) {
             args += "-crf";
@@ -49,21 +50,21 @@ public class X264Builder : Object, ICodecBuilder {
         }
 
         // ── Tune ───────────────────────────────────────────────────────────
-        string tune = tab.get_dropdown_text (tab.tune_combo);
+        string tune = CodecUtils.get_dropdown_text (tab.tune_combo);
         if (tune != "Auto" && tune.length > 0) {
             args += "-tune";
             args += tune;
         }
 
         // ── Level ──────────────────────────────────────────────────────────
-        string level = tab.get_dropdown_text (tab.level_combo);
+        string level = CodecUtils.get_dropdown_text (tab.level_combo);
         if (level != "Auto" && level.length > 0) {
             args += "-level:v";
             args += level;
         }
 
         // ── Keyframe Interval ──────────────────────────────────────────────
-        string keyint = tab.get_dropdown_text (tab.keyint_combo);
+        string keyint = CodecUtils.get_dropdown_text (tab.keyint_combo);
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
             args += "-g";
             args += keyint;
@@ -72,7 +73,7 @@ public class X264Builder : Object, ICodecBuilder {
         // ── x264opts ───────────────────────────────────────────────────────
         string[] params = {};
 
-        string ref_val = tab.get_dropdown_text (tab.ref_frames_combo);
+        string ref_val = CodecUtils.get_dropdown_text (tab.ref_frames_combo);
         if (ref_val.length > 0)
             params += "ref=" + ref_val;
 
@@ -93,7 +94,7 @@ public class X264Builder : Object, ICodecBuilder {
             params += "no-deblock=1";
         }
 
-        string me = tab.get_dropdown_text (tab.me_combo);
+        string me = CodecUtils.get_dropdown_text (tab.me_combo);
         if (me.length > 0)
             params += "me=" + me;
 
@@ -124,7 +125,7 @@ public class X264Builder : Object, ICodecBuilder {
             params += "rc-lookahead=" + la.to_string ();
         }
 
-        string aq_mode = tab.get_dropdown_text (tab.aq_mode_combo);
+        string aq_mode = CodecUtils.get_dropdown_text (tab.aq_mode_combo);
         if (aq_mode != "Automatic") {
             int aq_val = 0;
             switch (aq_mode) {
@@ -159,7 +160,7 @@ public class X264Builder : Object, ICodecBuilder {
         if (tab.open_gop_switch.active)
             params += "open-gop=1";
 
-        string threads = tab.get_dropdown_text (tab.threads_combo);
+        string threads = CodecUtils.get_dropdown_text (tab.threads_combo);
         if (threads != "Auto" && threads.length > 0)
             params += "threads=" + threads;
 

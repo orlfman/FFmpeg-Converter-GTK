@@ -8,7 +8,8 @@ using Gtk;
 //  so no re-encoding takes place — segments are cut at keyframe boundaries.
 //
 //  When the user selects "Re-encode", the Trim tab instead delegates to the
-//  real codec tab's builder (SvtAv1Builder / X265Builder).
+//  real codec tab's builder (SvtAv1Builder / X265Builder / etc.) via
+//  codec_tab.get_codec_builder(), which creates a typed builder automatically.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimBuilder : Object, ICodecBuilder {
@@ -17,7 +18,7 @@ public class TrimBuilder : Object, ICodecBuilder {
         return "copy";
     }
 
-    public string[] get_codec_args (ICodecTab codec_tab) {
+    public string[] get_codec_args () {
         return { "-c:v", "copy", "-c:a", "copy" };
     }
 }
