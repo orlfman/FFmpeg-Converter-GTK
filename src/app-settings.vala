@@ -17,6 +17,9 @@ using GLib;
 //    [output]
 //    default_directory = /home/user/Videos   (default: "" → same as input)
 //
+//    [smart_optimizer]
+//    target_mb = 4                           (default: 4 → 4 MB file size target)
+//
 //  Thread-safe: all reads/writes are mutex-guarded.
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -40,6 +43,7 @@ public class AppSettings : Object {
     private string _ffprobe_path = "ffprobe";
     private string _ffplay_path  = "ffplay";
     private string _default_output_dir = "";
+    private int    _smart_optimizer_target_mb = 4;
 
     // ── File location ─────────────────────────────────────────────────────────
     private string config_dir;
@@ -47,6 +51,7 @@ public class AppSettings : Object {
 
     private const string GROUP_PATHS  = "paths";
     private const string GROUP_OUTPUT = "output";
+    private const string GROUP_SMART  = "smart_optimizer";
 
     // ── Signal: emitted after settings are saved ──────────────────────────────
     public signal void settings_changed ();
@@ -119,6 +124,20 @@ public class AppSettings : Object {
         }
     }
 
+    public int smart_optimizer_target_mb {
+        get {
+            mutex.lock ();
+            int v = _smart_optimizer_target_mb;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _smart_optimizer_target_mb = value.clamp (1, 100);
+            mutex.unlock ();
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  LOAD — Read settings from disk
     // ═════════════════════════════════════════════════════════════════════════
@@ -141,6 +160,7 @@ public class AppSettings : Object {
         _ffprobe_path       = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
         _ffplay_path        = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
         _default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
+        _smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
         mutex.unlock ();
     }
 
@@ -158,6 +178,7 @@ public class AppSettings : Object {
         kf.set_string (GROUP_PATHS,  "ffprobe",           _ffprobe_path);
         kf.set_string (GROUP_PATHS,  "ffplay",            _ffplay_path);
         kf.set_string (GROUP_OUTPUT, "default_directory",  _default_output_dir);
+        kf.set_integer (GROUP_SMART, "target_mb",          _smart_optimizer_target_mb);
         mutex.unlock ();
 
         try {
@@ -179,6 +200,7 @@ public class AppSettings : Object {
         _ffprobe_path       = "ffprobe";
         _ffplay_path        = "ffplay";
         _default_output_dir = "";
+        _smart_optimizer_target_mb = 4;
         mutex.unlock ();
 
         save ();
@@ -193,6 +215,15 @@ public class AppSettings : Object {
         try {
             string val = kf.get_string (group, key);
             return (val.strip ().length > 0) ? val.strip () : fallback;
+        } catch (KeyFileError e) {
+            return fallback;
+        }
+    }
+
+    private static int read_int (KeyFile kf, string group,
+                                 string key, int fallback) {
+        try {
+            return kf.get_integer (group, key);
         } catch (KeyFileError e) {
             return fallback;
         }

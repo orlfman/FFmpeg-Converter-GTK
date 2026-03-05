@@ -9,6 +9,7 @@ using Adw;
 //  Sections:
 //    FFmpeg Binaries — custom paths for ffmpeg, ffprobe, and ffplay
 //    Output          — default output directory
+//    Smart Optimizer — target file size for content-aware encoding
 //
 //  Changes are persisted via AppSettings when the dialog closes.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -22,6 +23,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     // ── Output directory ──────────────────────────────────────────────────────
     private Entry output_dir_entry;
+
+    // ── Smart Optimizer ────────────────────────────────────────────────────────
+    private SpinButton target_mb_spin;
 
     // ── Status labels for path validation ─────────────────────────────────────
     private Label ffmpeg_status;
@@ -42,6 +46,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         add (build_binaries_page ());
         add (build_output_page ());
+        add (build_smart_optimizer_page ());
 
         load_from_settings ();
 
@@ -351,6 +356,72 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  PAGE 3 — Smart Optimizer
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private Adw.PreferencesPage build_smart_optimizer_page () {
+        var page = new Adw.PreferencesPage ();
+        page.set_title ("Smart Optimizer");
+        page.set_icon_name ("speedometer-symbolic");
+
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Target File Size");
+        group.set_description (
+            "The Smart Optimizer analyzes your video and recommends encoding " +
+            "settings (CRF, preset, bitrate) to hit this target size. " +
+            "Designed for imageboard upload limits."
+        );
+
+        var target_row = new Adw.ActionRow ();
+        target_row.set_title ("Target Size (MB)");
+        target_row.set_subtitle ("Maximum output file size — smaller targets require more compression");
+        target_row.set_icon_name ("drive-harddisk-symbolic");
+
+        target_mb_spin = new SpinButton.with_range (1, 100, 1);
+        target_mb_spin.set_value (4);
+        target_mb_spin.set_valign (Align.CENTER);
+        target_mb_spin.set_width_chars (4);
+        target_row.add_suffix (target_mb_spin);
+
+        group.add (target_row);
+
+        // ── Common presets row ────────────────────────────────────────────────
+        var presets_row = new Adw.ActionRow ();
+        presets_row.set_title ("Quick Presets");
+        presets_row.set_subtitle ("Common imageboard file size limits");
+
+        var presets_box = new Box (Orientation.HORIZONTAL, 6);
+        presets_box.set_valign (Align.CENTER);
+
+        var btn_3 = new Button.with_label ("3 MB");
+        btn_3.add_css_class ("flat");
+        btn_3.clicked.connect (() => { target_mb_spin.set_value (3); });
+        presets_box.append (btn_3);
+
+        var btn_4 = new Button.with_label ("4 MB");
+        btn_4.add_css_class ("flat");
+        btn_4.clicked.connect (() => { target_mb_spin.set_value (4); });
+        presets_box.append (btn_4);
+
+        var btn_6 = new Button.with_label ("6 MB");
+        btn_6.add_css_class ("flat");
+        btn_6.clicked.connect (() => { target_mb_spin.set_value (6); });
+        presets_box.append (btn_6);
+
+        var btn_8 = new Button.with_label ("8 MB");
+        btn_8.add_css_class ("flat");
+        btn_8.clicked.connect (() => { target_mb_spin.set_value (8); });
+        presets_box.append (btn_8);
+
+        presets_row.add_suffix (presets_box);
+        group.add (presets_row);
+
+        page.add (group);
+
+        return page;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  LOAD / SAVE — Sync with AppSettings
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -368,6 +439,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         ffplay_entry.set_text ((ffplay == "ffplay") ? "" : ffplay);
 
         output_dir_entry.set_text (s.default_output_dir);
+
+        target_mb_spin.set_value (s.smart_optimizer_target_mb);
 
         // Trigger initial validation
         validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg");
@@ -388,6 +461,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.ffplay_path = (ffplay_val.length > 0) ? ffplay_val : "ffplay";
 
         s.default_output_dir = output_dir_entry.get_text ().strip ();
+
+        s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
 
         s.save ();
     }

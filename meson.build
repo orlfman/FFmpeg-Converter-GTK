@@ -15,6 +15,7 @@ dependencies = [
   dependency('gio-2.0'),
   dependency('gtk4'),
   dependency('libadwaita-1'),
+  dependency('json-glib-1.0'),
 ]
 sources = files(
   'src/main.vala',
@@ -57,7 +58,8 @@ sources = files(
   'src/subtitles-tab.vala',
   'src/subtitles-runner.vala',
   'src/ffprobe-utils.vala',
-  'src/codec-utils.vala'
+  'src/codec-utils.vala',
+  'src/smart-optimizer.vala'
 )
 executable('ffmpeg-converter-gtk',
   sources,

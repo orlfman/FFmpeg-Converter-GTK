@@ -575,4 +575,113 @@ public class CodecPresets : Object {
             break;
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SMART OPTIMIZER → x264
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public static void apply_smart_x264 (X264Tab tab, OptimizationRecommendation rec) {
+        tab.reset_defaults ();
+
+        // Container — mp4 for x264 imageboard compatibility
+        tab.container_combo.set_selected (1);   // mp4
+        set_dropdown_by_label (tab.profile_combo, "High");
+
+        // Preset — rec.preset is the x264 preset name (e.g. "slow", "slower")
+        set_dropdown_by_label (tab.preset_combo, rec.preset);
+
+        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+            // ABR + two-pass for size-guaranteed mode
+            tab.rc_mode_combo.set_selected (2);   // ABR
+            tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
+            tab.two_pass_switch.set_active (true);
+        } else {
+            // CRF mode
+            tab.rc_mode_combo.set_selected (0);   // CRF
+            tab.crf_spin.set_value (rec.crf);
+        }
+
+        // Tune based on detected content type
+        switch (rec.content_type) {
+            case ContentType.ANIME:
+                set_dropdown_by_label (tab.tune_combo, "animation");
+                break;
+            case ContentType.SCREENCAST:
+                set_dropdown_by_label (tab.tune_combo, "stillimage");
+                break;
+            default:
+                tab.tune_combo.set_selected (0);   // none
+                break;
+        }
+
+        // Good defaults for size-constrained encodes
+        set_dropdown_by_label (tab.ref_frames_combo, "3");
+        tab.bframes_spin.set_value (3);
+        set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+        tab.cabac_switch.set_active (true);
+        set_dropdown_by_label (tab.me_combo, "hex");
+        tab.subme_combo.set_selected (7);
+        tab.mbtree_switch.set_active (true);
+        tab.deblock_expander.set_enable_expansion (true);
+        tab.deblock_alpha_spin.set_value (0);
+        tab.deblock_beta_spin.set_value (0);
+        tab.psy_rd_expander.set_enable_expansion (true);
+        tab.psy_rd_spin.set_value (1.0);
+        tab.psy_trellis_spin.set_value (0.0);
+        tab.lookahead_expander.set_enable_expansion (true);
+        tab.lookahead_spin.set_value (40);
+        tab.weightp_switch.set_active (true);
+
+        // Audio — AAC for mp4 container, low bitrate for imageboard targets
+        configure_audio (tab.audio_settings, AudioCodecName.AAC, 0);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SMART OPTIMIZER → VP9
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public static void apply_smart_vp9 (Vp9Tab tab, OptimizationRecommendation rec) {
+        tab.reset_defaults ();
+
+        // Container — webm for VP9
+        tab.container_combo.set_selected (0);   // webm
+
+        // Speed — rec.preset is "cpu-used N", extract the number
+        string speed_str = rec.preset.replace ("cpu-used ", "");
+        int speed_val = int.parse (speed_str);
+        tab.speed_spin.set_value (speed_val);
+
+        set_dropdown_by_label (tab.quality_combo, "good");
+
+        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+            // Constrained Quality + two-pass for size guarantee
+            tab.rc_mode_combo.set_selected (1);   // Constrained Quality
+            tab.cq_level_spin.set_value (rec.crf);
+            tab.cq_bitrate_spin.set_value (rec.target_bitrate_kbps);
+            tab.two_pass_switch.set_active (true);
+        } else {
+            // Pure CRF mode
+            tab.rc_mode_combo.set_selected (0);   // CRF
+            tab.crf_spin.set_value (rec.crf);
+        }
+
+        // Content-aware tuning
+        if (rec.content_type == ContentType.SCREENCAST) {
+            set_dropdown_by_label (tab.tune_content_combo, "Screen");
+        } else {
+            tab.tune_content_combo.set_selected (0);   // Default
+        }
+
+        // Good defaults for VP9
+        tab.altref_expander.set_enable_expansion (true);
+        tab.arnr_maxframes_spin.set_value (7);
+        tab.arnr_strength_spin.set_value (5);
+        tab.lookahead_expander.set_enable_expansion (true);
+        tab.lag_in_frames_spin.set_value (25);
+        tab.row_mt_switch.set_active (true);
+        tab.frame_parallel_switch.set_active (false);
+
+        // Audio — Opus for webm, low bitrate for imageboard targets
+        configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+    }
 }

@@ -34,8 +34,17 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
       <td align="center"><b>Console</b><br><img src="Screenshots/Screenshot-Console.png" width="400"></td>
       <td align="center"><b>Preferences</b><br><img src="Screenshots/Screenshot-Preferences.png" width="400"></td>
     </tr>
-        <tr>
+     <tr>
       <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-ColorCorrection.png" width="400"></td>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Settings.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer.png" width="400"></td>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Invalid.png" width="400"></td>
+    </tr>
+    <tr>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Success.png" width="400"></td>
+      <td align="center"><b>Color Correction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Filesize-Reduction.png" width="400"></td>
     </tr>
   </table>
 
@@ -52,6 +61,35 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 - Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate. The video player allows you to select regions within the video to select and crop.
 - By default the program uses the local systems FFmpeg but you can set custom path for FFmpeg if you wish to use a different version.
 - Native Adwaita UI
+
+## 🧠 Smart Optimizer
+
+Tired of guessing your way to the perfect file size? Just pick **Smart Optimizer** from the Quality Profile dropdown on the x264 or VP9 tab, and the app handles everything else.
+
+### How it actually works
+It doesn’t rely on some magic lookup table. Instead, it runs **two quick calibration encodes** on *your specific video* at different quality levels, then fits a real exponential curve to the results. It also figures out whether you’re dealing with live-action, anime, or a screencast, and picks the perfect preset + CRF combo to land right on your target size.
+
+### What it actually looks at
+- **Your real content** — Anime with its flat colors and razor-sharp lines compresses totally differently from live-action. The optimizer checks edge density, color saturation, and motion to classify it properly, then uses the right preset table. Anime gets the aggressive (slow) presets it loves; live-action doesn’t waste time on settings that barely help.
+- **Your actual filters** — Scaling, cropping, denoise, framerate changes… all of it gets baked into the test encodes so the size prediction matches what you’ll really export.
+- **Trimmed length** — If you set start/end points on the General tab, it only budgets for the clip you’re actually keeping.
+- **Audio** — It subtracts the real audio bitrate from your target so the video gets an honest budget (no more “whoops, audio ate 30% of my file” surprises).
+
+### What you actually get
+- A **CRF + preset recommendation** (best quality for the size)
+- A **two-pass bitrate version** as a guaranteed-size backup
+- A **confidence score** so you know how much the prediction had to guess
+- Full calibration numbers dumped to the Console tab if you’re the curious type
+
+### When it can’t hit the target
+It won’t just shrug and give up. It tells you exactly why and what to change — e.g. “trim to 42 seconds” or “scale down to ~720p and you’ll make it.”
+
+You can set your default target size (4 MB is the usual imageboard sweet spot) in **Preferences → Smart Optimizer**, with handy quick buttons for common limits.
+
+---
+
+**No more “encode… check size… re-encode… swear… repeat.”**  
+Just pick the mode and go.
 
 ### Dependency
 

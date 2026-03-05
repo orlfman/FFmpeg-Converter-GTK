@@ -30,6 +30,10 @@ public class AppController : Object {
     private StatusArea status_area;
     private Adw.ViewStack view_stack;
 
+    // ── Smart Optimizer ──────────────────────────────────────────────────────
+    private SmartOptimizer smart_optimizer;
+    private Cancellable? smart_opt_cancel = null;
+
     public AppController (FilePickers file_pickers,
                           GeneralTab general_tab,
                           SvtAv1Tab svt_tab,
@@ -61,6 +65,8 @@ public class AppController : Object {
         this.status_area    = status_area;
         this.view_stack     = view_stack;
 
+        smart_optimizer = new SmartOptimizer ();
+
         wire_all ();
     }
 
@@ -74,6 +80,7 @@ public class AppController : Object {
         wire_trim_done ();
         wire_trim_tab_focus ();
         wire_subtitle_done ();
+        wire_smart_optimizer ();
     }
 
     // ── Input file changed → probe info, load trim preview, load subtitles ──
@@ -214,5 +221,146 @@ public class AppController : Object {
             hamburger.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
+    }
+
+    // ── Smart Optimizer → analyze video, apply recommendation to codec tab ──
+
+    private void wire_smart_optimizer () {
+        x264_tab.smart_optimizer_requested.connect (() => {
+            run_smart_optimizer.begin ("x264");
+        });
+        vp9_tab.smart_optimizer_requested.connect (() => {
+            run_smart_optimizer.begin ("vp9");
+        });
+    }
+
+    /**
+     * Run the Smart Optimizer asynchronously for the given codec.
+     *
+     * Probes the input file, runs content detection and calibration encodes,
+     * then applies the recommendation to the corresponding codec tab.
+     * Progress is shown in the StatusArea; full details are logged to ConsoleTab.
+     *
+     * Calibration accuracy depends on knowing the actual output conditions:
+     * video filters (scale, crop, etc.), effective duration (seek/time trim),
+     * and output audio bitrate. All are gathered from the GeneralTab state.
+     */
+    private async void run_smart_optimizer (string codec) {
+        string input_file = file_pickers.input_entry.get_text ();
+        if (input_file.length == 0) {
+            status_area.set_status ("⚠️  Smart Optimizer: select an input file first.");
+            reset_smart_optimizer_dropdown (codec);
+            return;
+        }
+
+        // Cancel any in-flight optimization
+        if (smart_opt_cancel != null) {
+            smart_opt_cancel.cancel ();
+        }
+        smart_opt_cancel = new Cancellable ();
+
+        int target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
+        status_area.set_status ("🔍 Smart Optimizer: analyzing video for %d MB %s target…"
+            .printf (target_mb, codec.up ()));
+        status_area.start_progress ();
+
+        string preferred_codec = (codec == "vp9") ? "vp9" : "x264";
+
+        // ── Build optimization context from GeneralTab state ────────────
+        var ctx = OptimizationContext ();
+
+        // Video filter chain — calibration must encode at the same
+        // resolution/crop/fps as the actual output
+        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
+
+        // Effective duration — if seek/time are set, the encode is shorter
+        if (general_tab.seek_check.active || general_tab.time_check.active) {
+            double full_dur = FfprobeUtils.probe_duration (input_file);
+            double start = 0.0;
+            double end   = full_dur;
+
+            if (general_tab.seek_check.active) {
+                start = general_tab.seek_hh.get_value () * 3600.0
+                      + general_tab.seek_mm.get_value () * 60.0
+                      + general_tab.seek_ss.get_value ();
+            }
+            if (general_tab.time_check.active) {
+                double t = general_tab.time_hh.get_value () * 3600.0
+                         + general_tab.time_mm.get_value () * 60.0
+                         + general_tab.time_ss.get_value ();
+                end = double.min (start + t, full_dur);
+            }
+
+            double eff = end - start;
+            if (eff > 0 && eff < full_dur) {
+                ctx.effective_duration = eff;
+            }
+        }
+
+        // Audio bitrate — the smart presets use 64 kbps (bitrate index 0)
+        // for both AAC (x264) and Opus (vp9). Tell the optimizer so it
+        // doesn't over-reserve from the source audio.
+        ctx.audio_bitrate_kbps_override = 64;
+
+        try {
+            var rec = yield smart_optimizer.optimize_for_target_size (
+                input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);
+
+            status_area.stop_progress ();
+
+            if (rec.is_impossible) {
+                status_area.set_status ("⚠️  Smart Optimizer: target may be unreachable.");
+                console_tab.add_line ("[Smart Optimizer] " + rec.notes);
+                reset_smart_optimizer_dropdown (codec);
+                return;
+            }
+
+            // Apply to the correct tab
+            if (codec == "x264") {
+                x264_tab.apply_smart_recommendation (rec);
+            } else {
+                vp9_tab.apply_smart_recommendation (rec);
+            }
+
+            status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KB"
+                .printf (rec.crf, rec.preset, rec.estimated_size_kb));
+
+            // Log full details to console
+            string details = SmartOptimizer.format_recommendation (rec);
+            foreach (unowned string line in details.split ("\n")) {
+                console_tab.add_line ("[Smart Optimizer] " + line);
+            }
+
+        } catch (IOError e) {
+            status_area.stop_progress ();
+            if (e is IOError.CANCELLED) {
+                status_area.set_status ("Smart Optimizer cancelled.");
+            } else {
+                status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
+                console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
+            }
+        } catch (Error e) {
+            status_area.stop_progress ();
+            status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
+            console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
+        }
+
+        // Always reset the dropdown back to "Custom" so the user can
+        // re-select "Smart Optimizer" to run the analysis again.
+        // (notify["selected"] only fires on changes, so without this
+        // reset, re-clicking the same item would be a no-op.)
+        reset_smart_optimizer_dropdown (codec);
+    }
+
+    /**
+     * Reset a codec tab's quality profile dropdown back to "Custom" (index 0).
+     * This allows the user to re-select "Smart Optimizer" to re-run analysis.
+     */
+    private void reset_smart_optimizer_dropdown (string codec) {
+        if (codec == "x264") {
+            x264_tab.quality_profile_combo.set_selected (0);
+        } else {
+            vp9_tab.quality_profile_combo.set_selected (0);
+        }
     }
 }

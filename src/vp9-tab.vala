@@ -4,6 +4,9 @@ using GLib;
 
 public class Vp9Tab : Box, ICodecTab {
 
+    // ── Signals ───────────────────────────────────────────────────────────────
+    public signal void smart_optimizer_requested ();
+
     // ── Preset ───────────────────────────────────────────────────────────────
     public DropDown  quality_profile_combo    { get; private set; }
 
@@ -98,7 +101,7 @@ public class Vp9Tab : Box, ICodecTab {
         row.set_subtitle ("Configures all settings below — you can still adjust individually");
         quality_profile_combo = new DropDown (new StringList ({
             "Custom", "Streaming", "Anime", "Low", "Medium", "High", "Very High",
-            "Imageboards"
+            "Imageboards", "Smart Optimizer"
         }), null);
         quality_profile_combo.set_valign (Align.CENTER);
         quality_profile_combo.set_selected (0);
@@ -487,7 +490,10 @@ public class Vp9Tab : Box, ICodecTab {
 
         var reset_btn = new Button.with_label ("Reset to Defaults");
         reset_btn.add_css_class ("destructive-action");
-        reset_btn.clicked.connect (reset_defaults);
+        reset_btn.clicked.connect (() => {
+            quality_profile_combo.set_selected (0);   // Custom
+            reset_defaults ();
+        });
         reset_box.append (reset_btn);
 
         append (reset_box);
@@ -498,11 +504,15 @@ public class Vp9Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
-        // Preset → apply preset configuration
+        // Preset → apply preset configuration (or emit signal for Smart Optimizer)
         quality_profile_combo.notify["selected"].connect (() => {
             var item = quality_profile_combo.selected_item as StringObject;
-            if (item != null)
+            if (item == null) return;
+            if (item.string == "Smart Optimizer") {
+                smart_optimizer_requested ();
+            } else {
                 CodecPresets.apply_vp9 (this, item.string);
+            }
         });
 
         // Rate control mode → show/hide rows
@@ -571,6 +581,18 @@ public class Vp9Tab : Box, ICodecTab {
 
     public string[] get_audio_args () {
         return audio_settings.get_audio_args ();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SMART OPTIMIZER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Apply a SmartOptimizer recommendation to this tab's widgets.
+     * Called by AppController after the async analysis completes.
+     */
+    public void apply_smart_recommendation (OptimizationRecommendation rec) {
+        CodecPresets.apply_smart_vp9 (this, rec);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

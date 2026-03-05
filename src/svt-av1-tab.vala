@@ -638,7 +638,10 @@ public class SvtAv1Tab : Box, ICodecTab {
 
         var reset_btn = new Button.with_label ("Reset to Defaults");
         reset_btn.add_css_class ("destructive-action");
-        reset_btn.clicked.connect (reset_defaults);
+        reset_btn.clicked.connect (() => {
+            quality_profile_combo.set_selected (0);   // Custom
+            reset_defaults ();
+        });
         reset_box.append (reset_btn);
 
         append (reset_box);
