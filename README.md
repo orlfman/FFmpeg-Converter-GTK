@@ -79,7 +79,7 @@ It doesn’t rely on some magic lookup table. Instead, it runs **two quick calib
 - A **CRF + preset recommendation** (best quality for the size)
 - A **two-pass bitrate version** as a guaranteed-size backup
 - A **confidence score** so you know how much the prediction had to guess
-- Full calibration numbers dumped to the Console tab if you’re the curious type
+- Full calibration numbers dumped to the Console tab
 
 ### When it can’t hit the target
 It won’t just give up. It tells you exactly why and what to change: “trim to 42 seconds” or “scale down to "X."”
