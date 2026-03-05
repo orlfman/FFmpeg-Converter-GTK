@@ -86,10 +86,10 @@ It won’t just shrug and give up. It tells you exactly why and what to change �
 
 You can set your default target size (4 MB is the usual imageboard sweet spot) in **Preferences → Smart Optimizer**, with handy quick buttons for common limits.
 
----
-
 **No more “encode… check size… re-encode… swear… repeat.”**  
 Just pick the mode and go.
+
+---
 
 ### Dependency
 
