@@ -46,6 +46,10 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
       <td align="center"><b>Smart Optimizer Success</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Success.png" width="400"></td>
       <td align="center"><b>Smart Optimizer File Size Reduction</b><br><img src="Screenshots/Screenshot-SmartOptimizer-Filesize-Reduction.png" width="400"></td>
     </tr>
+    <tr>
+      <td align="center"><b>Smart Optimizer Crop & Trim Tab</b><br><img src="Screenshots/Screenshot-SmartOptimizer-CropTrimTab.png" width="400"></td>
+      <td align="center"><b>Crop & Trim Chapter Exractation</b><br><img src="Screenshots/Screenshot-Chapter Split" width="400"></td>
+    </tr>
   </table>
 
 </details>
@@ -58,7 +62,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 - Live console output for debugging, and detailed information tab for video metadata
 - Extensive color and light correction and alteration. Full RGB manipulation.
 - Subtitles tab to reorder, remove, add, and extract subtitles.
-- Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate. The video player allows you to select regions within the video to select and crop.
+- Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate. The video player allows you to select regions within the video to select and crop. Also now has a Chapter Extraction mode to split chapters out of videos!
 - By default the program uses the local systems FFmpeg but you can set custom path for FFmpeg if you wish to use a different version.
 - Native Adwaita UI
 

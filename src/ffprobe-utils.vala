@@ -1,5 +1,28 @@
 using GLib;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ChapterInfo — Data object representing a single embedded chapter marker
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public class ChapterInfo : Object {
+    public int    index      { get; set; default = 0; }
+    public string title      { get; set; default = ""; }
+    public double start_time { get; set; default = 0.0; }
+    public double end_time   { get; set; default = 0.0; }
+    public bool   selected   { get; set; default = false; }
+
+    public ChapterInfo (int index, string title, double start, double end) {
+        this.index      = index;
+        this.title      = title;
+        this.start_time = start;
+        this.end_time   = end;
+    }
+
+    public double get_duration () {
+        return (end_time - start_time).clamp (0.0, double.MAX);
+    }
+}
+
 namespace FfprobeUtils {
 
     /**
@@ -81,5 +104,84 @@ namespace FfprobeUtils {
             print ("ffprobe duration error: %s\n", e.message);
         }
         return 0.0;
+    }
+
+    /**
+     * Probe embedded chapter markers from @input_file using ffprobe.
+     *
+     * Uses JSON output for reliable parsing of chapter start/end times
+     * and titles.  Returns an empty array on failure or if the file has
+     * no chapters.
+     *
+     * Typical ffprobe JSON structure:
+     *   { "chapters": [ { "start_time": "0.000", "end_time": "180.000",
+     *                      "tags": { "title": "Intro" } }, … ] }
+     */
+    public GenericArray<ChapterInfo> probe_chapters (string input_file) {
+        var chapters = new GenericArray<ChapterInfo> ();
+
+        try {
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_chapters",
+                input_file
+            };
+            string stdout_text, stderr_text;
+            int status;
+
+            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
+                                null, out stdout_text, out stderr_text, out status);
+
+            if (status != 0 || stdout_text == null || stdout_text.strip ().length == 0)
+                return chapters;
+
+            var parser = new Json.Parser ();
+            parser.load_from_data (stdout_text);
+
+            var root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT)
+                return chapters;
+
+            var root_obj = root.get_object ();
+            if (!root_obj.has_member ("chapters"))
+                return chapters;
+
+            var chapter_array = root_obj.get_array_member ("chapters");
+            if (chapter_array == null)
+                return chapters;
+
+            for (uint i = 0; i < chapter_array.get_length (); i++) {
+                var ch = chapter_array.get_object_element (i);
+                if (ch == null) continue;
+
+                double start = double.parse (
+                    ch.get_string_member_with_default ("start_time", "0"));
+                double end = double.parse (
+                    ch.get_string_member_with_default ("end_time", "0"));
+
+                // Extract title from tags object (may be absent)
+                string title = "Chapter %u".printf (i + 1);
+                if (ch.has_member ("tags")) {
+                    var tags = ch.get_object_member ("tags");
+                    if (tags != null && tags.has_member ("title")) {
+                        string t = tags.get_string_member ("title");
+                        if (t != null && t.strip ().length > 0)
+                            title = t.strip ();
+                    }
+                }
+
+                // Skip zero-duration or invalid chapters
+                if (end > start) {
+                    chapters.add (new ChapterInfo ((int) i, title, start, end));
+                }
+            }
+
+        } catch (Error e) {
+            print ("ffprobe chapters error: %s\n", e.message);
+        }
+
+        return chapters;
     }
 }

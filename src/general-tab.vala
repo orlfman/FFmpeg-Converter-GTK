@@ -573,8 +573,8 @@ public class GeneralTab : Box {
     //  re-expand or re-activate — the user may have intentionally left them off.
     // ═════════════════════════════════════════════════════════════════════════
 
-    private static string LOCK_REASON = "Managed by the Crop & Trim tab — switch to \"Crop Only\" mode there to use this here";
-    private static string LOCK_REASON_CROP = "Managed by the Crop & Trim tab — switch to \"Trim Only\" mode there to use this here";
+    private static string LOCK_REASON = "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
+    private static string LOCK_REASON_CROP = "Disabled while using crop modes in the Crop & Trim tab — switch to Trim Only or Chapter Split mode to unlock";
 
     /**
      * Called by AppController whenever the Crop & Trim tab gains or loses
@@ -595,7 +595,9 @@ public class GeneralTab : Box {
         }
 
         // Seek / Duration are conflicted when trim segments are in play
-        bool lock_timing = (mode == 0 || mode == 2);   // TRIM_ONLY or TRIM_AND_CROP
+        // (TRIM_ONLY=0, TRIM_AND_CROP=2, CHAPTER_SPLIT=3 all use segments
+        //  with their own start/end times)
+        bool lock_timing = (mode == 0 || mode == 2 || mode == 3);
         // Crop is conflicted when the interactive overlay is in play
         bool lock_crop   = (mode == 1 || mode == 2);   // CROP_ONLY or TRIM_AND_CROP
 

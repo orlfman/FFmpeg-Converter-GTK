@@ -10,6 +10,7 @@ public class TrimSegment : Object {
     public double start_time  { get; set; }
     public double end_time    { get; set; }
     public string crop_value  { get; set; default = ""; }
+    public string label       { get; set; default = ""; }   // optional display name (used for chapter filenames)
 
     public TrimSegment (double start, double end) {
         this.start_time = start;
@@ -26,12 +27,33 @@ public class TrimSegment : Object {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  TrimTab — Video trimming, cropping, and segment management
+//  SegmentCodecArgs — Wrapper for per-segment FFmpeg video codec arguments
+//
+//  Vala does not support arrays as generic type arguments, so this thin
+//  wrapper allows GenericArray<SegmentCodecArgs> to carry string[] payloads.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public class SegmentCodecArgs : Object {
+    public string[] args;
+
+    public SegmentCodecArgs (owned string[] args) {
+        this.args = (owned) args;
+    }
+
+    public bool is_empty () {
+        return args == null || args.length == 0;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TrimTab — Video trimming, cropping, chapter splitting, and segment management
 //
 //  Modes:
-//    • Trim Only   — cut segments (original behaviour)
-//    • Crop Only   — crop the entire video with interactive overlay
-//    • Crop & Trim — segments with optional per-segment or global crop
+//    • Trim Only     — cut segments (original behaviour)
+//    • Crop Only     — crop the entire video with interactive overlay
+//    • Crop & Trim   — segments with optional per-segment or global crop
+//    • Chapter Split — detect embedded chapters and export them individually
+//                      or concatenate selected chapters into one file
 //
 //  The crop rectangle is drawn interactively on the video player and maps
 //  directly to FFmpeg's  crop=W:H:X:Y  filter.
@@ -40,7 +62,7 @@ public class TrimSegment : Object {
 public class TrimTab : Box, ICodecTab {
 
     // ── Mode ─────────────────────────────────────────────────────────────────
-    public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP }
+    public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
     private Mode current_mode = Mode.TRIM_ONLY;
     private DropDown mode_dropdown;
 
@@ -77,9 +99,23 @@ public class TrimTab : Box, ICodecTab {
     private DropDown codec_choice;
     private Switch export_separate_switch;
 
+    // ── Smart Optimizer (per-segment) ──────────────────────────────────────
+    private Switch smart_optimize_switch;
+    private Adw.ActionRow smart_optimize_row;
+    private SmartOptimizer? smart_optimizer = null;
+    private Cancellable? smart_cancel = null;
+
     // ── Sections (for visibility toggling) ───────────────────────────────────
     private Adw.PreferencesGroup mark_group;
     private Adw.PreferencesGroup output_group;
+
+    // ── Chapter Split ──────────────────────────────────────────────────────
+    private Adw.PreferencesGroup chapter_list_group;
+    private Gtk.ListBox chapter_listbox;
+    private Button chapter_select_all_btn;
+    private Button chapter_select_none_btn;
+    private GenericArray<ChapterInfo> detected_chapters = new GenericArray<ChapterInfo> ();
+    private string loaded_video_path = "";     // currently loaded video file
 
     // ── External references (set by MainWindow) ──────────────────────────────
     private GeneralTab? _general_tab = null;
@@ -122,6 +158,7 @@ public class TrimTab : Box, ICodecTab {
         build_player_section ();
         build_crop_controls ();
         build_mark_controls ();
+        build_chapter_list_section ();
         build_segment_list ();
         build_output_settings ();
 
@@ -155,6 +192,8 @@ public class TrimTab : Box, ICodecTab {
 
     public void load_video (string path) {
         if (path.length > 0) {
+            loaded_video_path = path;
+
             // Clear any stale crop from the previous video
             player.crop_overlay.clear_crop ();
             global_crop_value = "";
@@ -164,6 +203,9 @@ public class TrimTab : Box, ICodecTab {
             reset_trim_state ();
 
             player.load_file (path);
+
+            // Auto-scan for chapters in the background
+            scan_chapters_async (path);
         }
     }
 
@@ -178,6 +220,29 @@ public class TrimTab : Box, ICodecTab {
         // them individually, keeping its internals unchanged for now.
         Label status_label = status_area.status_label;
         ProgressBar progress_bar = status_area.progress_bar;
+
+        // For Chapter Split mode, build segments from selected chapters
+        if (current_mode == Mode.CHAPTER_SPLIT) {
+            if (input_file == null || input_file.strip () == "") {
+                status_label.set_text ("⚠️ Please select an input file first.");
+                return;
+            }
+            // Build segments from selected chapters
+            rebuild_chapter_segments ();
+            if (segments.length == 0) {
+                status_label.set_text ("⚠️ No chapters selected — select at least one chapter to export.");
+                return;
+            }
+
+            var segs = new GenericArray<TrimSegment> ();
+            for (int i = 0; i < segments.length; i++) {
+                segs.add (segments[i]);
+            }
+
+            maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
+                           progress_bar, console_tab, segs, false);
+            return;
+        }
 
         // For Crop Only mode, create a virtual full-video segment
         if (current_mode == Mode.CROP_ONLY) {
@@ -196,7 +261,7 @@ public class TrimTab : Box, ICodecTab {
             var segs = new GenericArray<TrimSegment> ();
             segs.add (full_seg);
 
-            launch_runner (input_file, output_folder, status_label,
+            maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
                            progress_bar, console_tab, segs, true);
             return;
         }
@@ -233,7 +298,7 @@ public class TrimTab : Box, ICodecTab {
             if (segs[i].has_crop ()) { any_crop = true; break; }
         }
 
-        launch_runner (input_file, output_folder, status_label,
+        maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
                        progress_bar, console_tab, segs, any_crop);
     }
 
@@ -243,7 +308,8 @@ public class TrimTab : Box, ICodecTab {
                                 ProgressBar progress_bar,
                                 ConsoleTab console_tab,
                                 GenericArray<TrimSegment> segs,
-                                bool force_reencode) {
+                                bool force_reencode,
+                                GenericArray<SegmentCodecArgs>? smart_codec_args = null) {
 
         var runner = new TrimRunner ();
         runner.input_file      = input_file;
@@ -261,7 +327,10 @@ public class TrimTab : Box, ICodecTab {
         runner.console_tab     = console_tab;
 
         // Set output suffix and status label based on mode
-        if (current_mode == Mode.CROP_ONLY) {
+        if (current_mode == Mode.CHAPTER_SPLIT) {
+            runner.output_suffix   = "-chapter";
+            runner.operation_label = "Chapter split";
+        } else if (current_mode == Mode.CROP_ONLY) {
             runner.output_suffix   = "-cropped";
             runner.operation_label = "Crop";
         } else if (current_mode == Mode.TRIM_AND_CROP) {
@@ -292,6 +361,11 @@ public class TrimTab : Box, ICodecTab {
             }
         }
 
+        // Per-segment Smart Optimizer codec overrides
+        if (smart_codec_args != null) {
+            runner.set_per_segment_codec_args (smart_codec_args);
+        }
+
         runner.set_segments (segs);
 
         runner.export_done.connect ((path) => {
@@ -307,6 +381,11 @@ public class TrimTab : Box, ICodecTab {
     }
 
     public void cancel_trim () {
+        // Cancel any in-flight Smart Optimizer analysis
+        if (smart_cancel != null) {
+            smart_cancel.cancel ();
+            smart_cancel = null;
+        }
         if (active_runner != null) {
             active_runner.cancel ();
             active_runner = null;
@@ -314,7 +393,231 @@ public class TrimTab : Box, ICodecTab {
     }
 
     public bool is_exporting () {
-        return active_runner != null;
+        return active_runner != null || smart_cancel != null;
+    }
+
+    /**
+     * Check if Smart Optimizer should be used and route accordingly.
+     * If Smart Optimizer is active, runs async per-segment analysis first
+     * then launches the runner. Otherwise launches immediately.
+     */
+    private void maybe_smart_optimize_then_launch (string input_file,
+                                                    string output_folder,
+                                                    Label status_label,
+                                                    ProgressBar progress_bar,
+                                                    ConsoleTab console_tab,
+                                                    GenericArray<TrimSegment> segs,
+                                                    bool force_reencode) {
+        if (smart_optimize_switch.active
+            && !copy_mode_switch.active
+            && export_separate_switch.active) {
+            run_smart_then_export.begin (
+                input_file, output_folder, status_label, progress_bar,
+                console_tab, segs, force_reencode);
+        } else {
+            launch_runner (input_file, output_folder, status_label,
+                           progress_bar, console_tab, segs, force_reencode);
+        }
+    }
+
+    /**
+     * Per-segment Smart Optimizer pipeline.
+     *
+     * For each segment:
+     *  1. Stream-copy to a temp file (fast, gives the optimizer a standalone
+     *     file with the segment's actual content)
+     *  2. Run SmartOptimizer on the temp file
+     *  3. Build FFmpeg codec args from the recommendation
+     *  4. Clean up temp file
+     *
+     * Segments where optimization fails or the target is impossible are
+     * dropped entirely — the user opted into Smart Optimizer because they
+     * need the target file size, so giving them unoptimized output would
+     * be worse than skipping.
+     *
+     * When all surviving segments are analyzed, launches TrimRunner with
+     * per-segment codec overrides.
+     */
+    private async void run_smart_then_export (string input_file,
+                                               string output_folder,
+                                               Label status_label,
+                                               ProgressBar progress_bar,
+                                               ConsoleTab console_tab,
+                                               GenericArray<TrimSegment> segs,
+                                               bool force_reencode) {
+        if (smart_optimizer == null) {
+            smart_optimizer = new SmartOptimizer ();
+        }
+
+        // Cancel any previous optimization
+        if (smart_cancel != null) {
+            smart_cancel.cancel ();
+        }
+        smart_cancel = new Cancellable ();
+        var cancel = smart_cancel;
+
+        int target_mb  = AppSettings.get_default ().smart_optimizer_target_mb;
+        int codec_sel  = (int) codec_choice.get_selected ();
+        string preferred_codec = (codec_sel == 3) ? "vp9" : "x264";
+
+        // Parallel arrays — only segments that pass optimization are kept
+        var ok_segs = new GenericArray<TrimSegment> ();
+        var ok_args = new GenericArray<SegmentCodecArgs> ();
+        var skipped = new GenericArray<string> ();   // names of dropped segments
+
+        // Create temp directory for segment analysis files
+        string tmp_dir;
+        try {
+            tmp_dir = DirUtils.make_tmp ("smart-opt-XXXXXX");
+        } catch (Error e) {
+            status_label.set_text ("❌ Failed to create temp directory: " + e.message);
+            smart_cancel = null;
+            return;
+        }
+
+        bool cancelled = false;
+
+        for (int i = 0; i < segs.length; i++) {
+            if (cancel.is_cancelled ()) {
+                status_label.set_text ("⏹️ Smart Optimizer cancelled.");
+                cancelled = true;
+                break;
+            }
+
+            var seg = segs[i];
+            string seg_name = (seg.label != null && seg.label.strip ().length > 0)
+                ? "\"%s\"".printf (seg.label)
+                : "Segment %d".printf (i + 1);
+
+            status_label.set_text ("🧠 Smart Optimizer: analyzing %s (%d/%d)…".printf (
+                seg_name, i + 1, segs.length));
+
+            // ── 1. Stream-copy segment to temp file ────────────────────────
+            string tmp_seg = Path.build_filename (tmp_dir, "seg_%d.mkv".printf (i));
+            int copy_exit = -1;
+
+            try {
+                string[] copy_cmd = {
+                    AppSettings.get_default ().ffmpeg_path, "-y",
+                    "-ss", "%.6f".printf (seg.start_time),
+                    "-t",  "%.6f".printf (seg.get_duration ()),
+                    "-i",  input_file,
+                    "-c",  "copy",
+                    "-map_chapters", "-1",
+                    tmp_seg
+                };
+                string stdout_buf, stderr_buf;
+                Process.spawn_sync (null, copy_cmd, null,
+                                    SpawnFlags.SEARCH_PATH,
+                                    null, out stdout_buf, out stderr_buf, out copy_exit);
+            } catch (Error e) {
+                console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — temp extract failed: %s"
+                    .printf (seg_name, e.message));
+                skipped.add (seg_name);
+                continue;
+            }
+
+            if (copy_exit != 0) {
+                console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — temp extract failed (exit %d)"
+                    .printf (seg_name, copy_exit));
+                skipped.add (seg_name);
+                continue;
+            }
+
+            // ── 2. Run SmartOptimizer on the temp file ─────────────────────
+            var ctx = OptimizationContext ();
+            if (general_tab != null) {
+                ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
+            }
+            ctx.audio_bitrate_kbps_override = 64;
+
+            try {
+                var rec = yield smart_optimizer.optimize_for_target_size (
+                    tmp_seg, target_mb, preferred_codec, ctx, cancel);
+
+                if (rec.is_impossible) {
+                    console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — target %d MB is unreachable"
+                        .printf (seg_name, target_mb));
+                    string fail_details = SmartOptimizer.format_recommendation (rec);
+                    foreach (unowned string line in fail_details.split ("\n")) {
+                        console_tab.add_line ("[Smart Optimizer]   " + line);
+                    }
+                    skipped.add (seg_name);
+                } else {
+                    // ── 3. Build codec args from recommendation ────────────
+                    string[] smart_args = CodecUtils.build_smart_codec_args (rec);
+                    ok_segs.add (seg);
+                    ok_args.add (new SegmentCodecArgs (smart_args));
+
+                    console_tab.add_line ("[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KB, %s)"
+                        .printf (seg_name, rec.crf, rec.preset,
+                                 rec.estimated_size_kb,
+                                 rec.content_type.to_label ()));
+
+                    // Log full details to console (same as codec tab path)
+                    string details = SmartOptimizer.format_recommendation (rec);
+                    foreach (unowned string line in details.split ("\n")) {
+                        console_tab.add_line ("[Smart Optimizer]   " + line);
+                    }
+                }
+
+            } catch (IOError e) {
+                if (e is IOError.CANCELLED) {
+                    status_label.set_text ("⏹️ Smart Optimizer cancelled.");
+                    cancelled = true;
+                    FileUtils.unlink (tmp_seg);
+                    break;
+                }
+                console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — error: %s"
+                    .printf (seg_name, e.message));
+                skipped.add (seg_name);
+            } catch (Error e) {
+                console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — error: %s"
+                    .printf (seg_name, e.message));
+                skipped.add (seg_name);
+            }
+
+            // ── 4. Clean up temp file ──────────────────────────────────────
+            FileUtils.unlink (tmp_seg);
+        }
+
+        // Clean up temp directory
+        DirUtils.remove (tmp_dir);
+        smart_cancel = null;
+
+        if (cancelled) return;
+
+        // ── Report skipped segments ─────────────────────────────────────────
+        if (skipped.length > 0) {
+            var sb = new StringBuilder ();
+            for (int i = 0; i < skipped.length; i++) {
+                if (i > 0) sb.append (", ");
+                sb.append (skipped[i]);
+            }
+            console_tab.add_line ("[Smart Optimizer] Skipped %d segment%s: %s"
+                .printf (skipped.length,
+                         skipped.length == 1 ? "" : "s",
+                         sb.str));
+        }
+
+        // ── Check if anything survived ──────────────────────────────────────
+        if (ok_segs.length == 0) {
+            status_label.set_text ("⚠️ Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
+                .printf (target_mb));
+            return;
+        }
+
+        // ── Launch TrimRunner with only the segments that passed ────────────
+        if (skipped.length > 0) {
+            status_label.set_text ("🧠 Analysis complete — exporting %d of %d segments (%d skipped)…"
+                .printf (ok_segs.length, segs.length, skipped.length));
+        } else {
+            status_label.set_text ("🧠 Analysis complete — exporting %d segments…"
+                .printf (ok_segs.length));
+        }
+
+        launch_runner (input_file, output_folder, status_label, progress_bar,
+                       console_tab, ok_segs, force_reencode, ok_args);
     }
 
     /**
@@ -356,10 +659,18 @@ public class TrimTab : Box, ICodecTab {
             // Check each expected segment file
             int count = (current_mode == Mode.CROP_ONLY) ? 1 : segments.length;
             for (int i = 0; i < count; i++) {
-                string num = pad_segment_number (i + 1);
-                string seg_path = Path.build_filename (
-                    out_dir, @"$name_no_ext-segment-$num$out_ext"
-                );
+                string seg_name;
+                if (current_mode == Mode.CHAPTER_SPLIT
+                    && i < segments.length
+                    && segments[i].label != null
+                    && segments[i].label.strip ().length > 0) {
+                    string safe = sanitize_filename (segments[i].label);
+                    seg_name = @"$name_no_ext-$safe$out_ext";
+                } else {
+                    string num = pad_segment_number (i + 1);
+                    seg_name = @"$name_no_ext-segment-$num$out_ext";
+                }
+                string seg_path = Path.build_filename (out_dir, seg_name);
                 if (FileUtils.test (seg_path, FileTest.EXISTS)) {
                     return seg_path;
                 }
@@ -369,7 +680,8 @@ public class TrimTab : Box, ICodecTab {
 
         // Combined output
         string suffix;
-        if (current_mode == Mode.CROP_ONLY) suffix = "-cropped";
+        if (current_mode == Mode.CHAPTER_SPLIT) suffix = "-chapter";
+        else if (current_mode == Mode.CROP_ONLY) suffix = "-cropped";
         else if (current_mode == Mode.TRIM_AND_CROP) suffix = "-cropped-trimmed";
         else suffix = "-trimmed";
 
@@ -494,14 +806,15 @@ public class TrimTab : Box, ICodecTab {
         mode_row.set_icon_name ("applications-multimedia-symbolic");
 
         mode_dropdown = new DropDown (new StringList (
-            { "✂️  Trim Only", "🔲  Crop Only", "🔲✂️  Crop & Trim" }
+            { "✂️  Trim Only", "🔲  Crop Only", "🔲✂️  Crop & Trim", "📖  Chapter Split" }
         ), null);
         mode_dropdown.set_valign (Align.CENTER);
         mode_dropdown.set_selected (0);
         mode_dropdown.notify["selected"].connect (() => {
             int sel = (int) mode_dropdown.get_selected ();
             Mode m = (sel == 0) ? Mode.TRIM_ONLY :
-                     (sel == 1) ? Mode.CROP_ONLY : Mode.TRIM_AND_CROP;
+                     (sel == 1) ? Mode.CROP_ONLY :
+                     (sel == 2) ? Mode.TRIM_AND_CROP : Mode.CHAPTER_SPLIT;
             apply_mode (m);
         });
         mode_row.add_suffix (mode_dropdown);
@@ -511,10 +824,19 @@ public class TrimTab : Box, ICodecTab {
     }
 
     private void apply_mode (Mode m) {
+        Mode previous_mode = current_mode;
         current_mode = m;
+
+        // When leaving Chapter Split mode, clear the auto-generated segments
+        // so they don't leak into Trim Only / Crop & Trim as stale entries.
+        if (previous_mode == Mode.CHAPTER_SPLIT && m != Mode.CHAPTER_SPLIT) {
+            segments = new GenericArray<TrimSegment> ();
+            rebuild_segment_rows ();
+        }
 
         bool show_crop = (m == Mode.CROP_ONLY || m == Mode.TRIM_AND_CROP);
         bool show_trim = (m == Mode.TRIM_ONLY || m == Mode.TRIM_AND_CROP);
+        bool show_chapters = (m == Mode.CHAPTER_SPLIT);
 
         // Toggle crop overlay on the video player
         player.set_crop_active (show_crop);
@@ -522,22 +844,37 @@ public class TrimTab : Box, ICodecTab {
         // Toggle section visibility
         crop_group.set_visible (show_crop);
         mark_group.set_visible (show_trim);
-        segments_group.set_visible (show_trim);
+        segments_group.set_visible (show_trim || show_chapters);
+        chapter_list_group.set_visible (show_chapters);
 
         // Crop scope row only makes sense in Crop & Trim mode
         crop_scope_row.set_visible (m == Mode.TRIM_AND_CROP);
         crop_apply_all_btn.set_visible (m == Mode.TRIM_AND_CROP);
 
+        // Crop overlay only active in crop modes — player stays visible in all modes
+        // so users can preview chapters, segments, etc.
+
         // In Crop Only mode, disable export-separate (doesn't apply)
         if (m == Mode.CROP_ONLY) {
             export_separate_switch.set_active (false);
         }
-        export_separate_switch.set_sensitive (show_trim);
+        // Chapter Split defaults to separate files, but user can turn it off
+        // to concatenate selected chapters into a single file
+        if (m == Mode.CHAPTER_SPLIT) {
+            export_separate_switch.set_active (true);
+            export_separate_switch.set_sensitive (true);
+        } else {
+            export_separate_switch.set_sensitive (show_trim);
+        }
 
         // Crop always requires re-encode (both Crop Only and Crop & Trim)
         if (m == Mode.CROP_ONLY || m == Mode.TRIM_AND_CROP) {
             copy_mode_switch.set_active (false);
             copy_mode_switch.set_sensitive (false);
+        } else if (m == Mode.CHAPTER_SPLIT) {
+            // Chapter Split defaults to copy mode (lossless, fast)
+            copy_mode_switch.set_active (true);
+            copy_mode_switch.set_sensitive (true);
         } else if (speed_locked) {
             // Speed filters are active — keep re-encode forced
             copy_mode_switch.set_active (false);
@@ -548,10 +885,17 @@ public class TrimTab : Box, ICodecTab {
 
         update_codec_row_visibility ();
 
+        // In Chapter Split mode, rebuild segments from selected chapters
+        if (show_chapters) {
+            segments_group.set_title ("Selected Chapters");
+            segments_group.set_description ("Chapters selected for export");
+            rebuild_chapter_segments ();
+        } else {
+            segments_group.set_title ("Segments");
+            segments_group.set_description ("Segments will be exported in the order listed below");
+        }
+
         // ── Update General tab locks when mode changes ────────────────────────
-        // apply_mode() is only reachable via the mode dropdown, which requires
-        // this tab to already be focused — no focus guard needed here.
-        // AppController.sync_general_tab_locks() handles focus transitions.
         if (general_tab != null) {
             general_tab.notify_trim_tab_mode ((int) m);
         }
@@ -807,6 +1151,238 @@ public class TrimTab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════════
+    //  UI — Chapter List (checkable rows + select all/none)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_chapter_list_section () {
+        chapter_list_group = new Adw.PreferencesGroup ();
+        chapter_list_group.set_title ("Chapters");
+        chapter_list_group.set_description ("Select which chapters to export");
+        chapter_list_group.set_visible (false);
+
+        chapter_listbox = new Gtk.ListBox ();
+        chapter_listbox.set_selection_mode (SelectionMode.NONE);
+        chapter_listbox.add_css_class ("boxed-list");
+        chapter_listbox.set_margin_top (8);
+        chapter_list_group.add (chapter_listbox);
+
+        // ── Selection action row ─────────────────────────────────────────────
+        var select_row = new Adw.ActionRow ();
+        select_row.set_title ("Selection");
+
+        chapter_select_all_btn = new Button.with_label ("Select All");
+        chapter_select_all_btn.set_valign (Align.CENTER);
+        chapter_select_all_btn.add_css_class ("flat");
+        chapter_select_all_btn.clicked.connect (() => {
+            set_all_chapters_selected (true);
+        });
+        select_row.add_suffix (chapter_select_all_btn);
+
+        chapter_select_none_btn = new Button.with_label ("Select None");
+        chapter_select_none_btn.set_valign (Align.CENTER);
+        chapter_select_none_btn.add_css_class ("flat");
+        chapter_select_none_btn.clicked.connect (() => {
+            set_all_chapters_selected (false);
+        });
+        select_row.add_suffix (chapter_select_none_btn);
+
+        chapter_list_group.add (select_row);
+
+        append (chapter_list_group);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CHAPTER DETECTION — Auto-scan on file load
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Scan a file for chapters asynchronously (called from load_video).
+     * Runs ffprobe on a background thread to avoid blocking the UI.
+     * Updates the chapter list group description with the result.
+     */
+    private void scan_chapters_async (string path) {
+        // Capture the path so the Idle callback can verify freshness
+        string scan_path = path;
+        new Thread<void> ("chapter-scan", () => {
+            var chapters = FfprobeUtils.probe_chapters (scan_path);
+            Idle.add (() => {
+                // Guard: if the user loaded a different file while we were
+                // scanning, discard these stale results silently.
+                if (loaded_video_path != scan_path) {
+                    return Source.REMOVE;
+                }
+
+                detected_chapters = chapters;
+                rebuild_chapter_list ();
+
+                // Update the chapter list group description with scan results
+                if (chapters.length > 0) {
+                    chapter_list_group.set_description (
+                        "📖 %d chapter%s found — select which to export".printf (
+                            chapters.length,
+                            chapters.length == 1 ? "" : "s"));
+                } else {
+                    chapter_list_group.set_description (
+                        "No chapters found in this file");
+                }
+
+                // If already in Chapter Split mode, update segments
+                if (current_mode == Mode.CHAPTER_SPLIT) {
+                    rebuild_chapter_segments ();
+                }
+
+                return Source.REMOVE;
+            });
+        });
+    }
+
+    /**
+     * Rebuild the chapter list UI from the detected_chapters array.
+     */
+    private void rebuild_chapter_list () {
+        // Clear existing rows
+        Gtk.Widget? child = chapter_listbox.get_first_child ();
+        while (child != null) {
+            Gtk.Widget? next = child.get_next_sibling ();
+            chapter_listbox.remove (child);
+            child = next;
+        }
+
+        if (detected_chapters.length == 0) return;
+
+        for (int i = 0; i < detected_chapters.length; i++) {
+            var ch = detected_chapters[i];
+            int idx = i;  // capture for closure
+
+            var row = new Adw.ActionRow ();
+            row.set_title (ch.title);
+            row.set_subtitle ("%s → %s  (%s)".printf (
+                VideoPlayer.format_time (ch.start_time),
+                VideoPlayer.format_time (ch.end_time),
+                format_duration (ch.get_duration ())
+            ));
+
+            // Chapter number badge
+            var num_label = new Label ("#%d".printf (i + 1));
+            num_label.add_css_class ("dim-label");
+            num_label.add_css_class ("monospace");
+            num_label.set_valign (Align.CENTER);
+            row.add_prefix (num_label);
+
+            // Seek-to-chapter button — lets the user preview the chapter
+            var seek_btn = new Button.from_icon_name ("find-location-symbolic");
+            seek_btn.set_tooltip_text ("Seek player to chapter start");
+            seek_btn.set_valign (Align.CENTER);
+            seek_btn.add_css_class ("flat");
+            seek_btn.clicked.connect (() => {
+                player.seek_to (detected_chapters[idx].start_time);
+            });
+            row.add_suffix (seek_btn);
+
+            // Selection checkbox
+            var check = new CheckButton ();
+            check.set_active (ch.selected);
+            check.set_valign (Align.CENTER);
+            check.toggled.connect (() => {
+                detected_chapters[idx].selected = check.active;
+                // Update segment list in real time
+                if (current_mode == Mode.CHAPTER_SPLIT) {
+                    rebuild_chapter_segments ();
+                }
+            });
+            row.add_suffix (check);
+            row.set_activatable_widget (check);
+
+            chapter_listbox.append (row);
+        }
+    }
+
+    /**
+     * Set all chapters to selected or unselected.
+     */
+    private void set_all_chapters_selected (bool selected) {
+        for (int i = 0; i < detected_chapters.length; i++) {
+            detected_chapters[i].selected = selected;
+        }
+        rebuild_chapter_list ();
+        if (current_mode == Mode.CHAPTER_SPLIT) {
+            rebuild_chapter_segments ();
+        }
+    }
+
+    /**
+     * Build TrimSegments from selected chapters and populate the segments list.
+     * Preserves existing order: keeps segments whose chapter is still selected
+     * (in their current position), removes deselected ones, and appends newly
+     * selected chapters at the end. This way, user reordering survives
+     * checkbox toggles.
+     */
+    private void rebuild_chapter_segments () {
+        // Build a set of currently-selected chapter time ranges for fast lookup
+        var selected_set = new HashTable<string, ChapterInfo> (str_hash, str_equal);
+        for (int i = 0; i < detected_chapters.length; i++) {
+            var ch = detected_chapters[i];
+            if (ch.selected) {
+                string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
+                selected_set.set (key, ch);
+            }
+        }
+
+        // Pass 1: Keep existing segments that are still selected (preserving order)
+        var kept = new GenericArray<TrimSegment> ();
+        var kept_keys = new HashTable<string, bool> (str_hash, str_equal);
+        for (int i = 0; i < segments.length; i++) {
+            var seg = segments[i];
+            string key = "%.6f:%.6f".printf (seg.start_time, seg.end_time);
+            if (selected_set.contains (key)) {
+                kept.add (seg);
+                kept_keys.set (key, true);
+            }
+        }
+
+        // Pass 2: Append newly selected chapters (not already in the kept list)
+        for (int i = 0; i < detected_chapters.length; i++) {
+            var ch = detected_chapters[i];
+            if (!ch.selected) continue;
+            string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
+            if (!kept_keys.contains (key)) {
+                var seg = new TrimSegment (ch.start_time, ch.end_time);
+                seg.label = ch.title;
+                kept.add (seg);
+            }
+        }
+
+        segments = kept;
+        rebuild_segment_rows ();
+    }
+
+    /**
+     * Sanitize a chapter title for use as a filename component.
+     * Replaces filesystem-unsafe characters with underscores.
+     */
+    private static string sanitize_filename (string name) {
+        var sb = new StringBuilder ();
+        unichar c;
+        int i = 0;
+        while (name.get_next_char (ref i, out c)) {
+            if (c == '/' || c == '\\' || c == ':' || c == '*'
+                || c == '?' || c == '"' || c == '<' || c == '>'
+                || c == '|' || c == '\0') {
+                sb.append_c ('_');
+            } else {
+                sb.append_unichar (c);
+            }
+        }
+        // Trim leading/trailing whitespace and dots (Windows compat)
+        string result = sb.str.strip ();
+        while (result.has_suffix (".")) {
+            result = result.substring (0, result.length - 1);
+        }
+        return result.length > 0 ? result : "untitled";
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  UI — Output Settings
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -855,6 +1431,7 @@ public class TrimTab : Box, ICodecTab {
         copy_mode_switch.notify["active"].connect (() => {
             update_codec_row_visibility ();
             update_concat_audio_constraint ();
+            update_smart_optimize_visibility ();
             keyframe_cut_row.set_visible (copy_mode_switch.active);
         });
 
@@ -868,12 +1445,53 @@ public class TrimTab : Box, ICodecTab {
         export_separate_switch.set_active (false);
         export_separate_switch.notify["active"].connect (() => {
             update_concat_audio_constraint ();
+            update_smart_optimize_visibility ();
         });
         separate_row.add_suffix (export_separate_switch);
         separate_row.set_activatable_widget (export_separate_switch);
         output_group.add (separate_row);
 
+        // ── Smart Optimizer per-segment ──────────────────────────────────────
+        smart_optimize_row = new Adw.ActionRow ();
+        smart_optimize_row.set_title ("Smart Optimizer");
+        smart_optimize_row.set_subtitle ("Analyze each segment individually for content-aware CRF and preset");
+        smart_optimize_row.set_icon_name ("starred-symbolic");
+
+        smart_optimize_switch = new Switch ();
+        smart_optimize_switch.set_valign (Align.CENTER);
+        smart_optimize_switch.set_active (false);
+        smart_optimize_row.add_suffix (smart_optimize_switch);
+        smart_optimize_row.set_activatable_widget (smart_optimize_switch);
+        smart_optimize_row.set_visible (false);
+        output_group.add (smart_optimize_row);
+
+        // Wire codec changes to Smart Optimizer visibility
+        codec_choice.notify["selected"].connect (() => {
+            update_smart_optimize_visibility ();
+        });
+
         append (output_group);
+    }
+
+    /**
+     * Show the Smart Optimizer toggle when all conditions are met:
+     *  - Re-encoding is active (copy mode OFF)
+     *  - Export as separate files is ON
+     *  - Codec is x264 (index 2) or VP9 (index 3)
+     */
+    private void update_smart_optimize_visibility () {
+        bool reencode   = !copy_mode_switch.active;
+        bool separate   = export_separate_switch.active;
+        int  codec_sel  = (int) codec_choice.get_selected ();
+        bool smart_codec = (codec_sel == 2 || codec_sel == 3);  // x264 or VP9
+
+        bool show = reencode && separate && smart_codec;
+        smart_optimize_row.set_visible (show);
+
+        // Turn off the switch when hidden to avoid stale state
+        if (!show && smart_optimize_switch.active) {
+            smart_optimize_switch.set_active (false);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -930,6 +1548,11 @@ public class TrimTab : Box, ICodecTab {
         mark_out = 0.0;
         mark_in_label.set_text ("00:00:00.000");
         mark_out_label.set_text ("00:00:00.000");
+
+        // Clear chapter state (will be re-populated by auto-scan in load_video)
+        detected_chapters = new GenericArray<ChapterInfo> ();
+        rebuild_chapter_list ();
+        chapter_list_group.set_description ("Select which chapters to export");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1019,15 +1642,21 @@ public class TrimTab : Box, ICodecTab {
         }
 
         if (segments.length == 0) {
-            segment_count_label.set_text ("No segments defined");
+            if (current_mode == Mode.CHAPTER_SPLIT) {
+                segment_count_label.set_text ("No chapters selected");
+            } else {
+                segment_count_label.set_text ("No segments defined");
+            }
         } else {
             double total = 0.0;
             for (int i = 0; i < segments.length; i++) {
                 total += segments[i].get_duration ();
             }
+            string unit = (current_mode == Mode.CHAPTER_SPLIT) ? "chapter" : "segment";
             segment_count_label.set_text (
-                "%d segment%s — total duration %s".printf (
+                "%d %s%s — total duration %s".printf (
                     segments.length,
+                    unit,
                     segments.length == 1 ? "" : "s",
                     VideoPlayer.format_time (total)
                 )
@@ -1051,7 +1680,12 @@ public class TrimTab : Box, ICodecTab {
         int idx = index;
 
         var row = new Adw.ActionRow ();
-        row.set_title ("#%d".printf (idx + 1));
+        // Use chapter title as row title when available, fall back to number
+        if (seg.label != null && seg.label.strip ().length > 0) {
+            row.set_title ("#%d — %s".printf (idx + 1, seg.label));
+        } else {
+            row.set_title ("#%d".printf (idx + 1));
+        }
 
         // Build subtitle with optional crop indicator
         string time_str = "%s → %s  (%s)".printf (
@@ -1063,6 +1697,36 @@ public class TrimTab : Box, ICodecTab {
             time_str += "  🔲 " + seg.crop_value;
         }
         row.set_subtitle (time_str);
+
+        // ── Chapter mode: simplified rows with reorder controls ────────────────
+        // In Chapter Split mode, segments are auto-generated from the chapter
+        // list. Time editing and delete don't apply (use the checkboxes above),
+        // but reordering lets the user control export/concat order.
+        if (current_mode == Mode.CHAPTER_SPLIT) {
+            // ── Move Up ──────────────────────────────────────────────────────
+            var up_btn = new Button.from_icon_name ("go-up-symbolic");
+            up_btn.set_tooltip_text ("Move chapter up");
+            up_btn.set_valign (Align.CENTER);
+            up_btn.add_css_class ("flat");
+            up_btn.set_sensitive (index > 0);
+            up_btn.clicked.connect (() => {
+                if (idx > 0) swap_segments (idx, idx - 1);
+            });
+            row.add_suffix (up_btn);
+
+            // ── Move Down ────────────────────────────────────────────────────
+            var down_btn = new Button.from_icon_name ("go-down-symbolic");
+            down_btn.set_tooltip_text ("Move chapter down");
+            down_btn.set_valign (Align.CENTER);
+            down_btn.add_css_class ("flat");
+            down_btn.set_sensitive (index < segments.length - 1);
+            down_btn.clicked.connect (() => {
+                if (idx < segments.length - 1) swap_segments (idx, idx + 1);
+            });
+            row.add_suffix (down_btn);
+
+            return row;
+        }
 
         // ── Start time editor ────────────────────────────────────────────────
         var start_entry = new Entry ();

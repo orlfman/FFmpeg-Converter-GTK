@@ -52,6 +52,12 @@ public class TrimRunner : Object {
     // ── Segments ────────────────────────────────────────────────────────────
     private GenericArray<TrimSegment> segments = new GenericArray<TrimSegment> ();
 
+    // ── Per-segment Smart Optimizer codec overrides ──────────────────────
+    // When non-null, per_segment_codec_args[i] contains FFmpeg video codec
+    // arguments for segment i, overriding reencode_builder.  Built by
+    // TrimTab's per-segment Smart Optimizer pipeline.
+    private GenericArray<SegmentCodecArgs>? per_segment_codec_args = null;
+
     // ── Shared process runner (thread-safe cancel/PID/kill) ─────────────────
     private ProcessRunner runner = new ProcessRunner ();
 
@@ -70,6 +76,15 @@ public class TrimRunner : Object {
 
     public void set_segments (GenericArray<TrimSegment> segs) {
         segments = segs;
+    }
+
+    /**
+     * Set per-segment Smart Optimizer codec overrides.
+     * When set, segment i uses per_segment_codec_args[i] instead of
+     * the shared reencode_builder for its video codec arguments.
+     */
+    public void set_per_segment_codec_args (GenericArray<SegmentCodecArgs>? args) {
+        per_segment_codec_args = args;
     }
 
     /**
@@ -175,6 +190,9 @@ public class TrimRunner : Object {
             // ── Phase 1: Extract each segment ────────────────────────────────
             var segment_files = new GenericArray<string> ();
 
+            // Track used filenames to deduplicate chapters with identical titles
+            var used_names = new HashTable<string, bool> (str_hash, str_equal);
+
             for (int i = 0; i < segments.length; i++) {
                 if (runner.is_cancelled ()) {
                     report_status (@"⏹️ $(operation_label) cancelled.");
@@ -182,7 +200,13 @@ public class TrimRunner : Object {
                 }
 
                 var seg = segments[i];
-                string seg_label = "Segment %d/%d".printf (i + 1, segments.length);
+                // Use chapter label for status messages when available
+                string seg_label;
+                if (seg.label != null && seg.label.strip ().length > 0) {
+                    seg_label = "\"%s\" (%d/%d)".printf (seg.label, i + 1, segments.length);
+                } else {
+                    seg_label = "Segment %d/%d".printf (i + 1, segments.length);
+                }
 
                 // For single-segment non-separate exports, write directly to
                 // final output path (avoids an unnecessary concat pass)
@@ -190,10 +214,27 @@ public class TrimRunner : Object {
 
                 string seg_output;
                 if (export_separate) {
-                    seg_output = Path.build_filename (
-                        out_dir,
-                        @"$name_no_ext-segment-$(pad_number (i + 1))$out_ext"
-                    );
+                    // Use chapter title for filename when available
+                    string seg_name;
+                    if (seg.label != null && seg.label.strip ().length > 0) {
+                        string safe = sanitize_filename (seg.label);
+                        string candidate = @"$name_no_ext-$safe";
+                        // Deduplicate: append (2), (3)… on collision
+                        if (used_names.contains (candidate)) {
+                            int dup_count = 2;
+                            string deduped = @"$candidate ($dup_count)";
+                            while (used_names.contains (deduped)) {
+                                dup_count++;
+                                deduped = @"$candidate ($dup_count)";
+                            }
+                            candidate = deduped;
+                        }
+                        used_names.set (candidate, true);
+                        seg_name = @"$candidate$out_ext";
+                    } else {
+                        seg_name = @"$name_no_ext-segment-$(pad_number (i + 1))$out_ext";
+                    }
+                    seg_output = Path.build_filename (out_dir, seg_name);
                 } else if (direct_output) {
                     seg_output = Path.build_filename (
                         out_dir,
@@ -209,7 +250,7 @@ public class TrimRunner : Object {
                 report_status (@"🔄 Extracting $seg_label…");
                 update_progress ((double) i / segments.length * 100.0);
 
-                int exit = extract_segment (seg, seg_output);
+                int exit = extract_segment (i, seg, seg_output);
                 if (exit != 0) {
                     report_error (@"$seg_label extraction failed (exit code $exit).");
                     return;
@@ -222,7 +263,7 @@ public class TrimRunner : Object {
             // ── Phase 2: Concatenate (copy-mode multi-segment only) ──────────
             if (export_separate) {
                 last_output = segment_files[0];
-                report_status (@"✅ Exported $(segments.length) segments to:\n$out_dir");
+                report_status (@"✅ $(operation_label) completed — exported $(segments.length) files to:\n$out_dir");
             } else if (segments.length == 1) {
                 // Single segment was written directly to the output path
                 last_output = segment_files[0];
@@ -463,7 +504,7 @@ public class TrimRunner : Object {
     //  PATH B/C — Individual segment extraction
     // ═════════════════════════════════════════════════════════════════════════
 
-    private int extract_segment (TrimSegment seg, string output) {
+    private int extract_segment (int seg_index, TrimSegment seg, string output) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         bool seg_has_crop = seg.has_crop ();
@@ -513,25 +554,40 @@ public class TrimRunner : Object {
                 cmd += vf;
             }
 
-            if (reencode_builder != null && reencode_codec_tab != null) {
-                string[] codec_args = reencode_builder.get_codec_args ();
-
-                if (general_tab != null) {
-                    foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
-                                 input_file, general_tab)) {
-                        codec_args += kf;
-                    }
+            // ── Video codec args: per-segment Smart Optimizer or shared builder ──
+            bool used_smart_args = false;
+            if (per_segment_codec_args != null
+                && seg_index >= 0
+                && seg_index < per_segment_codec_args.length) {
+                var smart = per_segment_codec_args[seg_index];
+                if (smart != null && !smart.is_empty ()) {
+                    foreach (string arg in smart.args) cmd += arg;
+                    used_smart_args = true;
+                    log_line ("🧠 Segment %d: using Smart Optimizer codec args".printf (seg_index + 1));
                 }
+            }
 
-                foreach (string arg in codec_args) cmd += arg;
-            } else {
-                log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
-                cmd += "-c:v";
-                cmd += "libx264";
-                cmd += "-crf";
-                cmd += "18";
-                cmd += "-preset";
-                cmd += "medium";
+            if (!used_smart_args) {
+                if (reencode_builder != null && reencode_codec_tab != null) {
+                    string[] codec_args = reencode_builder.get_codec_args ();
+
+                    if (general_tab != null) {
+                        foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
+                                     input_file, general_tab)) {
+                            codec_args += kf;
+                        }
+                    }
+
+                    foreach (string arg in codec_args) cmd += arg;
+                } else {
+                    log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
+                    cmd += "-c:v";
+                    cmd += "libx264";
+                    cmd += "-crf";
+                    cmd += "18";
+                    cmd += "-preset";
+                    cmd += "medium";
+                }
             }
 
             string af = (general_tab != null)
@@ -791,5 +847,29 @@ public class TrimRunner : Object {
             // Best-effort cleanup — log so orphaned temp files are visible
             print ("TrimRunner: cleanup_dir failed for %s: %s\n", path, e.message);
         }
+    }
+
+    /**
+     * Sanitize a string for use as a filename component.
+     * Replaces filesystem-unsafe characters with underscores.
+     */
+    private static string sanitize_filename (string name) {
+        var sb = new StringBuilder ();
+        unichar c;
+        int i = 0;
+        while (name.get_next_char (ref i, out c)) {
+            if (c == '/' || c == '\\' || c == ':' || c == '*'
+                || c == '?' || c == '"' || c == '<' || c == '>'
+                || c == '|' || c == '\0') {
+                sb.append_c ('_');
+            } else {
+                sb.append_unichar (c);
+            }
+        }
+        string result = sb.str.strip ();
+        while (result.has_suffix (".")) {
+            result = result.substring (0, result.length - 1);
+        }
+        return result.length > 0 ? result : "untitled";
     }
 }

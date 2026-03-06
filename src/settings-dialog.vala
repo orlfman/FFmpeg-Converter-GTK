@@ -393,6 +393,11 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var presets_box = new Box (Orientation.HORIZONTAL, 6);
         presets_box.set_valign (Align.CENTER);
 
+        var btn_2 = new Button.with_label ("2 MB");
+        btn_2.add_css_class ("flat");
+        btn_2.clicked.connect (() => { target_mb_spin.set_value (2); });
+        presets_box.append (btn_2);
+
         var btn_3 = new Button.with_label ("3 MB");
         btn_3.add_css_class ("flat");
         btn_3.clicked.connect (() => { target_mb_spin.set_value (3); });

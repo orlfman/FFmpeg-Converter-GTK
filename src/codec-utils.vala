@@ -77,4 +77,82 @@ namespace CodecUtils {
 
         return { "-g", gop.to_string () };
     }
+
+    /**
+     * Build FFmpeg video codec arguments directly from a SmartOptimizer
+     * recommendation, without going through a codec tab's UI state.
+     *
+     * Used for per-segment Smart Optimization in the Crop & Trim tab,
+     * where each segment gets its own recommendation and needs its own
+     * codec args independently of the codec tab widgets.
+     */
+    public string[] build_smart_codec_args (OptimizationRecommendation rec) {
+        string[] args = {};
+
+        if (rec.codec == "x264") {
+            args += "-c:v";
+            args += "libx264";
+
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                args += "-b:v";
+                args += "%dk".printf (rec.target_bitrate_kbps);
+            } else {
+                args += "-crf";
+                args += rec.crf.to_string ();
+            }
+
+            args += "-preset";
+            args += rec.preset;
+
+            args += "-profile:v";
+            args += "high";
+
+            // Content-aware tune
+            switch (rec.content_type) {
+                case ContentType.ANIME:
+                    args += "-tune";
+                    args += "animation";
+                    break;
+                case ContentType.SCREENCAST:
+                    args += "-tune";
+                    args += "stillimage";
+                    break;
+                default:
+                    break;
+            }
+
+        } else if (rec.codec == "vp9") {
+            args += "-c:v";
+            args += "libvpx-vp9";
+
+            // rec.preset for VP9 is "cpu-used N" — extract the number
+            string speed_str = rec.preset.replace ("cpu-used ", "");
+
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                args += "-b:v";
+                args += "%dk".printf (rec.target_bitrate_kbps);
+                args += "-crf";
+                args += rec.crf.to_string ();
+            } else {
+                args += "-crf";
+                args += rec.crf.to_string ();
+                args += "-b:v";
+                args += "0";
+            }
+
+            args += "-cpu-used";
+            args += speed_str;
+            args += "-quality";
+            args += "good";
+            args += "-row-mt";
+            args += "1";
+
+            if (rec.content_type == ContentType.SCREENCAST) {
+                args += "-tune-content";
+                args += "screen";
+            }
+        }
+
+        return args;
+    }
 }

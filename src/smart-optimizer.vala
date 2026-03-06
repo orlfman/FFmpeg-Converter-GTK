@@ -57,6 +57,20 @@
 //     make it feasible, instead of generic advice.
 //   - Duration-aware budget: all size calculations use the effective encode
 //     duration (accounting for seek/time trim) rather than the full file.
+//
+// v5 improvements:
+//   - Three-point CRF calibration: encodes samples at three CRF values
+//     (lo, mid, hi) instead of two, fitting a quadratic in log-space:
+//       ln(size) = a + b·CRF + c·CRF²
+//     The quadratic term captures the CRF↔size curve's bend that the
+//     two-point exponential model missed, significantly improving accuracy
+//     when the predicted CRF falls between or beyond calibration points.
+//   - Graceful fallback: if the three-point system is degenerate (e.g. two
+//     points produced identical sizes), falls back to two-point exponential
+//     automatically.
+//   - Quadratic root selection: when solving c·x²+b·x+(a-ln(target))=0,
+//     picks the root closest to the valid CRF range. Handles edge cases
+//     including negative discriminant (target unreachable by the curve).
 
 using GLib;
 using Json;
@@ -222,7 +236,9 @@ public class SmartOptimizer : GLib.Object {
                 "Could not read video file: %s".printf (e.message));
         }
         if (info.duration <= 0) {
-            return make_error_rec (preferred_codec, "Video has zero duration.");
+            return make_error_rec (preferred_codec,
+                "Video has zero duration — ffprobe could not determine the length.\n"
+                + "The file may be corrupt, truncated, or in an unsupported container format.");
         }
 
         // ── 1b. Apply context overrides ─────────────────────────────────
@@ -310,20 +326,27 @@ public class SmartOptimizer : GLib.Object {
             };
         }
 
-        // ── 5. Two-point CRF calibration ────────────────────────────────
-        // Encode sample segments at two CRFs with the fastest preset,
-        // measure sizes, fit an exponential curve for THIS video.
+        // ── 5. Three-point CRF calibration ──────────────────────────────
+        // Encode sample segments at three CRFs with the fastest preset,
+        // measure sizes, fit a quadratic curve in log-space for THIS video.
+        // Three points capture the curvature that a two-point exponential
+        // misses, significantly improving accuracy when the predicted CRF
+        // falls between or beyond the calibration points.
         // Video filters are included so calibration reflects the actual
         // output resolution and processing.
 
-        int crf_lo, crf_hi;
-        pick_calibration_crfs (preferred_codec, out crf_lo, out crf_hi);
+        int crf_lo, crf_mid, crf_hi;
+        pick_calibration_crfs (preferred_codec, out crf_lo, out crf_mid, out crf_hi);
 
-        double size_lo_kb, size_hi_kb;
+        double size_lo_kb, size_mid_kb, size_hi_kb;
         try {
             cancellable_check (cancellable);
             size_lo_kb = yield calibration_encode (
                 input_file, preferred_codec, crf_lo, positions, encode_duration,
+                vf, cancellable);
+            cancellable_check (cancellable);
+            size_mid_kb = yield calibration_encode (
+                input_file, preferred_codec, crf_mid, positions, encode_duration,
                 vf, cancellable);
             cancellable_check (cancellable);
             size_hi_kb = yield calibration_encode (
@@ -337,22 +360,79 @@ public class SmartOptimizer : GLib.Object {
                 "Test encode failed — is ffmpeg installed?\n%s".printf (e.message));
         }
 
-        if (size_lo_kb <= 0 || size_hi_kb <= 0 || size_lo_kb <= size_hi_kb) {
-            warning ("Nonsensical calibration: lo=%.0f hi=%.0f", size_lo_kb, size_hi_kb);
+        if (size_lo_kb <= 0 || size_mid_kb <= 0 || size_hi_kb <= 0) {
+            warning ("Nonsensical calibration: lo=%.0f mid=%.0f hi=%.0f",
+                     size_lo_kb, size_mid_kb, size_hi_kb);
             return make_error_rec (preferred_codec,
-                "Calibration produced invalid results (%.0f KB / %.0f KB). File may be corrupt."
-                    .printf (size_lo_kb, size_hi_kb));
+                "Calibration produced invalid results (%.0f / %.0f / %.0f KB). File may be corrupt."
+                    .printf (size_lo_kb, size_mid_kb, size_hi_kb));
         }
 
-        // ── 6. Fit CRF↔size curve ──────────────────────────────────────
-        // Model: size = A × Bᶜʳᶠ
-        //   size_lo = A × B^crf_lo
-        //   size_hi = A × B^crf_hi
-        //   → B = (size_hi / size_lo)^(1 / (crf_hi − crf_lo))
-        //   → A = size_lo / B^crf_lo
+        // Warn if sizes aren't monotonically decreasing (unusual but the
+        // quadratic fit handles it — just means unusual content variance)
+        if (size_lo_kb <= size_mid_kb || size_mid_kb <= size_hi_kb) {
+            warning ("Non-monotonic calibration: CRF %d→%.0fKB, %d→%.0fKB, %d→%.0fKB — "
+                + "proceeding with quadratic fit",
+                crf_lo, size_lo_kb, crf_mid, size_mid_kb, crf_hi, size_hi_kb);
+        }
 
-        double B = Math.pow (size_hi_kb / size_lo_kb, 1.0 / (crf_hi - crf_lo));
-        double A = size_lo_kb / Math.pow (B, crf_lo);
+        // ── 6. Fit CRF↔size curve (quadratic in log-space) ────────────
+        // Model:  ln(size) = a + b·crf + c·crf²
+        //
+        // Three calibration points give a 3×3 linear system:
+        //   a + b·x₁ + c·x₁² = ln(size_lo)
+        //   a + b·x₂ + c·x₂² = ln(size_mid)
+        //   a + b·x₃ + c·x₃² = ln(size_hi)
+        //
+        // Solved via row subtraction (Gaussian elimination). The quadratic
+        // term (c) captures the CRF↔size curve's bend — the key improvement
+        // over two-point exponential fitting.
+
+        double x1 = (double) crf_lo;
+        double x2 = (double) crf_mid;
+        double x3 = (double) crf_hi;
+        double y1 = Math.log (size_lo_kb);
+        double y2 = Math.log (size_mid_kb);
+        double y3 = Math.log (size_hi_kb);
+
+        // Row-subtraction solve for the 3×3 system  [1, x, x²] · [a, b, c]ᵀ = [y]
+        // Subtract row 1 from rows 2 and 3 to get a 2×2 system, then solve.
+        // The determinant check guards against degenerate inputs (e.g. two
+        // calibration points producing identical sizes).
+        double det = (x2 - x1) * (x3*x3 - x1*x1) - (x3 - x1) * (x2*x2 - x1*x1);
+
+        double qa, qb, qc;  // quadratic coefficients
+
+        if (Math.fabs (det) < 1e-12) {
+            // Degenerate — fall back to two-point exponential (lo + hi)
+            warning ("Three-point calibration degenerate, falling back to two-point");
+            if (size_lo_kb <= size_hi_kb || Math.fabs (size_lo_kb - size_hi_kb) < 1e-6) {
+                // Even two-point is degenerate (sizes are equal or inverted)
+                // — use a safe middle CRF
+                warning ("Two-point fallback also degenerate — using midpoint CRF");
+                qa = y1;
+                qb = -0.1;  // small negative slope so the solver picks a reasonable CRF
+                qc = 0.0;
+            } else {
+                double B_fallback = Math.pow (size_hi_kb / size_lo_kb, 1.0 / (crf_hi - crf_lo));
+                double A_fallback = size_lo_kb / Math.pow (B_fallback, crf_lo);
+                qa = Math.log (A_fallback);
+                qb = Math.log (B_fallback);
+                qc = 0.0;
+            }
+        } else {
+            // Solve relative to point 1 to reduce numerical error
+            double dy2 = y2 - y1;
+            double dy3 = y3 - y1;
+            double dx2 = x2 - x1;
+            double dx3 = x3 - x1;
+            double dx2sq = x2*x2 - x1*x1;
+            double dx3sq = x3*x3 - x1*x1;
+
+            qc = (dy2 * dx3 - dy3 * dx2) / (dx2sq * dx3 - dx3sq * dx2);
+            qb = (dy2 - qc * dx2sq) / dx2;
+            qa = y1 - qb * x1 - qc * x1 * x1;
+        }
 
         // ── 7. Content-aware preset selection ───────────────────────────
         // Scale the preset index by type_confidence: when classification is
@@ -373,36 +453,80 @@ public class SmartOptimizer : GLib.Object {
         // produces smaller files at the same CRF, so we inflate the target to
         // compensate:
         //   effective_target = video_target_kb / preset_factor
-        // Then solve: effective_target = A × B^crf
+        // Then solve: ln(effective_target) = a + b·crf + c·crf²
+        //   → c·crf² + b·crf + (a − ln(target)) = 0
 
         double effective_target_kb = video_target_kb / preset_factor;
         int crf_min = (preferred_codec == "vp9") ? 12 : 8;
         int crf_max = (preferred_codec == "vp9") ? 55 : 51;
 
-        double crf_raw = Math.log (effective_target_kb / A) / Math.log (B);
+        double ln_target = Math.log (effective_target_kb);
+        double crf_raw;
+
+        if (Math.fabs (qc) < 1e-15) {
+            // Linear in log-space (pure exponential) — same as two-point
+            if (Math.fabs (qb) < 1e-15) {
+                // Flat curve — CRF has no effect on size. Use midpoint as best guess.
+                crf_raw = (double) crf_mid;
+            } else {
+                crf_raw = (ln_target - qa) / qb;
+            }
+        } else {
+            // Quadratic formula:  c·x² + b·x + (a − ln_target) = 0
+            double disc = qb * qb - 4.0 * qc * (qa - ln_target);
+            if (disc < 0) {
+                // No real solution — curve doesn't reach the target.
+                // Use the vertex (minimum/maximum point) as the best CRF.
+                crf_raw = -qb / (2.0 * qc);
+            } else {
+                double sqrt_disc = Math.sqrt (disc);
+                double r1 = (-qb + sqrt_disc) / (2.0 * qc);
+                double r2 = (-qb - sqrt_disc) / (2.0 * qc);
+                // Pick the root that falls in or nearest the valid CRF range.
+                // For typical video, qc > 0 (curve bends up in log-space at
+                // very high CRFs), so r2 is usually the correct root.
+                if (r1 >= crf_min && r1 <= crf_max && r2 >= crf_min && r2 <= crf_max) {
+                    // Both valid — pick the one closest to the midpoint
+                    crf_raw = (Math.fabs (r1 - crf_mid) < Math.fabs (r2 - crf_mid)) ? r1 : r2;
+                } else if (r1 >= crf_min && r1 <= crf_max) {
+                    crf_raw = r1;
+                } else if (r2 >= crf_min && r2 <= crf_max) {
+                    crf_raw = r2;
+                } else {
+                    // Neither in range — pick closest to valid range
+                    double d1 = double.min (Math.fabs (r1 - crf_min), Math.fabs (r1 - crf_max));
+                    double d2 = double.min (Math.fabs (r2 - crf_min), Math.fabs (r2 - crf_max));
+                    crf_raw = (d1 < d2) ? r1 : r2;
+                }
+            }
+        }
+
         int predicted_crf = ((int) Math.round (crf_raw)).clamp (crf_min, crf_max);
 
         // ── 9. Estimate final size ──────────────────────────────────────
-        double raw_estimate_kb = A * Math.pow (B, predicted_crf);
+        double raw_estimate_kb = Math.exp (qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
         int estimated_video_kb = (int) (raw_estimate_kb * preset_factor);
         int estimated_total_kb = estimated_video_kb + (int) audio_kb;
 
         // ── 10. Confidence ──────────────────────────────────────────────
-        // Bands are scaled to the calibration range width so they stay
-        // proportional regardless of codec.
+        // Three-point calibration is most accurate within [crf_lo, crf_hi]
+        // where the quadratic interpolates rather than extrapolates. Outside
+        // that range, confidence degrades proportionally to distance.
         double confidence = 1.0;
         int cal_range = crf_hi - crf_lo;   // e.g. 14 for x264, 15 for vp9
         if (predicted_crf < crf_lo - cal_range || predicted_crf > crf_hi + cal_range) {
             confidence = 0.5;   // far extrapolation (> one full range outside)
-            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d] — "
-                + "prediction reliability is low", predicted_crf, crf_lo, crf_hi);
+            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d, %d] — "
+                + "prediction reliability is low", predicted_crf, crf_lo, crf_mid, crf_hi);
         } else if (predicted_crf < crf_lo - 2 || predicted_crf > crf_hi + 2) {
-            confidence = 0.7;   // moderate extrapolation
-            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d] — "
-                + "prediction may be inaccurate", predicted_crf, crf_lo, crf_hi);
+            confidence = 0.75;  // moderate extrapolation
+            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d, %d] — "
+                + "prediction may be inaccurate", predicted_crf, crf_lo, crf_mid, crf_hi);
         } else if (predicted_crf < crf_lo || predicted_crf > crf_hi) {
-            confidence = 0.85;  // slight extrapolation (just outside range)
+            confidence = 0.9;   // slight extrapolation (just outside range)
         }
+        // Within [crf_lo, crf_hi]: confidence stays at 1.0 — the quadratic
+        // model is interpolating between measured points, not extrapolating.
 
         // ── 10b. Sample coverage factor ─────────────────────────────────
         // When the sampled duration is a small fraction of the total, the
@@ -490,13 +614,15 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Calibration data ---
-        notes.append ("\n── Calibration data ──\n");
+        notes.append ("\n── Calibration data (3-point quadratic) ──\n");
         notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
             .printf (crf_lo, size_lo_kb));
         notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
+            .printf (crf_mid, size_mid_kb));
+        notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
             .printf (crf_hi, size_hi_kb));
-        notes.append ("  Per-CRF factor B = %.4f (lower = more compressible)\n"
-            .printf (B));
+        notes.append ("  Model: ln(size) = %.4f + %.4f·CRF + %.6f·CRF²\n"
+            .printf (qa, qb, qc));
         notes.append ("  Preset efficiency factor = %.2f (%s vs ultrafast)\n"
             .printf (preset_factor, preset_label));
         notes.append ("  Sample coverage: %.0f%% (%d × %ds segments)\n"
@@ -565,11 +691,17 @@ public class SmartOptimizer : GLib.Object {
         var parser = new Json.Parser ();
         parser.load_from_data (stdout_text);
         var root   = parser.get_root ().get_object ();
-        var format = root.get_object_member ("format");
+        var format = root.has_member ("format") ? root.get_object_member ("format") : null;
+
+        // ── Duration: try format-level first ─────────────────────────────
+        double duration = 0.0;
+        if (format != null) {
+            string dur_str = format.get_string_member_with_default ("duration", "0");
+            duration = double.parse (dur_str);
+        }
 
         var info = SmartOptimizerVideoInfo () {
-            duration                = double.parse (
-                format.get_string_member_with_default ("duration", "0")),
+            duration                = duration,
             width                   = 0,
             height                  = 0,
             fps                     = 0.0,
@@ -588,13 +720,33 @@ public class SmartOptimizer : GLib.Object {
                 info.height = (int) s.get_int_member ("height");
                 var rfr     = s.get_string_member_with_default ("r_frame_rate", "24/1");
                 info.fps    = parse_fraction (rfr);
+
+                // ── Duration fallback: video stream level ────────────────
+                if (info.duration <= 0) {
+                    string stream_dur = s.get_string_member_with_default ("duration", "0");
+                    info.duration = double.parse (stream_dur);
+                }
             }
 
             if (ctype == "audio") {
                 var bstr = s.get_string_member_with_default ("bit_rate", "0");
                 info.audio_bitrate_kbps = (int) (double.parse (bstr) / 1000.0);
                 info.audio_codec = s.get_string_member_with_default ("codec_name", "");
+
+                // ── Duration fallback: audio stream level ────────────────
+                if (info.duration <= 0) {
+                    string stream_dur = s.get_string_member_with_default ("duration", "0");
+                    info.duration = double.parse (stream_dur);
+                }
             }
+        }
+
+        // ── Duration fallback: separate ffprobe call (most reliable) ─────
+        // FfprobeUtils.probe_duration uses format=duration via CSV output,
+        // which sometimes succeeds when JSON parsing doesn't (e.g. when
+        // the JSON field contains "N/A" or is absent).
+        if (info.duration <= 0) {
+            info.duration = FfprobeUtils.probe_duration (path);
         }
 
         // If the audio stream didn't report a bitrate, fall back to a
@@ -778,13 +930,15 @@ public class SmartOptimizer : GLib.Object {
     // CALIBRATION ENCODING
     // ════════════════════════════════════════════════════════════════════════
 
-    private void pick_calibration_crfs (string codec, out int crf_lo, out int crf_hi) {
+    private void pick_calibration_crfs (string codec, out int crf_lo, out int crf_mid, out int crf_hi) {
         if (codec == "vp9") {
-            crf_lo = 25;
-            crf_hi = 40;
+            crf_lo  = 25;
+            crf_mid = 33;
+            crf_hi  = 40;
         } else {
-            crf_lo = 18;
-            crf_hi = 32;
+            crf_lo  = 18;
+            crf_mid = 25;
+            crf_hi  = 32;
         }
     }
 
