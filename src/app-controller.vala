@@ -249,7 +249,6 @@ public class AppController : Object {
         string input_file = file_pickers.input_entry.get_text ();
         if (input_file.length == 0) {
             status_area.set_status ("⚠️  Smart Optimizer: select an input file first.");
-            reset_smart_optimizer_dropdown (codec);
             return;
         }
 
@@ -311,7 +310,6 @@ public class AppController : Object {
             if (rec.is_impossible) {
                 status_area.set_status ("⚠️  Smart Optimizer: target may be unreachable.");
                 console_tab.add_line ("[Smart Optimizer] " + rec.notes);
-                reset_smart_optimizer_dropdown (codec);
                 return;
             }
 
@@ -345,22 +343,5 @@ public class AppController : Object {
             console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
         }
 
-        // Always reset the dropdown back to "Custom" so the user can
-        // re-select "Smart Optimizer" to run the analysis again.
-        // (notify["selected"] only fires on changes, so without this
-        // reset, re-clicking the same item would be a no-op.)
-        reset_smart_optimizer_dropdown (codec);
-    }
-
-    /**
-     * Reset a codec tab's quality profile dropdown back to "Custom" (index 0).
-     * This allows the user to re-select "Smart Optimizer" to re-run analysis.
-     */
-    private void reset_smart_optimizer_dropdown (string codec) {
-        if (codec == "x264") {
-            x264_tab.quality_profile_combo.set_selected (0);
-        } else {
-            vp9_tab.quality_profile_combo.set_selected (0);
-        }
     }
 }

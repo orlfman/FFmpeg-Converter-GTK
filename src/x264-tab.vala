@@ -130,14 +130,40 @@ public class X264Tab : Box, ICodecTab {
         row.set_subtitle ("Configures all settings below — you can still adjust individually");
         quality_profile_combo = new DropDown (new StringList ({
             "Custom", "Streaming", "Anime", "Low", "Medium", "High", "Very High",
-            "Imageboards", "Smart Optimizer"
+            "Imageboards"
         }), null);
         quality_profile_combo.set_valign (Align.CENTER);
         quality_profile_combo.set_selected (0);
         row.add_suffix (quality_profile_combo);
         group.add (row);
 
+        // Smart Optimizer — ActionRow with button suffix for content-aware analysis
+        var smart_row = new Adw.ActionRow ();
+        smart_row.set_title ("Smart Optimizer");
+        smart_row.set_subtitle ("Analyze the video and auto-configure CRF and speed for your target size");
+        smart_row.add_prefix (make_smart_icon ());
+        var smart_btn = new Button.with_label ("Optimize");
+        smart_btn.add_css_class ("suggested-action");
+        smart_btn.set_valign (Align.CENTER);
+        smart_btn.clicked.connect (() => {
+            smart_optimizer_requested ();
+        });
+        smart_row.add_suffix (smart_btn);
+        smart_row.set_activatable_widget (smart_btn);
+        group.add (smart_row);
+
         append (group);
+    }
+
+    /**
+     * Build a tinted prefix icon for the Smart Optimizer row.
+     */
+    private static Image make_smart_icon () {
+        var img = new Image.from_icon_name ("starred-symbolic");
+        img.set_pixel_size (24);
+        img.set_valign (Align.CENTER);
+        img.add_css_class ("accent");
+        return img;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -654,15 +680,11 @@ public class X264Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
-        // Preset → apply preset configuration (or emit signal for Smart Optimizer)
+        // Preset → apply preset configuration
         quality_profile_combo.notify["selected"].connect (() => {
             var item = quality_profile_combo.selected_item as StringObject;
             if (item == null) return;
-            if (item.string == "Smart Optimizer") {
-                smart_optimizer_requested ();
-            } else {
-                CodecPresets.apply_x264 (this, item.string);
-            }
+            CodecPresets.apply_x264 (this, item.string);
         });
 
         // Rate control mode → show/hide rows
