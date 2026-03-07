@@ -17,6 +17,11 @@ using GLib;
 //    [output]
 //    default_directory = /home/user/Videos   (default: "" → same as input)
 //
+//    [general]
+//    output_name_mode  = default             (default|custom|random|date|metadata)
+//    output_custom_name = my_video           (default: "" → used when mode=custom)
+//    overwrite_enabled = false               (default: false → prompt before overwriting)
+//
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
 //    auto_convert = false                    (default: false → don't auto-start conversion)
@@ -45,6 +50,9 @@ public class AppSettings : Object {
     private string _ffprobe_path = "ffprobe";
     private string _ffplay_path  = "ffplay";
     private string _default_output_dir = "";
+    private OutputNameMode _output_name_mode = OutputNameMode.DEFAULT;
+    private string _output_custom_name = "";
+    private bool   _overwrite_enabled = false;
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
     private bool   _smart_optimizer_strip_audio = false;
@@ -53,9 +61,10 @@ public class AppSettings : Object {
     private string config_dir;
     private string config_file;
 
-    private const string GROUP_PATHS  = "paths";
-    private const string GROUP_OUTPUT = "output";
-    private const string GROUP_SMART  = "smart_optimizer";
+    private const string GROUP_PATHS   = "paths";
+    private const string GROUP_OUTPUT  = "output";
+    private const string GROUP_GENERAL = "general";
+    private const string GROUP_SMART   = "smart_optimizer";
 
     // ── Signal: emitted after settings are saved ──────────────────────────────
     public signal void settings_changed ();
@@ -129,6 +138,48 @@ public class AppSettings : Object {
         }
     }
 
+    public OutputNameMode output_name_mode {
+        get {
+            mutex.lock ();
+            OutputNameMode v = _output_name_mode;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _output_name_mode = value;
+            mutex.unlock ();
+        }
+    }
+
+    public string output_custom_name {
+        owned get {
+            mutex.lock ();
+            string v = _output_custom_name;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _output_custom_name = value.strip ();
+            mutex.unlock ();
+        }
+    }
+
+    public bool overwrite_enabled {
+        get {
+            mutex.lock ();
+            bool v = _overwrite_enabled;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _overwrite_enabled = value;
+            mutex.unlock ();
+        }
+    }
+
     public int smart_optimizer_target_mb {
         get {
             mutex.lock ();
@@ -193,6 +244,10 @@ public class AppSettings : Object {
         _ffprobe_path       = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
         _ffplay_path        = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
         _default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
+        _output_name_mode   = OutputNameMode.from_string (
+            read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
+        _output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
+        _overwrite_enabled  = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
         _smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
         _smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
         _smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
@@ -213,6 +268,9 @@ public class AppSettings : Object {
         kf.set_string (GROUP_PATHS,  "ffprobe",           _ffprobe_path);
         kf.set_string (GROUP_PATHS,  "ffplay",            _ffplay_path);
         kf.set_string (GROUP_OUTPUT, "default_directory",  _default_output_dir);
+        kf.set_string (GROUP_GENERAL, "output_name_mode",  _output_name_mode.to_string ());
+        kf.set_string (GROUP_GENERAL, "output_custom_name", _output_custom_name);
+        kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", _overwrite_enabled);
         kf.set_integer (GROUP_SMART, "target_mb",          _smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert",       _smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio",        _smart_optimizer_strip_audio);
@@ -238,6 +296,9 @@ public class AppSettings : Object {
         _ffprobe_path       = "ffprobe";
         _ffplay_path        = "ffplay";
         _default_output_dir = "";
+        _output_name_mode   = OutputNameMode.DEFAULT;
+        _output_custom_name = "";
+        _overwrite_enabled  = false;
         _smart_optimizer_target_mb = 4;
         _smart_optimizer_auto_convert = false;
         _smart_optimizer_strip_audio = false;

@@ -36,11 +36,142 @@ namespace ConversionUtils {
         string container_ext = codec_tab.get_container ();
         if (container_ext == "") container_ext = ContainerExt.MKV;
 
+        string name_stem = resolve_output_stem (input_file, codec_suffix);
+
+        return @"$out_folder/$name_stem.$container_ext";
+    }
+
+    /**
+     * Resolve the output filename stem (without extension) based on the
+     * current OutputNameMode setting.
+     *
+     * Each mode produces a different stem:
+     *   DEFAULT  → <original_name>-<codec_suffix>
+     *   CUSTOM   → <user_custom_name>-<codec_suffix>
+     *   RANDOM   → <8-char alphanumeric>-<codec_suffix>
+     *   DATE     → <YYYY-MM-DD_HH-MM-SS>-<codec_suffix>
+     *   METADATA → <metadata_title>-<codec_suffix>  (falls back to DEFAULT)
+     */
+    public string resolve_output_stem (string input_file, string codec_suffix) {
+        var settings = AppSettings.get_default ();
+        OutputNameMode mode = settings.output_name_mode;
+
         string basename = Path.get_basename (input_file);
         int dot_pos = basename.last_index_of_char ('.');
         string name_no_ext = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
 
-        return @"$out_folder/$name_no_ext-$codec_suffix.$container_ext";
+        switch (mode) {
+            case OutputNameMode.CUSTOM:
+                string custom = settings.output_custom_name;
+                if (custom.length > 0) {
+                    // Sanitize to prevent path traversal or broken filenames
+                    string safe_custom = sanitize_name_component (custom);
+                    if (safe_custom.length > 0) {
+                        return @"$safe_custom-$codec_suffix";
+                    }
+                }
+                // Fall through to default if custom name is empty or fully invalid
+                return @"$name_no_ext-$codec_suffix";
+
+            case OutputNameMode.RANDOM:
+                string random_str = generate_random_name (8);
+                return @"$random_str-$codec_suffix";
+
+            case OutputNameMode.DATE:
+                string timestamp = generate_timestamp_name ();
+                return @"$timestamp-$codec_suffix";
+
+            case OutputNameMode.METADATA:
+                string? title = FfprobeUtils.probe_title (input_file);
+                if (title != null && title.length > 0) {
+                    // Sanitize the title for use as a filename
+                    string safe_title = sanitize_name_component (title);
+                    if (safe_title.length > 0) {
+                        return @"$safe_title-$codec_suffix";
+                    }
+                }
+                // Fallback: use original filename
+                return @"$name_no_ext-$codec_suffix";
+
+            default:  // DEFAULT
+                return @"$name_no_ext-$codec_suffix";
+        }
+    }
+
+    /**
+     * Generate a random alphanumeric string of the given length.
+     */
+    public string generate_random_name (int length) {
+        const string CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+        var sb = new StringBuilder ();
+        for (int i = 0; i < length; i++) {
+            int idx = Random.int_range (0, CHARS.length);
+            sb.append_c (CHARS[idx]);
+        }
+        return sb.str;
+    }
+
+    /**
+     * Generate a date-time stamp suitable for filenames.
+     * Format: YYYY-MM-DD_HH-MM-SS
+     */
+    public string generate_timestamp_name () {
+        var now = new DateTime.now_local ();
+        return now.format ("%Y-%m-%d_%H-%M-%S");
+    }
+
+    /**
+     * Strip characters unsafe for filenames from a metadata string.
+     * Keeps letters, digits, hyphens, underscores, and periods.
+     * Collapses whitespace and path separators into single underscores.
+     * Strips leading dots to prevent hidden files on Linux.
+     * Clamps length to MAX_NAME_COMPONENT_LEN to stay within filesystem limits
+     * (ext4 allows 255 bytes for the full filename; we reserve headroom for
+     * the codec suffix and container extension).
+     */
+    private const int MAX_NAME_COMPONENT_LEN = 200;
+
+    public string sanitize_name_component (string raw) {
+        var sb = new StringBuilder ();
+        unichar c;
+        int i = 0;
+        bool last_was_space = false;
+
+        while (raw.get_next_char (ref i, out c)) {
+            if (c.isalnum () || c == '-' || c == '_' || c == '.') {
+                sb.append_unichar (c);
+                last_was_space = false;
+            } else if (c.isspace () || c == ':' || c == '/' || c == '\\') {
+                if (!last_was_space && sb.len > 0) {
+                    sb.append_c ('_');
+                    last_was_space = true;
+                }
+            }
+            // Skip all other characters silently
+        }
+
+        string result = sb.str;
+
+        // Strip leading dots — prevent hidden files on Linux
+        while (result.has_prefix (".")) {
+            result = result.substring (1);
+        }
+
+        // Strip trailing underscores and dots
+        while (result.has_suffix ("_") || result.has_suffix (".")) {
+            result = result.substring (0, result.length - 1);
+        }
+
+        // Clamp length to stay within filesystem limits
+        if (result.length > MAX_NAME_COMPONENT_LEN) {
+            result = result.substring (0, MAX_NAME_COMPONENT_LEN);
+            // Re-trim if the cut landed on a trailing underscore or dot
+            while (result.has_suffix ("_") || result.has_suffix (".")) {
+                result = result.substring (0, result.length - 1);
+            }
+        }
+
+        return result;
     }
 
     public string find_unique_path (string path) {

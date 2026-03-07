@@ -73,6 +73,56 @@ namespace Chroma {
     public const string C444 = "4:4:4";
 }
 
+// ── Output Filename Modes ────────────────────────────────────────────────────
+
+public enum OutputNameMode {
+    DEFAULT,     // Current behavior: <original>-<codec>.<ext>
+    CUSTOM,      // User-defined custom name
+    RANDOM,      // Random alphanumeric string
+    DATE,        // Timestamp: YYYY-MM-DD_HH-MM-SS
+    METADATA;    // Video metadata "title" tag, fallback to filename
+
+    public string to_string () {
+        switch (this) {
+            case CUSTOM:   return "custom";
+            case RANDOM:   return "random";
+            case DATE:     return "date";
+            case METADATA: return "metadata";
+            default:       return "default";
+        }
+    }
+
+    public static OutputNameMode from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "custom":   return CUSTOM;
+            case "random":   return RANDOM;
+            case "date":     return DATE;
+            case "metadata": return METADATA;
+            default:         return DEFAULT;
+        }
+    }
+
+    public string get_label () {
+        switch (this) {
+            case CUSTOM:   return "Custom Name";
+            case RANDOM:   return "Random";
+            case DATE:     return "Date & Time";
+            case METADATA: return "Metadata Title";
+            default:       return "Default";
+        }
+    }
+
+    public string get_description () {
+        switch (this) {
+            case CUSTOM:   return "Use a custom name you define below";
+            case RANDOM:   return "Generate a random alphanumeric name";
+            case DATE:     return "Use a timestamp (e.g. 2025-03-07_14-30-00)";
+            case METADATA: return "Use the video's metadata title, or fall back to the filename";
+            default:       return "Original filename with codec suffix appended";
+        }
+    }
+}
+
 // ── Scaling Algorithms ───────────────────────────────────────────────────────
 
 namespace ScaleAlgorithm {

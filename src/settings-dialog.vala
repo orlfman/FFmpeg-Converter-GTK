@@ -7,8 +7,9 @@ using Adw;
 //  Uses Adw.PreferencesDialog for a polished, native GNOME settings experience.
 //
 //  Sections:
-//    FFmpeg Binaries — custom paths for ffmpeg, ffprobe, and ffplay
+//    General         — output filename format & overwrite behavior
 //    Output          — default output directory
+//    FFmpeg Binaries — custom paths for ffmpeg, ffprobe, and ffplay
 //    Smart Optimizer — target file size for content-aware encoding
 //
 //  Changes are persisted via AppSettings when the dialog closes.
@@ -23,6 +24,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     // ── Output directory ──────────────────────────────────────────────────────
     private Entry output_dir_entry;
+
+    // ── General settings ────────────────────────────────────────────────────
+    private Adw.ComboRow name_mode_combo;
+    private Adw.EntryRow custom_name_entry;
+    private Adw.SwitchRow overwrite_switch;
+    private Adw.ActionRow overwrite_warning_row;
+    private Adw.ActionRow preview_row;
 
     // ── Smart Optimizer ────────────────────────────────────────────────────────
     private SpinButton target_mb_spin;
@@ -46,8 +54,10 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         inject_settings_css ();
 
-        add (build_binaries_page ());
+        // Tab order: General → Output → Binaries → Smart Optimizer
+        add (build_general_page ());
         add (build_output_page ());
+        add (build_binaries_page ());
         add (build_smart_optimizer_page ());
 
         load_from_settings ();
@@ -77,6 +87,10 @@ public class SettingsDialog : Adw.PreferencesDialog {
             ".settings-path-missing {\n" +
             "    color: #e74856;\n" +
             "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".settings-overwrite-warning .title {\n" +
+            "    color: #e5a50a;\n" +
+            "    font-size: 0.85em;\n" +
             "}\n"
         );
         StyleContext.add_provider_for_display (
@@ -87,7 +101,162 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 1 — FFmpeg Binaries
+    //  PAGE 1 — General
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private Adw.PreferencesPage build_general_page () {
+        var page = new Adw.PreferencesPage ();
+        page.set_title ("General");
+        page.set_icon_name ("preferences-other-symbolic");
+
+        // ── Output Filename Format ────────────────────────────────────────────
+        var naming_group = new Adw.PreferencesGroup ();
+        naming_group.set_title ("Output Filename");
+        naming_group.set_description (
+            "Choose how output files are named during codec conversion. " +
+            "The codec suffix and container extension are always appended automatically."
+        );
+
+        // Mode selector — subtitle doubles as a dynamic description that
+        // explains the currently selected mode.  This keeps the text
+        // left-aligned and naturally wrapped, matching libadwaita conventions.
+        name_mode_combo = new Adw.ComboRow ();
+        name_mode_combo.set_title ("Naming Mode");
+        name_mode_combo.set_subtitle (OutputNameMode.DEFAULT.get_description ());
+
+        var mode_model = new Gtk.StringList (null);
+        mode_model.append (OutputNameMode.DEFAULT.get_label ());
+        mode_model.append (OutputNameMode.CUSTOM.get_label ());
+        mode_model.append (OutputNameMode.RANDOM.get_label ());
+        mode_model.append (OutputNameMode.DATE.get_label ());
+        mode_model.append (OutputNameMode.METADATA.get_label ());
+        name_mode_combo.set_model (mode_model);
+
+        // Custom name entry row — hidden by default, only shown in Custom mode
+        custom_name_entry = new Adw.EntryRow ();
+        custom_name_entry.set_title ("Custom Name");
+        custom_name_entry.set_show_apply_button (false);
+        custom_name_entry.set_visible (false);
+
+        // Preview row — uses the ActionRow's own subtitle for the filename
+        // so it flows horizontally across the full row width.
+        preview_row = new Adw.ActionRow ();
+        preview_row.set_title ("Preview");
+        preview_row.set_subtitle ("original_name-x265.mkv");
+
+        // Wire up combo change → update subtitle + show/hide custom entry + preview
+        name_mode_combo.notify["selected"].connect (() => {
+            uint sel = name_mode_combo.get_selected ();
+            OutputNameMode mode = index_to_mode (sel);
+
+            name_mode_combo.set_subtitle (mode.get_description ());
+            custom_name_entry.set_visible (mode == OutputNameMode.CUSTOM);
+            update_name_preview ();
+        });
+
+        // Wire up custom name typing → update preview
+        custom_name_entry.changed.connect (() => {
+            update_name_preview ();
+        });
+
+        naming_group.add (name_mode_combo);
+        naming_group.add (custom_name_entry);
+        naming_group.add (preview_row);
+        page.add (naming_group);
+
+        // ── Overwrite Behavior ────────────────────────────────────────────────
+        var overwrite_group = new Adw.PreferencesGroup ();
+        overwrite_group.set_title ("File Overwrite");
+        overwrite_group.set_description (
+            "Control whether existing output files are overwritten without confirmation."
+        );
+
+        overwrite_switch = new Adw.SwitchRow ();
+        overwrite_switch.set_title ("Always Overwrite");
+        overwrite_switch.set_subtitle (
+            "Skip the overwrite confirmation dialog and always replace existing files"
+        );
+
+        // Warning row — uses the ActionRow's own title so the text flows
+        // horizontally across the full width instead of stacking in a box.
+        // The entire row hides/shows so no empty gap remains when disabled.
+        overwrite_warning_row = new Adw.ActionRow ();
+        overwrite_warning_row.set_title ("⚠ Existing files will be silently replaced — data may be lost");
+        overwrite_warning_row.add_css_class ("settings-overwrite-warning");
+        overwrite_warning_row.set_activatable (false);
+        overwrite_warning_row.set_visible (false);
+
+        overwrite_switch.notify["active"].connect (() => {
+            overwrite_warning_row.set_visible (overwrite_switch.get_active ());
+        });
+
+        overwrite_group.add (overwrite_switch);
+        overwrite_group.add (overwrite_warning_row);
+        page.add (overwrite_group);
+
+        return page;
+    }
+
+    /**
+     * Map a ComboRow index to the corresponding OutputNameMode.
+     */
+    private static OutputNameMode index_to_mode (uint idx) {
+        switch (idx) {
+            case 1:  return OutputNameMode.CUSTOM;
+            case 2:  return OutputNameMode.RANDOM;
+            case 3:  return OutputNameMode.DATE;
+            case 4:  return OutputNameMode.METADATA;
+            default: return OutputNameMode.DEFAULT;
+        }
+    }
+
+    /**
+     * Map an OutputNameMode back to a ComboRow index.
+     */
+    private static uint mode_to_index (OutputNameMode mode) {
+        switch (mode) {
+            case OutputNameMode.CUSTOM:   return 1;
+            case OutputNameMode.RANDOM:   return 2;
+            case OutputNameMode.DATE:     return 3;
+            case OutputNameMode.METADATA: return 4;
+            default:                      return 0;
+        }
+    }
+
+    /**
+     * Update the filename preview label based on current combo selection
+     * and custom name entry text.
+     */
+    private void update_name_preview () {
+        uint sel = name_mode_combo.get_selected ();
+        OutputNameMode mode = index_to_mode (sel);
+
+        string stem;
+        switch (mode) {
+            case OutputNameMode.CUSTOM:
+                string custom = custom_name_entry.get_text ().strip ();
+                stem = (custom.length > 0) ? @"$custom-x265" : "my_video-x265";
+                break;
+            case OutputNameMode.RANDOM:
+                // Static example to avoid confusing preview changes
+                stem = "a7k2m9x4-x265";
+                break;
+            case OutputNameMode.DATE:
+                stem = @"$(ConversionUtils.generate_timestamp_name ())-x265";
+                break;
+            case OutputNameMode.METADATA:
+                stem = "Video_Title-x265";
+                break;
+            default:
+                stem = "original_name-x265";
+                break;
+        }
+
+        preview_row.set_subtitle (@"$stem.mkv");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  PAGE 2 — FFmpeg Binaries
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_binaries_page () {
@@ -285,7 +454,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 2 — Output
+    //  PAGE 3 — Output
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_output_page () {
@@ -358,13 +527,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 3 — Smart Optimizer
+    //  PAGE 4 — Smart Optimizer
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_smart_optimizer_page () {
         var page = new Adw.PreferencesPage ();
-        page.set_title ("Smart Optimizer");
-        page.set_icon_name ("speedometer-symbolic");
+        page.set_title ("Optimizer");
+        page.set_icon_name ("starred-symbolic");
 
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Target File Size");
@@ -500,6 +669,21 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         output_dir_entry.set_text (s.default_output_dir);
 
+        // General settings
+        name_mode_combo.set_selected (mode_to_index (s.output_name_mode));
+        custom_name_entry.set_text (s.output_custom_name);
+        custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
+        overwrite_switch.set_active (s.overwrite_enabled);
+
+        // Explicitly initialize state that relies on notify signals,
+        // because set_selected(0) on a fresh combo (already at 0) won't
+        // fire notify["selected"], leaving the subtitle at its default.
+        name_mode_combo.set_subtitle (s.output_name_mode.get_description ());
+        overwrite_warning_row.set_visible (s.overwrite_enabled);
+
+        // Initialize preview
+        update_name_preview ();
+
         target_mb_spin.set_value (s.smart_optimizer_target_mb);
         auto_convert_switch.set_active (s.smart_optimizer_auto_convert);
         strip_audio_switch.set_active (s.smart_optimizer_strip_audio);
@@ -523,6 +707,11 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.ffplay_path = (ffplay_val.length > 0) ? ffplay_val : "ffplay";
 
         s.default_output_dir = output_dir_entry.get_text ().strip ();
+
+        // General settings
+        s.output_name_mode = index_to_mode (name_mode_combo.get_selected ());
+        s.output_custom_name = custom_name_entry.get_text ().strip ();
+        s.overwrite_enabled = overwrite_switch.get_active ();
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
         s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();

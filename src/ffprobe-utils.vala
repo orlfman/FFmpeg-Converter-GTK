@@ -107,6 +107,100 @@ namespace FfprobeUtils {
     }
 
     /**
+     * Probe the "title" tag from a media file's format-level metadata.
+     *
+     * Checks both the format-level tags and stream-level tags for a title.
+     * Returns null if no title is found so callers can fall back to the
+     * filename.
+     */
+    public string? probe_title (string input_file) {
+        try {
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_entries", "format_tags=title",
+                input_file
+            };
+            string stdout_text, stderr_text;
+            int status;
+
+            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
+                                null, out stdout_text, out stderr_text, out status);
+
+            if (status == 0 && stdout_text != null && stdout_text.strip ().length > 0) {
+                var parser = new Json.Parser ();
+                parser.load_from_data (stdout_text);
+
+                var root = parser.get_root ();
+                if (root != null && root.get_node_type () == Json.NodeType.OBJECT) {
+                    var root_obj = root.get_object ();
+
+                    // Check format.tags.title
+                    if (root_obj.has_member ("format")) {
+                        var format = root_obj.get_object_member ("format");
+                        if (format != null && format.has_member ("tags")) {
+                            var tags = format.get_object_member ("tags");
+                            if (tags != null && tags.has_member ("title")) {
+                                string title = tags.get_string_member ("title");
+                                if (title != null && title.strip ().length > 0)
+                                    return title.strip ();
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Error e) {
+            // probe failed — caller uses fallback
+        }
+
+        // Second attempt: try stream-level tags
+        try {
+            string[] cmd2 = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_entries", "stream_tags=title",
+                "-select_streams", "v:0",
+                input_file
+            };
+            string stdout_text2, stderr_text2;
+            int status2;
+
+            Process.spawn_sync (null, cmd2, null, SpawnFlags.SEARCH_PATH,
+                                null, out stdout_text2, out stderr_text2, out status2);
+
+            if (status2 == 0 && stdout_text2 != null && stdout_text2.strip ().length > 0) {
+                var parser2 = new Json.Parser ();
+                parser2.load_from_data (stdout_text2);
+
+                var root2 = parser2.get_root ();
+                if (root2 != null && root2.get_node_type () == Json.NodeType.OBJECT) {
+                    var root_obj2 = root2.get_object ();
+                    if (root_obj2.has_member ("streams")) {
+                        var streams = root_obj2.get_array_member ("streams");
+                        if (streams != null && streams.get_length () > 0) {
+                            var stream = streams.get_object_element (0);
+                            if (stream != null && stream.has_member ("tags")) {
+                                var tags = stream.get_object_member ("tags");
+                                if (tags != null && tags.has_member ("title")) {
+                                    string title = tags.get_string_member ("title");
+                                    if (title != null && title.strip ().length > 0)
+                                        return title.strip ();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Error e) {
+            // probe failed — caller uses fallback
+        }
+
+        return null;
+    }
+
+    /**
      * Probe embedded chapter markers from @input_file using ffprobe.
      *
      * Uses JSON output for reliable parsing of chapter start/end times

@@ -306,8 +306,14 @@ public class MainWindow : Adw.ApplicationWindow {
             return;
         }
 
+        var settings = AppSettings.get_default ();
         string expected = subtitles_tab.get_expected_output_path ();
-        if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+
+        if (settings.overwrite_enabled) {
+            // Overwrite protection disabled — always proceed directly
+            subtitles_tab.start_apply (true);
+            activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, true,
                 () => {
                     subtitles_tab.start_apply (true);
@@ -330,7 +336,14 @@ public class MainWindow : Adw.ApplicationWindow {
         string out_folder = file_pickers.output_entry.get_text ();
         string expected = trim.get_expected_output_path (input_file, out_folder);
 
-        if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            // Overwrite protection disabled — always proceed directly
+            trim.start_trim_export (
+                input_file, out_folder, status_area, console_tab);
+            activate_cancel (ActiveOperation.TRIMMING);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, false,
                 () => {
                     trim.start_trim_export (
@@ -357,7 +370,12 @@ public class MainWindow : Adw.ApplicationWindow {
             codec_tab
         );
 
-        if (FileUtils.test (output_file, FileTest.EXISTS)) {
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            // Overwrite protection disabled — always proceed directly
+            begin_conversion (input_file, output_file, codec_tab, builder);
+        } else if (FileUtils.test (output_file, FileTest.EXISTS)) {
             confirm_overwrite (output_file, true,
                 () => { begin_conversion (input_file, output_file, codec_tab, builder); },
                 () => {
