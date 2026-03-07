@@ -68,7 +68,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 
 ## 🧠 Smart Optimizer
 
-Tired of guessing your way to the perfect file size? Just pick **Smart Optimizer** from the Quality Profile dropdown on the x264 or VP9 tab, and the app handles everything else.
+Tired of guessing your way to the perfect file size? Just pick **Smart Optimizer** from the Smart Optimizer button on the SVT-AV1, x265, x264 or VP9 tab, and the app handles everything else.
 
 ### How it actually works
 It doesn’t rely on some magic lookup table. Instead, it runs **two quick calibration encodes** on *your specific video* at different quality levels, then fits a real exponential curve to the results. It also figures out whether you’re dealing with live-action, anime, or a screencast, and picks the perfect preset + CRF combo to land right on your target size.
