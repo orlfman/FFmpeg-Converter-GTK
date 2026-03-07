@@ -4,6 +4,12 @@ using GLib;
 
 public class X265Tab : Box, ICodecTab {
 
+    // ── Signals ───────────────────────────────────────────────────────────────
+    public signal void smart_optimizer_requested ();
+
+    // ── Auto-convert (per-tab, session-only) ─────────────────────────────────
+    public bool auto_convert_active { get; private set; default = false; }
+
     // ── Preset ───────────────────────────────────────────────────────────────
     public DropDown  quality_profile_combo    { get; private set; }
 
@@ -122,7 +128,63 @@ public class X265Tab : Box, ICodecTab {
         row.add_suffix (quality_profile_combo);
         group.add (row);
 
+        // Smart Optimizer — ActionRow with button suffix for content-aware analysis
+        var smart_row = new Adw.ActionRow ();
+        smart_row.set_title ("Smart Optimizer");
+        smart_row.set_subtitle ("Analyze the video and auto-configure CRF and speed for your target size");
+        smart_row.add_prefix (make_smart_icon ());
+        var smart_btn = new Button.with_label ("Optimize");
+        smart_btn.add_css_class ("suggested-action");
+        smart_btn.set_valign (Align.CENTER);
+        smart_btn.clicked.connect (() => {
+            smart_optimizer_requested ();
+        });
+        smart_row.add_suffix (smart_btn);
+        smart_row.set_activatable_widget (smart_btn);
+        group.add (smart_row);
+
+        // Auto-convert toggle — per-tab, session-only.
+        // When the global override in Preferences is ON, this is forced active
+        // and locked insensitive. Disable the global override to control per-tab.
+        var auto_convert_row = new Adw.SwitchRow ();
+        auto_convert_row.set_title ("Auto-Convert");
+        auto_convert_row.set_subtitle ("Start conversion automatically when optimization completes");
+
+        bool global_on = AppSettings.get_default ().smart_optimizer_auto_convert;
+        auto_convert_row.set_active (global_on);
+        auto_convert_row.set_sensitive (!global_on);
+        auto_convert_active = global_on;
+
+        auto_convert_row.notify["active"].connect (() => {
+            auto_convert_active = auto_convert_row.get_active ();
+        });
+
+        AppSettings.get_default ().settings_changed.connect (() => {
+            bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
+            if (locked) {
+                // Global override ON → force active and lock
+                auto_convert_row.set_active (true);
+                auto_convert_row.set_sensitive (false);
+            } else {
+                // Global override OFF → unlock and reset to off
+                auto_convert_row.set_sensitive (true);
+                auto_convert_row.set_active (false);
+            }
+        });
+        group.add (auto_convert_row);
+
         append (group);
+    }
+
+    /**
+     * Build a tinted prefix icon for the Smart Optimizer row.
+     */
+    private static Image make_smart_icon () {
+        var img = new Image.from_icon_name ("starred-symbolic");
+        img.set_pixel_size (24);
+        img.set_valign (Align.CENTER);
+        img.add_css_class ("accent");
+        return img;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -663,6 +725,18 @@ public class X265Tab : Box, ICodecTab {
 
     public string[] get_audio_args () {
         return audio_settings.get_audio_args ();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SMART OPTIMIZER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Apply a SmartOptimizer recommendation to this tab's widgets.
+     * Called by AppController after the async analysis completes.
+     */
+    public void apply_smart_recommendation (OptimizationRecommendation rec) {
+        CodecPresets.apply_smart_x265 (this, rec);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -64,6 +64,17 @@ public class MainWindow : Adw.ApplicationWindow {
             view_stack
         );
 
+        // Auto-convert: Smart Optimizer requests conversion start.
+        // Ensure the correct codec tab is visible (user may have switched
+        // tabs while the optimizer was analyzing), and guard against the
+        // unlikely case where another operation started concurrently.
+        controller.auto_convert_requested.connect ((codec) => {
+            if (current_operation == ActiveOperation.IDLE) {
+                view_stack.set_visible_child_name (codec);
+                on_convert_clicked ();
+            }
+        });
+
         // Reset operation state when any operation completes.
         // (AppController separately handles info_tab, hamburger, and
         // cancel_button for these same signals — multiple handlers are fine.)

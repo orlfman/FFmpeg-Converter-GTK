@@ -151,6 +151,45 @@ namespace CodecUtils {
                 args += "-tune-content";
                 args += "screen";
             }
+
+        } else if (rec.codec == "x265") {
+            args += "-c:v";
+            args += "libx265";
+
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                args += "-b:v";
+                args += "%dk".printf (rec.target_bitrate_kbps);
+            } else {
+                args += "-crf";
+                args += rec.crf.to_string ();
+            }
+
+            args += "-preset";
+            args += rec.preset;
+
+            // Content-aware tune
+            if (rec.content_type == ContentType.ANIME) {
+                args += "-tune";
+                args += "animation";
+            }
+
+        } else if (rec.codec == "svt-av1") {
+            args += "-c:v";
+            args += "libsvtav1";
+
+            // rec.preset for SVT-AV1 is "preset N" — extract the number
+            string preset_str = rec.preset.replace ("preset ", "");
+
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                args += "-b:v";
+                args += "%dk".printf (rec.target_bitrate_kbps);
+            } else {
+                args += "-crf";
+                args += rec.crf.to_string ();
+            }
+
+            args += "-preset";
+            args += preset_str;
         }
 
         return args;

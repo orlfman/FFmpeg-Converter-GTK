@@ -71,6 +71,18 @@
 //   - Quadratic root selection: when solving c·x²+b·x+(a-ln(target))=0,
 //     picks the root closest to the valid CRF range. Handles edge cases
 //     including negative discriminant (target unreachable by the curve).
+//
+// v6 improvements:
+//   - Source size awareness: detects when the target exceeds the source file
+//     size and adjusts the recommendation accordingly. Re-encoding with a
+//     lossy codec can never inflate a file beyond its source, so in this
+//     scenario: two-pass is disabled (bitrate capping is meaningless), the
+//     size estimate is capped at the source size (the quadratic model is
+//     wildly inaccurate when extrapolating to near-lossless CRFs), and a
+//     clear explanation is added to the notes so the user understands why
+//     the output will be smaller than the target.
+//   - Source file size is now reported in the calibration data section for
+//     full transparency.
 
 using GLib;
 using Json;
@@ -95,6 +107,42 @@ public enum ContentType {
     }
 }
 
+/**
+ * Size tier — determines the optimization strategy.
+ *
+ * As target size increases, the optimizer shifts from aggressive compression
+ * toward quality maximization: slower presets matter less (diminishing returns
+ * at higher bitrates), audio budget increases, encoder features are pushed
+ * toward perceptual quality rather than size reduction, and two-pass is
+ * recommended less aggressively.
+ */
+public enum SizeTier {
+    TINY,       // ≤ 25 MB  — imageboard / extreme compression
+    SMALL,      // 25–50 MB — size-conscious but more headroom
+    MEDIUM,     // 50–100 MB — balanced quality and size
+    LARGE,      // 100–200 MB — quality-focused
+    XLARGE;     // 200+ MB  — quality-first, generous budget
+
+    public static SizeTier from_mb (int mb) {
+        if (mb <= 25)  return TINY;
+        if (mb <= 50)  return SMALL;
+        if (mb <= 100) return MEDIUM;
+        if (mb <= 200) return LARGE;
+        return XLARGE;
+    }
+
+    public string to_label () {
+        switch (this) {
+            case TINY:   return "Tiny (≤25 MB)";
+            case SMALL:  return "Small (25–50 MB)";
+            case MEDIUM: return "Medium (50–100 MB)";
+            case LARGE:  return "Large (100–200 MB)";
+            case XLARGE: return "XLarge (200+ MB)";
+            default:     return "Unknown";
+        }
+    }
+}
+
 public struct OptimizationRecommendation {
     public string codec;
     public int crf;
@@ -106,6 +154,8 @@ public struct OptimizationRecommendation {
     public bool is_impossible;
     public ContentType content_type;
     public double confidence;          // 0.0–1.0, how far we extrapolated
+    public SizeTier size_tier;         // optimization strategy tier
+    public int recommended_audio_kbps; // audio bitrate the preset should use
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -164,7 +214,13 @@ public class SmartOptimizer : GLib.Object {
         "ultrafast", "superfast", "veryfast", "faster", "fast",
         "medium", "slow", "slower", "veryslow"
     };
+    private const string[] X265_PRESETS = {
+        "ultrafast", "superfast", "veryfast", "faster", "fast",
+        "medium", "slow", "slower", "veryslow"
+    };
     private const int[] VP9_CPU_USED = { 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    // SVT-AV1 presets 13→0 mapped to 9 indices (fastest to slowest)
+    private const int[] SVT_AV1_PRESETS = { 13, 12, 11, 10, 8, 6, 4, 2, 0 };
 
     // ── Content-aware preset efficiency tables ───────────────────────────────
     //
@@ -253,6 +309,17 @@ public class SmartOptimizer : GLib.Object {
 
         string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
 
+        // ── 1c. Size tier ───────────────────────────────────────────────
+        SizeTier tier = SizeTier.from_mb (target_mb);
+        int tier_audio = tier_audio_kbps (tier);
+
+        // Use tier-based audio budget when caller hasn't explicitly
+        // overridden — the codec preset will configure audio to match.
+        if (ctx.audio_bitrate_kbps_override <= 0) {
+            info.audio_bitrate_kbps      = tier_audio;
+            info.audio_bitrate_estimated = false;
+        }
+
         // ── 2. Early feasibility check ──────────────────────────────────
         // Before running any encode, check if the target is even physically
         // plausible. This saves the user waiting through two calibration
@@ -305,6 +372,42 @@ public class SmartOptimizer : GLib.Object {
             return make_error_rec (preferred_codec, msg.str);
         }
 
+        // ── 2b. Source size check ────────────────────────────────────
+        // Detect when the target exceeds the source file size. Re-encoding
+        // with a lossy codec can never add information — the output will
+        // always be smaller than or roughly equal to the source. In this
+        // case, the optimizer still finds the best quality settings, but
+        // two-pass is meaningless and the user needs a clear explanation.
+        int64 source_size_bytes = 0;
+        double effective_source_kb = 0.0;  // trim-adjusted, reused below
+        bool target_exceeds_source = false;
+        try {
+            var file_info = File.new_for_path (input_file).query_info (
+                FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
+            source_size_bytes = file_info.get_size ();
+        } catch (Error e) {
+            // Non-fatal — we just can't compare sizes
+            warning ("Smart Optimizer: Could not query source file size: %s", e.message);
+        }
+
+        if (source_size_bytes > 0) {
+            effective_source_kb = (double) source_size_bytes / 1024.0;
+
+            // If trimming, scale source size proportionally to estimate the
+            // effective source size for the trimmed region
+            if (ctx.effective_duration > 0 && info.duration > 0
+                    && ctx.effective_duration < info.duration) {
+                effective_source_kb *= ctx.effective_duration / info.duration;
+            }
+
+            if (target_total_kb > effective_source_kb) {
+                target_exceeds_source = true;
+                message ("Smart Optimizer: Target (%.0f KB) exceeds source (%.0f KB) — "
+                    + "output will be capped by source quality",
+                    target_total_kb, effective_source_kb);
+            }
+        }
+
         // ── 3. Pick sample positions ────────────────────────────────────
         // Sample from the full video even if a trim is set — the content
         // characteristics are representative. The encode_duration is only
@@ -336,7 +439,7 @@ public class SmartOptimizer : GLib.Object {
         // output resolution and processing.
 
         int crf_lo, crf_mid, crf_hi;
-        pick_calibration_crfs (preferred_codec, out crf_lo, out crf_mid, out crf_hi);
+        pick_calibration_crfs (preferred_codec, tier, out crf_lo, out crf_mid, out crf_hi);
 
         double size_lo_kb, size_mid_kb, size_hi_kb;
         try {
@@ -434,15 +537,16 @@ public class SmartOptimizer : GLib.Object {
             qa = y1 - qb * x1 - qc * x1 * x1;
         }
 
-        // ── 7. Content-aware preset selection ───────────────────────────
-        // Scale the preset index by type_confidence: when classification is
-        // uncertain, bias toward a safer (less extreme) preset. The "safe"
-        // baseline is index 5 (medium / cpu-used 3), and we interpolate
-        // toward the content-specific ideal as confidence increases.
+        // ── 7. Content-aware, tier-scaled preset selection ────────────
+        // At larger targets, slower presets have diminishing returns because
+        // the encoder already has plenty of bits. The "safe" baseline shifts
+        // faster, and content-type influence is dampened.
         int ideal_preset_idx = choose_ideal_preset_index (profile);
-        int safe_preset_idx  = 5;  // medium / cpu-used 3
+        int safe_preset_idx  = tier_safe_preset_index (tier);
+        double content_factor = tier_content_influence (tier);
+
         int preset_idx = safe_preset_idx + (int) Math.round (
-            (ideal_preset_idx - safe_preset_idx) * profile.type_confidence);
+            (ideal_preset_idx - safe_preset_idx) * profile.type_confidence * content_factor);
         preset_idx = preset_idx.clamp (0, X264_PRESETS.length - 1);
 
         double[] preset_factors = preset_factors_for_content (profile.content_type);
@@ -457,8 +561,15 @@ public class SmartOptimizer : GLib.Object {
         //   → c·crf² + b·crf + (a − ln(target)) = 0
 
         double effective_target_kb = video_target_kb / preset_factor;
-        int crf_min = (preferred_codec == "vp9") ? 12 : 8;
-        int crf_max = (preferred_codec == "vp9") ? 55 : 51;
+        int crf_min, crf_max;
+        if (preferred_codec == "vp9") {
+            crf_min = 12; crf_max = 55;
+        } else if (preferred_codec == "svt-av1") {
+            crf_min = 10; crf_max = 55;
+        } else {
+            // x264 and x265 share the same 0–51 range
+            crf_min = 8; crf_max = 51;
+        }
 
         double ln_target = Math.log (effective_target_kb);
         double crf_raw;
@@ -508,6 +619,18 @@ public class SmartOptimizer : GLib.Object {
         int estimated_video_kb = (int) (raw_estimate_kb * preset_factor);
         int estimated_total_kb = estimated_video_kb + (int) audio_kb;
 
+        // When the target exceeds the source, the quadratic model is
+        // extrapolating far below its calibration range and becomes very
+        // inaccurate (often underestimates dramatically). The source file
+        // size is a more realistic upper bound — the output can't exceed
+        // the source, and at near-lossless CRFs it'll be close.
+        if (target_exceeds_source && effective_source_kb > 0) {
+            int source_cap_kb = (int) effective_source_kb;
+            if (estimated_total_kb < source_cap_kb) {
+                estimated_total_kb = source_cap_kb;
+            }
+        }
+
         // ── 10. Confidence ──────────────────────────────────────────────
         // Three-point calibration is most accurate within [crf_lo, crf_hi]
         // where the quadratic interpolates rather than extrapolates. Outside
@@ -543,25 +666,64 @@ public class SmartOptimizer : GLib.Object {
                 sample_coverage * 100.0);
         }
 
-        // ── 11. Two-pass bitrate (guaranteed-size fallback) ─────────────
+        // ── 11. Tier-aware two-pass recommendation ────────────────────
         int target_video_kbps = available_video_kbps;
+        bool recommend_two_pass;
+        switch (tier) {
+            case SizeTier.MEDIUM:
+                recommend_two_pass = (confidence < 0.85);
+                break;
+            case SizeTier.LARGE:
+                recommend_two_pass = (confidence < 0.70);
+                break;
+            case SizeTier.XLARGE:
+                // At 200+ MB CRF mode is almost always sufficient
+                recommend_two_pass = false;
+                break;
+            default:
+                // TINY and SMALL — always recommend for size guarantee
+                recommend_two_pass = true;
+                break;
+        }
 
         // ── 12. Feasibility flags ───────────────────────────────────────
         bool crf_at_max = (predicted_crf >= crf_max);
         bool is_impossible = crf_at_max && (estimated_total_kb > target_total_kb * 1.1);
+
+        // Force two-pass when CRF alone can't hit the target
+        if (crf_at_max && !is_impossible) {
+            recommend_two_pass = true;
+        }
+
+        // ── 12b. Target-exceeds-source adjustment ───────────────────────
+        // When the target is larger than the source, two-pass bitrate capping
+        // is meaningless — the encoder can't inflate the file beyond what the
+        // content produces at a given quality. CRF mode is the only sensible
+        // path: it finds the best quality the codec can achieve.
+        if (target_exceeds_source) {
+            recommend_two_pass = false;
+        }
 
         // ── 13. Build the recommendation ────────────────────────────────
         string preset_label = format_preset_label (preferred_codec, preset_idx);
 
         var notes = new StringBuilder ();
 
+        // --- Tier ---
+        notes.append ("── Strategy: %s ──\n".printf (tier.to_label ()));
+        notes.append ("  Audio budget: %d kbps\n".printf (tier_audio));
+
         // --- Content ---
-        notes.append ("── Content ──\n");
+        notes.append ("\n── Content ──\n");
         notes.append ("  %s".printf (profile.content_type.to_label ()));
         if (profile.type_confidence > 0)
             notes.append (" (confidence: %s)".printf (
                 "%.0f%%".printf (profile.type_confidence * 100)));
         notes.append ("\n");
+        if (tier >= SizeTier.MEDIUM) {
+            notes.append ("  Content influence dampened to %.0f%% (ample bitrate)\n"
+                .printf (content_factor * 100.0));
+        }
 
         // --- Audio ---
         if (info.audio_bitrate_kbps > 0) {
@@ -577,25 +739,48 @@ public class SmartOptimizer : GLib.Object {
         notes.append ("  CRF %d / Preset: %s\n".printf (predicted_crf, preset_label));
 
         if (crf_at_max && !is_impossible) {
-            // CRF is at the limit but two-pass can still hit the target.
             notes.append ("  ⚠️  CRF mode is at maximum compression — quality will be poor.\n");
             notes.append ("  ✅  Two-pass mode below is the recommended path.\n");
         } else if (!is_impossible) {
             notes.append ("  Estimated: ~%d KB".printf (estimated_total_kb));
-            if (confidence < 0.8)
+            if (target_exceeds_source)
+                notes.append (" (approximate — capped at source size)");
+            else if (confidence < 0.8)
                 notes.append (" (extrapolated — confidence %s)"
                     .printf ("%.0f%%".printf (confidence * 100)));
             notes.append ("\n");
         }
 
         // --- Two-pass mode ---
-        notes.append ("\n── Two-pass mode (size-guaranteed) ──\n");
-        notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
-            .printf (target_video_kbps, preset_label));
-        notes.append ("  This mode guarantees the file fits within the target.\n");
-        notes.append ("  Quality is determined by available bitrate, not CRF.\n");
+        if (recommend_two_pass) {
+            notes.append ("\n── Two-pass mode (size-guaranteed) ──\n");
+            notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
+                .printf (target_video_kbps, preset_label));
+            notes.append ("  This mode guarantees the file fits within the target.\n");
+            notes.append ("  Quality is determined by available bitrate, not CRF.\n");
+        } else {
+            notes.append ("\n── Two-pass: skipped ──\n");
+            if (target_exceeds_source) {
+                notes.append ("  Target exceeds source file size — bitrate capping is not applicable.\n");
+                notes.append ("  CRF mode will produce the best quality the codec can achieve.\n");
+            } else if (tier >= SizeTier.XLARGE) {
+                notes.append ("  Target is generous — CRF mode will comfortably fit.\n");
+            } else {
+                notes.append ("  CRF confidence is high (%.0f%%) — CRF mode should hit the target.\n"
+                    .printf (confidence * 100.0));
+            }
+        }
 
         // --- Warnings ---
+        if (target_exceeds_source) {
+            notes.append ("\nℹ️  Target (%d MB) exceeds the source file size (%.1f MB).\n"
+                .printf (target_mb, effective_source_kb / 1024.0));
+            notes.append ("    Re-encoding can never produce a file larger than the source.\n");
+            notes.append ("    The output is optimized for maximum quality — the codec will\n");
+            notes.append ("    use the lowest CRF it can, but the file will likely be smaller\n");
+            notes.append ("    than the target. This is normal and expected.\n");
+        }
+
         if (is_impossible) {
             notes.append ("\n⚠️  Even maximum compression will likely exceed the %d MB target.\n"
                 .printf (target_mb));
@@ -634,18 +819,24 @@ public class SmartOptimizer : GLib.Object {
         if (vf.length > 0) {
             notes.append ("  Video filters applied to calibration: yes\n");
         }
+        if (source_size_bytes > 0) {
+            notes.append ("  Source file size: %.1f MB\n"
+                .printf ((double) source_size_bytes / (1024.0 * 1024.0)));
+        }
 
         return OptimizationRecommendation () {
-            codec               = preferred_codec,
-            crf                 = predicted_crf,
-            preset              = preset_label,
-            two_pass            = true,
-            target_bitrate_kbps = target_video_kbps,
-            estimated_size_kb   = estimated_total_kb,
-            notes               = notes.str,
-            is_impossible       = is_impossible,
-            content_type        = profile.content_type,
-            confidence          = confidence
+            codec                 = preferred_codec,
+            crf                   = predicted_crf,
+            preset                = preset_label,
+            two_pass              = recommend_two_pass,
+            target_bitrate_kbps   = target_video_kbps,
+            estimated_size_kb     = estimated_total_kb,
+            notes                 = notes.str,
+            is_impossible         = is_impossible,
+            content_type          = profile.content_type,
+            confidence            = confidence,
+            size_tier             = tier,
+            recommended_audio_kbps = tier_audio
         };
     }
 
@@ -670,6 +861,8 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Est. size:      %d KB\n".printf (rec.estimated_size_kb));
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
+        sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
+        sb.append ("Audio budget:   %d kbps\n".printf (rec.recommended_audio_kbps));
         sb.append ("\n");
         sb.append (rec.notes);
 
@@ -927,18 +1120,95 @@ public class SmartOptimizer : GLib.Object {
     }
 
     // ════════════════════════════════════════════════════════════════════════
+    // SIZE-TIER HELPERS
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Recommended audio bitrate for budget calculation.
+     * The codec preset functions will configure actual audio to match.
+     */
+    private int tier_audio_kbps (SizeTier tier) {
+        switch (tier) {
+            case SizeTier.TINY:   return 64;
+            case SizeTier.SMALL:  return 128;
+            case SizeTier.MEDIUM: return 192;
+            case SizeTier.LARGE:  return 256;
+            case SizeTier.XLARGE: return 256;   // FLAC varies; generous budget
+            default:              return 128;
+        }
+    }
+
+    /**
+     * Safe baseline preset index by tier.
+     * Larger targets bias toward faster presets because the marginal
+     * quality gain from slower presets diminishes with ample bitrate.
+     */
+    private int tier_safe_preset_index (SizeTier tier) {
+        switch (tier) {
+            case SizeTier.TINY:   return 5;   // medium
+            case SizeTier.SMALL:  return 5;   // medium
+            case SizeTier.MEDIUM: return 4;   // fast
+            case SizeTier.LARGE:  return 4;   // fast
+            case SizeTier.XLARGE: return 3;   // faster
+            default:              return 5;
+        }
+    }
+
+    /**
+     * Content-type influence on preset selection.
+     * At larger sizes, content-specific preset adjustments matter less
+     * because the encoder has plenty of bits regardless.
+     */
+    private double tier_content_influence (SizeTier tier) {
+        switch (tier) {
+            case SizeTier.TINY:   return 1.0;
+            case SizeTier.SMALL:  return 0.85;
+            case SizeTier.MEDIUM: return 0.65;
+            case SizeTier.LARGE:  return 0.45;
+            case SizeTier.XLARGE: return 0.25;
+            default:              return 1.0;
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     // CALIBRATION ENCODING
     // ════════════════════════════════════════════════════════════════════════
 
-    private void pick_calibration_crfs (string codec, out int crf_lo, out int crf_mid, out int crf_hi) {
+    /**
+     * Choose three CRF calibration points that bracket the expected
+     * answer for the given codec and target size tier.
+     *
+     * Larger targets need lower CRFs, so the calibration window shifts
+     * downward to keep the quadratic model interpolating rather than
+     * extrapolating.
+     */
+    private void pick_calibration_crfs (string codec, SizeTier tier,
+                                         out int crf_lo, out int crf_mid, out int crf_hi) {
         if (codec == "vp9") {
-            crf_lo  = 25;
-            crf_mid = 33;
-            crf_hi  = 40;
+            switch (tier) {
+                case SizeTier.SMALL:  crf_lo = 22; crf_mid = 30; crf_hi = 38; break;
+                case SizeTier.MEDIUM: crf_lo = 18; crf_mid = 26; crf_hi = 34; break;
+                case SizeTier.LARGE:  crf_lo = 15; crf_mid = 23; crf_hi = 31; break;
+                case SizeTier.XLARGE: crf_lo = 12; crf_mid = 20; crf_hi = 28; break;
+                default:              crf_lo = 25; crf_mid = 33; crf_hi = 40; break;
+            }
+        } else if (codec == "svt-av1") {
+            switch (tier) {
+                case SizeTier.SMALL:  crf_lo = 18; crf_mid = 28; crf_hi = 38; break;
+                case SizeTier.MEDIUM: crf_lo = 15; crf_mid = 24; crf_hi = 33; break;
+                case SizeTier.LARGE:  crf_lo = 12; crf_mid = 20; crf_hi = 28; break;
+                case SizeTier.XLARGE: crf_lo =  8; crf_mid = 16; crf_hi = 24; break;
+                default:              crf_lo = 22; crf_mid = 32; crf_hi = 42; break;
+            }
         } else {
-            crf_lo  = 18;
-            crf_mid = 25;
-            crf_hi  = 32;
+            // x264 and x265 share the same CRF scale
+            switch (tier) {
+                case SizeTier.SMALL:  crf_lo = 16; crf_mid = 23; crf_hi = 30; break;
+                case SizeTier.MEDIUM: crf_lo = 14; crf_mid = 21; crf_hi = 28; break;
+                case SizeTier.LARGE:  crf_lo = 10; crf_mid = 18; crf_hi = 26; break;
+                case SizeTier.XLARGE: crf_lo =  8; crf_mid = 16; crf_hi = 24; break;
+                default:              crf_lo = 18; crf_mid = 25; crf_hi = 32; break;
+            }
         }
     }
 
@@ -1098,6 +1368,14 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");      cmd.add (crf.to_string ());
             cmd.add ("-b:v");      cmd.add ("0");
             cmd.add ("-row-mt");   cmd.add ("1");
+        } else if (codec == "svt-av1") {
+            cmd.add ("-c:v");      cmd.add ("libsvtav1");
+            cmd.add ("-preset");   cmd.add ("13");
+            cmd.add ("-crf");      cmd.add (crf.to_string ());
+        } else if (codec == "x265") {
+            cmd.add ("-c:v");    cmd.add ("libx265");
+            cmd.add ("-preset"); cmd.add ("ultrafast");
+            cmd.add ("-crf");    cmd.add (crf.to_string ());
         } else {
             cmd.add ("-c:v");    cmd.add ("libx264");
             cmd.add ("-preset"); cmd.add ("ultrafast");
@@ -1306,6 +1584,10 @@ public class SmartOptimizer : GLib.Object {
     private string format_preset_label (string codec, int preset_idx) {
         if (codec == "vp9") {
             return "cpu-used %d".printf (VP9_CPU_USED[preset_idx]);
+        } else if (codec == "svt-av1") {
+            return "preset %d".printf (SVT_AV1_PRESETS[preset_idx]);
+        } else if (codec == "x265") {
+            return X265_PRESETS[preset_idx];
         }
         return X264_PRESETS[preset_idx];
     }
@@ -1324,16 +1606,18 @@ public class SmartOptimizer : GLib.Object {
 
     private OptimizationRecommendation make_error_rec (string codec, string message) {
         return OptimizationRecommendation () {
-            codec               = codec,
-            crf                 = 0,
-            preset              = "",
-            two_pass            = false,
-            target_bitrate_kbps = 0,
-            estimated_size_kb   = 0,
-            notes               = "❌ " + message,
-            is_impossible       = true,
-            content_type        = ContentType.LIVE_ACTION,
-            confidence          = 0.0
+            codec                  = codec,
+            crf                    = 0,
+            preset                 = "",
+            two_pass               = false,
+            target_bitrate_kbps    = 0,
+            estimated_size_kb      = 0,
+            notes                  = "❌ " + message,
+            is_impossible          = true,
+            content_type           = ContentType.LIVE_ACTION,
+            confidence             = 0.0,
+            size_tier              = SizeTier.TINY,
+            recommended_audio_kbps = 64
         };
     }
 }

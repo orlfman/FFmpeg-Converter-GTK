@@ -141,6 +141,17 @@ public class TrimRunner : Object {
             ? output_folder
             : Path.get_dirname (input_file);
 
+        // Ensure the output directory exists — handles volatile paths
+        // (e.g. /tmp/work) or directories deleted between sessions.
+        if (!FileUtils.test (out_dir, FileTest.IS_DIR)) {
+            if (DirUtils.create_with_parents (out_dir, 0755) == 0) {
+                message ("TrimRunner: Created missing output directory: %s", out_dir);
+            } else {
+                warning ("TrimRunner: Could not create output directory %s: %s",
+                         out_dir, strerror (errno));
+            }
+        }
+
         // ── PATH A: Concat filter (re-encode + multi-segment + combined) ─────
         // This is the most robust path: a single FFmpeg command that decodes
         // all segments, applies per-segment filters, and encodes once.

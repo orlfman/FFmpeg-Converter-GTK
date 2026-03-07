@@ -26,6 +26,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     // ── Smart Optimizer ────────────────────────────────────────────────────────
     private SpinButton target_mb_spin;
+    private Adw.SwitchRow auto_convert_switch;
 
     // ── Status labels for path validation ─────────────────────────────────────
     private Label ffmpeg_status;
@@ -369,7 +370,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         group.set_description (
             "The Smart Optimizer analyzes your video and recommends encoding " +
             "settings (CRF, preset, bitrate) to hit this target size. " +
-            "Designed for imageboard upload limits."
+            "Works for any target from tiny imageboard uploads to large quality-focused encodes."
         );
 
         var target_row = new Adw.ActionRow ();
@@ -377,31 +378,64 @@ public class SettingsDialog : Adw.PreferencesDialog {
         target_row.set_subtitle ("Maximum output file size — smaller targets require more compression");
         target_row.set_icon_name ("drive-harddisk-symbolic");
 
-        target_mb_spin = new SpinButton.with_range (1, 100, 1);
+        target_mb_spin = new SpinButton.with_range (1, 4096, 1);
         target_mb_spin.set_value (4);
         target_mb_spin.set_valign (Align.CENTER);
-        target_mb_spin.set_width_chars (4);
+        target_mb_spin.set_width_chars (5);
         target_row.add_suffix (target_mb_spin);
 
         group.add (target_row);
+        page.add (group);
 
-        // ── Common presets row ────────────────────────────────────────────────
+        // ── Presets group ─────────────────────────────────────────────────
+        var presets_group = new Adw.PreferencesGroup ();
+        presets_group.set_title ("Presets");
+
+        // ── General purpose ──────────────────────────────────────────────
+        var general_row = new Adw.ActionRow ();
+        general_row.set_title ("General");
+        general_row.set_subtitle ("Targets for messaging, email, and sharing");
+
+        var general_box = new Box (Orientation.HORIZONTAL, 6);
+        general_box.set_valign (Align.CENTER);
+        general_box.set_homogeneous (true);
+
+        var btn_25 = new Button.with_label ("25 MB");
+        btn_25.add_css_class ("flat");
+        btn_25.clicked.connect (() => { target_mb_spin.set_value (25); });
+        general_box.append (btn_25);
+
+        var btn_50 = new Button.with_label ("50 MB");
+        btn_50.add_css_class ("flat");
+        btn_50.clicked.connect (() => { target_mb_spin.set_value (50); });
+        general_box.append (btn_50);
+
+        var btn_100 = new Button.with_label ("100 MB");
+        btn_100.add_css_class ("flat");
+        btn_100.clicked.connect (() => { target_mb_spin.set_value (100); });
+        general_box.append (btn_100);
+
+        var btn_500 = new Button.with_label ("500 MB");
+        btn_500.add_css_class ("flat");
+        btn_500.clicked.connect (() => { target_mb_spin.set_value (500); });
+        general_box.append (btn_500);
+
+        general_row.add_suffix (general_box);
+        presets_group.add (general_row);
+
+        // ── Imageboard limits ────────────────────────────────────────────
         var presets_row = new Adw.ActionRow ();
-        presets_row.set_title ("Quick Presets");
-        presets_row.set_subtitle ("Common imageboard file size limits");
+        presets_row.set_title ("Imageboard");
+        presets_row.set_subtitle ("Common upload limits for 4chan, forums, etc.");
 
         var presets_box = new Box (Orientation.HORIZONTAL, 6);
         presets_box.set_valign (Align.CENTER);
+        presets_box.set_homogeneous (true);
 
         var btn_2 = new Button.with_label ("2 MB");
         btn_2.add_css_class ("flat");
         btn_2.clicked.connect (() => { target_mb_spin.set_value (2); });
         presets_box.append (btn_2);
-
-        var btn_3 = new Button.with_label ("3 MB");
-        btn_3.add_css_class ("flat");
-        btn_3.clicked.connect (() => { target_mb_spin.set_value (3); });
-        presets_box.append (btn_3);
 
         var btn_4 = new Button.with_label ("4 MB");
         btn_4.add_css_class ("flat");
@@ -419,9 +453,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
         presets_box.append (btn_8);
 
         presets_row.add_suffix (presets_box);
-        group.add (presets_row);
+        presets_group.add (presets_row);
 
-        page.add (group);
+        page.add (presets_group);
+
+        // ── Behavior group ────────────────────────────────────────────────
+        var behavior_group = new Adw.PreferencesGroup ();
+        behavior_group.set_title ("Behavior");
+
+        auto_convert_switch = new Adw.SwitchRow ();
+        auto_convert_switch.set_title ("Auto-Convert");
+        auto_convert_switch.set_subtitle (
+            "Force auto-convert on for all codec tabs. " +
+            "Disable to control each tab independently.");
+        behavior_group.add (auto_convert_switch);
+
+        page.add (behavior_group);
 
         return page;
     }
@@ -446,6 +493,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         output_dir_entry.set_text (s.default_output_dir);
 
         target_mb_spin.set_value (s.smart_optimizer_target_mb);
+        auto_convert_switch.set_active (s.smart_optimizer_auto_convert);
 
         // Trigger initial validation
         validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg");
@@ -468,6 +516,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.default_output_dir = output_dir_entry.get_text ().strip ();
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
+        s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();
 
         s.save ();
     }

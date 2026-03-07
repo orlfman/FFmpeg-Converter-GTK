@@ -13,6 +13,11 @@ using GLib;
 
 public class AppController : Object {
 
+    // ── Signals ──────────────────────────────────────────────────────────────
+    /** Emitted when Smart Optimizer finishes and auto-convert is enabled.
+     *  Carries the codec name so MainWindow can ensure the correct tab is visible. */
+    public signal void auto_convert_requested (string codec);
+
     // ── References ──────────────────────────────────────────────────────────
     private FilePickers file_pickers;
     private GeneralTab general_tab;
@@ -226,6 +231,12 @@ public class AppController : Object {
     // ── Smart Optimizer → analyze video, apply recommendation to codec tab ──
 
     private void wire_smart_optimizer () {
+        svt_tab.smart_optimizer_requested.connect (() => {
+            run_smart_optimizer.begin ("svt-av1");
+        });
+        x265_tab.smart_optimizer_requested.connect (() => {
+            run_smart_optimizer.begin ("x265");
+        });
         x264_tab.smart_optimizer_requested.connect (() => {
             run_smart_optimizer.begin ("x264");
         });
@@ -263,7 +274,7 @@ public class AppController : Object {
             .printf (target_mb, codec.up ()));
         status_area.start_progress ();
 
-        string preferred_codec = (codec == "vp9") ? "vp9" : "x264";
+        string preferred_codec = codec;
 
         // ── Build optimization context from GeneralTab state ────────────
         var ctx = OptimizationContext ();
@@ -296,10 +307,9 @@ public class AppController : Object {
             }
         }
 
-        // Audio bitrate — the smart presets use 64 kbps (bitrate index 0)
-        // for both AAC (x264) and Opus (vp9). Tell the optimizer so it
-        // doesn't over-reserve from the source audio.
-        ctx.audio_bitrate_kbps_override = 64;
+        // Audio bitrate — determined by the optimizer based on size tier.
+        // Do not override here; the optimizer picks the right audio budget
+        // for the target size and stores it in the recommendation.
 
         try {
             var rec = yield smart_optimizer.optimize_for_target_size (
@@ -314,7 +324,11 @@ public class AppController : Object {
             }
 
             // Apply to the correct tab
-            if (codec == "x264") {
+            if (codec == "svt-av1") {
+                svt_tab.apply_smart_recommendation (rec);
+            } else if (codec == "x265") {
+                x265_tab.apply_smart_recommendation (rec);
+            } else if (codec == "x264") {
                 x264_tab.apply_smart_recommendation (rec);
             } else {
                 vp9_tab.apply_smart_recommendation (rec);
@@ -327,6 +341,23 @@ public class AppController : Object {
             string details = SmartOptimizer.format_recommendation (rec);
             foreach (unowned string line in details.split ("\n")) {
                 console_tab.add_line ("[Smart Optimizer] " + line);
+            }
+
+            // Auto-convert: trigger conversion if the active tab has it enabled
+            bool should_auto_convert = false;
+            if (codec == "svt-av1") {
+                should_auto_convert = svt_tab.auto_convert_active;
+            } else if (codec == "x265") {
+                should_auto_convert = x265_tab.auto_convert_active;
+            } else if (codec == "x264") {
+                should_auto_convert = x264_tab.auto_convert_active;
+            } else {
+                should_auto_convert = vp9_tab.auto_convert_active;
+            }
+
+            if (should_auto_convert) {
+                console_tab.add_line ("[Smart Optimizer] Auto-convert enabled — starting conversion…");
+                auto_convert_requested (codec);
             }
 
         } catch (IOError e) {

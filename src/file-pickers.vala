@@ -60,6 +60,15 @@ public class FilePickers : Box {
             output_entry.set_text (default_dir);
         }
 
+        // Update the output entry when settings change (e.g. user sets a new
+        // default output directory in preferences)
+        AppSettings.get_default ().settings_changed.connect (() => {
+            string dir = AppSettings.get_default ().default_output_dir;
+            if (dir.length > 0 && FileUtils.test (dir, FileTest.IS_DIR)) {
+                output_entry.set_text (dir);
+            }
+        });
+
         // === Drag and Drop ===
         setup_drag_drop ();
     }

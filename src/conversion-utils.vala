@@ -19,6 +19,17 @@ namespace ConversionUtils {
             ? output_folder
             : Path.get_dirname (input_file);
 
+        // Ensure the output directory exists — handles volatile paths
+        // (e.g. /tmp/work) or directories deleted between sessions.
+        if (!FileUtils.test (out_folder, FileTest.IS_DIR)) {
+            if (DirUtils.create_with_parents (out_folder, 0755) == 0) {
+                message ("ConversionUtils: Created missing output directory: %s", out_folder);
+            } else {
+                warning ("ConversionUtils: Could not create output directory %s: %s",
+                         out_folder, strerror (errno));
+            }
+        }
+
         string codec_name = builder.get_codec_name ().down ();
         string codec_suffix = codec_name.contains ("av1") ? "av1" : codec_name;
 

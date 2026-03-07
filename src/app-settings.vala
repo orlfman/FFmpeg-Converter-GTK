@@ -19,6 +19,7 @@ using GLib;
 //
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
+//    auto_convert = false                    (default: false → don't auto-start conversion)
 //
 //  Thread-safe: all reads/writes are mutex-guarded.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -44,6 +45,7 @@ public class AppSettings : Object {
     private string _ffplay_path  = "ffplay";
     private string _default_output_dir = "";
     private int    _smart_optimizer_target_mb = 4;
+    private bool   _smart_optimizer_auto_convert = false;
 
     // ── File location ─────────────────────────────────────────────────────────
     private string config_dir;
@@ -66,6 +68,7 @@ public class AppSettings : Object {
         config_file = Path.build_filename (config_dir, "settings.ini");
 
         load ();
+        ensure_output_directory ();
     }
 
     public string ffmpeg_path {
@@ -133,7 +136,21 @@ public class AppSettings : Object {
         }
         set {
             mutex.lock ();
-            _smart_optimizer_target_mb = value.clamp (1, 100);
+            _smart_optimizer_target_mb = value.clamp (1, 4096);
+            mutex.unlock ();
+        }
+    }
+
+    public bool smart_optimizer_auto_convert {
+        get {
+            mutex.lock ();
+            bool v = _smart_optimizer_auto_convert;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _smart_optimizer_auto_convert = value;
             mutex.unlock ();
         }
     }
@@ -161,6 +178,7 @@ public class AppSettings : Object {
         _ffplay_path        = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
         _default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
         _smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
+        _smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
         mutex.unlock ();
     }
 
@@ -179,6 +197,7 @@ public class AppSettings : Object {
         kf.set_string (GROUP_PATHS,  "ffplay",            _ffplay_path);
         kf.set_string (GROUP_OUTPUT, "default_directory",  _default_output_dir);
         kf.set_integer (GROUP_SMART, "target_mb",          _smart_optimizer_target_mb);
+        kf.set_boolean (GROUP_SMART, "auto_convert",       _smart_optimizer_auto_convert);
         mutex.unlock ();
 
         try {
@@ -187,6 +206,7 @@ public class AppSettings : Object {
             warning ("AppSettings: Failed to save %s: %s", config_file, e.message);
         }
 
+        ensure_output_directory ();
         settings_changed ();
     }
 
@@ -201,9 +221,42 @@ public class AppSettings : Object {
         _ffplay_path        = "ffplay";
         _default_output_dir = "";
         _smart_optimizer_target_mb = 4;
+        _smart_optimizer_auto_convert = false;
         mutex.unlock ();
 
         save ();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  OUTPUT DIRECTORY — Ensure it exists on disk
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * If a default output directory is configured, create it (and any parent
+     * directories) if it doesn't already exist.
+     *
+     * This handles the common case where the directory is volatile (e.g.
+     * /tmp/work) or was manually deleted between sessions. Called at startup
+     * after loading settings, and can be called any time the directory is
+     * about to be used.
+     *
+     * Returns true if the directory exists (or was created), false on failure.
+     */
+    public bool ensure_output_directory () {
+        string dir = default_output_dir;
+        if (dir.length == 0) return true;  // No directory configured — nothing to do
+
+        if (FileUtils.test (dir, FileTest.IS_DIR)) return true;  // Already exists
+
+        int result = DirUtils.create_with_parents (dir, 0755);
+        if (result == 0) {
+            message ("AppSettings: Created missing output directory: %s", dir);
+            return true;
+        } else {
+            warning ("AppSettings: Could not create output directory %s: %s",
+                     dir, strerror (errno));
+            return false;
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -224,6 +277,15 @@ public class AppSettings : Object {
                                  string key, int fallback) {
         try {
             return kf.get_integer (group, key);
+        } catch (KeyFileError e) {
+            return fallback;
+        }
+    }
+
+    private static bool read_bool (KeyFile kf, string group,
+                                   string key, bool fallback) {
+        try {
+            return kf.get_boolean (group, key);
         } catch (KeyFileError e) {
             return fallback;
         }

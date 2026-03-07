@@ -458,7 +458,13 @@ public class TrimTab : Box, ICodecTab {
 
         int target_mb  = AppSettings.get_default ().smart_optimizer_target_mb;
         int codec_sel  = (int) codec_choice.get_selected ();
-        string preferred_codec = (codec_sel == 3) ? "vp9" : "x264";
+        string preferred_codec;
+        switch (codec_sel) {
+            case 0:  preferred_codec = "svt-av1"; break;
+            case 1:  preferred_codec = "x265";    break;
+            case 3:  preferred_codec = "vp9";     break;
+            default: preferred_codec = "x264";    break;
+        }
 
         // Parallel arrays — only segments that pass optimization are kept
         var ok_segs = new GenericArray<TrimSegment> ();
@@ -529,7 +535,7 @@ public class TrimTab : Box, ICodecTab {
             if (general_tab != null) {
                 ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
             }
-            ctx.audio_bitrate_kbps_override = 64;
+            // Audio budget is determined by the optimizer based on size tier.
 
             try {
                 var rec = yield smart_optimizer.optimize_for_target_size (
@@ -1465,11 +1471,6 @@ public class TrimTab : Box, ICodecTab {
         smart_optimize_row.set_visible (false);
         output_group.add (smart_optimize_row);
 
-        // Wire codec changes to Smart Optimizer visibility
-        codec_choice.notify["selected"].connect (() => {
-            update_smart_optimize_visibility ();
-        });
-
         append (output_group);
     }
 
@@ -1477,15 +1478,9 @@ public class TrimTab : Box, ICodecTab {
      * Show the Smart Optimizer toggle when all conditions are met:
      *  - Re-encoding is active (copy mode OFF)
      *  - Export as separate files is ON
-     *  - Codec is x264 (index 2) or VP9 (index 3)
      */
     private void update_smart_optimize_visibility () {
-        bool reencode   = !copy_mode_switch.active;
-        bool separate   = export_separate_switch.active;
-        int  codec_sel  = (int) codec_choice.get_selected ();
-        bool smart_codec = (codec_sel == 2 || codec_sel == 3);  // x264 or VP9
-
-        bool show = reencode && separate && smart_codec;
+        bool show = !copy_mode_switch.active && export_separate_switch.active;
         smart_optimize_row.set_visible (show);
 
         // Turn off the switch when hidden to avoid stale state
