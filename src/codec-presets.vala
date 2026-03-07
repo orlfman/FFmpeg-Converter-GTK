@@ -582,28 +582,33 @@ public class CodecPresets : Object {
 
     /**
      * Configure audio for a Smart Optimizer preset based on size tier.
+     *
+     * Uses the native audio codec for the container: Opus for WebM,
+     * AAC for MP4. This ensures maximum compatibility — Opus is the
+     * standard WebM audio codec, and AAC is the standard MP4 audio codec.
+     *
      * Bitrate combo indices: 0=64, 1=128, 2=192, 3=256, 4=320 kbps.
      */
     private static void configure_smart_audio (AudioSettings audio,
                                                 SizeTier tier,
                                                 string container) {
         bool is_webm = (container == "webm");
+        string codec = is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC;
         switch (tier) {
             case SizeTier.TINY:
-                configure_audio (audio,
-                    is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC, 0);
+                configure_audio (audio, codec, 0);    // 64 kbps
                 break;
             case SizeTier.SMALL:
-                configure_audio (audio, AudioCodecName.OPUS, 1);
+                configure_audio (audio, codec, 1);    // 128 kbps
                 break;
             case SizeTier.MEDIUM:
-                configure_audio (audio, AudioCodecName.OPUS, 2);
+                configure_audio (audio, codec, 2);    // 192 kbps
                 break;
             case SizeTier.LARGE:
-                configure_audio (audio, AudioCodecName.OPUS, 3);
+                configure_audio (audio, codec, 3);    // 256 kbps
                 break;
             case SizeTier.XLARGE:
-                configure_audio (audio, AudioCodecName.FLAC, -1, 8);
+                configure_audio (audio, codec, 4);    // 320 kbps
                 break;
         }
     }
@@ -616,12 +621,8 @@ public class CodecPresets : Object {
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — mp4 for tiny (imageboard compat), mkv otherwise
-        if (tier == SizeTier.TINY) {
-            tab.container_combo.set_selected (1);   // mp4
-        } else {
-            tab.container_combo.set_selected (0);   // mkv
-        }
+        // Container — always mp4 for x264 (broadly compatible)
+        tab.container_combo.set_selected (1);   // mp4
         set_dropdown_by_label (tab.profile_combo, "High");
 
         // Preset
@@ -740,8 +741,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        string container = (tier == SizeTier.TINY) ? "mp4" : "mkv";
-        configure_smart_audio (tab.audio_settings, tier, container);
+        configure_smart_audio (tab.audio_settings, tier, "mp4");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -752,12 +752,8 @@ public class CodecPresets : Object {
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — webm for tiny, mkv for larger (broader audio support)
-        if (tier == SizeTier.TINY) {
-            tab.container_combo.set_selected (0);   // webm
-        } else {
-            tab.container_combo.set_selected (1);   // mkv
-        }
+        // Container — always webm for VP9 (native, broadly compatible)
+        tab.container_combo.set_selected (0);   // webm
 
         // Speed
         string speed_str = rec.preset.replace ("cpu-used ", "");
@@ -830,8 +826,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        string container = (tier == SizeTier.TINY) ? "webm" : "mkv";
-        configure_smart_audio (tab.audio_settings, tier, container);
+        configure_smart_audio (tab.audio_settings, tier, "webm");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -842,8 +837,8 @@ public class CodecPresets : Object {
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always mkv for x265
-        tab.container_combo.set_selected (0);
+        // Container — always mp4 for x265 (broadly compatible)
+        tab.container_combo.set_selected (1);   // mp4
 
         // Preset
         set_dropdown_by_label (tab.preset_combo, rec.preset);
@@ -931,7 +926,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "mkv");
+        configure_smart_audio (tab.audio_settings, tier, "mp4");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -942,8 +937,8 @@ public class CodecPresets : Object {
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always mkv for AV1
-        tab.container_combo.set_selected (0);
+        // Container — always webm for AV1 (native web container)
+        tab.container_combo.set_selected (1);   // webm
 
         // Preset
         string preset_str = rec.preset.replace ("preset ", "");
@@ -1045,6 +1040,6 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "mkv");
+        configure_smart_audio (tab.audio_settings, tier, "webm");
     }
 }

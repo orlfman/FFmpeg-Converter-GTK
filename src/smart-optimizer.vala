@@ -71,21 +71,6 @@
 //   - Quadratic root selection: when solving c·x²+b·x+(a-ln(target))=0,
 //     picks the root closest to the valid CRF range. Handles edge cases
 //     including negative discriminant (target unreachable by the curve).
-//
-// v6 improvements:
-//   - Source size awareness: detects when the target exceeds the source file
-//     size and adjusts the recommendation accordingly. Re-encoding with a
-//     lossy codec can never inflate a file beyond its source, so in this
-//     scenario: two-pass is disabled (bitrate capping is meaningless), the
-//     size estimate is capped at the source size (the quadratic model is
-//     wildly inaccurate when extrapolating to near-lossless CRFs), and a
-//     clear explanation is added to the notes so the user understands why
-//     the output will be smaller than the target.
-//   - Source file size is now reported in the calibration data section for
-//     full transparency.
-//   - Strip audio support: OptimizationContext.strip_audio zeroes out the
-//     audio budget so the entire target size is allocated to video. Notes
-//     and formatted output clearly indicate when audio is stripped.
 
 using GLib;
 using Json;
@@ -205,9 +190,8 @@ public struct OptimizationContext {
      *  0 means probe from the source file. */
     public int audio_bitrate_kbps_override;
 
-    /** Strip audio entirely from the output. When true, the optimizer
-     *  allocates zero budget to audio, giving all space to video.
-     *  Useful for imageboard uploads where audio is not allowed. */
+    /** When true, no audio track will be muxed — the entire file budget
+     *  goes to video. Overrides audio_bitrate_kbps_override. */
     public bool strip_audio;
 }
 
@@ -310,7 +294,11 @@ public class SmartOptimizer : GLib.Object {
             ? ctx.effective_duration
             : info.duration;
 
-        if (ctx.audio_bitrate_kbps_override > 0) {
+        if (ctx.strip_audio) {
+            // No audio track — entire budget goes to video
+            info.audio_bitrate_kbps      = 0;
+            info.audio_bitrate_estimated = false;
+        } else if (ctx.audio_bitrate_kbps_override > 0) {
             info.audio_bitrate_kbps      = ctx.audio_bitrate_kbps_override;
             info.audio_bitrate_estimated = false;
         }
@@ -321,15 +309,10 @@ public class SmartOptimizer : GLib.Object {
         SizeTier tier = SizeTier.from_mb (target_mb);
         int tier_audio = tier_audio_kbps (tier);
 
-        // Strip audio — allocate entire budget to video
-        if (ctx.strip_audio) {
-            info.audio_bitrate_kbps      = 0;
-            info.audio_bitrate_estimated = false;
-            tier_audio                   = 0;
-        }
         // Use tier-based audio budget when caller hasn't explicitly
-        // overridden — the codec preset will configure audio to match.
-        else if (ctx.audio_bitrate_kbps_override <= 0) {
+        // overridden or stripped audio — the codec preset will configure
+        // audio to match.
+        if (!ctx.strip_audio && ctx.audio_bitrate_kbps_override <= 0) {
             info.audio_bitrate_kbps      = tier_audio;
             info.audio_bitrate_estimated = false;
         }
@@ -384,42 +367,6 @@ public class SmartOptimizer : GLib.Object {
                 msg.append ("  • Increasing the target size");
             }
             return make_error_rec (preferred_codec, msg.str);
-        }
-
-        // ── 2b. Source size check ────────────────────────────────────
-        // Detect when the target exceeds the source file size. Re-encoding
-        // with a lossy codec can never add information — the output will
-        // always be smaller than or roughly equal to the source. In this
-        // case, the optimizer still finds the best quality settings, but
-        // two-pass is meaningless and the user needs a clear explanation.
-        int64 source_size_bytes = 0;
-        double effective_source_kb = 0.0;  // trim-adjusted, reused below
-        bool target_exceeds_source = false;
-        try {
-            var file_info = File.new_for_path (input_file).query_info (
-                FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
-            source_size_bytes = file_info.get_size ();
-        } catch (Error e) {
-            // Non-fatal — we just can't compare sizes
-            warning ("Smart Optimizer: Could not query source file size: %s", e.message);
-        }
-
-        if (source_size_bytes > 0) {
-            effective_source_kb = (double) source_size_bytes / 1024.0;
-
-            // If trimming, scale source size proportionally to estimate the
-            // effective source size for the trimmed region
-            if (ctx.effective_duration > 0 && info.duration > 0
-                    && ctx.effective_duration < info.duration) {
-                effective_source_kb *= ctx.effective_duration / info.duration;
-            }
-
-            if (target_total_kb > effective_source_kb) {
-                target_exceeds_source = true;
-                message ("Smart Optimizer: Target (%.0f KB) exceeds source (%.0f KB) — "
-                    + "output will be capped by source quality",
-                    target_total_kb, effective_source_kb);
-            }
         }
 
         // ── 3. Pick sample positions ────────────────────────────────────
@@ -633,18 +580,6 @@ public class SmartOptimizer : GLib.Object {
         int estimated_video_kb = (int) (raw_estimate_kb * preset_factor);
         int estimated_total_kb = estimated_video_kb + (int) audio_kb;
 
-        // When the target exceeds the source, the quadratic model is
-        // extrapolating far below its calibration range and becomes very
-        // inaccurate (often underestimates dramatically). The source file
-        // size is a more realistic upper bound — the output can't exceed
-        // the source, and at near-lossless CRFs it'll be close.
-        if (target_exceeds_source && effective_source_kb > 0) {
-            int source_cap_kb = (int) effective_source_kb;
-            if (estimated_total_kb < source_cap_kb) {
-                estimated_total_kb = source_cap_kb;
-            }
-        }
-
         // ── 10. Confidence ──────────────────────────────────────────────
         // Three-point calibration is most accurate within [crf_lo, crf_hi]
         // where the quadratic interpolates rather than extrapolates. Outside
@@ -709,15 +644,6 @@ public class SmartOptimizer : GLib.Object {
             recommend_two_pass = true;
         }
 
-        // ── 12b. Target-exceeds-source adjustment ───────────────────────
-        // When the target is larger than the source, two-pass bitrate capping
-        // is meaningless — the encoder can't inflate the file beyond what the
-        // content produces at a given quality. CRF mode is the only sensible
-        // path: it finds the best quality the codec can achieve.
-        if (target_exceeds_source) {
-            recommend_two_pass = false;
-        }
-
         // ── 13. Build the recommendation ────────────────────────────────
         string preset_label = format_preset_label (preferred_codec, preset_idx);
 
@@ -725,11 +651,7 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Tier ---
         notes.append ("── Strategy: %s ──\n".printf (tier.to_label ()));
-        if (ctx.strip_audio) {
-            notes.append ("  Audio: stripped (no audio in output)\n");
-        } else {
-            notes.append ("  Audio budget: %d kbps\n".printf (tier_audio));
-        }
+        notes.append ("  Audio budget: %d kbps\n".printf (tier_audio));
 
         // --- Content ---
         notes.append ("\n── Content ──\n");
@@ -744,9 +666,7 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Audio ---
-        if (ctx.strip_audio) {
-            notes.append ("  Audio: stripped — entire budget allocated to video\n");
-        } else if (info.audio_bitrate_kbps > 0) {
+        if (info.audio_bitrate_kbps > 0) {
             notes.append ("  Audio: ~%d kbps".printf (info.audio_bitrate_kbps));
             if (info.audio_bitrate_estimated)
                 notes.append (" (estimated %s — stream did not report bitrate)".printf (
@@ -763,9 +683,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  ✅  Two-pass mode below is the recommended path.\n");
         } else if (!is_impossible) {
             notes.append ("  Estimated: ~%d KB".printf (estimated_total_kb));
-            if (target_exceeds_source)
-                notes.append (" (approximate — capped at source size)");
-            else if (confidence < 0.8)
+            if (confidence < 0.8)
                 notes.append (" (extrapolated — confidence %s)"
                     .printf ("%.0f%%".printf (confidence * 100)));
             notes.append ("\n");
@@ -780,10 +698,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  Quality is determined by available bitrate, not CRF.\n");
         } else {
             notes.append ("\n── Two-pass: skipped ──\n");
-            if (target_exceeds_source) {
-                notes.append ("  Target exceeds source file size — bitrate capping is not applicable.\n");
-                notes.append ("  CRF mode will produce the best quality the codec can achieve.\n");
-            } else if (tier >= SizeTier.XLARGE) {
+            if (tier >= SizeTier.XLARGE) {
                 notes.append ("  Target is generous — CRF mode will comfortably fit.\n");
             } else {
                 notes.append ("  CRF confidence is high (%.0f%%) — CRF mode should hit the target.\n"
@@ -792,15 +707,6 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Warnings ---
-        if (target_exceeds_source) {
-            notes.append ("\nℹ️  Target (%d MB) exceeds the source file size (%.1f MB).\n"
-                .printf (target_mb, effective_source_kb / 1024.0));
-            notes.append ("    Re-encoding can never produce a file larger than the source.\n");
-            notes.append ("    The output is optimized for maximum quality — the codec will\n");
-            notes.append ("    use the lowest CRF it can, but the file will likely be smaller\n");
-            notes.append ("    than the target. This is normal and expected.\n");
-        }
-
         if (is_impossible) {
             notes.append ("\n⚠️  Even maximum compression will likely exceed the %d MB target.\n"
                 .printf (target_mb));
@@ -838,10 +744,6 @@ public class SmartOptimizer : GLib.Object {
         }
         if (vf.length > 0) {
             notes.append ("  Video filters applied to calibration: yes\n");
-        }
-        if (source_size_bytes > 0) {
-            notes.append ("  Source file size: %.1f MB\n"
-                .printf ((double) source_size_bytes / (1024.0 * 1024.0)));
         }
 
         return OptimizationRecommendation () {
@@ -882,10 +784,7 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
-        sb.append ("Audio budget:   %s\n".printf (
-            rec.recommended_audio_kbps > 0
-                ? "%d kbps".printf (rec.recommended_audio_kbps)
-                : "stripped"));
+        sb.append ("Audio budget:   %d kbps\n".printf (rec.recommended_audio_kbps));
         sb.append ("\n");
         sb.append (rec.notes);
 
@@ -1156,7 +1055,7 @@ public class SmartOptimizer : GLib.Object {
             case SizeTier.SMALL:  return 128;
             case SizeTier.MEDIUM: return 192;
             case SizeTier.LARGE:  return 256;
-            case SizeTier.XLARGE: return 256;   // FLAC varies; generous budget
+            case SizeTier.XLARGE: return 320;   // Opus 320 kbps — transparent quality
             default:              return 128;
         }
     }
