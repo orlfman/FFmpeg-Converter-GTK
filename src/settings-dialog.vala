@@ -27,6 +27,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     // ── Smart Optimizer ────────────────────────────────────────────────────────
     private SpinButton target_mb_spin;
     private Adw.SwitchRow auto_convert_switch;
+    private Adw.SwitchRow strip_audio_switch;
 
     // ── Status labels for path validation ─────────────────────────────────────
     private Label ffmpeg_status;
@@ -468,6 +469,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
             "Disable to control each tab independently.");
         behavior_group.add (auto_convert_switch);
 
+        strip_audio_switch = new Adw.SwitchRow ();
+        strip_audio_switch.set_title ("No Audio");
+        strip_audio_switch.set_subtitle (
+            "Force audio stripping on all codec tabs. " +
+            "Disable to control each tab independently.");
+        behavior_group.add (strip_audio_switch);
+
         page.add (behavior_group);
 
         return page;
@@ -494,6 +502,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         target_mb_spin.set_value (s.smart_optimizer_target_mb);
         auto_convert_switch.set_active (s.smart_optimizer_auto_convert);
+        strip_audio_switch.set_active (s.smart_optimizer_strip_audio);
 
         // Trigger initial validation
         validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg");
@@ -517,6 +526,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
         s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();
+        s.smart_optimizer_strip_audio = strip_audio_switch.get_active ();
 
         s.save ();
     }

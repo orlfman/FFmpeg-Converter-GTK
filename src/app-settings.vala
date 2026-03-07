@@ -20,6 +20,7 @@ using GLib;
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
 //    auto_convert = false                    (default: false → don't auto-start conversion)
+//    strip_audio = false                     (default: false → include audio in output)
 //
 //  Thread-safe: all reads/writes are mutex-guarded.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -46,6 +47,7 @@ public class AppSettings : Object {
     private string _default_output_dir = "";
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
+    private bool   _smart_optimizer_strip_audio = false;
 
     // ── File location ─────────────────────────────────────────────────────────
     private string config_dir;
@@ -155,6 +157,20 @@ public class AppSettings : Object {
         }
     }
 
+    public bool smart_optimizer_strip_audio {
+        get {
+            mutex.lock ();
+            bool v = _smart_optimizer_strip_audio;
+            mutex.unlock ();
+            return v;
+        }
+        set {
+            mutex.lock ();
+            _smart_optimizer_strip_audio = value;
+            mutex.unlock ();
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  LOAD — Read settings from disk
     // ═════════════════════════════════════════════════════════════════════════
@@ -179,6 +195,7 @@ public class AppSettings : Object {
         _default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
         _smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
         _smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
+        _smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
         mutex.unlock ();
     }
 
@@ -198,6 +215,7 @@ public class AppSettings : Object {
         kf.set_string (GROUP_OUTPUT, "default_directory",  _default_output_dir);
         kf.set_integer (GROUP_SMART, "target_mb",          _smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert",       _smart_optimizer_auto_convert);
+        kf.set_boolean (GROUP_SMART, "strip_audio",        _smart_optimizer_strip_audio);
         mutex.unlock ();
 
         try {
@@ -222,6 +240,7 @@ public class AppSettings : Object {
         _default_output_dir = "";
         _smart_optimizer_target_mb = 4;
         _smart_optimizer_auto_convert = false;
+        _smart_optimizer_strip_audio = false;
         mutex.unlock ();
 
         save ();

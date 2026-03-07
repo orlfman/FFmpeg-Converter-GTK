@@ -10,6 +10,9 @@ public class X264Tab : Box, ICodecTab {
     // ── Auto-convert (per-tab, session-only) ─────────────────────────────────
     public bool auto_convert_active { get; private set; default = false; }
 
+    // ── Strip audio (per-tab, session-only) ──────────────────────────────────
+    public bool strip_audio_active { get; private set; default = false; }
+
     // ── Preset ───────────────────────────────────────────────────────────────
     public DropDown  quality_profile_combo    { get; private set; }
 
@@ -167,23 +170,62 @@ public class X264Tab : Box, ICodecTab {
         auto_convert_row.set_sensitive (!global_on);
         auto_convert_active = global_on;
 
+        group.add (auto_convert_row);
+
+        // No Audio toggle — per-tab, session-only.
+        // Only visible when auto-convert is enabled on this tab.
+        var strip_audio_row = new Adw.SwitchRow ();
+        strip_audio_row.set_title ("No Audio");
+        strip_audio_row.set_subtitle ("Strip audio from analysis and output");
+        strip_audio_row.set_visible (auto_convert_active);
+
+        bool audio_global = AppSettings.get_default ().smart_optimizer_strip_audio;
+        strip_audio_row.set_active (audio_global && auto_convert_active);
+        strip_audio_row.set_sensitive (!audio_global);
+        strip_audio_active = audio_global && auto_convert_active;
+
+        // Wire auto-convert → strip_audio visibility after both rows exist
         auto_convert_row.notify["active"].connect (() => {
             auto_convert_active = auto_convert_row.get_active ();
+            strip_audio_row.set_visible (auto_convert_active);
+            if (!auto_convert_active) {
+                strip_audio_row.set_active (false);
+            } else {
+                bool sa_locked = AppSettings.get_default ().smart_optimizer_strip_audio;
+                if (sa_locked) {
+                    strip_audio_row.set_active (true);
+                    strip_audio_row.set_sensitive (false);
+                }
+            }
         });
 
         AppSettings.get_default ().settings_changed.connect (() => {
             bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
             if (locked) {
-                // Global override ON → force active and lock
                 auto_convert_row.set_active (true);
                 auto_convert_row.set_sensitive (false);
-            } else {
-                // Global override OFF → unlock and reset to off
+            } else if (!auto_convert_row.get_sensitive ()) {
                 auto_convert_row.set_sensitive (true);
                 auto_convert_row.set_active (false);
             }
         });
-        group.add (auto_convert_row);
+
+        strip_audio_row.notify["active"].connect (() => {
+            strip_audio_active = strip_audio_row.get_active ();
+        });
+
+        AppSettings.get_default ().settings_changed.connect (() => {
+            bool locked = AppSettings.get_default ().smart_optimizer_strip_audio;
+            if (!strip_audio_row.get_visible ()) return;
+            if (locked) {
+                strip_audio_row.set_active (true);
+                strip_audio_row.set_sensitive (false);
+            } else if (!strip_audio_row.get_sensitive ()) {
+                strip_audio_row.set_sensitive (true);
+                strip_audio_row.set_active (false);
+            }
+        });
+        group.add (strip_audio_row);
 
         append (group);
     }

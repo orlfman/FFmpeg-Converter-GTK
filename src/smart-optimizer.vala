@@ -83,6 +83,9 @@
 //     the output will be smaller than the target.
 //   - Source file size is now reported in the calibration data section for
 //     full transparency.
+//   - Strip audio support: OptimizationContext.strip_audio zeroes out the
+//     audio budget so the entire target size is allocated to video. Notes
+//     and formatted output clearly indicate when audio is stripped.
 
 using GLib;
 using Json;
@@ -201,6 +204,11 @@ public struct OptimizationContext {
      *  actually be used in the encode (e.g. 64 for Opus, 128 for AAC).
      *  0 means probe from the source file. */
     public int audio_bitrate_kbps_override;
+
+    /** Strip audio entirely from the output. When true, the optimizer
+     *  allocates zero budget to audio, giving all space to video.
+     *  Useful for imageboard uploads where audio is not allowed. */
+    public bool strip_audio;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -313,9 +321,15 @@ public class SmartOptimizer : GLib.Object {
         SizeTier tier = SizeTier.from_mb (target_mb);
         int tier_audio = tier_audio_kbps (tier);
 
+        // Strip audio — allocate entire budget to video
+        if (ctx.strip_audio) {
+            info.audio_bitrate_kbps      = 0;
+            info.audio_bitrate_estimated = false;
+            tier_audio                   = 0;
+        }
         // Use tier-based audio budget when caller hasn't explicitly
         // overridden — the codec preset will configure audio to match.
-        if (ctx.audio_bitrate_kbps_override <= 0) {
+        else if (ctx.audio_bitrate_kbps_override <= 0) {
             info.audio_bitrate_kbps      = tier_audio;
             info.audio_bitrate_estimated = false;
         }
@@ -711,7 +725,11 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Tier ---
         notes.append ("── Strategy: %s ──\n".printf (tier.to_label ()));
-        notes.append ("  Audio budget: %d kbps\n".printf (tier_audio));
+        if (ctx.strip_audio) {
+            notes.append ("  Audio: stripped (no audio in output)\n");
+        } else {
+            notes.append ("  Audio budget: %d kbps\n".printf (tier_audio));
+        }
 
         // --- Content ---
         notes.append ("\n── Content ──\n");
@@ -726,7 +744,9 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Audio ---
-        if (info.audio_bitrate_kbps > 0) {
+        if (ctx.strip_audio) {
+            notes.append ("  Audio: stripped — entire budget allocated to video\n");
+        } else if (info.audio_bitrate_kbps > 0) {
             notes.append ("  Audio: ~%d kbps".printf (info.audio_bitrate_kbps));
             if (info.audio_bitrate_estimated)
                 notes.append (" (estimated %s — stream did not report bitrate)".printf (
@@ -862,7 +882,10 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
-        sb.append ("Audio budget:   %d kbps\n".printf (rec.recommended_audio_kbps));
+        sb.append ("Audio budget:   %s\n".printf (
+            rec.recommended_audio_kbps > 0
+                ? "%d kbps".printf (rec.recommended_audio_kbps)
+                : "stripped"));
         sb.append ("\n");
         sb.append (rec.notes);
 

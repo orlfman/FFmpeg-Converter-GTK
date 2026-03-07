@@ -311,6 +311,19 @@ public class AppController : Object {
         // Do not override here; the optimizer picks the right audio budget
         // for the target size and stores it in the recommendation.
 
+        // Strip audio — check the per-tab toggle for this codec
+        bool strip_audio = false;
+        if (codec == "svt-av1") {
+            strip_audio = svt_tab.strip_audio_active;
+        } else if (codec == "x265") {
+            strip_audio = x265_tab.strip_audio_active;
+        } else if (codec == "x264") {
+            strip_audio = x264_tab.strip_audio_active;
+        } else {
+            strip_audio = vp9_tab.strip_audio_active;
+        }
+        ctx.strip_audio = strip_audio;
+
         try {
             var rec = yield smart_optimizer.optimize_for_target_size (
                 input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);
@@ -326,12 +339,16 @@ public class AppController : Object {
             // Apply to the correct tab
             if (codec == "svt-av1") {
                 svt_tab.apply_smart_recommendation (rec);
+                if (strip_audio) svt_tab.audio_settings.audio_expander.set_enable_expansion (false);
             } else if (codec == "x265") {
                 x265_tab.apply_smart_recommendation (rec);
+                if (strip_audio) x265_tab.audio_settings.audio_expander.set_enable_expansion (false);
             } else if (codec == "x264") {
                 x264_tab.apply_smart_recommendation (rec);
+                if (strip_audio) x264_tab.audio_settings.audio_expander.set_enable_expansion (false);
             } else {
                 vp9_tab.apply_smart_recommendation (rec);
+                if (strip_audio) vp9_tab.audio_settings.audio_expander.set_enable_expansion (false);
             }
 
             status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KB"
