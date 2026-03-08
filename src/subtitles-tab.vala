@@ -1072,8 +1072,8 @@ public class SubtitlesTab : Box {
             ? FilterBuilder.build_video_filter_chain (general_tab) : "";
         string af = (general_tab != null)
             ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
-        bool preserve_meta = (general_tab != null) ? general_tab.preserve_metadata.active : false;
-        bool no_chapters    = (general_tab != null) ? general_tab.remove_chapters.active : false;
+        bool preserve_meta = (general_tab != null) ? general_tab.is_preserve_metadata () : false;
+        bool no_chapters    = (general_tab != null) ? general_tab.is_remove_chapters () : false;
 
         _is_busy = true;
         update_ui_state ();

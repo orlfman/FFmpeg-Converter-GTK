@@ -38,12 +38,16 @@ public class MainWindow : Adw.ApplicationWindow {
     private SubtitlesTab subtitles_tab;
     private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
+    private Adw.ToastOverlay toast_overlay;
 
     // Prevent GC from collecting the controller
     private AppController controller;
 
     // Explicit operation tracking for clean cancel dispatch
     private ActiveOperation current_operation = ActiveOperation.IDLE;
+
+    // Guard against re-entrant close_request during the confirmation dialog
+    private bool close_dialog_open = false;
 
     public MainWindow (Adw.Application app) {
         Object (application: app);
@@ -78,15 +82,21 @@ public class MainWindow : Adw.ApplicationWindow {
         // Reset operation state when any operation completes.
         // (AppController separately handles info_tab, hamburger, and
         // cancel_button for these same signals — multiple handlers are fine.)
-        converter.conversion_done.connect (() => {
+        converter.conversion_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
+            post_success_toast ("Conversion complete", output_path);
         });
-        trim_tab.trim_done.connect (() => {
+        trim_tab.trim_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
+            post_success_toast ("Export complete", output_path);
         });
-        subtitles_tab.subtitle_done.connect (() => {
+        subtitles_tab.subtitle_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
+            post_success_toast ("Subtitles applied", output_path);
         });
+
+        // ── Close-request guard: prevent orphaned FFmpeg processes ────────
+        close_request.connect (on_close_request);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -176,7 +186,11 @@ public class MainWindow : Adw.ApplicationWindow {
         content_box.append (build_button_bar ());
         content_box.append (status_area);
 
-        toolbar_view.set_content (content_box);
+        // ── Toast overlay: wraps content for non-intrusive notifications ──
+        toast_overlay = new Adw.ToastOverlay ();
+        toast_overlay.set_child (content_box);
+
+        toolbar_view.set_content (toast_overlay);
 
         // ── Bottom bar: revealed when header has no room for tabs ────────────
         var switcher_bar = new Adw.ViewSwitcherBar ();
@@ -485,6 +499,146 @@ public class MainWindow : Adw.ApplicationWindow {
 
         current_operation = ActiveOperation.IDLE;
         cancel_button.set_sensitive (false);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CLOSE REQUEST — Prevent orphaned FFmpeg processes
+    //
+    //  If an operation is running, intercept the window close, present a
+    //  confirmation dialog, and only close after cancellation completes.
+    //  When idle, allow the close immediately.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private bool on_close_request () {
+        if (current_operation == ActiveOperation.IDLE) {
+            return false;  // No operation running — allow close
+        }
+
+        // Prevent stacking multiple confirmation dialogs
+        if (close_dialog_open) return true;
+        close_dialog_open = true;
+
+        string operation_label;
+        switch (current_operation) {
+            case ActiveOperation.CONVERTING:     operation_label = "conversion";     break;
+            case ActiveOperation.TRIMMING:        operation_label = "export";         break;
+            case ActiveOperation.SUBTITLE_APPLY:  operation_label = "subtitle apply"; break;
+            default:                              operation_label = "operation";      break;
+        }
+
+        var dialog = new Adw.AlertDialog (
+            "Operation in Progress",
+            @"A $operation_label is currently running.\n\nClosing now will cancel it and may leave incomplete output files."
+        );
+
+        dialog.add_response ("stay", "Keep Working");
+        dialog.add_response ("quit", "Cancel & Quit");
+        dialog.set_response_appearance ("quit", Adw.ResponseAppearance.DESTRUCTIVE);
+        dialog.set_default_response ("stay");
+        dialog.set_close_response ("stay");
+
+        dialog.choose.begin (this, null, (obj, res) => {
+            string response = dialog.choose.end (res);
+            close_dialog_open = false;
+
+            if (response == "quit") {
+                force_cancel_and_close ();
+            }
+        });
+
+        return true;  // Block close — dialog will handle it
+    }
+
+    /**
+     * Cancel any running operation and destroy the window.
+     *
+     * Called when the user confirms "Cancel & Quit" from the close dialog.
+     * Dispatches cancellation to the correct target (same logic as
+     * on_cancel_clicked) and then closes the window.
+     */
+    private void force_cancel_and_close () {
+        switch (current_operation) {
+            case ActiveOperation.SUBTITLE_APPLY:
+                subtitles_tab.cancel_operation ();
+                break;
+            case ActiveOperation.TRIMMING:
+                trim_tab.cancel_trim ();
+                break;
+            case ActiveOperation.CONVERTING:
+                converter.cancel ();
+                break;
+            default:
+                break;
+        }
+
+        current_operation = ActiveOperation.IDLE;
+        cancel_button.set_sensitive (false);
+
+        // Allow a moment for the subprocess SIGTERM to land, then close.
+        Timeout.add (150, () => {
+            destroy ();
+            return Source.REMOVE;
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  TOAST NOTIFICATIONS — Non-intrusive success / error overlays
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Post a success toast with an optional "Open Folder" action button.
+     * Also sends a system notification so the user is informed when the app
+     * is in the background or unfocused.
+     */
+    private void post_success_toast (string title, string output_path) {
+        string basename = Path.get_basename (output_path);
+
+        // ── In-app toast ─────────────────────────────────────────────────────
+        var toast = new Adw.Toast (@"$title — $basename");
+        toast.set_timeout (5);
+
+        // "Open Folder" action to reveal the file in the system file manager
+        string parent_dir = Path.get_dirname (output_path);
+        if (parent_dir.length > 0 && FileUtils.test (parent_dir, FileTest.IS_DIR)) {
+            toast.set_button_label ("Open Folder");
+            toast.button_clicked.connect (() => {
+                try {
+                    var folder = File.new_for_path (parent_dir);
+                    AppInfo.launch_default_for_uri (folder.get_uri (), null);
+                } catch (Error e) {
+                    warning ("Failed to open folder: %s", e.message);
+                }
+            });
+        }
+
+        toast_overlay.add_toast (toast);
+
+        // ── System notification (visible when the app is unfocused) ──────────
+        send_system_notification (title, basename, output_path);
+    }
+
+    /**
+     * Send a desktop notification via GLib.Notification.
+     *
+     * Integrates with the GNOME / freedesktop notification daemon so the
+     * user is informed even when the window is minimized or another app
+     * has focus.  The notification's default action brings the window to
+     * the foreground; the "View" button opens the output in the default
+     * video player.
+     */
+    private void send_system_notification (string title, string basename, string output_path) {
+        var app = (GLib.Application) get_application ();
+        if (app == null) return;
+
+        var notification = new GLib.Notification (title);
+        notification.set_body (@"$basename is ready.");
+
+        // "View" button → open the output file with the default video player.
+        // Clicking the notification body itself activates the app (built-in
+        // GApplication behavior — no explicit action needed).
+        notification.add_button ("View", "app.view-output");
+
+        app.send_notification ("operation-complete", notification);
     }
 }
 

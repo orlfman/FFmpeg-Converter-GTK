@@ -5,7 +5,9 @@ public class FilePickers : Box {
     public Entry input_entry { get; private set; }
     public Entry output_entry { get; private set; }
 
-    private Box input_row;
+    private Adw.PreferencesGroup file_group;
+    private Adw.ActionRow input_row;
+    private Adw.ActionRow output_row;
 
     // Known video file extensions for validating text/URI drops
     private const string[] VIDEO_EXTENSIONS = {
@@ -16,43 +18,57 @@ public class FilePickers : Box {
     };
 
     public FilePickers () {
-        Object (orientation: Orientation.VERTICAL, spacing: 18);
+        Object (orientation: Orientation.VERTICAL, spacing: 0);
 
-        // === Input File ===
-        input_row = new Box (Orientation.HORIZONTAL, 12);
-        var input_label = new Label ("Input File:");
-        input_label.set_width_chars (12);
+        file_group = new Adw.PreferencesGroup ();
+        file_group.set_title ("Files");
+
+        // ── Input File row ───────────────────────────────────────────────────
+        input_row = new Adw.ActionRow ();
+        input_row.set_title ("Input File");
+        input_row.set_subtitle ("Select a video file");
+        input_row.add_prefix (new Gtk.Image.from_icon_name ("video-x-generic-symbolic"));
 
         input_entry = new Entry ();
-        input_entry.set_placeholder_text ("Drop a video file here or click Browse…");
+        input_entry.set_placeholder_text ("No file selected");
         input_entry.set_editable (false);
         input_entry.set_hexpand (true);
+        input_entry.set_valign (Align.CENTER);
+        input_entry.set_width_chars (48);
+        input_row.add_suffix (input_entry);
 
-        var input_browse = new Button.with_label ("Browse…");
+        var input_browse = new Button.from_icon_name ("document-open-symbolic");
+        input_browse.set_tooltip_text ("Select a file");
+        input_browse.add_css_class ("flat");
+        input_browse.set_valign (Align.CENTER);
         input_browse.clicked.connect (on_input_browse_clicked);
+        input_row.add_suffix (input_browse);
 
-        input_row.append (input_label);
-        input_row.append (input_entry);
-        input_row.append (input_browse);
-        append (input_row);
+        file_group.add (input_row);
 
-        // === Output Folder ===
-        var output_row = new Box (Orientation.HORIZONTAL, 12);
-        var output_label = new Label ("Output Folder:");
-        output_label.set_width_chars (12);
+        // ── Output Folder row ────────────────────────────────────────────────
+        output_row = new Adw.ActionRow ();
+        output_row.set_title ("Output Folder");
+        output_row.set_subtitle ("Output location");
+        output_row.add_prefix (new Gtk.Image.from_icon_name ("folder-symbolic"));
 
         output_entry = new Entry ();
-        output_entry.set_placeholder_text ("No folder selected");
+        output_entry.set_placeholder_text ("Same as input");
         output_entry.set_editable (false);
         output_entry.set_hexpand (true);
+        output_entry.set_valign (Align.CENTER);
+        output_entry.set_width_chars (48);
+        output_row.add_suffix (output_entry);
 
-        var output_browse = new Button.with_label ("Browse…");
+        var output_browse = new Button.from_icon_name ("folder-open-symbolic");
+        output_browse.set_tooltip_text ("Output location");
+        output_browse.add_css_class ("flat");
+        output_browse.set_valign (Align.CENTER);
         output_browse.clicked.connect (on_output_browse_clicked);
+        output_row.add_suffix (output_browse);
 
-        output_row.append (output_label);
-        output_row.append (output_entry);
-        output_row.append (output_browse);
-        append (output_row);
+        file_group.add (output_row);
+        append (file_group);
 
         // Pre-populate from settings if a default output directory is configured
         string default_dir = AppSettings.get_default ().default_output_dir;
@@ -75,6 +91,11 @@ public class FilePickers : Box {
 
     // ═════════════════════════════════════════════════════════════════════════
     //  DRAG & DROP
+    //
+    //  Drop targets are attached to the entire FilePickers widget for a
+    //  generous drop zone.  Visual feedback highlights the whole preferences
+    //  group — not just the entry — so the user gets a clear, prominent
+    //  "you can drop here" indicator with a dashed accent outline.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void setup_drag_drop () {
@@ -82,21 +103,20 @@ public class FilePickers : Box {
         var file_drop = new DropTarget (typeof (File), Gdk.DragAction.COPY);
 
         file_drop.accept.connect ((drop) => {
-            // Accept any drop that offers GLib.File content
             return true;
         });
 
         file_drop.enter.connect ((x, y) => {
-            input_entry.add_css_class ("drop-highlight");
+            show_drop_highlight ();
             return Gdk.DragAction.COPY;
         });
 
         file_drop.leave.connect (() => {
-            input_entry.remove_css_class ("drop-highlight");
+            hide_drop_highlight ();
         });
 
         file_drop.drop.connect ((val, x, y) => {
-            input_entry.remove_css_class ("drop-highlight");
+            hide_drop_highlight ();
 
             var file = val.get_object () as File;
             if (file == null) return false;
@@ -112,28 +132,26 @@ public class FilePickers : Box {
             return false;
         });
 
-        // Attach to the entire FilePickers box so the drop zone is generous
         add_controller (file_drop);
 
         // Also accept plain text URI drops (from some terminals / apps)
         var text_drop = new DropTarget (Type.STRING, Gdk.DragAction.COPY);
 
         text_drop.enter.connect ((x, y) => {
-            input_entry.add_css_class ("drop-highlight");
+            show_drop_highlight ();
             return Gdk.DragAction.COPY;
         });
 
         text_drop.leave.connect (() => {
-            input_entry.remove_css_class ("drop-highlight");
+            hide_drop_highlight ();
         });
 
         text_drop.drop.connect ((val, x, y) => {
-            input_entry.remove_css_class ("drop-highlight");
+            hide_drop_highlight ();
 
             string? text = val.get_string ();
             if (text == null) return false;
 
-            // Handle file:// URIs (one or more, take the first)
             string path = resolve_dropped_text (text);
             if (path.length > 0 && is_video_file (path)) {
                 input_entry.set_text (path);
@@ -145,8 +163,19 @@ public class FilePickers : Box {
 
         add_controller (text_drop);
 
-        // Inject CSS for the drop highlight effect
         inject_drop_css ();
+    }
+
+    // ── Drop highlight — covers the whole preferences group card ─────────
+
+    private void show_drop_highlight () {
+        add_css_class ("drop-active");
+        input_entry.add_css_class ("drop-highlight");
+    }
+
+    private void hide_drop_highlight () {
+        remove_css_class ("drop-active");
+        input_entry.remove_css_class ("drop-highlight");
     }
 
     /**
@@ -157,19 +186,15 @@ public class FilePickers : Box {
         string trimmed = text.strip ();
         if (trimmed.length == 0) return "";
 
-        // Take only the first line (URI lists can be multi-line)
         string first_line = trimmed.split ("\n")[0].strip ();
-        // Remove trailing \r from Windows-style line endings
         if (first_line.has_suffix ("\r"))
             first_line = first_line.substring (0, first_line.length - 1);
 
-        // file:// URI → local path
         if (first_line.has_prefix ("file://")) {
             var gfile = File.new_for_uri (first_line);
             return gfile.get_path () ?? "";
         }
 
-        // Already a plain path (e.g. from a terminal drag)
         if (first_line.has_prefix ("/")) {
             return first_line;
         }
@@ -191,8 +216,11 @@ public class FilePickers : Box {
     private static bool drop_css_injected = false;
 
     /**
-     * Inject a small CSS snippet for the visual drop-highlight on the entry.
-     * Only runs once regardless of how many FilePickers are created.
+     * Inject CSS for visual drop-highlight effects.
+     *
+     * Two-level feedback:
+     *  1. The entry itself gets an accent border + glow
+     *  2. The entire FilePickers box gets a dashed accent outline + tint
      */
     private static void inject_drop_css () {
         if (drop_css_injected) return;
@@ -200,10 +228,18 @@ public class FilePickers : Box {
 
         var css = new CssProvider ();
         css.load_from_string (
+            /* Entry-level highlight */
             "entry.drop-highlight {\n" +
             "    border-color: @accent_color;\n" +
             "    box-shadow: 0 0 0 2px alpha(@accent_color, 0.35);\n" +
             "    transition: border-color 150ms ease, box-shadow 150ms ease;\n" +
+            "}\n" +
+            /* Widget-level highlight — dashed outline around the whole group */
+            ".drop-active {\n" +
+            "    outline: 2px dashed @accent_color;\n" +
+            "    outline-offset: 4px;\n" +
+            "    border-radius: 12px;\n" +
+            "    transition: outline 150ms ease;\n" +
             "}\n"
         );
         StyleContext.add_provider_for_display (
@@ -231,7 +267,6 @@ public class FilePickers : Box {
                 var file = dialog.open.end (res);
                 if (file != null) input_entry.set_text (file.get_path () ?? "");
             } catch (Error e) {
-                // Gtk.DialogError.DISMISSED is normal (user clicked Cancel)
                 if (!(e is Gtk.DialogError.DISMISSED)) {
                     warning ("Input file dialog error: %s", e.message);
                 }
@@ -248,7 +283,6 @@ public class FilePickers : Box {
                 var folder = dialog.select_folder.end (res);
                 if (folder != null) output_entry.set_text (folder.get_path () ?? "");
             } catch (Error e) {
-                // Gtk.DialogError.DISMISSED is normal (user clicked Cancel)
                 if (!(e is Gtk.DialogError.DISMISSED)) {
                     warning ("Output folder dialog error: %s", e.message);
                 }

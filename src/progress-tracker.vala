@@ -156,10 +156,7 @@ public class ProgressTracker : Object {
     private void start_pulsing () {
         stop_pulsing ();
         pulse_source = Timeout.add (320, () => {
-            Idle.add (() => {
-                progress_bar.pulse ();
-                return Source.REMOVE;
-            });
+            progress_bar.pulse ();
             return Source.CONTINUE;
         });
     }

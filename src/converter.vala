@@ -229,20 +229,18 @@ public class Converter : Object {
         config.audio_args = codec_tab.get_audio_args ();
 
         // Seek / Duration
-        config.seek_enabled = general_tab.seek_check.active;
+        config.seek_enabled = general_tab.is_seek_enabled ();
         if (config.seek_enabled) {
-            config.seek_timestamp = ConversionUtils.build_timestamp (
-                general_tab.seek_hh, general_tab.seek_mm, general_tab.seek_ss);
+            config.seek_timestamp = general_tab.get_seek_timestamp ();
         }
-        config.time_enabled = general_tab.time_check.active;
+        config.time_enabled = general_tab.is_time_enabled ();
         if (config.time_enabled) {
-            config.time_timestamp = ConversionUtils.build_timestamp (
-                general_tab.time_hh, general_tab.time_mm, general_tab.time_ss);
+            config.time_timestamp = general_tab.get_time_timestamp ();
         }
 
         // Metadata
-        config.preserve_metadata = general_tab.preserve_metadata.active;
-        config.remove_chapters   = general_tab.remove_chapters.active;
+        config.preserve_metadata = general_tab.is_preserve_metadata ();
+        config.remove_chapters   = general_tab.is_remove_chapters ();
 
         return config;
     }

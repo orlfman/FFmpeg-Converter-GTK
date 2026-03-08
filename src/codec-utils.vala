@@ -55,9 +55,9 @@ namespace CodecUtils {
         // ── fps-based: check General tab first, then probe ───────────────
         double fps = 0.0;
 
-        string fr_text = get_dropdown_text (general_tab.frame_rate_combo);
+        string fr_text = general_tab.get_frame_rate_text ();
         if (fr_text == FrameRateLabel.CUSTOM) {
-            string custom_fr = general_tab.custom_frame_rate.text.strip ();
+            string custom_fr = general_tab.get_custom_frame_rate_text ();
             if (custom_fr.length > 0)
                 fps = double.parse (custom_fr);
         } else if (fr_text != FrameRateLabel.ORIGINAL) {

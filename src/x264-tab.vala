@@ -2,22 +2,12 @@ using Gtk;
 using Adw;
 using GLib;
 
-public class X264Tab : Box, ICodecTab {
-
-    // ── Signals ───────────────────────────────────────────────────────────────
-    public signal void smart_optimizer_requested ();
-
-    // ── Auto-convert (per-tab, session-only) ─────────────────────────────────
-    public bool auto_convert_active { get; private set; default = false; }
-
-    // ── Strip audio (per-tab, session-only) ──────────────────────────────────
-    public bool strip_audio_active { get; private set; default = false; }
+public class X264Tab : BaseCodecTab {
 
     // ── Preset ───────────────────────────────────────────────────────────────
     public DropDown  quality_profile_combo    { get; private set; }
 
     // ── Encoding ─────────────────────────────────────────────────────────────
-    public DropDown  container_combo    { get; private set; }
     public DropDown  preset_combo       { get; private set; }
     public DropDown  profile_combo      { get; private set; }
 
@@ -43,7 +33,6 @@ public class X264Tab : Box, ICodecTab {
     public SpinButton abr_bitrate_spin  { get; private set; }
     public Switch     abr_vbv_switch    { get; private set; }
     public SpinButton cbr_bitrate_spin  { get; private set; }
-    public Switch     two_pass_switch    { get; private set; }
     private Adw.ActionRow crf_row;
     private Adw.ActionRow qp_row;
     private Adw.ActionRow abr_row;
@@ -89,11 +78,8 @@ public class X264Tab : Box, ICodecTab {
     public SpinButton psy_trellis_spin  { get; private set; }
 
     // ── Audio ────────────────────────────────────────────────────────────────
-    public AudioSettings audio_settings  { get; private set; }
 
     // ── Threading & Keyframes ────────────────────────────────────────────────
-    public DropDown  keyint_combo        { get; private set; }
-    public DropDown  custom_keyframe_combo { get; private set; }
     public DropDown  threads_combo       { get; private set; }
 
     private Adw.ActionRow custom_keyframe_row;
@@ -143,102 +129,10 @@ public class X264Tab : Box, ICodecTab {
         row.add_suffix (quality_profile_combo);
         group.add (row);
 
-        // Smart Optimizer — ActionRow with button suffix for content-aware analysis
-        var smart_row = new Adw.ActionRow ();
-        smart_row.set_title ("Smart Optimizer");
-        smart_row.set_subtitle ("Analyze the video and auto-configure CRF and speed for your target size");
-        smart_row.add_prefix (make_smart_icon ());
-        var smart_btn = new Button.with_label ("Optimize");
-        smart_btn.add_css_class ("suggested-action");
-        smart_btn.set_valign (Align.CENTER);
-        smart_btn.clicked.connect (() => {
-            smart_optimizer_requested ();
-        });
-        smart_row.add_suffix (smart_btn);
-        smart_row.set_activatable_widget (smart_btn);
-        group.add (smart_row);
-
-        // Auto-convert toggle — per-tab, session-only.
-        // When the global override in Preferences is ON, this is forced active
-        // and locked insensitive. Disable the global override to control per-tab.
-        var auto_convert_row = new Adw.SwitchRow ();
-        auto_convert_row.set_title ("Auto-Convert");
-        auto_convert_row.set_subtitle ("Start conversion automatically when optimization completes");
-
-        bool global_on = AppSettings.get_default ().smart_optimizer_auto_convert;
-        auto_convert_row.set_active (global_on);
-        auto_convert_row.set_sensitive (!global_on);
-        auto_convert_active = global_on;
-
-        group.add (auto_convert_row);
-
-        // No Audio toggle — per-tab, session-only.
-        // Only visible when auto-convert is enabled on this tab.
-        var strip_audio_row = new Adw.SwitchRow ();
-        strip_audio_row.set_title ("No Audio");
-        strip_audio_row.set_subtitle ("Strip audio from analysis and output");
-        strip_audio_row.set_visible (auto_convert_active);
-
-        bool audio_global = AppSettings.get_default ().smart_optimizer_strip_audio;
-        strip_audio_row.set_active (audio_global && auto_convert_active);
-        strip_audio_row.set_sensitive (!audio_global);
-        strip_audio_active = audio_global && auto_convert_active;
-
-        // Wire auto-convert → strip_audio visibility after both rows exist
-        auto_convert_row.notify["active"].connect (() => {
-            auto_convert_active = auto_convert_row.get_active ();
-            strip_audio_row.set_visible (auto_convert_active);
-            if (!auto_convert_active) {
-                strip_audio_row.set_active (false);
-            } else {
-                bool sa_locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-                if (sa_locked) {
-                    strip_audio_row.set_active (true);
-                    strip_audio_row.set_sensitive (false);
-                }
-            }
-        });
-
-        AppSettings.get_default ().settings_changed.connect (() => {
-            bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
-            if (locked) {
-                auto_convert_row.set_active (true);
-                auto_convert_row.set_sensitive (false);
-            } else if (!auto_convert_row.get_sensitive ()) {
-                auto_convert_row.set_sensitive (true);
-                auto_convert_row.set_active (false);
-            }
-        });
-
-        strip_audio_row.notify["active"].connect (() => {
-            strip_audio_active = strip_audio_row.get_active ();
-        });
-
-        AppSettings.get_default ().settings_changed.connect (() => {
-            bool locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-            if (!strip_audio_row.get_visible ()) return;
-            if (locked) {
-                strip_audio_row.set_active (true);
-                strip_audio_row.set_sensitive (false);
-            } else if (!strip_audio_row.get_sensitive ()) {
-                strip_audio_row.set_sensitive (true);
-                strip_audio_row.set_active (false);
-            }
-        });
-        group.add (strip_audio_row);
+        // Smart Optimizer, Auto-Convert, and No Audio rows (shared via BaseCodecTab)
+        add_smart_optimizer_rows (group);
 
         append (group);
-    }
-
-    /**
-     * Build a tinted prefix icon for the Smart Optimizer row.
-     */
-    private static Image make_smart_icon () {
-        var img = new Image.from_icon_name ("starred-symbolic");
-        img.set_pixel_size (24);
-        img.set_valign (Align.CENTER);
-        img.add_css_class ("accent");
-        return img;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -866,10 +760,6 @@ public class X264Tab : Box, ICodecTab {
         return CodecUtils.get_dropdown_text (dropdown);
     }
 
-    public string get_container () {
-        return CodecUtils.get_dropdown_text (container_combo);
-    }
-
     public string get_active_preset () {
         return CodecUtils.get_dropdown_text (preset_combo);
     }
@@ -878,17 +768,8 @@ public class X264Tab : Box, ICodecTab {
     //  ICodecTab INTERFACE
     // ═════════════════════════════════════════════════════════════════════════
 
-    public ICodecBuilder get_codec_builder () {
+    public override ICodecBuilder get_codec_builder () {
         return new X264Builder (this);
-    }
-
-    // (#2) Read the Switch directly — no hidden CheckButton needed
-    public bool get_two_pass () {
-        return two_pass_switch.active;
-    }
-
-    public string[] get_audio_args () {
-        return audio_settings.get_audio_args ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -899,7 +780,7 @@ public class X264Tab : Box, ICodecTab {
      * Apply a SmartOptimizer recommendation to this tab's widgets.
      * Called by AppController after the async analysis completes.
      */
-    public void apply_smart_recommendation (OptimizationRecommendation rec) {
+    public override void apply_smart_recommendation (OptimizationRecommendation rec) {
         CodecPresets.apply_smart_x264 (this, rec);
     }
 
@@ -967,9 +848,5 @@ public class X264Tab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     // (#1) Delegate to shared implementation in CodecUtils
-    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
-        return CodecUtils.resolve_custom_keyframe_args (
-            keyint_combo, custom_keyframe_combo, input_file, general_tab);
-    }
 
 }

@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '0.1.0',
+  version : '1.4.0',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -39,6 +39,7 @@ sources = files(
   'src/x265-tab.vala',
   'src/x265-builder.vala',
   'src/codec-tab.vala',
+  'src/base-codec-tab.vala',
   'src/color-correction-dialog.vala',
   'src/information-tab.vala',
   'src/about-dialog.vala',

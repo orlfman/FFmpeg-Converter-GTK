@@ -70,6 +70,20 @@ public class GeneralTab : Box {
     public Switch preserve_metadata    { get; private set; }
     public Switch remove_chapters      { get; private set; }
 
+    // ── Forwarding Signals ─────────────────────────────────────────────────
+    //    Emitted when the corresponding internal switch/toggle changes state.
+    //    AppController and other consumers should connect to these instead of
+    //    reaching into the raw Switch widgets directly.
+
+    /** Fired when the audio speed toggle changes. */
+    public signal void audio_speed_toggled (bool active);
+    /** Fired when the video speed toggle changes. */
+    public signal void video_speed_toggled (bool active);
+    /** Fired when the normalize audio toggle changes. */
+    public signal void normalize_toggled (bool active);
+    /** Fired when the Detect Crop button is clicked. */
+    public signal void crop_detect_clicked ();
+
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
@@ -536,13 +550,27 @@ public class GeneralTab : Box {
                 color_dialog = new ColorCorrectionDialog (get_root () as Gtk.Window);
             color_dialog.present ();
         });
+
+        // ── Forwarding signals ───────────────────────────────────────────────
+        audio_speed_check.notify["active"].connect (() => {
+            audio_speed_toggled (audio_speed_check.active);
+        });
+        video_speed_check.notify["active"].connect (() => {
+            video_speed_toggled (video_speed_check.active);
+        });
+        normalize_audio.notify["active"].connect (() => {
+            normalize_toggled (normalize_audio.active);
+        });
+        detect_crop_button.clicked.connect (() => {
+            crop_detect_clicked ();
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    private string get_frame_rate_text () {
+    public string get_frame_rate_text () {
         var item = frame_rate_combo.selected_item as StringObject;
         return item != null ? item.string : "";
     }
@@ -738,4 +766,57 @@ public class GeneralTab : Box {
         int end = part.index_of_char (' ');
         return (end > 0) ? part.substring (0, end) : part;
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SEMANTIC ACCESSORS
+    //
+    //  Encapsulate widget state so consumers don't depend on the internal
+    //  widget structure.  New code should use these instead of reaching into
+    //  the raw Switch / SpinButton / DropDown properties directly.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // ── Seek / Time ──────────────────────────────────────────────────────────
+
+    public bool is_seek_enabled ()      { return seek_check.active; }
+    public bool is_time_enabled ()      { return time_check.active; }
+
+    public string get_seek_timestamp () {
+        return ConversionUtils.build_timestamp (seek_hh, seek_mm, seek_ss);
+    }
+
+    public string get_time_timestamp () {
+        return ConversionUtils.build_timestamp (time_hh, time_mm, time_ss);
+    }
+
+    public double get_seek_seconds () {
+        return seek_hh.get_value () * 3600.0
+             + seek_mm.get_value () * 60.0
+             + seek_ss.get_value ();
+    }
+
+    public double get_time_seconds () {
+        return time_hh.get_value () * 3600.0
+             + time_mm.get_value () * 60.0
+             + time_ss.get_value ();
+    }
+
+    // ── Metadata ─────────────────────────────────────────────────────────────
+
+    public bool is_preserve_metadata () { return preserve_metadata.active; }
+    public bool is_remove_chapters ()   { return remove_chapters.active; }
+
+    // ── Speed & Audio ────────────────────────────────────────────────────────
+
+    public bool is_video_speed_enabled ()  { return video_speed_check.active; }
+    public bool is_audio_speed_enabled ()  { return audio_speed_check.active; }
+    public bool is_normalize_enabled ()    { return normalize_audio.active; }
+
+    // ── Crop ─────────────────────────────────────────────────────────────────
+
+    public bool is_crop_enabled ()         { return crop_check.active; }
+    public string get_crop_value_text ()   { return crop_value.text.strip (); }
+
+    // ── Frame Rate ───────────────────────────────────────────────────────────
+
+    public string get_custom_frame_rate_text () { return custom_frame_rate.text.strip (); }
 }

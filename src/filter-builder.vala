@@ -6,6 +6,14 @@ using Gtk;
 
 namespace FilterBuilder {
 
+    // Epsilon for floating-point comparisons — SpinButton values can drift
+    // from exact representable doubles, so bare == / != is unreliable.
+    private const double EPSILON = 1e-9;
+
+    private bool fp_equal (double a, double b) {
+        return Math.fabs (a - b) < EPSILON;
+    }
+
     public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false) {
         string[] filters = {};
 
@@ -38,9 +46,9 @@ namespace FilterBuilder {
         // 5. Scale - clean display + zscale for quality filters
         double sw = tab.scale_width_x.get_value ();
         double sh = tab.scale_height_x.get_value ();
-        if (sw != 1.0 || sh != 1.0) {
-            string w = (sw == 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
-            string h = (sh == 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
+        if (!fp_equal (sw, 1.0) || !fp_equal (sh, 1.0)) {
+            string w = fp_equal (sw, 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
+            string h = fp_equal (sh, 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
             string alg = get_dropdown_text (tab.scale_algorithm).down ();
 
             if (alg == ScaleAlgorithm.POINT) {
@@ -63,7 +71,7 @@ namespace FilterBuilder {
         // 7. Video Speed
         if (tab.video_speed_check.active) {
             double pct = tab.video_speed.get_value ();
-            if (pct != 0.0) {
+            if (!fp_equal (pct, 0.0)) {
                 double mult = 1.0 + pct / 100.0;
                 double factor = 1.0 / mult;
                 filters += "setpts=%.6f*PTS".printf (factor);
@@ -109,7 +117,7 @@ namespace FilterBuilder {
         // Audio Speed
         if (tab.audio_speed_check.active) {
             double pct = tab.audio_speed.get_value ();
-            if (pct != 0.0) {
+            if (!fp_equal (pct, 0.0)) {
                 double m = 1.0 + pct / 100.0;
                 string chain = build_atempo_chain (m);
                 if (chain.length > 0) filters += chain;
@@ -120,7 +128,7 @@ namespace FilterBuilder {
     }
 
     public string build_atempo_chain (double multiplier) {
-        if (multiplier == 1.0) return "";
+        if (fp_equal (multiplier, 1.0)) return "";
 
         string[] parts = {};
         double t = multiplier;
@@ -137,7 +145,7 @@ namespace FilterBuilder {
             }
         }
 
-        if (t != 1.0) {
+        if (!fp_equal (t, 1.0)) {
             parts += "atempo=%.6f".printf (t);
         }
 

@@ -39,6 +39,12 @@ public class AppController : Object {
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
 
+    // ── Codec Registry ───────────────────────────────────────────────────────
+    //    Maps ViewStack page names to their ISmartCodecTab, eliminating
+    //    repeated 4-way if/else chains for Smart Optimizer, audio speed
+    //    constraints, and normalize-audio constraints.
+    private HashTable<string, ISmartCodecTab> codec_registry;
+
     public AppController (FilePickers file_pickers,
                           GeneralTab general_tab,
                           SvtAv1Tab svt_tab,
@@ -72,6 +78,14 @@ public class AppController : Object {
 
         smart_optimizer = new SmartOptimizer ();
 
+        // Build the codec registry — add new codecs here and they
+        // automatically participate in audio constraints + Smart Optimizer.
+        codec_registry = new HashTable<string, ISmartCodecTab> (str_hash, str_equal);
+        codec_registry.insert ("svt-av1", svt_tab);
+        codec_registry.insert ("x265",    x265_tab);
+        codec_registry.insert ("x264",    x264_tab);
+        codec_registry.insert ("vp9",     vp9_tab);
+
         wire_all ();
     }
 
@@ -103,7 +117,7 @@ public class AppController : Object {
     // ── Crop detection button → uses input file + console ───────────────────
 
     private void wire_crop_detection () {
-        general_tab.detect_crop_button.clicked.connect (() => {
+        general_tab.crop_detect_clicked.connect (() => {
             string input_file = file_pickers.input_entry.get_text ();
             general_tab.start_crop_detection (input_file, console_tab);
         });
@@ -112,12 +126,10 @@ public class AppController : Object {
     // ── Audio speed → disable "Copy" in all codec tab audio lists ───────────
 
     private void wire_audio_speed_constraint () {
-        general_tab.audio_speed_check.notify["active"].connect (() => {
-            bool on = general_tab.audio_speed_check.active;
-            svt_tab.audio_settings.update_for_audio_speed (on);
-            x265_tab.audio_settings.update_for_audio_speed (on);
-            x264_tab.audio_settings.update_for_audio_speed (on);
-            vp9_tab.audio_settings.update_for_audio_speed (on);
+        general_tab.audio_speed_toggled.connect ((on) => {
+            foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+                tab.get_audio_settings_ref ().update_for_audio_speed (on);
+            }
         });
     }
 
@@ -126,27 +138,21 @@ public class AppController : Object {
     //    and audio filters require re-encoding (copy won't apply them).
 
     private void wire_normalize_audio_constraint () {
-        general_tab.normalize_audio.notify["active"].connect (() => {
-            bool on = general_tab.normalize_audio.active;
-            svt_tab.audio_settings.update_for_normalize (on);
-            x265_tab.audio_settings.update_for_normalize (on);
-            x264_tab.audio_settings.update_for_normalize (on);
-            vp9_tab.audio_settings.update_for_normalize (on);
+        general_tab.normalize_toggled.connect ((on) => {
+            foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+                tab.get_audio_settings_ref ().update_for_normalize (on);
+            }
         });
     }
 
     // ── Video/Audio speed → force re-encode in Trim tab ─────────────────────
 
     private void wire_video_speed_constraint () {
-        general_tab.video_speed_check.notify["active"].connect (() => {
-            trim_tab.update_for_speed (
-                general_tab.video_speed_check.active,
-                general_tab.audio_speed_check.active);
+        general_tab.video_speed_toggled.connect ((on) => {
+            trim_tab.update_for_speed (on, general_tab.is_audio_speed_enabled ());
         });
-        general_tab.audio_speed_check.notify["active"].connect (() => {
-            trim_tab.update_for_speed (
-                general_tab.video_speed_check.active,
-                general_tab.audio_speed_check.active);
+        general_tab.audio_speed_toggled.connect ((on) => {
+            trim_tab.update_for_speed (general_tab.is_video_speed_enabled (), on);
         });
     }
 
@@ -284,21 +290,16 @@ public class AppController : Object {
         ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
 
         // Effective duration — if seek/time are set, the encode is shorter
-        if (general_tab.seek_check.active || general_tab.time_check.active) {
+        if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {
             double full_dur = FfprobeUtils.probe_duration (input_file);
             double start = 0.0;
             double end   = full_dur;
 
-            if (general_tab.seek_check.active) {
-                start = general_tab.seek_hh.get_value () * 3600.0
-                      + general_tab.seek_mm.get_value () * 60.0
-                      + general_tab.seek_ss.get_value ();
+            if (general_tab.is_seek_enabled ()) {
+                start = general_tab.get_seek_seconds ();
             }
-            if (general_tab.time_check.active) {
-                double t = general_tab.time_hh.get_value () * 3600.0
-                         + general_tab.time_mm.get_value () * 60.0
-                         + general_tab.time_ss.get_value ();
-                end = double.min (start + t, full_dur);
+            if (general_tab.is_time_enabled ()) {
+                end = double.min (start + general_tab.get_time_seconds (), full_dur);
             }
 
             double eff = end - start;
@@ -311,17 +312,9 @@ public class AppController : Object {
         // Do not override here; the optimizer picks the right audio budget
         // for the target size and stores it in the recommendation.
 
-        // Strip audio — check the per-tab toggle for this codec
-        bool strip_audio = false;
-        if (codec == "svt-av1") {
-            strip_audio = svt_tab.strip_audio_active;
-        } else if (codec == "x265") {
-            strip_audio = x265_tab.strip_audio_active;
-        } else if (codec == "x264") {
-            strip_audio = x264_tab.strip_audio_active;
-        } else {
-            strip_audio = vp9_tab.strip_audio_active;
-        }
+        // Strip audio — look up from codec registry
+        var smart_tab = codec_registry.get (codec);
+        bool strip_audio = (smart_tab != null) ? smart_tab.get_strip_audio_active () : false;
         ctx.strip_audio = strip_audio;
 
         try {
@@ -336,19 +329,12 @@ public class AppController : Object {
                 return;
             }
 
-            // Apply to the correct tab
-            if (codec == "svt-av1") {
-                svt_tab.apply_smart_recommendation (rec);
-                if (strip_audio) svt_tab.audio_settings.audio_expander.set_enable_expansion (false);
-            } else if (codec == "x265") {
-                x265_tab.apply_smart_recommendation (rec);
-                if (strip_audio) x265_tab.audio_settings.audio_expander.set_enable_expansion (false);
-            } else if (codec == "x264") {
-                x264_tab.apply_smart_recommendation (rec);
-                if (strip_audio) x264_tab.audio_settings.audio_expander.set_enable_expansion (false);
-            } else {
-                vp9_tab.apply_smart_recommendation (rec);
-                if (strip_audio) vp9_tab.audio_settings.audio_expander.set_enable_expansion (false);
+            // Apply recommendation via the codec registry
+            if (smart_tab != null) {
+                smart_tab.apply_smart_recommendation (rec);
+                if (strip_audio) {
+                    smart_tab.get_audio_settings_ref ().audio_expander.set_enable_expansion (false);
+                }
             }
 
             status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KB"
@@ -361,16 +347,7 @@ public class AppController : Object {
             }
 
             // Auto-convert: trigger conversion if the active tab has it enabled
-            bool should_auto_convert = false;
-            if (codec == "svt-av1") {
-                should_auto_convert = svt_tab.auto_convert_active;
-            } else if (codec == "x265") {
-                should_auto_convert = x265_tab.auto_convert_active;
-            } else if (codec == "x264") {
-                should_auto_convert = x264_tab.auto_convert_active;
-            } else {
-                should_auto_convert = vp9_tab.auto_convert_active;
-            }
+            bool should_auto_convert = (smart_tab != null) ? smart_tab.get_auto_convert_active () : false;
 
             if (should_auto_convert) {
                 console_tab.add_line ("[Smart Optimizer] Auto-convert enabled — starting conversion…");

@@ -2,6 +2,13 @@
 //  Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Application Version ─────────────────────────────────────────────────────
+//    Keep in sync with meson.build project version.
+
+namespace AppVersion {
+    public const string VERSION = "1.4.0";
+}
+
 // ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────
 
 namespace RateControl {
