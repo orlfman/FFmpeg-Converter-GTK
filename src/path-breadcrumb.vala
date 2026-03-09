@@ -73,7 +73,7 @@ public class PathBreadcrumb : Box {
     }
 
     public void set_text (string path) {
-        string normalized = path.strip ();
+        string normalized = normalize_path (path);
         if (normalized == current_path) return;
 
         cancel_path_state_refresh ();
@@ -141,8 +141,7 @@ public class PathBreadcrumb : Box {
         Crumb[] crumbs = {};
         string path = current_path;
         bool show_leaf_as_file = treat_last_as_file &&
-                                 current_path_info_ready &&
-                                 current_path_is_regular;
+                                 (!current_path_info_ready || current_path_is_regular);
 
         string home = Environment.get_home_dir ();
         bool under_home = home != null && home.length > 1 &&
@@ -276,6 +275,24 @@ public class PathBreadcrumb : Box {
             box.remove (child);
             child = next;
         }
+    }
+
+    private static string normalize_path (string path) {
+        string normalized = path.strip ();
+        if (normalized.length == 0) return "";
+
+        string? relative_to = null;
+        if (!Path.is_absolute (normalized)) {
+            relative_to = Environment.get_current_dir ();
+        }
+
+        normalized = Filename.canonicalize (normalized, relative_to);
+
+        while (normalized.length > 1 && normalized.has_suffix ("/")) {
+            normalized = normalized.substring (0, normalized.length - 1);
+        }
+
+        return normalized;
     }
 
     private bool crumb_is_hidden (int index, int count) {
@@ -432,6 +449,18 @@ public class PathBreadcrumb : Box {
         }
     }
 
+    public override void dispose () {
+        cancel_path_state_refresh ();
+
+        if (path_menu != null) {
+            path_menu.unparent ();
+        }
+
+        insert_action_group ("crumb", null);
+
+        base.dispose ();
+    }
+
     private void reset_path_state () {
         current_path_info_ready = false;
         current_path_exists = false;
@@ -579,8 +608,22 @@ public class PathBreadcrumb : Box {
     private static async void reveal_in_file_manager (string path) {
         if (path.length == 0) return;
 
+        var file = File.new_for_path (path);
+        FileType file_type = FileType.UNKNOWN;
+
         try {
-            var file = File.new_for_path (path);
+            var info = yield file.query_info_async (
+                FileAttribute.STANDARD_TYPE,
+                FileQueryInfoFlags.NONE,
+                Priority.DEFAULT,
+                null
+            );
+            file_type = info.get_file_type ();
+        } catch (Error e) {
+            // Fall back to the best-effort parent open below.
+        }
+
+        try {
             var uri = file.get_uri ();
             var proxy = yield new DBusProxy.for_bus (
                 BusType.SESSION,
@@ -591,9 +634,14 @@ public class PathBreadcrumb : Box {
                 "org.freedesktop.FileManager1",
                 null
             );
+            if (proxy.get_name_owner () == null) {
+                throw new IOError.FAILED ("No file manager owner available");
+            }
+
             string[] uris = { uri };
-            yield proxy.call (
-                "ShowItems",
+            string method = file_type == FileType.DIRECTORY ? "ShowFolders" : "ShowItems";
+            Variant? reply = yield proxy.call (
+                method,
                 new Variant.tuple ({
                     new Variant.strv (uris),
                     new Variant.string ("")
@@ -602,20 +650,13 @@ public class PathBreadcrumb : Box {
                 -1,
                 null
             );
-            return;
+            if (reply != null) return;
         } catch (Error e) {
             // Fall back to opening the containing folder when item reveal is unavailable.
         }
 
         try {
-            var file = File.new_for_path (path);
-            var info = yield file.query_info_async (
-                FileAttribute.STANDARD_TYPE,
-                FileQueryInfoFlags.NONE,
-                Priority.DEFAULT,
-                null
-            );
-            var target = info.get_file_type () == FileType.DIRECTORY ? file : file.get_parent ();
+            var target = file_type == FileType.DIRECTORY ? file : file.get_parent ();
             if (target != null) {
                 AppInfo.launch_default_for_uri (target.get_uri (), null);
             }
