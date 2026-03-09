@@ -16,8 +16,10 @@ public class PathBreadcrumb : Box {
     private bool current_path_is_regular = false;
     private Icon? current_path_icon = null;
     private string[] current_path_icon_names = {};
+    private int cached_icon_pixel_size = -1;
     private uint path_state_generation = 0;
     private Cancellable? path_state_cancellable = null;
+    private Cancellable? reveal_cancellable = null;
 
     private Box crumb_box;
     private Label placeholder_label;
@@ -25,9 +27,11 @@ public class PathBreadcrumb : Box {
     private GLib.Menu path_menu_model;
     private SimpleActionGroup action_group;
     private SimpleAction copy_path_action;
-    private SimpleAction open_path_action;
+    private SimpleAction? open_path_action;
     private SimpleAction reveal_path_action;
+    private SimpleAction? open_output_action;
     private SimpleAction open_crumb_action;
+    private string last_output_file = "";
 
     private class Crumb : Object {
         public string label { get; construct set; }
@@ -101,6 +105,12 @@ public class PathBreadcrumb : Box {
             set_tooltip_text (placeholder_text);
             rebuild ();
         }
+    }
+
+    public void set_last_output_file (string path) {
+        last_output_file = path;
+        bool exists = path.length > 0 && FileUtils.test (path, FileTest.EXISTS);
+        open_output_action.set_enabled (exists);
     }
 
     private void rebuild () {
@@ -200,7 +210,9 @@ public class PathBreadcrumb : Box {
             file_button.set_focus_on_click (false);
             file_button.set_tooltip_text (crumb.path);
             file_button.clicked.connect (() => {
-                reveal_in_file_manager.begin (crumb.path);
+                cancel_reveal ();
+                reveal_cancellable = new Cancellable ();
+                reveal_in_file_manager.begin (crumb.path, reveal_cancellable);
             });
 
             var file_chip = new Box (Orientation.HORIZONTAL, 6);
@@ -330,11 +342,7 @@ public class PathBreadcrumb : Box {
     }
 
     private int get_file_chip_icon_pixel_size () {
-        var probe = new Image ();
-        probe.set_icon_size (IconSize.INHERIT);
-
-        int pixel_size = probe.get_pixel_size ();
-        if (pixel_size > 0) return pixel_size.clamp (12, 32);
+        if (cached_icon_pixel_size > 0) return cached_icon_pixel_size;
 
         int font_size = 16;
         var context = get_pango_context ();
@@ -349,7 +357,8 @@ public class PathBreadcrumb : Box {
             }
         }
 
-        return font_size.clamp (12, 32);
+        cached_icon_pixel_size = font_size.clamp (12, 32);
+        return cached_icon_pixel_size;
     }
 
     private Icon? resolve_file_chip_icon () {
@@ -386,19 +395,22 @@ public class PathBreadcrumb : Box {
         string[] candidates = {};
 
         foreach (unowned string name in current_path_icon_names) {
-            if (name.length > 0) candidates += name;
-        }
-
-        bool has_default = false;
-        foreach (unowned string name in candidates) {
-            if (name == DEFAULT_FILE_ICON) {
-                has_default = true;
-                break;
+            if (name.length > 0 && !strv_contains (candidates, name)) {
+                candidates += name;
             }
         }
 
-        if (!has_default) candidates += DEFAULT_FILE_ICON;
+        if (!strv_contains (candidates, DEFAULT_FILE_ICON)) {
+            candidates += DEFAULT_FILE_ICON;
+        }
         return candidates;
+    }
+
+    private static bool strv_contains (string[] arr, string needle) {
+        foreach (unowned string s in arr) {
+            if (s == needle) return true;
+        }
+        return false;
     }
 
     private static string[] extract_icon_names (Icon? icon) {
@@ -415,31 +427,20 @@ public class PathBreadcrumb : Box {
 
         var emblemed_icon = icon as EmblemedIcon;
         if (emblemed_icon != null) {
-            append_icon_names (ref names, extract_icon_names (emblemed_icon.get_icon ()));
+            foreach (string name in extract_icon_names (emblemed_icon.get_icon ())) {
+                if (name.length > 0) names += name;
+            }
             foreach (unowned Emblem emblem in emblemed_icon.get_emblems ()) {
                 var emblem_icon = emblem.icon as Icon;
                 if (emblem_icon != null) {
-                    append_icon_names (ref names, extract_icon_names (emblem_icon));
+                    foreach (string name in extract_icon_names (emblem_icon)) {
+                        if (name.length > 0) names += name;
+                    }
                 }
             }
         }
 
         return names;
-    }
-
-    private static void append_icon_names (ref string[] names, string[] extra_names) {
-        foreach (string name in extra_names) {
-            if (name.length > 0) append_icon_name (ref names, name);
-        }
-    }
-
-    private static void append_icon_name (ref string[] names, string name) {
-        string[] expanded = new string[names.length + 1];
-        for (int i = 0; i < names.length; i++) {
-            expanded[i] = names[i];
-        }
-        expanded[names.length] = name;
-        names = expanded;
     }
 
     private void cancel_path_state_refresh () {
@@ -449,8 +450,16 @@ public class PathBreadcrumb : Box {
         }
     }
 
+    private void cancel_reveal () {
+        if (reveal_cancellable != null) {
+            reveal_cancellable.cancel ();
+            reveal_cancellable = null;
+        }
+    }
+
     public override void dispose () {
         cancel_path_state_refresh ();
+        cancel_reveal ();
 
         if (path_menu != null) {
             path_menu.unparent ();
@@ -538,15 +547,28 @@ public class PathBreadcrumb : Box {
         });
         action_group.add_action (copy_path_action);
 
-        open_path_action = new SimpleAction ("open-path", null);
-        open_path_action.activate.connect (() => {
-            open_path (current_path);
-        });
-        action_group.add_action (open_path_action);
+        if (treat_last_as_file) {
+            // Input breadcrumb: open the file itself
+            open_path_action = new SimpleAction ("open-path", null);
+            open_path_action.activate.connect (() => {
+                open_path (current_path);
+            });
+            action_group.add_action (open_path_action);
+        } else {
+            // Output breadcrumb: open last created output file
+            open_output_action = new SimpleAction ("open-output", null);
+            open_output_action.set_enabled (false);
+            open_output_action.activate.connect (() => {
+                if (last_output_file.length > 0) open_path (last_output_file);
+            });
+            action_group.add_action (open_output_action);
+        }
 
         reveal_path_action = new SimpleAction ("reveal-path", null);
         reveal_path_action.activate.connect (() => {
-            reveal_in_file_manager.begin (current_path);
+            cancel_reveal ();
+            reveal_cancellable = new Cancellable ();
+            reveal_in_file_manager.begin (current_path, reveal_cancellable);
         });
         action_group.add_action (reveal_path_action);
 
@@ -563,8 +585,15 @@ public class PathBreadcrumb : Box {
     private void setup_context_menu () {
         path_menu_model = new GLib.Menu ();
         path_menu_model.append ("Copy Path", "crumb.copy-path");
-        path_menu_model.append ("Open", "crumb.open-path");
-        path_menu_model.append ("Reveal in File Manager", "crumb.reveal-path");
+        if (treat_last_as_file) {
+            // Input file breadcrumb: open the file, reveal in file manager
+            path_menu_model.append ("Open Input File", "crumb.open-path");
+            path_menu_model.append ("Reveal in File Manager", "crumb.reveal-path");
+        } else {
+            // Output folder breadcrumb: open output file, reveal folder
+            path_menu_model.append ("Open Output File", "crumb.open-output");
+            path_menu_model.append ("Reveal in File Manager", "crumb.reveal-path");
+        }
 
         path_menu = new PopoverMenu.from_model (path_menu_model);
         path_menu.set_has_arrow (false);
@@ -591,7 +620,17 @@ public class PathBreadcrumb : Box {
         bool has_path = current_path.length > 0;
 
         copy_path_action.set_enabled (has_path);
-        open_path_action.set_enabled (has_path && current_path_info_ready && current_path_exists);
+
+        if (open_path_action != null) {
+            open_path_action.set_enabled (has_path && current_path_info_ready && current_path_exists);
+        }
+
+        if (open_output_action != null) {
+            bool output_exists = last_output_file.length > 0 &&
+                                 FileUtils.test (last_output_file, FileTest.EXISTS);
+            open_output_action.set_enabled (output_exists);
+        }
+
         reveal_path_action.set_enabled (
             has_path &&
             current_path_info_ready &&
@@ -605,7 +644,8 @@ public class PathBreadcrumb : Box {
         return display != null ? display.get_clipboard () : null;
     }
 
-    private static async void reveal_in_file_manager (string path) {
+    private static async void reveal_in_file_manager (string path,
+                                                       Cancellable? cancellable = null) {
         if (path.length == 0) return;
 
         var file = File.new_for_path (path);
@@ -616,10 +656,11 @@ public class PathBreadcrumb : Box {
                 FileAttribute.STANDARD_TYPE,
                 FileQueryInfoFlags.NONE,
                 Priority.DEFAULT,
-                null
+                cancellable
             );
             file_type = info.get_file_type ();
         } catch (Error e) {
+            if (e is IOError.CANCELLED) return;
             // Fall back to the best-effort parent open below.
         }
 
@@ -632,7 +673,7 @@ public class PathBreadcrumb : Box {
                 "org.freedesktop.FileManager1",
                 "/org/freedesktop/FileManager1",
                 "org.freedesktop.FileManager1",
-                null
+                cancellable
             );
             if (proxy.get_name_owner () == null) {
                 throw new IOError.FAILED ("No file manager owner available");
@@ -648,10 +689,11 @@ public class PathBreadcrumb : Box {
                 }),
                 DBusCallFlags.NONE,
                 -1,
-                null
+                cancellable
             );
             if (reply != null) return;
         } catch (Error e) {
+            if (e is IOError.CANCELLED) return;
             // Fall back to opening the containing folder when item reveal is unavailable.
         }
 

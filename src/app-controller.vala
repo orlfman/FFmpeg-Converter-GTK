@@ -162,6 +162,7 @@ public class AppController : Object {
         converter.conversion_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
+            file_pickers.output_entry.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
     }
@@ -172,6 +173,7 @@ public class AppController : Object {
         trim_tab.trim_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
+            file_pickers.output_entry.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
     }
@@ -230,6 +232,7 @@ public class AppController : Object {
         subtitles_tab.subtitle_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
+            file_pickers.output_entry.set_last_output_file (output_path);
             cancel_button.set_sensitive (false);
         });
     }
