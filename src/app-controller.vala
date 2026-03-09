@@ -340,6 +340,11 @@ public class AppController : Object {
                 }
             }
 
+            // Strip metadata for tiny targets — every byte counts
+            if (rec.strip_metadata) {
+                general_tab.preserve_metadata.set_active (false);
+            }
+
             status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KB"
                 .printf (rec.crf, rec.preset, rec.estimated_size_kb));
 

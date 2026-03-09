@@ -96,7 +96,7 @@ namespace FfprobeUtils {
                                 SpawnFlags.SEARCH_PATH,
                                 null, out stdout_buf, out stderr_buf, out status);
 
-            if (status == 0) {
+            if (status == 0 && stdout_buf != null && stdout_buf.strip ().length > 0) {
                 double dur = double.parse (stdout_buf.strip ());
                 if (dur > 0) return dur;
             }
@@ -109,9 +109,10 @@ namespace FfprobeUtils {
     /**
      * Probe the "title" tag from a media file's format-level metadata.
      *
-     * Checks both the format-level tags and stream-level tags for a title.
-     * Returns null if no title is found so callers can fall back to the
-     * filename.
+     * Queries both format-level and stream-level tags in a single ffprobe
+     * call.  Prefers the format title; falls back to the first video
+     * stream title.  Returns null if no title is found so callers can
+     * fall back to the filename.
      */
     public string? probe_title (string input_file) {
         try {
@@ -119,7 +120,8 @@ namespace FfprobeUtils {
                 AppSettings.get_default ().ffprobe_path,
                 "-v", "quiet",
                 "-print_format", "json",
-                "-show_entries", "format_tags=title",
+                "-show_entries", "format_tags=title:stream_tags=title",
+                "-select_streams", "v:0",
                 input_file
             };
             string stdout_text, stderr_text;
@@ -128,67 +130,42 @@ namespace FfprobeUtils {
             Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
                                 null, out stdout_text, out stderr_text, out status);
 
-            if (status == 0 && stdout_text != null && stdout_text.strip ().length > 0) {
-                var parser = new Json.Parser ();
-                parser.load_from_data (stdout_text);
+            if (status != 0 || stdout_text == null || stdout_text.strip ().length == 0)
+                return null;
 
-                var root = parser.get_root ();
-                if (root != null && root.get_node_type () == Json.NodeType.OBJECT) {
-                    var root_obj = root.get_object ();
+            var parser = new Json.Parser ();
+            parser.load_from_data (stdout_text);
 
-                    // Check format.tags.title
-                    if (root_obj.has_member ("format")) {
-                        var format = root_obj.get_object_member ("format");
-                        if (format != null && format.has_member ("tags")) {
-                            var tags = format.get_object_member ("tags");
-                            if (tags != null && tags.has_member ("title")) {
-                                string title = tags.get_string_member ("title");
-                                if (title != null && title.strip ().length > 0)
-                                    return title.strip ();
-                            }
-                        }
+            var root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT)
+                return null;
+
+            var root_obj = root.get_object ();
+
+            // Prefer format-level title
+            if (root_obj.has_member ("format")) {
+                var format = root_obj.get_object_member ("format");
+                if (format != null && format.has_member ("tags")) {
+                    var tags = format.get_object_member ("tags");
+                    if (tags != null && tags.has_member ("title")) {
+                        string title = tags.get_string_member ("title");
+                        if (title != null && title.strip ().length > 0)
+                            return title.strip ();
                     }
                 }
             }
-        } catch (Error e) {
-            // probe failed — caller uses fallback
-        }
 
-        // Second attempt: try stream-level tags
-        try {
-            string[] cmd2 = {
-                AppSettings.get_default ().ffprobe_path,
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_entries", "stream_tags=title",
-                "-select_streams", "v:0",
-                input_file
-            };
-            string stdout_text2, stderr_text2;
-            int status2;
-
-            Process.spawn_sync (null, cmd2, null, SpawnFlags.SEARCH_PATH,
-                                null, out stdout_text2, out stderr_text2, out status2);
-
-            if (status2 == 0 && stdout_text2 != null && stdout_text2.strip ().length > 0) {
-                var parser2 = new Json.Parser ();
-                parser2.load_from_data (stdout_text2);
-
-                var root2 = parser2.get_root ();
-                if (root2 != null && root2.get_node_type () == Json.NodeType.OBJECT) {
-                    var root_obj2 = root2.get_object ();
-                    if (root_obj2.has_member ("streams")) {
-                        var streams = root_obj2.get_array_member ("streams");
-                        if (streams != null && streams.get_length () > 0) {
-                            var stream = streams.get_object_element (0);
-                            if (stream != null && stream.has_member ("tags")) {
-                                var tags = stream.get_object_member ("tags");
-                                if (tags != null && tags.has_member ("title")) {
-                                    string title = tags.get_string_member ("title");
-                                    if (title != null && title.strip ().length > 0)
-                                        return title.strip ();
-                                }
-                            }
+            // Fall back to first video stream title
+            if (root_obj.has_member ("streams")) {
+                var streams = root_obj.get_array_member ("streams");
+                if (streams != null && streams.get_length () > 0) {
+                    var stream = streams.get_object_element (0);
+                    if (stream != null && stream.has_member ("tags")) {
+                        var tags = stream.get_object_member ("tags");
+                        if (tags != null && tags.has_member ("title")) {
+                            string title = tags.get_string_member ("title");
+                            if (title != null && title.strip ().length > 0)
+                                return title.strip ();
                         }
                     }
                 }

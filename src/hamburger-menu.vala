@@ -20,10 +20,14 @@ public class HamburgerMenu {
         playback_menu.append ("Show Output in File Manager", "app.open-output-folder");
 
         // ── Top-level menu ───────────────────────────────────────────────────
+        var quit_section = new GLib.Menu ();
+        quit_section.append ("Quit", "app.quit");
+
         var menu_model = new GLib.Menu ();
         menu_model.append_submenu ("Playback", playback_menu);
         menu_model.append ("Preferences", "app.preferences");
         menu_model.append ("About FFmpeg Converter GTK", "app.about");
+        menu_model.append_section (null, quit_section);
 
         // Create the menu button with the hamburger icon
         menu_button = new Gtk.MenuButton ();
@@ -41,6 +45,15 @@ public class HamburgerMenu {
                 AboutDialog.show_about (parent_window);
             });
             app.add_action (about_action);
+        }
+
+        // Quit — triggers close_request so the in-progress operation guard works
+        if (app.lookup_action ("quit") == null) {
+            var quit_action = new GLib.SimpleAction ("quit", null);
+            quit_action.activate.connect (() => {
+                parent_window.close ();
+            });
+            app.add_action (quit_action);
         }
 
         // Preferences

@@ -477,20 +477,33 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_cancel_clicked () {
+        string? message = cancel_current_operation ();
+        if (message != null) {
+            status_area.set_status (message);
+        }
+    }
+
+    /**
+     * Cancel whatever operation is currently running.
+     * Returns a status message describing what was cancelled, or null if idle.
+     */
+    private string? cancel_current_operation () {
+        string? message = null;
+
         switch (current_operation) {
             case ActiveOperation.SUBTITLE_APPLY:
                 subtitles_tab.cancel_operation ();
-                status_area.set_status ("⏹️ Subtitle operation cancelled by user.");
+                message = "⏹️ Subtitle operation cancelled by user.";
                 break;
 
             case ActiveOperation.TRIMMING:
                 trim_tab.cancel_trim ();
-                status_area.set_status ("⏹️ Export cancelled by user.");
+                message = "⏹️ Export cancelled by user.";
                 break;
 
             case ActiveOperation.CONVERTING:
                 converter.cancel ();
-                status_area.set_status ("⏹️ Conversion cancelled by user.");
+                message = "⏹️ Conversion cancelled by user.";
                 break;
 
             default:
@@ -499,6 +512,7 @@ public class MainWindow : Adw.ApplicationWindow {
 
         current_operation = ActiveOperation.IDLE;
         cancel_button.set_sensitive (false);
+        return message;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -557,22 +571,7 @@ public class MainWindow : Adw.ApplicationWindow {
      * on_cancel_clicked) and then closes the window.
      */
     private void force_cancel_and_close () {
-        switch (current_operation) {
-            case ActiveOperation.SUBTITLE_APPLY:
-                subtitles_tab.cancel_operation ();
-                break;
-            case ActiveOperation.TRIMMING:
-                trim_tab.cancel_trim ();
-                break;
-            case ActiveOperation.CONVERTING:
-                converter.cancel ();
-                break;
-            default:
-                break;
-        }
-
-        current_operation = ActiveOperation.IDLE;
-        cancel_button.set_sensitive (false);
+        cancel_current_operation ();
 
         // Allow a moment for the subprocess SIGTERM to land, then close.
         Timeout.add (150, () => {
