@@ -13,16 +13,17 @@ public class FilePickers : Box {
     // Known video file extensions for validating text/URI drops
     private const string[] VIDEO_EXTENSIONS = {
         ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv",
-        ".m4v", ".ts", ".mts", ".m2ts", ".vob", ".mpg", ".mpeg",
-        ".3gp", ".ogv", ".rm", ".rmvb", ".asf", ".divx", ".f4v",
-        ".y4m", ".ivf"
+        ".m4v", ".ts", ".mts", ".m2ts", ".m2v", ".vob", ".mpg",
+        ".mpeg", ".mp2", ".mxf", ".3gp", ".ogv", ".rm", ".rmvb",
+        ".asf", ".divx", ".f4v", ".y4m", ".ivf", ".av1", ".hevc",
+        ".vp9"
     };
 
     public FilePickers () {
         Object (orientation: Orientation.VERTICAL, spacing: 0);
 
         file_group = new Adw.PreferencesGroup ();
-        file_group.set_title ("Files");
+        file_group.set_title ("FFmpeg Converter GTK");
         label_size_group = new SizeGroup (SizeGroupMode.HORIZONTAL);
 
         // ── Input File row ───────────────────────────────────────────────────
@@ -172,6 +173,7 @@ public class FilePickers : Box {
 
         var icon = new Image.from_icon_name (icon_name);
         icon.set_valign (Align.CENTER);
+        icon.add_css_class ("file-picker-row-icon");
         row.append (icon);
 
         var label_box = new Box (Orientation.VERTICAL, 0);
@@ -181,14 +183,18 @@ public class FilePickers : Box {
         var title_label = new Label (title);
         title_label.set_xalign (0.0f);
         title_label.add_css_class ("heading");
+        title_label.add_css_class ("file-picker-row-label");
         label_box.append (title_label);
 
         row.append (label_box);
 
         path_widget.set_hexpand (true);
+        path_widget.add_css_class ("file-picker-breadcrumb");
         row.append (path_widget);
 
         browse_button.set_valign (Align.CENTER);
+        browse_button.add_css_class ("circular");
+        browse_button.add_css_class ("file-picker-browse");
         row.append (browse_button);
 
         return row;
@@ -257,24 +263,50 @@ public class FilePickers : Box {
         var css = new CssProvider ();
         css.load_from_string (
             ".path-breadcrumb {\n" +
-            "    border-radius: 9999px;\n" +
-            "    padding: 2px 6px;\n" +
-            "    background: alpha(currentColor, 0.04);\n" +
+            "    min-height: 30px;\n" +
+            "    border-radius: 10px;\n" +
+            "    padding: 2px 5px;\n" +
+            "    background: alpha(currentColor, 0.032);\n" +
+            "    box-shadow: inset 0 0 0 1px alpha(currentColor, 0.065);\n" +
             "}\n" +
             ".file-picker-row {\n" +
             "    min-height: 34px;\n" +
             "}\n" +
             ".file-picker-row > image {\n" +
-            "    opacity: 0.85;\n" +
+            "    opacity: 0.8;\n" +
+            "}\n" +
+            ".file-picker-row-icon {\n" +
+            "    opacity: 0.7;\n" +
+            "}\n" +
+            ".file-picker-row-label {\n" +
+            "    font-size: 0.95em;\n" +
+            "    font-weight: 600;\n" +
+            "    opacity: 0.88;\n" +
             "}\n" +
             ".path-breadcrumb.drop-highlight {\n" +
             "    box-shadow: 0 0 0 2px alpha(@accent_color, 0.35);\n" +
             "    background: alpha(@accent_color, 0.09);\n" +
             "}\n" +
+            ".path-breadcrumb .path-placeholder {\n" +
+            "    min-height: 24px;\n" +
+            "    padding-left: 9px;\n" +
+            "    padding-right: 9px;\n" +
+            "}\n" +
             ".path-breadcrumb .path-crumb {\n" +
             "    min-height: 24px;\n" +
-            "    padding: 1px 7px;\n" +
-            "    border-radius: 9999px;\n" +
+            "    padding: 0 8px;\n" +
+            "    border-radius: 6px;\n" +
+            "    background: transparent;\n" +
+            "    box-shadow: none;\n" +
+            "    color: inherit;\n" +
+            "    font-weight: 500;\n" +
+            "    transition: background-color 140ms ease, box-shadow 140ms ease;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb:hover {\n" +
+            "    background: alpha(currentColor, 0.05);\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb:active {\n" +
+            "    background: alpha(currentColor, 0.075);\n" +
             "}\n" +
             ".path-breadcrumb .path-overflow {\n" +
             "    min-width: 24px;\n" +
@@ -282,12 +314,38 @@ public class FilePickers : Box {
             "    padding-right: 4px;\n" +
             "}\n" +
             ".path-breadcrumb .path-crumb.path-current {\n" +
-            "    background: alpha(@accent_color, 0.12);\n" +
-            "    color: @accent_color;\n" +
-            "    font-weight: 600;\n" +
+            "    background: alpha(currentColor, 0.07);\n" +
+            "    box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);\n" +
+            "    font-weight: 700;\n" +
             "}\n" +
             ".path-breadcrumb .path-crumb.path-file {\n" +
-            "    background: alpha(currentColor, 0.06);\n" +
+            "    background: alpha(currentColor, 0.065);\n" +
+            "    box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb.path-file:hover {\n" +
+            "    background: alpha(currentColor, 0.09);\n" +
+            "}\n" +
+            ".path-breadcrumb .path-file-chip {\n" +
+            "    spacing: 5px;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-file-icon {\n" +
+            "    opacity: 0.72;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-separator {\n" +
+            "    opacity: 0.34;\n" +
+            "    margin-left: 0;\n" +
+            "    margin-right: 0;\n" +
+            "}\n" +
+            ".file-picker-breadcrumb {\n" +
+            "    margin-right: 2px;\n" +
+            "}\n" +
+            ".file-picker-browse {\n" +
+            "    min-width: 28px;\n" +
+            "    min-height: 28px;\n" +
+            "    opacity: 0.8;\n" +
+            "}\n" +
+            ".file-picker-browse:hover {\n" +
+            "    background: alpha(currentColor, 0.05);\n" +
             "}\n" +
             ".drop-active {\n" +
             "    outline: 2px dashed @accent_color;\n" +
