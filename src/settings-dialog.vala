@@ -12,7 +12,9 @@ using Adw;
 //    FFmpeg Binaries — custom paths for ffmpeg, ffprobe, and ffplay
 //    Smart Optimizer — target file size for content-aware encoding
 //
-//  Changes are persisted via AppSettings when the dialog closes.
+//  Most changes are persisted via AppSettings when the dialog closes.
+//  The default output directory is explicit-apply to avoid clobbering the
+//  session-only output folder selected in the main window.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class SettingsDialog : Adw.PreferencesDialog {
@@ -24,6 +26,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     // ── Output directory ──────────────────────────────────────────────────────
     private Entry output_dir_entry;
+    private Button output_dir_apply_btn;
+    private string saved_output_dir = "";
 
     // ── General settings ────────────────────────────────────────────────────
     private Adw.ComboRow name_mode_combo;
@@ -471,7 +475,6 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         var row = new Adw.ActionRow ();
         row.set_title ("Directory");
-        row.set_subtitle ("Where finished files are saved by default");
         row.set_icon_name ("folder-open-symbolic");
 
         output_dir_entry = new Entry ();
@@ -491,14 +494,29 @@ public class SettingsDialog : Adw.PreferencesDialog {
         });
         row.add_suffix (browse_btn);
 
+        output_dir_apply_btn = new Button.from_icon_name ("object-select-symbolic");
+        output_dir_apply_btn.set_tooltip_text ("Save as default output directory");
+        output_dir_apply_btn.add_css_class ("flat");
+        output_dir_apply_btn.add_css_class ("suggested-action");
+        output_dir_apply_btn.set_valign (Align.CENTER);
+        output_dir_apply_btn.set_sensitive (false);
+        output_dir_apply_btn.clicked.connect (() => {
+            apply_output_directory_setting ();
+        });
+        row.add_suffix (output_dir_apply_btn);
+
         var clear_btn = new Button.from_icon_name ("edit-clear-symbolic");
-        clear_btn.set_tooltip_text ("Clear — save alongside input file");
+        clear_btn.set_tooltip_text ("Clear the staged default output directory");
         clear_btn.add_css_class ("flat");
         clear_btn.set_valign (Align.CENTER);
         clear_btn.clicked.connect (() => {
             output_dir_entry.set_text ("");
         });
         row.add_suffix (clear_btn);
+
+        output_dir_entry.changed.connect (() => {
+            update_output_dir_apply_state ();
+        });
 
         group.add (row);
         page.add (group);
@@ -667,7 +685,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
         string ffplay = s.ffplay_path;
         ffplay_entry.set_text ((ffplay == "ffplay") ? "" : ffplay);
 
-        output_dir_entry.set_text (s.default_output_dir);
+        saved_output_dir = s.default_output_dir;
+        output_dir_entry.set_text (saved_output_dir);
+        update_output_dir_apply_state ();
 
         // General settings
         name_mode_combo.set_selected (mode_to_index (s.output_name_mode));
@@ -706,8 +726,6 @@ public class SettingsDialog : Adw.PreferencesDialog {
         string ffplay_val = ffplay_entry.get_text ().strip ();
         s.ffplay_path = (ffplay_val.length > 0) ? ffplay_val : "ffplay";
 
-        s.default_output_dir = output_dir_entry.get_text ().strip ();
-
         // General settings
         s.output_name_mode = index_to_mode (name_mode_combo.get_selected ());
         s.output_custom_name = custom_name_entry.get_text ().strip ();
@@ -718,5 +736,25 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.smart_optimizer_strip_audio = strip_audio_switch.get_active ();
 
         s.save ();
+    }
+
+    private void update_output_dir_apply_state () {
+        if (output_dir_apply_btn == null) return;
+
+        string staged = output_dir_entry.get_text ().strip ();
+        bool changed = staged != saved_output_dir;
+        output_dir_apply_btn.set_sensitive (changed);
+    }
+
+    private void apply_output_directory_setting () {
+        string staged = output_dir_entry.get_text ().strip ();
+        var s = AppSettings.get_default ();
+
+        s.default_output_dir = staged;
+        s.save ();
+        s.default_output_dir_applied (staged);
+
+        saved_output_dir = staged;
+        update_output_dir_apply_state ();
     }
 }

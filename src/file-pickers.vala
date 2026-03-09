@@ -2,12 +2,13 @@ using Gtk;
 using Adw;
 
 public class FilePickers : Box {
-    public Entry input_entry { get; private set; }
-    public Entry output_entry { get; private set; }
+    public PathBreadcrumb input_entry { get; private set; }
+    public PathBreadcrumb output_entry { get; private set; }
 
     private Adw.PreferencesGroup file_group;
-    private Adw.ActionRow input_row;
-    private Adw.ActionRow output_row;
+    private Box input_row;
+    private Box output_row;
+    private SizeGroup label_size_group;
 
     // Known video file extensions for validating text/URI drops
     private const string[] VIDEO_EXTENSIONS = {
@@ -22,50 +23,41 @@ public class FilePickers : Box {
 
         file_group = new Adw.PreferencesGroup ();
         file_group.set_title ("Files");
+        label_size_group = new SizeGroup (SizeGroupMode.HORIZONTAL);
 
         // ── Input File row ───────────────────────────────────────────────────
-        input_row = new Adw.ActionRow ();
-        input_row.set_title ("Input File");
-        input_row.set_subtitle ("Select a video file");
-        input_row.add_prefix (new Gtk.Image.from_icon_name ("video-x-generic-symbolic"));
-
-        input_entry = new Entry ();
-        input_entry.set_placeholder_text ("No file selected");
-        input_entry.set_editable (false);
-        input_entry.set_hexpand (true);
-        input_entry.set_valign (Align.CENTER);
-        input_entry.set_width_chars (48);
-        input_row.add_suffix (input_entry);
+        input_entry = new PathBreadcrumb ("No file selected", true);
 
         var input_browse = new Button.from_icon_name ("document-open-symbolic");
         input_browse.set_tooltip_text ("Select a file");
         input_browse.add_css_class ("flat");
         input_browse.set_valign (Align.CENTER);
         input_browse.clicked.connect (on_input_browse_clicked);
-        input_row.add_suffix (input_browse);
+
+        input_row = build_file_row (
+            "video-x-generic-symbolic",
+            "Input File",
+            input_entry,
+            input_browse
+        );
 
         file_group.add (input_row);
 
         // ── Output Folder row ────────────────────────────────────────────────
-        output_row = new Adw.ActionRow ();
-        output_row.set_title ("Output Folder");
-        output_row.set_subtitle ("Output location");
-        output_row.add_prefix (new Gtk.Image.from_icon_name ("folder-symbolic"));
-
-        output_entry = new Entry ();
-        output_entry.set_placeholder_text ("Same as input");
-        output_entry.set_editable (false);
-        output_entry.set_hexpand (true);
-        output_entry.set_valign (Align.CENTER);
-        output_entry.set_width_chars (48);
-        output_row.add_suffix (output_entry);
+        output_entry = new PathBreadcrumb ("Same as input");
 
         var output_browse = new Button.from_icon_name ("folder-open-symbolic");
         output_browse.set_tooltip_text ("Output location");
         output_browse.add_css_class ("flat");
         output_browse.set_valign (Align.CENTER);
         output_browse.clicked.connect (on_output_browse_clicked);
-        output_row.add_suffix (output_browse);
+
+        output_row = build_file_row (
+            "folder-symbolic",
+            "Output Folder",
+            output_entry,
+            output_browse
+        );
 
         file_group.add (output_row);
         append (file_group);
@@ -76,12 +68,13 @@ public class FilePickers : Box {
             output_entry.set_text (default_dir);
         }
 
-        // Update the output entry when settings change (e.g. user sets a new
-        // default output directory in preferences)
-        AppSettings.get_default ().settings_changed.connect (() => {
-            string dir = AppSettings.get_default ().default_output_dir;
+        // Only explicit "apply default output directory" actions in
+        // Preferences should push a new value into the main window.
+        AppSettings.get_default ().default_output_dir_applied.connect ((dir) => {
             if (dir.length > 0 && FileUtils.test (dir, FileTest.IS_DIR)) {
                 output_entry.set_text (dir);
+            } else if (dir.length == 0) {
+                output_entry.set_text ("");
             }
         });
 
@@ -166,6 +159,41 @@ public class FilePickers : Box {
         inject_drop_css ();
     }
 
+    private Box build_file_row (string icon_name,
+                                string title,
+                                Widget path_widget,
+                                Widget browse_button) {
+        var row = new Box (Orientation.HORIZONTAL, 6);
+        row.add_css_class ("file-picker-row");
+        row.set_margin_start (12);
+        row.set_margin_end (12);
+        row.set_margin_top (2);
+        row.set_margin_bottom (2);
+
+        var icon = new Image.from_icon_name (icon_name);
+        icon.set_valign (Align.CENTER);
+        row.append (icon);
+
+        var label_box = new Box (Orientation.VERTICAL, 0);
+        label_box.set_valign (Align.CENTER);
+        label_size_group.add_widget (label_box);
+
+        var title_label = new Label (title);
+        title_label.set_xalign (0.0f);
+        title_label.add_css_class ("heading");
+        label_box.append (title_label);
+
+        row.append (label_box);
+
+        path_widget.set_hexpand (true);
+        row.append (path_widget);
+
+        browse_button.set_valign (Align.CENTER);
+        row.append (browse_button);
+
+        return row;
+    }
+
     // ── Drop highlight — covers the whole preferences group card ─────────
 
     private void show_drop_highlight () {
@@ -219,7 +247,7 @@ public class FilePickers : Box {
      * Inject CSS for visual drop-highlight effects.
      *
      * Two-level feedback:
-     *  1. The entry itself gets an accent border + glow
+     *  1. The breadcrumb itself gets an accent border + glow
      *  2. The entire FilePickers box gets a dashed accent outline + tint
      */
     private static void inject_drop_css () {
@@ -228,13 +256,39 @@ public class FilePickers : Box {
 
         var css = new CssProvider ();
         css.load_from_string (
-            /* Entry-level highlight */
-            "entry.drop-highlight {\n" +
-            "    border-color: @accent_color;\n" +
-            "    box-shadow: 0 0 0 2px alpha(@accent_color, 0.35);\n" +
-            "    transition: border-color 150ms ease, box-shadow 150ms ease;\n" +
+            ".path-breadcrumb {\n" +
+            "    border-radius: 9999px;\n" +
+            "    padding: 2px 6px;\n" +
+            "    background: alpha(currentColor, 0.04);\n" +
             "}\n" +
-            /* Widget-level highlight — dashed outline around the whole group */
+            ".file-picker-row {\n" +
+            "    min-height: 34px;\n" +
+            "}\n" +
+            ".file-picker-row > image {\n" +
+            "    opacity: 0.85;\n" +
+            "}\n" +
+            ".path-breadcrumb.drop-highlight {\n" +
+            "    box-shadow: 0 0 0 2px alpha(@accent_color, 0.35);\n" +
+            "    background: alpha(@accent_color, 0.09);\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb {\n" +
+            "    min-height: 24px;\n" +
+            "    padding: 1px 7px;\n" +
+            "    border-radius: 9999px;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-overflow {\n" +
+            "    min-width: 24px;\n" +
+            "    padding-left: 4px;\n" +
+            "    padding-right: 4px;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb.path-current {\n" +
+            "    background: alpha(@accent_color, 0.12);\n" +
+            "    color: @accent_color;\n" +
+            "    font-weight: 600;\n" +
+            "}\n" +
+            ".path-breadcrumb .path-crumb.path-file {\n" +
+            "    background: alpha(currentColor, 0.06);\n" +
+            "}\n" +
             ".drop-active {\n" +
             "    outline: 2px dashed @accent_color;\n" +
             "    outline-offset: 4px;\n" +

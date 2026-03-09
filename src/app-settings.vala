@@ -68,6 +68,7 @@ public class AppSettings : Object {
 
     // ── Signal: emitted after settings are saved ──────────────────────────────
     public signal void settings_changed ();
+    public signal void default_output_dir_applied (string path);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR — private

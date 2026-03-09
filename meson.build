@@ -28,6 +28,7 @@ sources = files(
   'src/general-tab.vala',
   'src/converter.vala',
   'src/file-pickers.vala',
+  'src/path-breadcrumb.vala',
   'src/status-area.vala',
   'src/console-tab.vala',
   'src/filter-builder.vala',
