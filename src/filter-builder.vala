@@ -14,16 +14,38 @@ namespace FilterBuilder {
         return Math.fabs (a - b) < EPSILON;
     }
 
-    public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false) {
+    private string[] get_rotation_filters (GeneralTab tab) {
         string[] filters = {};
-
-        // 1. Rotation / Flip
         string rot = get_dropdown_text (tab.rotate_combo);
         if (rot == Rotation.CW_90) filters += "transpose=1";
         else if (rot == Rotation.CCW_90) filters += "transpose=2";
         else if (rot == Rotation.ROTATE_180) filters += "transpose=1,transpose=1";
         else if (rot == Rotation.HORIZONTAL_FLIP) filters += "hflip";
         else if (rot == Rotation.VERTICAL_FLIP) filters += "vflip";
+        return filters;
+    }
+
+    public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false,
+                                               string codec_name = "") {
+        string[] filters = {};
+
+        // 1. Rotation / Flip
+        string[] rot_filters = get_rotation_filters (tab);
+        bool has_vflip = false;
+        foreach (string f in rot_filters) {
+            filters += f;
+            if (f == "vflip") has_vflip = true;
+        }
+
+        // SVT-AV1 workaround: vflip produces frames with negative line strides
+        // which SVT-AV1's API rejects (EB_ErrorBadParameter).  A format=
+        // filter alone is not enough — ffmpeg's format filter is a no-op when
+        // the input already matches (e.g. yuv420p→yuv420p), so negative strides
+        // pass through.  scale=iw:ih forces swscale to allocate a new buffer
+        // with positive strides regardless of pixel format.
+        if (has_vflip && codec_name.down ().contains ("svt")) {
+            filters += "scale=iw:ih";
+        }
 
         // 2. Crop (skipped when the Crop & Trim tab provides its own)
         if (!skip_crop && tab.crop_check.active) {
@@ -112,7 +134,7 @@ namespace FilterBuilder {
             filters += "format=" + pixfmt;
         }
 
-        // Color Correction
+        // 9. Color Correction
         string cc = tab.get_color_filter ();
         if (cc.length > 0)
             filters += cc;
@@ -225,12 +247,7 @@ namespace FilterBuilder {
         string[] filters = {};
 
         // 1. Rotation / Flip (must come first)
-        string rot = get_dropdown_text (tab.rotate_combo);
-        if (rot == Rotation.CW_90) filters += "transpose=1";
-        else if (rot == Rotation.CCW_90) filters += "transpose=2";
-        else if (rot == Rotation.ROTATE_180) filters += "transpose=1,transpose=1";
-        else if (rot == Rotation.HORIZONTAL_FLIP) filters += "hflip";
-        else if (rot == Rotation.VERTICAL_FLIP) filters += "vflip";
+        foreach (string f in get_rotation_filters (tab)) filters += f;
 
         // 2. Cropdetect
         filters += "cropdetect=24:2:0";

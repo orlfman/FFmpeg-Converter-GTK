@@ -290,7 +290,7 @@ public class AppController : Object {
 
         // Video filter chain — calibration must encode at the same
         // resolution/crop/fps as the actual output
-        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
+        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab, false, codec);
 
         // Effective duration — if seek/time are set, the encode is shorter
         if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {

@@ -647,7 +647,9 @@ public class TrimRunner : Object {
         }
 
         if (general_tab != null) {
-            string general_vf = FilterBuilder.build_video_filter_chain (general_tab, seg.has_crop ());
+            string codec_name = (reencode_builder != null) ? reencode_builder.get_codec_name () : "";
+            string general_vf = FilterBuilder.build_video_filter_chain (general_tab, seg.has_crop (),
+                                                                        codec_name);
             if (general_vf.length > 0) {
                 filters += general_vf;
             }

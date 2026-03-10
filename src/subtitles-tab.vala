@@ -1139,7 +1139,8 @@ public class SubtitlesTab : Box {
 
         string[] audio_args = codec_tab.get_audio_args ();
         string vf = (general_tab != null)
-            ? FilterBuilder.build_video_filter_chain (general_tab) : "";
+            ? FilterBuilder.build_video_filter_chain (general_tab, false,
+                                                      builder.get_codec_name ()) : "";
         string af = (general_tab != null)
             ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
         bool preserve_meta = (general_tab != null) ? general_tab.is_preserve_metadata () : false;

@@ -536,7 +536,8 @@ public class TrimTab : Box, ICodecTab {
             // ── 2. Run SmartOptimizer on the temp file ─────────────────────
             var ctx = OptimizationContext ();
             if (general_tab != null) {
-                ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab);
+                ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab, false,
+                                                                               preferred_codec);
             }
             // Audio budget is determined by the optimizer based on size tier.
 

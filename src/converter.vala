@@ -213,7 +213,8 @@ public class Converter : Object {
         config.passlog_base = plog;
 
         // Filters
-        config.video_filters = FilterBuilder.build_video_filter_chain (general_tab);
+        config.video_filters = FilterBuilder.build_video_filter_chain (general_tab, false,
+                                                                       builder.get_codec_name ());
         config.audio_filters = FilterBuilder.build_audio_filter_chain (general_tab);
 
         // Codec
