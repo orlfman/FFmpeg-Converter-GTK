@@ -37,6 +37,18 @@ public class ExternalSubtitle : Object {
     public string title      { get; set; default = ""; }
     public bool   is_default { get; set; default = false; }
     public bool   is_forced  { get; set; default = false; }
+    public bool   is_bitmap  { get; set; default = false; }
+
+    /**
+     * Guess whether a subtitle file is bitmap-based from its extension.
+     * .sup = PGS (Blu-ray bitmap), .idx/.sub pair = VobSub (DVD bitmap).
+     * Note: .sub alone is ambiguous (could be MicroDVD text) — defaults to
+     * bitmap since VobSub is far more common for that extension.
+     */
+    public static bool guess_bitmap_from_path (string path) {
+        string lower = path.down ();
+        return lower.has_suffix (".sup") || lower.has_suffix (".sub");
+    }
 
     public string display_label () {
         string basename = Path.get_basename (file_path);
@@ -248,6 +260,102 @@ public class SubtitlesRunner : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  EXTRACT ALL — Pull every subtitle track to individual files
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Extract all subtitle tracks using Copy Original (native codec).
+     * Each track is saved as: {output_dir}/{base}.{lang}.track{N}.{ext}
+     *
+     * @param input_file   Source video
+     * @param output_dir   Directory to write extracted files
+     * @param base_name    Filename stem (no extension) for output files
+     * @param streams      The subtitle streams to extract
+     */
+    public void extract_all_subtitles (string input_file,
+                                       string output_dir,
+                                       string base_name,
+                                       GenericArray<SubtitleStream> streams) {
+        runner.reset ();
+        report_status (@"🔄 Extracting all $(streams.length) subtitle tracks…");
+
+        // Snapshot streams for background thread
+        var snap = new GenericArray<SubtitleStream> ();
+        for (int i = 0; i < streams.length; i++)
+            snap.add (streams[i]);
+
+        new Thread<void> ("subtitle-extract-all", () => {
+            int success = 0;
+            int failed = 0;
+
+            for (int i = 0; i < snap.length; i++) {
+                if (runner.is_cancelled ()) {
+                    report_status (@"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                    return;
+                }
+
+                var s = snap[i];
+                string ext = native_extension_for_codec (s.codec_name.down ());
+                string lang_part = (s.language.length > 0 && s.language != "und")
+                    ? @".$(s.language)" : "";
+                string out_path = Path.build_filename (
+                    output_dir, @"$(base_name)$(lang_part).track$(s.sub_index)$(ext)");
+
+                report_status (@"🔄 Extracting track #$(s.sub_index) ($(i + 1)/$(snap.length))…");
+
+                string[] cmd = {
+                    AppSettings.get_default ().ffmpeg_path, "-y",
+                    "-i", input_file,
+                    "-map", @"0:s:$(s.sub_index)",
+                    "-c:s", "copy",
+                    out_path
+                };
+
+                log_line (@"=== Extract All — Track #$(s.sub_index) ===");
+                log_line (string.joinv (" ", cmd));
+
+                int exit = runner.execute (cmd, (line) => {
+                    log_line (line);
+                });
+
+                if (exit == 0) {
+                    success++;
+                } else {
+                    log_line (@"⚠ Track #$(s.sub_index) failed (exit $exit), skipping.");
+                    failed++;
+                }
+            }
+
+            if (runner.is_cancelled ()) {
+                report_status (@"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                return;
+            }
+
+            string msg = @"✅ Extracted $success of $(snap.length) subtitle tracks";
+            if (failed > 0) msg += @" ($failed failed)";
+            msg += @"\n\nSaved to:\n$output_dir";
+            report_status (msg);
+
+            Idle.add (() => {
+                operation_done (output_dir);
+                return Source.REMOVE;
+            });
+        });
+    }
+
+    /** Map a subtitle codec name to its native file extension. */
+    public static string native_extension_for_codec (string codec) {
+        if (codec == "subrip" || codec == "srt")              return ".srt";
+        if (codec == "ass" || codec == "ssa")                  return ".ass";
+        if (codec == "webvtt")                                 return ".vtt";
+        if (codec == "mov_text")                               return ".srt";
+        if (codec == "hdmv_pgs_subtitle" || codec == "pgssub") return ".sup";
+        if (codec == "dvd_subtitle" || codec == "dvdsub")      return ".sub";
+        if (codec == "dvb_subtitle" || codec == "dvbsub")      return ".sub";
+        return ".srt";
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  REMUX — Apply subtitle changes (add/remove/reorder) without re-encoding
     //
     //  Copies video and audio streams untouched; only subtitle streams are
@@ -261,6 +369,14 @@ public class SubtitlesRunner : Object {
                                  GenericArray<int> final_order) {
         runner.reset ();
         report_status ("🔄 Applying subtitle changes…");
+
+        // Create tracker on main thread (GTK widgets must not be touched from bg)
+        ProgressTracker? tracker = null;
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_pulse ();
+        }
 
         // Snapshot all data for the background thread
         var snap_existing = new GenericArray<SubtitleStream> ();
@@ -276,7 +392,7 @@ public class SubtitlesRunner : Object {
             snap_order.add (final_order[i]);
 
         new Thread<void> ("subtitle-remux", () => {
-            run_remux (input_file, output_path, snap_existing, snap_added, snap_order);
+            run_remux (input_file, output_path, snap_existing, snap_added, snap_order, tracker);
         });
     }
 
@@ -284,7 +400,16 @@ public class SubtitlesRunner : Object {
                             string output_path,
                             GenericArray<SubtitleStream> existing,
                             GenericArray<ExternalSubtitle> added,
-                            GenericArray<int> order) {
+                            GenericArray<int> order,
+                            ProgressTracker? tracker) {
+
+        // Probe duration for progress tracking
+        double duration = probe_duration (input_file);
+        if (tracker != null) {
+            if (duration > 0) {
+                tracker.switch_to_determinate ();
+            }
+        }
 
         // Build command:
         //   ffmpeg -y -i input [-i sub1.srt] [-i sub2.ass]
@@ -409,6 +534,8 @@ public class SubtitlesRunner : Object {
             meta_idx++;
         }
 
+        cmd += "-progress";
+        cmd += "pipe:2";
         cmd += output_path;
 
         log_line ("=== Subtitle Remux ===");
@@ -416,11 +543,31 @@ public class SubtitlesRunner : Object {
 
         bool saw_format_mismatch = false;
         int exit = runner.execute (cmd, (line) => {
-            log_line (line);
+            if (ConversionUtils.should_log_ffmpeg_line (line)) {
+                log_line (line);
+            }
+
             if (line.contains ("only possible from text to text or bitmap to bitmap")) {
                 saw_format_mismatch = true;
             }
+
+            // Progress parsing
+            if (tracker != null && duration > 0) {
+                double current = parse_progress_time (line);
+                if (current >= 0) {
+                    tracker.update_from_time (current, duration, 0.0, 100.0);
+                }
+            }
         });
+
+        // Cleanup tracker
+        if (tracker != null) {
+            if (runner.is_cancelled ()) {
+                tracker.hide_cancelled ();
+            } else {
+                tracker.hide ();
+            }
+        }
 
         if (runner.is_cancelled ()) {
             report_status ("⏹️ Remux cancelled.");
@@ -726,14 +873,19 @@ public class SubtitlesRunner : Object {
     /**
      * Escape a file path for use inside FFmpeg's subtitles= filter option.
      *
-     * FFmpeg filter option syntax treats \, :, ', [, ], ;, = as special.
-     * Each must be backslash-escaped so the filter parser reads them literally.
+     * FFmpeg filter syntax has two escaping levels:
+     *  • Option-value level:  \  :  '  =       (separator/quoting chars)
+     *  • Filter-graph level:  [  ]  ;  ,       (link labels, chain/graph separators)
+     *
+     * All of these must be backslash-escaped so the filter parser reads
+     * the path literally.
      */
     private static string escape_filter_path (string path) {
         var sb = new StringBuilder ();
         for (int i = 0; i < path.length; i++) {
             uint8 c = path.data[i];
-            if (c == '\\' || c == ':' || c == '\'' || c == '[' || c == ']' || c == ';' || c == '=') {
+            if (c == '\\' || c == ':' || c == '\'' || c == '=' ||
+                c == '['  || c == ']' || c == ';'  || c == ',') {
                 sb.append_c ('\\');
             }
             sb.append_c ((char) c);

@@ -29,6 +29,7 @@ public class SubtitlesTab : Box {
     private GenericArray<SubtitleStream>   detected_streams = new GenericArray<SubtitleStream> ();
     private GenericArray<ExternalSubtitle> added_subtitles  = new GenericArray<ExternalSubtitle> ();
     private bool _is_busy = false;
+    private bool _updating_defaults = false;
 
     // ── Drag-and-drop state ──────────────────────────────────────────────────
     private int _drag_from_detected = -1;
@@ -42,6 +43,7 @@ public class SubtitlesTab : Box {
     private DropDown extract_track_combo;
     private DropDown extract_format_combo;
     private Button   extract_button;
+    private Button   extract_all_button;
     private DropDown mode_combo;
     private DropDown container_combo;
     private Adw.ActionRow container_compat_row;
@@ -216,11 +218,17 @@ public class SubtitlesTab : Box {
         default_sw.set_active (stream.is_default);
         default_sw.set_valign (Align.CENTER);
         default_sw.notify["active"].connect (() => {
+            if (_updating_defaults) return;
             if (default_sw.active) {
-                // Only one track should be default — clear all others first
+                _updating_defaults = true;
                 clear_all_defaults ();
+                stream.is_default = true;
+                rebuild_detected_group ();
+                rebuild_add_group ();
+                _updating_defaults = false;
+            } else {
+                stream.is_default = false;
             }
-            stream.is_default = default_sw.active;
         });
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
@@ -308,6 +316,17 @@ public class SubtitlesTab : Box {
         btn_row.add_suffix (extract_button);
         btn_row.set_activatable_widget (extract_button);
         group.add (btn_row);
+
+        // Extract All button
+        var all_row = new Adw.ActionRow ();
+        all_row.set_title ("Extract All Tracks");
+        all_row.set_subtitle ("Save every subtitle track to a folder using native formats");
+        extract_all_button = new Button.with_label ("Extract All");
+        extract_all_button.set_valign (Align.CENTER);
+        extract_all_button.set_sensitive (false);
+        all_row.add_suffix (extract_all_button);
+        all_row.set_activatable_widget (extract_all_button);
+        group.add (all_row);
 
         append (group);
     }
@@ -442,10 +461,17 @@ public class SubtitlesTab : Box {
         default_sw.set_active (ext.is_default);
         default_sw.set_valign (Align.CENTER);
         default_sw.notify["active"].connect (() => {
+            if (_updating_defaults) return;
             if (default_sw.active) {
+                _updating_defaults = true;
                 clear_all_defaults ();
+                ext.is_default = true;
+                rebuild_detected_group ();
+                rebuild_add_group ();
+                _updating_defaults = false;
+            } else {
+                ext.is_default = false;
             }
-            ext.is_default = default_sw.active;
         });
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
@@ -464,6 +490,20 @@ public class SubtitlesTab : Box {
         forced_row.add_suffix (forced_sw);
         forced_row.set_activatable_widget (forced_sw);
         expander.add_row (forced_row);
+
+        // ── Bitmap flag ─────────────────────────────────────────────────────
+        var bitmap_row = new Adw.ActionRow ();
+        bitmap_row.set_title ("Bitmap Subtitle");
+        bitmap_row.set_subtitle ("Enable for image-based formats (PGS/VobSub) — uses overlay filter for burn-in");
+        var bitmap_sw = new Switch ();
+        bitmap_sw.set_active (ext.is_bitmap);
+        bitmap_sw.set_valign (Align.CENTER);
+        bitmap_sw.notify["active"].connect (() => {
+            ext.is_bitmap = bitmap_sw.active;
+        });
+        bitmap_row.add_suffix (bitmap_sw);
+        bitmap_row.set_activatable_widget (bitmap_sw);
+        expander.add_row (bitmap_row);
 
         // ── Reorder ──────────────────────────────────────────────────────────
         var move_row = new Adw.ActionRow ();
@@ -613,6 +653,7 @@ public class SubtitlesTab : Box {
 
     private void connect_signals () {
         extract_button.clicked.connect (on_extract_clicked);
+        extract_all_button.clicked.connect (on_extract_all_clicked);
 
         runner.operation_done.connect ((path) => {
             _is_busy = false;
@@ -773,18 +814,48 @@ public class SubtitlesTab : Box {
     private string get_native_extension () {
         uint selected = extract_track_combo.get_selected ();
         if (selected >= detected_streams.length) return ".srt";
+        return SubtitlesRunner.native_extension_for_codec (
+            detected_streams[(int) selected].codec_name.down ());
+    }
 
-        string codec = detected_streams[(int) selected].codec_name.down ();
+    // ═════════════════════════════════════════════════════════════════════════
+    //  EXTRACT ALL HANDLER
+    // ═════════════════════════════════════════════════════════════════════════
 
-        if (codec == "subrip" || codec == "srt")              return ".srt";
-        if (codec == "ass" || codec == "ssa")                  return ".ass";
-        if (codec == "webvtt")                                 return ".vtt";
-        if (codec == "mov_text")                               return ".srt";
-        if (codec == "hdmv_pgs_subtitle" || codec == "pgssub") return ".sup";
-        if (codec == "dvd_subtitle" || codec == "dvdsub")      return ".sub";
-        if (codec == "dvb_subtitle" || codec == "dvbsub")      return ".sub";
+    private void on_extract_all_clicked () {
+        if (current_input_file == "" || detected_streams.length == 0) return;
 
-        return ".srt";  // safe fallback
+        // Use a folder chooser — all tracks are saved into the selected directory
+        var dialog = new FileDialog ();
+
+        // Default to output folder if set, otherwise input file's directory
+        string default_dir = Path.get_dirname (current_input_file);
+        if (file_pickers != null) {
+            string out_dir = file_pickers.output_entry.get_text ().strip ();
+            if (out_dir.length > 0) default_dir = out_dir;
+        }
+        dialog.set_initial_folder (File.new_for_path (default_dir));
+
+        dialog.select_folder.begin (get_root () as Gtk.Window, null, (obj, res) => {
+            try {
+                var folder = dialog.select_folder.end (res);
+                if (folder == null) return;
+                string? dir_path = folder.get_path ();
+                if (dir_path == null) return;
+
+                // Build base name from input filename
+                string basename = Path.get_basename (current_input_file);
+                int dot = basename.last_index_of_char ('.');
+                string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+
+                _is_busy = true;
+                update_ui_state ();
+                runner.extract_all_subtitles (
+                    current_input_file, dir_path, name_no_ext, detected_streams);
+            } catch (Error e) {
+                // User cancelled
+            }
+        });
     }
 
     /**
@@ -901,6 +972,7 @@ public class SubtitlesTab : Box {
                     s.title      = "";
                     s.is_default = false;
                     s.is_forced  = false;
+                    s.is_bitmap  = ExternalSubtitle.guess_bitmap_from_path (path);
                     added_subtitles.add (s);
                 }
 
@@ -1044,9 +1116,7 @@ public class SubtitlesTab : Box {
             int ext_idx = combo_sel - non_removed_count;
             if (ext_idx >= 0 && ext_idx < added_subtitles.length) {
                 external_sub_path = added_subtitles[ext_idx].file_path;
-                // Guess bitmap from extension
-                string lower = external_sub_path.down ();
-                is_bitmap = lower.has_suffix (".sup") || lower.has_suffix (".sub");
+                is_bitmap = added_subtitles[ext_idx].is_bitmap;
             }
         }
 
@@ -1223,7 +1293,7 @@ public class SubtitlesTab : Box {
             var s = detected_streams[i];
             string c = s.codec_name.length > 0 ? s.codec_name : "unknown";
             string l = (s.language.length > 0 && s.language != "und") ? s.language : "";
-            string lbl = @"#$(i) — $(c)";
+            string lbl = @"#$(s.sub_index) — $(c)";
             if (l.length > 0)       lbl += @" ($(l))";
             if (s.title.length > 0) lbl += @" — $(s.title)";
             labels += lbl;
@@ -1254,7 +1324,7 @@ public class SubtitlesTab : Box {
             if (s.marked_remove) continue;  // skip removed tracks
             string c = s.codec_name.length > 0 ? s.codec_name : "unknown";
             string l = (s.language.length > 0 && s.language != "und") ? s.language : "";
-            string lbl = @"Internal #$(i) — $(c)";
+            string lbl = @"Internal #$(s.sub_index) — $(c)";
             if (l.length > 0)       lbl += @" ($(l))";
             if (s.title.length > 0) lbl += @" — $(s.title)";
             labels += lbl;
@@ -1287,6 +1357,7 @@ public class SubtitlesTab : Box {
         bool has_added   = (added_subtitles.length > 0);
 
         extract_button.set_sensitive (has_file && has_streams && !_is_busy);
+        extract_all_button.set_sensitive (has_file && has_streams && !_is_busy);
 
         // Burn-in widgets
         burn_codec_combo.set_sensitive (!_is_busy);

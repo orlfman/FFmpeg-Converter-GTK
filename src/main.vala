@@ -597,7 +597,10 @@ public class MainWindow : Adw.ApplicationWindow {
         toast.set_timeout (5);
 
         // "Open Folder" action to reveal the file in the system file manager
-        string parent_dir = Path.get_dirname (output_path);
+        // If output_path is itself a directory (e.g. extract-all), open it directly
+        string parent_dir = FileUtils.test (output_path, FileTest.IS_DIR)
+            ? output_path
+            : Path.get_dirname (output_path);
         if (parent_dir.length > 0 && FileUtils.test (parent_dir, FileTest.IS_DIR)) {
             toast.set_button_label ("Open Folder");
             toast.button_clicked.connect (() => {
