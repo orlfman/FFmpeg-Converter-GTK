@@ -113,36 +113,45 @@ public class CropOverlay : Gtk.DrawingArea {
 
     /**
      * Set crop from an FFmpeg "W:H:X:Y" string.
+     * Returns true if the string was valid and applied, false otherwise.
      */
-    public void set_crop_string (string val) {
+    public bool set_crop_string (string val) {
         if (val.strip () == "" || val == "w:h:x:y") {
             clear_crop ();
-            return;
+            return true;
         }
 
         string clean = val.strip ();
         if (clean.has_prefix ("crop=")) clean = clean.substring (5);
 
         string[] parts = clean.split (":");
-        if (parts.length == 4) {
-            _crop_w = double.parse (parts[0]);
-            _crop_h = double.parse (parts[1]);
-            _crop_x = double.parse (parts[2]);
-            _crop_y = double.parse (parts[3]);
+        if (parts.length != 4) return false;
 
-            // Clamp to video bounds
-            if (_video_width > 0 && _video_height > 0) {
-                _crop_w = _crop_w.clamp (0, _video_width);
-                _crop_h = _crop_h.clamp (0, _video_height);
-                _crop_x = _crop_x.clamp (0, _video_width  - _crop_w);
-                _crop_y = _crop_y.clamp (0, _video_height - _crop_h);
-            }
+        double w = double.parse (parts[0]);
+        double h = double.parse (parts[1]);
+        double x = double.parse (parts[2]);
+        double y = double.parse (parts[3]);
 
-            _has_crop = (_crop_w > 0 && _crop_h > 0);
-            queue_draw ();
-            if (_has_crop)
-                crop_changed ((int) _crop_w, (int) _crop_h, (int) _crop_x, (int) _crop_y);
+        if (w <= 0 || h <= 0 || x < 0 || y < 0) return false;
+
+        _crop_w = w;
+        _crop_h = h;
+        _crop_x = x;
+        _crop_y = y;
+
+        // Clamp to video bounds
+        if (_video_width > 0 && _video_height > 0) {
+            _crop_w = _crop_w.clamp (0, _video_width);
+            _crop_h = _crop_h.clamp (0, _video_height);
+            _crop_x = _crop_x.clamp (0, _video_width  - _crop_w);
+            _crop_y = _crop_y.clamp (0, _video_height - _crop_h);
         }
+
+        _has_crop = (_crop_w > 0 && _crop_h > 0);
+        queue_draw ();
+        if (_has_crop)
+            crop_changed ((int) _crop_w, (int) _crop_h, (int) _crop_x, (int) _crop_y);
+        return true;
     }
 
     public void clear_crop () {

@@ -170,7 +170,11 @@ public class TrimRunner : Object {
 
             int exit = run_concat_filter_encode (output_path);
             if (exit != 0) {
-                report_error (@"$(operation_label) failed (exit code $exit).");
+                if (runner.is_cancelled ()) {
+                    report_cancelled ();
+                } else {
+                    report_error (@"$(operation_label) failed (exit code $exit).");
+                }
             } else {
                 last_output = output_path;
                 report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$output_path");
@@ -206,7 +210,7 @@ public class TrimRunner : Object {
 
             for (int i = 0; i < segments.length; i++) {
                 if (runner.is_cancelled ()) {
-                    report_status (@"⏹️ $(operation_label) cancelled.");
+                    report_cancelled ();
                     return;
                 }
 
@@ -263,7 +267,11 @@ public class TrimRunner : Object {
 
                 int exit = extract_segment (i, seg, seg_output);
                 if (exit != 0) {
-                    report_error (@"$seg_label extraction failed (exit code $exit).");
+                    if (runner.is_cancelled ()) {
+                        report_cancelled ();
+                    } else {
+                        report_error (@"$seg_label extraction failed (exit code $exit).");
+                    }
                     return;
                 }
 
@@ -282,7 +290,7 @@ public class TrimRunner : Object {
             } else {
                 // Multi-segment copy mode → demuxer concat
                 if (runner.is_cancelled ()) {
-                    report_status (@"⏹️ $(operation_label) cancelled.");
+                    report_cancelled ();
                     return;
                 }
 
@@ -297,7 +305,11 @@ public class TrimRunner : Object {
 
                 int concat_exit = concat_demuxer (segment_files, tmp_dir, concat_output);
                 if (concat_exit != 0) {
-                    report_error ("Concatenation failed (exit code %d).".printf (concat_exit));
+                    if (runner.is_cancelled ()) {
+                        report_cancelled ();
+                    } else {
+                        report_error ("Concatenation failed (exit code %d).".printf (concat_exit));
+                    }
                     return;
                 }
 
@@ -806,6 +818,21 @@ public class TrimRunner : Object {
         log_line (message);
     }
 
+    private void report_cancelled () {
+        string msg = @"$(operation_label) cancelled.";
+        Idle.add (() => {
+            if (status_label != null)
+                status_label.set_text (@"⏹️ $msg");
+            return Source.REMOVE;
+        });
+        log_line (@"⏹️ $msg");
+
+        Idle.add (() => {
+            export_failed (msg);
+            return Source.REMOVE;
+        });
+    }
+
     private void report_error (string message) {
         Idle.add (() => {
             if (status_label != null)
@@ -840,9 +867,7 @@ public class TrimRunner : Object {
     }
 
     private static string pad_number (int n) {
-        if (n < 10) return "00" + n.to_string ();
-        if (n < 100) return "0" + n.to_string ();
-        return n.to_string ();
+        return ConversionUtils.pad_segment_number (n);
     }
 
     private static void cleanup_dir (string path) {
@@ -851,7 +876,11 @@ public class TrimRunner : Object {
             string? name;
             while ((name = dir.read_name ()) != null) {
                 string full = Path.build_filename (path, name);
-                FileUtils.unlink (full);
+                if (FileUtils.test (full, FileTest.IS_DIR)) {
+                    cleanup_dir (full);
+                } else {
+                    FileUtils.unlink (full);
+                }
             }
             DirUtils.remove (path);
         } catch (Error e) {
@@ -860,27 +889,7 @@ public class TrimRunner : Object {
         }
     }
 
-    /**
-     * Sanitize a string for use as a filename component.
-     * Replaces filesystem-unsafe characters with underscores.
-     */
     private static string sanitize_filename (string name) {
-        var sb = new StringBuilder ();
-        unichar c;
-        int i = 0;
-        while (name.get_next_char (ref i, out c)) {
-            if (c == '/' || c == '\\' || c == ':' || c == '*'
-                || c == '?' || c == '"' || c == '<' || c == '>'
-                || c == '|' || c == '\0') {
-                sb.append_c ('_');
-            } else {
-                sb.append_unichar (c);
-            }
-        }
-        string result = sb.str.strip ();
-        while (result.has_suffix (".")) {
-            result = result.substring (0, result.length - 1);
-        }
-        return result.length > 0 ? result : "untitled";
+        return ConversionUtils.sanitize_segment_name (name);
     }
 }

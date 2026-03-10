@@ -286,4 +286,41 @@ namespace ConversionUtils {
         return line.contains ("Lsize=")  || line.contains ("Error")   ||
                line.contains ("Warning") || line.contains ("failed");
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SEGMENT HELPERS — shared by TrimTab and TrimRunner
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Sanitize a string for use as a filename component.
+     * Replaces filesystem-unsafe characters with underscores.
+     */
+    public string sanitize_segment_name (string name) {
+        var sb = new StringBuilder ();
+        unichar c;
+        int i = 0;
+        while (name.get_next_char (ref i, out c)) {
+            if (c == '/' || c == '\\' || c == ':' || c == '*'
+                || c == '?' || c == '"' || c == '<' || c == '>'
+                || c == '|' || c == '\0') {
+                sb.append_c ('_');
+            } else {
+                sb.append_unichar (c);
+            }
+        }
+        string result = sb.str.strip ();
+        while (result.has_suffix (".")) {
+            result = result.substring (0, result.length - 1);
+        }
+        return result.length > 0 ? result : "untitled";
+    }
+
+    /**
+     * Zero-pad a segment number to 3 digits (001, 012, 123).
+     */
+    public string pad_segment_number (int n) {
+        if (n < 10) return "00" + n.to_string ();
+        if (n < 100) return "0" + n.to_string ();
+        return n.to_string ();
+    }
 }

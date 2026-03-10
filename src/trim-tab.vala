@@ -276,20 +276,23 @@ public class TrimTab : Box, ICodecTab {
             return;
         }
 
-        // If global crop and Crop & Trim mode, stamp global crop onto any
-        // segment that doesn't already have its own
-        if (current_mode == Mode.TRIM_AND_CROP && !crop_scope_switch.active
-            && global_crop_value.strip ().length > 0) {
-            for (int i = 0; i < segments.length; i++) {
-                if (!segments[i].has_crop ()) {
-                    segments[i].crop_value = global_crop_value;
-                }
-            }
-        }
-
         var segs = new GenericArray<TrimSegment> ();
+
+        // If global crop and Crop & Trim mode, clone segments that need the
+        // global crop stamped so the original segments stay clean for re-export
+        bool stamp_global_crop = current_mode == Mode.TRIM_AND_CROP
+            && !crop_scope_switch.active
+            && global_crop_value.strip ().length > 0;
+
         for (int i = 0; i < segments.length; i++) {
-            segs.add (segments[i]);
+            if (stamp_global_crop && !segments[i].has_crop ()) {
+                var clone = new TrimSegment (segments[i].start_time, segments[i].end_time);
+                clone.label = segments[i].label;
+                clone.crop_value = global_crop_value;
+                segs.add (clone);
+            } else {
+                segs.add (segments[i]);
+            }
         }
 
         // Determine if any segment has a crop (forces re-encode)
@@ -695,9 +698,7 @@ public class TrimTab : Box, ICodecTab {
     }
 
     private static string pad_segment_number (int n) {
-        if (n < 10) return "00" + n.to_string ();
-        if (n < 100) return "0" + n.to_string ();
-        return n.to_string ();
+        return ConversionUtils.pad_segment_number (n);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -974,7 +975,16 @@ public class TrimTab : Box, ICodecTab {
         crop_entry.add_css_class ("monospace");
         crop_entry.activate.connect (() => {
             string val = crop_entry.get_text ().strip ();
-            player.crop_overlay.set_crop_string (val);
+            bool ok = player.crop_overlay.set_crop_string (val);
+            crop_entry.remove_css_class ("segment-valid");
+            crop_entry.remove_css_class ("segment-error");
+            if (ok) {
+                crop_entry.add_css_class ("segment-valid");
+                crop_entry.set_tooltip_text ("Applied");
+            } else {
+                crop_entry.add_css_class ("segment-error");
+                crop_entry.set_tooltip_text ("Invalid format — use W:H:X:Y with positive values");
+            }
         });
         entry_row.add_suffix (crop_entry);
         crop_group.add (entry_row);
@@ -1043,6 +1053,11 @@ public class TrimTab : Box, ICodecTab {
     }
 
     private void update_crop_display (string val, int w, int h, int x, int y) {
+        // Clear any stale validation feedback from manual entry
+        crop_entry.remove_css_class ("segment-valid");
+        crop_entry.remove_css_class ("segment-error");
+        crop_entry.set_tooltip_text (null);
+
         if (val == "") {
             crop_value_label.set_text ("No crop defined");
             crop_value_label.add_css_class ("dim-label");
@@ -1363,29 +1378,9 @@ public class TrimTab : Box, ICodecTab {
         rebuild_segment_rows ();
     }
 
-    /**
-     * Sanitize a chapter title for use as a filename component.
-     * Replaces filesystem-unsafe characters with underscores.
-     */
+    // sanitize_filename delegates to ConversionUtils.sanitize_segment_name
     private static string sanitize_filename (string name) {
-        var sb = new StringBuilder ();
-        unichar c;
-        int i = 0;
-        while (name.get_next_char (ref i, out c)) {
-            if (c == '/' || c == '\\' || c == ':' || c == '*'
-                || c == '?' || c == '"' || c == '<' || c == '>'
-                || c == '|' || c == '\0') {
-                sb.append_c ('_');
-            } else {
-                sb.append_unichar (c);
-            }
-        }
-        // Trim leading/trailing whitespace and dots (Windows compat)
-        string result = sb.str.strip ();
-        while (result.has_suffix (".")) {
-            result = result.substring (0, result.length - 1);
-        }
-        return result.length > 0 ? result : "untitled";
+        return ConversionUtils.sanitize_segment_name (name);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

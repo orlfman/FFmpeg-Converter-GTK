@@ -173,10 +173,15 @@ public class VideoPlayer : Box {
         picture.set_paintable (media);
 
         string probe_path = path;
+        Gtk.MediaFile probe_media = media;  // capture for staleness check
         new Thread<void> ("fps-probe", () => {
             double probed = FfprobeUtils.probe_input_fps (probe_path);
             Idle.add (() => {
-                _fps = probed;
+                // Guard: if the user loaded a different file while we were
+                // probing, discard the stale result.
+                if (media == probe_media) {
+                    _fps = probed;
+                }
                 return Source.REMOVE;
             });
         });
