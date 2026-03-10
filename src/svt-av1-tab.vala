@@ -200,8 +200,8 @@ public class SvtAv1Tab : BaseCodecTab {
         // CRF Value
         crf_row = new Adw.ActionRow ();
         crf_row.set_title ("CRF Value");
-        crf_row.set_subtitle ("Lower = better quality, larger file (1–63)");
-        crf_spin = new SpinButton.with_range (1, 63, 1);
+        crf_row.set_subtitle ("Lower = better quality, larger file (0–63, 0 = near-lossless)");
+        crf_spin = new SpinButton.with_range (0, 63, 1);
         crf_spin.set_value (28);
         crf_spin.set_valign (Align.CENTER);
         crf_row.add_suffix (crf_spin);
@@ -210,8 +210,8 @@ public class SvtAv1Tab : BaseCodecTab {
         // QP Value
         qp_row = new Adw.ActionRow ();
         qp_row.set_title ("QP Value");
-        qp_row.set_subtitle ("Fixed quantizer — simple quality control (1–63)");
-        qp_spin = new SpinButton.with_range (1, 63, 1);
+        qp_row.set_subtitle ("Fixed quantizer — simple quality control (0–63, 0 = near-lossless)");
+        qp_spin = new SpinButton.with_range (0, 63, 1);
         qp_spin.set_value (28);
         qp_spin.set_valign (Align.CENTER);
         qp_row.add_suffix (qp_spin);
@@ -631,7 +631,7 @@ public class SvtAv1Tab : BaseCodecTab {
     private void build_reset_button () {
         var reset_box = new Box (Orientation.HORIZONTAL, 0);
         reset_box.set_halign (Align.END);
-        reset_box.set_margin_top (8);
+        reset_box.set_margin_top (12);
 
         var reset_btn = new Button.with_label ("Reset to Defaults");
         reset_btn.add_css_class ("destructive-action");

@@ -48,14 +48,27 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         }
 
         // ── Rate Control ────────────────────────────────────────────────────
+        // SVT-AV1 CRF valid range is 1–63; CRF/QP 0 means lossless, which
+        // requires the svtav1-params lossless flag instead.
         string rc_mode = CodecUtils.get_dropdown_text (tab.rc_mode_combo);
+        bool lossless = false;
 
         if (rc_mode == RateControl.CRF) {
-            args += "-crf";
-            args += ((int) tab.crf_spin.get_value ()).to_string ();
+            int crf = (int) tab.crf_spin.get_value ();
+            if (crf == 0) {
+                lossless = true;
+            } else {
+                args += "-crf";
+                args += crf.to_string ();
+            }
         } else if (rc_mode == RateControl.QP) {
-            args += "-qp";
-            args += ((int) tab.qp_spin.get_value ()).to_string ();
+            int qp = (int) tab.qp_spin.get_value ();
+            if (qp == 0) {
+                lossless = true;
+            } else {
+                args += "-qp";
+                args += qp.to_string ();
+            }
         } else if (rc_mode == RateControl.VBR) {
             args += "-b:v";
             args += ((int) tab.vbr_bitrate_spin.get_value ()).to_string () + "k";
@@ -77,6 +90,9 @@ public class SvtAv1Builder : Object, ICodecBuilder {
 
         // ── SVT-AV1 Specific Parameters ─────────────────────────────────────
         string[] svt_params = {};
+
+        if (lossless)
+            svt_params += "lossless=1";
 
         int tune_sel = (int) tab.tune_combo.get_selected ();
         if (tune_sel > 0)

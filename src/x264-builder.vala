@@ -70,7 +70,7 @@ public class X264Builder : Object, ICodecBuilder {
             args += keyint;
         }
 
-        // ── x264opts ───────────────────────────────────────────────────────
+        // ── x264-params ──────────────────────────────────────────────────────
         string[] params = {};
 
         string ref_val = CodecUtils.get_dropdown_text (tab.ref_frames_combo);
@@ -165,7 +165,7 @@ public class X264Builder : Object, ICodecBuilder {
             params += "threads=" + threads;
 
         if (params.length > 0) {
-            args += "-x264opts";
+            args += "-x264-params";
             args += string.joinv (":", params);
         }
 

@@ -532,13 +532,13 @@ public class Vp9Tab : BaseCodecTab {
 
     private void update_rc_visibility () {
         string mode = get_dropdown_text (rc_mode_combo);
-        crf_row.set_visible (mode == "CRF");
-        cq_level_row.set_visible (mode == "Constrained Quality");
-        cq_bitrate_row.set_visible (mode == "Constrained Quality");
-        vbr_row.set_visible (mode == "VBR");
-        cbr_row.set_visible (mode == "CBR");
+        crf_row.set_visible (mode == RateControl.CRF);
+        cq_level_row.set_visible (mode == RateControl.CONSTRAINED_QUALITY);
+        cq_bitrate_row.set_visible (mode == RateControl.CONSTRAINED_QUALITY);
+        vbr_row.set_visible (mode == RateControl.VBR);
+        cbr_row.set_visible (mode == RateControl.CBR);
         // Two-pass for bitrate-targeting modes (CQ, VBR, CBR) — not pure CRF
-        bool can_two_pass = (mode != "CRF");
+        bool can_two_pass = (mode != RateControl.CRF);
         two_pass_row.set_visible (can_two_pass);
         if (!can_two_pass) {
             two_pass_switch.set_active (false);

@@ -214,8 +214,8 @@ public class X265Tab : BaseCodecTab {
         // ABR bitrate
         abr_row = new Adw.ActionRow ();
         abr_row.set_title ("Average Bitrate");
-        abr_row.set_subtitle ("Target average bitrate in kbps (100–10000)");
-        abr_bitrate_spin = new SpinButton.with_range (100, 10000, 100);
+        abr_row.set_subtitle ("Target average bitrate in kbps (100–50000)");
+        abr_bitrate_spin = new SpinButton.with_range (100, 50000, 100);
         abr_bitrate_spin.set_value (1000);
         abr_bitrate_spin.set_valign (Align.CENTER);
         abr_row.add_suffix (abr_bitrate_spin);
@@ -237,8 +237,8 @@ public class X265Tab : BaseCodecTab {
         // CBR bitrate
         cbr_row = new Adw.ActionRow ();
         cbr_row.set_title ("Constant Bitrate");
-        cbr_row.set_subtitle ("Fixed bitrate in kbps (100–10000)");
-        cbr_bitrate_spin = new SpinButton.with_range (100, 10000, 100);
+        cbr_row.set_subtitle ("Fixed bitrate in kbps (100–50000)");
+        cbr_bitrate_spin = new SpinButton.with_range (100, 50000, 100);
         cbr_bitrate_spin.set_value (1000);
         cbr_bitrate_spin.set_valign (Align.CENTER);
         cbr_row.add_suffix (cbr_bitrate_spin);
@@ -579,13 +579,13 @@ public class X265Tab : BaseCodecTab {
 
     private void update_rc_visibility () {
         string mode = get_dropdown_text (rc_mode_combo);
-        crf_row.set_visible (mode == "CRF");
-        qp_row.set_visible (mode == "QP");
-        abr_row.set_visible (mode == "ABR");
-        abr_vbv_row.set_visible (mode == "ABR");
-        cbr_row.set_visible (mode == "CBR");
+        crf_row.set_visible (mode == RateControl.CRF);
+        qp_row.set_visible (mode == RateControl.QP);
+        abr_row.set_visible (mode == RateControl.ABR);
+        abr_vbv_row.set_visible (mode == RateControl.ABR);
+        cbr_row.set_visible (mode == RateControl.CBR);
         // Two-pass only available for ABR and CBR
-        bool can_two_pass = (mode == "ABR" || mode == "CBR");
+        bool can_two_pass = (mode == RateControl.ABR || mode == RateControl.CBR);
         two_pass_row.set_visible (can_two_pass);
         if (!can_two_pass) {
             two_pass_switch.set_active (false);
