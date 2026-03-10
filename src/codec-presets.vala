@@ -762,11 +762,14 @@ public class CodecPresets : Object {
         // "best" is prohibitively slow with negligible visual gain.
         set_dropdown_by_label (tab.quality_combo, "good");
 
-        // Rate control
+        // Rate control — use pure VBR for two-pass hard size targets.
+        // Constrained Quality (CQ) has a CRF floor that can prevent the
+        // encoder from staying under the bitrate cap on complex content.
+        // VBR two-pass gives the encoder a clear bitrate target with no
+        // quality minimum fighting the size constraint.
         if (rec.two_pass && rec.target_bitrate_kbps > 0) {
-            tab.rc_mode_combo.set_selected (1);   // Constrained Quality
-            tab.cq_level_spin.set_value (rec.crf);
-            tab.cq_bitrate_spin.set_value (rec.target_bitrate_kbps);
+            tab.rc_mode_combo.set_selected (2);   // VBR
+            tab.vbr_bitrate_spin.set_value (rec.target_bitrate_kbps);
             tab.two_pass_switch.set_active (true);
         } else {
             tab.rc_mode_combo.set_selected (0);   // CRF

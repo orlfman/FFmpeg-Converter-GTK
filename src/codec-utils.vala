@@ -129,10 +129,11 @@ namespace CodecUtils {
             string speed_str = rec.preset.replace ("cpu-used ", "");
 
             if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                // Pure VBR two-pass for hard size targets — no CRF floor
+                // so the encoder can allocate bits strictly to hit the
+                // target bitrate without a quality minimum pulling it up.
                 args += "-b:v";
                 args += "%dk".printf (rec.target_bitrate_kbps);
-                args += "-crf";
-                args += rec.crf.to_string ();
             } else {
                 args += "-crf";
                 args += rec.crf.to_string ();

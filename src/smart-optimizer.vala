@@ -1,7 +1,8 @@
 // smart-optimizer.vala
 // Intelligent video size optimizer with content-aware encoding recommendations.
 //
-// Designed for 4chan/imageboard targets (≤4 MB, H.264/MP4 or VP9/WebM only).
+// Supports all target sizes from imageboard (≤4 MB) to large file reductions
+// (hundreds of MB), with tier-aware strategies for each range.
 //
 // Improvements over v1:
 //   - Two-point CRF calibration: measures THIS video's CRF↔size curve instead
@@ -59,15 +60,16 @@
 //     duration (accounting for seek/time trim) rather than the full file.
 //
 // v5 improvements:
-//   - Three-point CRF calibration: encodes samples at three CRF values
-//     (lo, mid, hi) instead of two, fitting a quadratic in log-space:
+//   - Four-point CRF calibration: encodes samples at four CRF values
+//     and fits a quadratic in log-space via least-squares:
 //       ln(size) = a + b·CRF + c·CRF²
-//     The quadratic term captures the CRF↔size curve's bend that the
-//     two-point exponential model missed, significantly improving accuracy
-//     when the predicted CRF falls between or beyond calibration points.
-//   - Graceful fallback: if the three-point system is degenerate (e.g. two
-//     points produced identical sizes), falls back to two-point exponential
-//     automatically.
+//     Four points overdetermine the 3-unknown model, so the least-squares
+//     fit averages out noise from individual samples — more robust than
+//     an exact 3-point solve. The quadratic term captures the CRF↔size
+//     curve's bend that the two-point exponential model missed.
+//   - Graceful fallback: if the least-squares system is degenerate (e.g.
+//     two points produced identical sizes), falls back to two-point
+//     exponential automatically.
 //   - Quadratic root selection: when solving c·x²+b·x+(a-ln(target))=0,
 //     picks the root closest to the valid CRF range. Handles edge cases
 //     including negative discriminant (target unreachable by the curve).
@@ -81,6 +83,42 @@
 //     metadata based on size tier. Prevents "just barely over target" results.
 //   - Metadata stripping for TINY tier: disables preserve_metadata when
 //     targeting ≤25 MB — every byte counts at imageboard sizes.
+//
+// v7 improvements:
+//   - Source-aware two-pass: when target_mb < source file size, two-pass
+//     bitrate targeting is forced regardless of tier. CRF mode cannot
+//     guarantee a size reduction — only bitrate targeting can.
+//   - CRF overshoot detection: if the CRF estimate exceeds the target by
+//     >5%, two-pass is forced even when the source size is unknown.
+//   - XLARGE tier no longer unconditionally skips two-pass. It now checks
+//     confidence (threshold 0.60) and defers to the reduction/overshoot
+//     checks above. Prevents 400MB→1.2GB blowups on large targets.
+//   - Source file size probed from ffprobe format.size with stat fallback,
+//     stored in SmartOptimizerVideoInfo.file_size_bytes.
+//   - Duration-scaled sampling: videos >10 min now sample up to 8 segments
+//     (64s) instead of 4 (32s), improving prediction accuracy on long or
+//     variable-content videos.
+//   - Source bitrate sanity check: computes the source's effective video
+//     bitrate and compares it against the CRF estimate. If the model
+//     predicts a larger output than the source while the target is smaller,
+//     confidence is reduced to force two-pass.
+//   - Multi-segment verification: verification encode now uses 2–3 spread
+//     positions (quartiles) instead of a single middle segment, catching
+//     content variability in the preset factor measurement.
+//   - VP9 two-pass uses pure VBR instead of Constrained Quality for hard
+//     size targets. CQ's CRF floor can fight the bitrate cap on complex
+//     content; VBR gives the encoder a clear target with no quality minimum.
+//   - SVT-AV1 presets capped at 9 — presets 10+ are flagged by SVT-AV1 as
+//     "automation tooling" with visual artifacts and poor rate control.
+//   - Codec-aware tier_safe_preset_index: SVT-AV1 gets its own mapping
+//     tuned for the compacted {9..0} array; x264/x265/vp9 unchanged.
+//   - Calibration fallback for SVT-AV1 uses preset 9 (array index 0)
+//     instead of the old hardcoded preset 13.
+//   - Adaptive segment expansion: if content analysis detects high motion
+//     variance (CV > 0.60), calibration segments expand up to 16 for
+//     better size prediction on variable-content videos.
+//   - Three-tier duration scaling: <10 min (4 segments), 10–45 min (8),
+//     45+ min (12 base, up to 16 adaptive).
 
 using GLib;
 using Json;
@@ -169,6 +207,7 @@ internal struct SmartOptimizerVideoInfo {
     public int    audio_bitrate_kbps;
     public bool   audio_bitrate_estimated;   // true when we fell back to a default
     public string audio_codec;               // e.g. "opus", "aac", "vorbis"
+    public int64  file_size_bytes;            // source file size from format.size or stat
 }
 
 internal struct ContentProfile {
@@ -222,14 +261,20 @@ public class SmartOptimizer : GLib.Object {
         "medium", "slow", "slower", "veryslow"
     };
     private const int[] VP9_CPU_USED = { 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    // SVT-AV1 presets 13→0 mapped to 9 indices (fastest to slowest)
-    private const int[] SVT_AV1_PRESETS = { 13, 12, 11, 10, 8, 6, 4, 2, 0 };
+    // SVT-AV1 presets 9→0 mapped to 9 indices (fastest to slowest).
+    // Presets 10+ are excluded — SVT-AV1 flags them as "automation tooling"
+    // with visual artifacts, poor rate control, and no film-grain support.
+    // Users who want 10+ can disable auto-convert and set it manually.
+    private const int[] SVT_AV1_PRESETS = { 9, 8, 7, 6, 5, 4, 3, 2, 0 };
 
     // ── Content-aware preset efficiency tables ───────────────────────────────
     //
-    // Each table answers: compared to ultrafast/cpu-used-8, what fraction of
-    // that file size does a given preset produce at the same CRF?
-    // Index 0 = ultrafast (1.0 by definition), index 8 = veryslow.
+    // Each table answers: compared to the fastest preset in the array,
+    // what fraction of that file size does a given preset produce at the
+    // same CRF?  Index 0 = fastest (1.0 by definition), index 8 = slowest.
+    //
+    // These are initial estimates — the verification encode (step 8b)
+    // measures the real ratio at runtime and corrects if >5% off.
     //
     // Live-action: diminishing returns past medium/slow.
     private const double[] PRESET_FACTORS_LIVE_ACTION = {
@@ -255,9 +300,18 @@ public class SmartOptimizer : GLib.Object {
     };
 
     // Analysis segment config
-    private const int    SEGMENT_DURATION = 8;      // seconds per sample
-    private const int    MAX_SEGMENTS     = 4;
-    private const double SEGMENT_SPREAD   = 0.15;   // start at 15%, end at 85%
+    private const int    SEGMENT_DURATION   = 8;        // seconds per sample
+    private const int    BASE_MAX_SEGMENTS  = 4;        // cap for videos < 10 min
+    private const int    LONG_MAX_SEGMENTS  = 8;        // cap for videos 10–45 min
+    private const int    VLONG_MAX_SEGMENTS = 12;       // cap for videos > 45 min
+    private const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
+    private const double LONG_VIDEO_THRESHOLD  = 600.0; // 10 minutes
+    private const double VLONG_VIDEO_THRESHOLD = 2700.0; // 45 minutes
+    private const double SEGMENT_SPREAD    = 0.15;      // start at 15%, end at 85%
+    // Coefficient of variation threshold for adaptive expansion.
+    // If temporal_diff stddev/mean exceeds this, content varies significantly
+    // across the video and more samples improve prediction accuracy.
+    private const double ADAPTIVE_CV_THRESHOLD = 0.60;
 
     // If the required video bitrate would fall below this threshold it is
     // physically impossible to produce acceptable-quality output.
@@ -410,32 +464,52 @@ public class SmartOptimizer : GLib.Object {
             };
         }
 
-        // ── 5. Three-point CRF calibration ──────────────────────────────
-        // Encode sample segments at three CRFs with the fastest preset,
-        // measure sizes, fit a quadratic curve in log-space for THIS video.
-        // Three points capture the curvature that a two-point exponential
-        // misses, significantly improving accuracy when the predicted CRF
-        // falls between or beyond the calibration points.
+        // ── 4b. Adaptive segment expansion ───────────────────────────────
+        // If content analysis reveals high variability between segments
+        // (e.g. action scenes interspersed with dialogue), expand the
+        // sample positions for calibration to improve size prediction.
+        // The content classification from step 4 is already done and
+        // doesn't need re-running — only calibration benefits from more
+        // samples.
+        bool adaptive_expanded = false;
+        if (profile.temporal_diff_mean > 0) {
+            double motion_cv = profile.temporal_diff_stddev / profile.temporal_diff_mean;
+            if (motion_cv > ADAPTIVE_CV_THRESHOLD && positions.length < ADAPTIVE_MAX_SEGMENTS) {
+                int initial_count = positions.length;
+                int expanded_count = int.min (
+                    ADAPTIVE_MAX_SEGMENTS,
+                    (int) (info.duration / SEGMENT_DURATION));
+                if (expanded_count > initial_count) {
+                    positions = pick_sample_positions_n (info.duration, expanded_count);
+                    adaptive_expanded = true;
+                    warning ("Smart Optimizer: high content variability (CV=%.2f) — "
+                        + "expanded from %d to %d calibration segments",
+                        motion_cv, initial_count, positions.length);
+                }
+            }
+        }
+
+        // ── 5. Four-point CRF calibration ──────────────────────────────
+        // Encode sample segments at four CRFs with the fastest preset,
+        // measure sizes, fit a quadratic curve in log-space via least-
+        // squares. Four points overdetermine the quadratic model, so the
+        // fit averages out noise from individual samples — more robust
+        // than the exact 3-point solve.
         // Video filters are included so calibration reflects the actual
         // output resolution and processing.
 
-        int crf_lo, crf_mid, crf_hi;
-        pick_calibration_crfs (preferred_codec, tier, out crf_lo, out crf_mid, out crf_hi);
+        int[] cal_crfs = new int[4];
+        pick_calibration_crfs (preferred_codec, tier,
+            out cal_crfs[0], out cal_crfs[1], out cal_crfs[2], out cal_crfs[3]);
 
-        double size_lo_kb, size_mid_kb, size_hi_kb;
+        double[] cal_sizes = new double[4];
         try {
-            cancellable_check (cancellable);
-            size_lo_kb = yield calibration_encode (
-                input_file, preferred_codec, crf_lo, positions, encode_duration,
-                vf, cancellable);
-            cancellable_check (cancellable);
-            size_mid_kb = yield calibration_encode (
-                input_file, preferred_codec, crf_mid, positions, encode_duration,
-                vf, cancellable);
-            cancellable_check (cancellable);
-            size_hi_kb = yield calibration_encode (
-                input_file, preferred_codec, crf_hi, positions, encode_duration,
-                vf, cancellable);
+            for (int ci = 0; ci < 4; ci++) {
+                cancellable_check (cancellable);
+                cal_sizes[ci] = yield calibration_encode (
+                    input_file, preferred_codec, cal_crfs[ci], positions,
+                    encode_duration, vf, cancellable);
+            }
         } catch (IOError.CANCELLED e) {
             throw e;
         } catch (Error e) {
@@ -444,78 +518,109 @@ public class SmartOptimizer : GLib.Object {
                 "Test encode failed — is ffmpeg installed?\n%s".printf (e.message));
         }
 
-        if (size_lo_kb <= 0 || size_mid_kb <= 0 || size_hi_kb <= 0) {
-            warning ("Nonsensical calibration: lo=%.0f mid=%.0f hi=%.0f",
-                     size_lo_kb, size_mid_kb, size_hi_kb);
+        bool any_invalid = false;
+        for (int ci = 0; ci < 4; ci++) {
+            if (cal_sizes[ci] <= 0) any_invalid = true;
+        }
+        if (any_invalid) {
+            warning ("Nonsensical calibration: %.0f / %.0f / %.0f / %.0f",
+                     cal_sizes[0], cal_sizes[1], cal_sizes[2], cal_sizes[3]);
             return make_error_rec (preferred_codec,
-                "Calibration produced invalid results (%.0f / %.0f / %.0f KB). File may be corrupt."
-                    .printf (size_lo_kb, size_mid_kb, size_hi_kb));
+                "Calibration produced invalid results. File may be corrupt.");
         }
 
         // Warn if sizes aren't monotonically decreasing (unusual but the
-        // quadratic fit handles it — just means unusual content variance)
-        if (size_lo_kb <= size_mid_kb || size_mid_kb <= size_hi_kb) {
-            warning ("Non-monotonic calibration: CRF %d→%.0fKB, %d→%.0fKB, %d→%.0fKB — "
-                + "proceeding with quadratic fit",
-                crf_lo, size_lo_kb, crf_mid, size_mid_kb, crf_hi, size_hi_kb);
+        // least-squares fit handles it — just means unusual content variance)
+        for (int ci = 0; ci < 3; ci++) {
+            if (cal_sizes[ci] <= cal_sizes[ci + 1]) {
+                warning ("Non-monotonic calibration: CRF %d→%.0fKB, %d→%.0fKB — "
+                    + "proceeding with least-squares fit",
+                    cal_crfs[ci], cal_sizes[ci], cal_crfs[ci + 1], cal_sizes[ci + 1]);
+                break;
+            }
         }
 
-        // ── 6. Fit CRF↔size curve (quadratic in log-space) ────────────
+        // ── 6. Fit CRF↔size curve (least-squares quadratic in log-space) ─
         // Model:  ln(size) = a + b·crf + c·crf²
         //
-        // Three calibration points give a 3×3 linear system:
-        //   a + b·x₁ + c·x₁² = ln(size_lo)
-        //   a + b·x₂ + c·x₂² = ln(size_mid)
-        //   a + b·x₃ + c·x₃² = ln(size_hi)
+        // With 4 calibration points, the system is overdetermined (4 eqns,
+        // 3 unknowns). We solve via normal equations:
+        //   [n,    Σx,   Σx² ] [a]   [Σy   ]
+        //   [Σx,   Σx²,  Σx³ ] [b] = [Σxy  ]
+        //   [Σx²,  Σx³,  Σx⁴ ] [c]   [Σx²y ]
         //
-        // Solved via row subtraction (Gaussian elimination). The quadratic
-        // term (c) captures the CRF↔size curve's bend — the key improvement
-        // over two-point exponential fitting.
+        // This minimizes the sum of squared residuals, averaging out
+        // noise from individual calibration samples.
 
-        double x1 = (double) crf_lo;
-        double x2 = (double) crf_mid;
-        double x3 = (double) crf_hi;
-        double y1 = Math.log (size_lo_kb);
-        double y2 = Math.log (size_mid_kb);
-        double y3 = Math.log (size_hi_kb);
+        double sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
+        double sy = 0, sxy = 0, sx2y = 0;
+        for (int ci = 0; ci < 4; ci++) {
+            double x = (double) cal_crfs[ci];
+            double y = Math.log (cal_sizes[ci]);
+            double x2 = x * x;
+            sx   += x;
+            sx2  += x2;
+            sx3  += x2 * x;
+            sx4  += x2 * x2;
+            sy   += y;
+            sxy  += x * y;
+            sx2y += x2 * y;
+        }
+        double n_pts = 4.0;
 
-        // Row-subtraction solve for the 3×3 system  [1, x, x²] · [a, b, c]ᵀ = [y]
-        // Subtract row 1 from rows 2 and 3 to get a 2×2 system, then solve.
-        // The determinant check guards against degenerate inputs (e.g. two
-        // calibration points producing identical sizes).
-        double det = (x2 - x1) * (x3*x3 - x1*x1) - (x3 - x1) * (x2*x2 - x1*x1);
+        double qa = 0, qb = 0, qc = 0;  // quadratic coefficients
+        bool degenerate = false;
 
-        double qa, qb, qc;  // quadratic coefficients
+        // Solve 3×3 normal equations via Gaussian elimination
+        // Row 0: [n,   sx,  sx2 | sy  ]
+        // Row 1: [sx,  sx2, sx3 | sxy ]
+        // Row 2: [sx2, sx3, sx4 | sx2y]
+        double[,] m = {
+            { n_pts, sx,  sx2, sy   },
+            { sx,    sx2, sx3, sxy  },
+            { sx2,   sx3, sx4, sx2y }
+        };
 
-        if (Math.fabs (det) < 1e-12) {
-            // Degenerate — fall back to two-point exponential (lo + hi)
-            warning ("Three-point calibration degenerate, falling back to two-point");
-            if (size_lo_kb <= size_hi_kb || Math.fabs (size_lo_kb - size_hi_kb) < 1e-6) {
-                // Even two-point is degenerate (sizes are equal or inverted)
-                // — use a safe middle CRF
-                warning ("Two-point fallback also degenerate — using midpoint CRF");
-                qa = y1;
-                qb = -0.1;  // small negative slope so the solver picks a reasonable CRF
-                qc = 0.0;
-            } else {
-                double B_fallback = Math.pow (size_hi_kb / size_lo_kb, 1.0 / (crf_hi - crf_lo));
-                double A_fallback = size_lo_kb / Math.pow (B_fallback, crf_lo);
-                qa = Math.log (A_fallback);
-                qb = Math.log (B_fallback);
-                qc = 0.0;
+        // Forward elimination with partial pivoting
+        for (int col = 0; col < 3; col++) {
+            // Find pivot
+            int pivot = col;
+            for (int row = col + 1; row < 3; row++) {
+                if (Math.fabs (m[row, col]) > Math.fabs (m[pivot, col]))
+                    pivot = row;
             }
-        } else {
-            // Solve relative to point 1 to reduce numerical error
-            double dy2 = y2 - y1;
-            double dy3 = y3 - y1;
-            double dx2 = x2 - x1;
-            double dx3 = x3 - x1;
-            double dx2sq = x2*x2 - x1*x1;
-            double dx3sq = x3*x3 - x1*x1;
+            if (pivot != col) {
+                for (int k = 0; k < 4; k++) {
+                    double tmp = m[col, k];
+                    m[col, k] = m[pivot, k];
+                    m[pivot, k] = tmp;
+                }
+            }
+            if (Math.fabs (m[col, col]) < 1e-12) {
+                // Degenerate — fall back to two-point exponential
+                warning ("Least-squares system degenerate, falling back to two-point");
+                double B_fb = Math.pow (cal_sizes[3] / cal_sizes[0],
+                    1.0 / (cal_crfs[3] - cal_crfs[0]));
+                double A_fb = cal_sizes[0] / Math.pow (B_fb, cal_crfs[0]);
+                qa = Math.log (A_fb);
+                qb = Math.log (B_fb);
+                qc = 0.0;
+                degenerate = true;
+                break;
+            }
+            // Eliminate below
+            for (int row = col + 1; row < 3; row++) {
+                double factor = m[row, col] / m[col, col];
+                for (int k = col; k < 4; k++)
+                    m[row, k] -= factor * m[col, k];
+            }
+        }
 
-            qc = (dy2 * dx3 - dy3 * dx2) / (dx2sq * dx3 - dx3sq * dx2);
-            qb = (dy2 - qc * dx2sq) / dx2;
-            qa = y1 - qb * x1 - qc * x1 * x1;
+        // Back substitution (only if we didn't fall back)
+        if (!degenerate) {
+            qc = m[2, 3] / m[2, 2];
+            qb = (m[1, 3] - m[1, 2] * qc) / m[1, 1];
+            qa = (m[0, 3] - m[0, 1] * qb - m[0, 2] * qc) / m[0, 0];
         }
 
         // ── 7. Content-aware, tier-scaled preset selection ────────────
@@ -523,7 +628,7 @@ public class SmartOptimizer : GLib.Object {
         // the encoder already has plenty of bits. The "safe" baseline shifts
         // faster, and content-type influence is dampened.
         int ideal_preset_idx = choose_ideal_preset_index (profile);
-        int safe_preset_idx  = tier_safe_preset_index (tier);
+        int safe_preset_idx  = tier_safe_preset_index (tier, preferred_codec);
         double content_factor = tier_content_influence (tier);
 
         int preset_idx = safe_preset_idx + (int) Math.round (
@@ -554,12 +659,14 @@ public class SmartOptimizer : GLib.Object {
 
         double ln_target = Math.log (effective_target_kb);
         double crf_raw;
+        // Midpoint of the calibration range — used for root disambiguation
+        double cal_mid = (double) (cal_crfs[0] + cal_crfs[3]) / 2.0;
 
         if (Math.fabs (qc) < 1e-15) {
             // Linear in log-space (pure exponential) — same as two-point
             if (Math.fabs (qb) < 1e-15) {
                 // Flat curve — CRF has no effect on size. Use midpoint as best guess.
-                crf_raw = (double) crf_mid;
+                crf_raw = cal_mid;
             } else {
                 crf_raw = (ln_target - qa) / qb;
             }
@@ -578,8 +685,8 @@ public class SmartOptimizer : GLib.Object {
                 // For typical video, qc > 0 (curve bends up in log-space at
                 // very high CRFs), so r2 is usually the correct root.
                 if (r1 >= crf_min && r1 <= crf_max && r2 >= crf_min && r2 <= crf_max) {
-                    // Both valid — pick the one closest to the midpoint
-                    crf_raw = (Math.fabs (r1 - crf_mid) < Math.fabs (r2 - crf_mid)) ? r1 : r2;
+                    // Both valid — pick the one closest to the calibration midpoint
+                    crf_raw = (Math.fabs (r1 - cal_mid) < Math.fabs (r2 - cal_mid)) ? r1 : r2;
                 } else if (r1 >= crf_min && r1 <= crf_max) {
                     crf_raw = r1;
                 } else if (r2 >= crf_min && r2 <= crf_max) {
@@ -597,10 +704,10 @@ public class SmartOptimizer : GLib.Object {
         bool crf_at_max = (predicted_crf >= crf_max);
 
         // ── 8b. Verification encode ─────────────────────────────────────
-        // Encode a single segment at the predicted CRF + recommended preset
+        // Encode spread segments at the predicted CRF + recommended preset
         // to measure the real preset factor instead of relying on the
-        // hardcoded table.  Compare against the quadratic model's ultrafast
-        // prediction at the same CRF (no need for a second ultrafast encode).
+        // hardcoded table.  Compare against the quadratic model's fastest
+        // prediction at the same CRF (no need for a second fastest-preset encode).
         //
         // If the verified factor differs significantly, re-solve for CRF
         // using the measured factor so the prediction is self-consistent.
@@ -614,12 +721,25 @@ public class SmartOptimizer : GLib.Object {
             verify_model_ultrafast_kb = Math.exp (
                 qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
 
-            // Pick the middle sample position for verification
-            double[] verify_pos = { positions[positions.length / 2] };
+            // Pick spread positions for verification — using multiple segments
+            // catches content variability that a single middle segment misses.
+            double[] verify_pos;
+            if (positions.length >= 4) {
+                // Use 3 spread positions: ~25%, ~50%, ~75% through the samples
+                int q1 = positions.length / 4;
+                int q2 = positions.length / 2;
+                int q3 = positions.length * 3 / 4;
+                verify_pos = { positions[q1], positions[q2], positions[q3] };
+            } else if (positions.length >= 2) {
+                // Use first and last
+                verify_pos = { positions[0], positions[positions.length - 1] };
+            } else {
+                verify_pos = { positions[0] };
+            }
             try {
                 cancellable_check (cancellable);
 
-                // Single encode at the recommended preset to measure the real ratio
+                // Encode at the recommended preset to measure the real ratio
                 verify_preset_kb = yield calibration_encode (
                     input_file, preferred_codec, predicted_crf, verify_pos,
                     encode_duration, vf, cancellable, preset_idx);
@@ -639,7 +759,7 @@ public class SmartOptimizer : GLib.Object {
 
                         if (Math.fabs (qc) < 1e-15) {
                             re_crf_raw = (Math.fabs (qb) < 1e-15)
-                                ? (double) crf_mid
+                                ? cal_mid
                                 : (re_ln_target - qa) / qb;
                         } else {
                             double re_disc = qb * qb - 4.0 * qc * (qa - re_ln_target);
@@ -651,8 +771,8 @@ public class SmartOptimizer : GLib.Object {
                                 double re_r2 = (-qb - re_sqrt) / (2.0 * qc);
                                 if (re_r1 >= crf_min && re_r1 <= crf_max &&
                                     re_r2 >= crf_min && re_r2 <= crf_max) {
-                                    re_crf_raw = (Math.fabs (re_r1 - crf_mid) <
-                                                  Math.fabs (re_r2 - crf_mid)) ? re_r1 : re_r2;
+                                    re_crf_raw = (Math.fabs (re_r1 - cal_mid) <
+                                                  Math.fabs (re_r2 - cal_mid)) ? re_r1 : re_r2;
                                 } else if (re_r1 >= crf_min && re_r1 <= crf_max) {
                                     re_crf_raw = re_r1;
                                 } else if (re_r2 >= crf_min && re_r2 <= crf_max) {
@@ -693,23 +813,25 @@ public class SmartOptimizer : GLib.Object {
         int estimated_total_kb = estimated_video_kb + (int) audio_kb + (int) container_overhead_kb;
 
         // ── 10. Confidence ──────────────────────────────────────────────
-        // Three-point calibration is most accurate within [crf_lo, crf_hi]
+        // Four-point calibration is most accurate within [cal_crfs[0], cal_crfs[3]]
         // where the quadratic interpolates rather than extrapolates. Outside
         // that range, confidence degrades proportionally to distance.
         double confidence = 1.0;
-        int cal_range = crf_hi - crf_lo;   // e.g. 14 for x264, 15 for vp9
-        if (predicted_crf < crf_lo - cal_range || predicted_crf > crf_hi + cal_range) {
+        int cal_range = cal_crfs[3] - cal_crfs[0];   // e.g. 14 for x264, 15 for vp9
+        if (predicted_crf < cal_crfs[0] - cal_range || predicted_crf > cal_crfs[3] + cal_range) {
             confidence = 0.5;   // far extrapolation (> one full range outside)
-            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d, %d] — "
-                + "prediction reliability is low", predicted_crf, crf_lo, crf_mid, crf_hi);
-        } else if (predicted_crf < crf_lo - 2 || predicted_crf > crf_hi + 2) {
+            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d, %d, %d] — "
+                + "prediction reliability is low",
+                predicted_crf, cal_crfs[0], cal_crfs[1], cal_crfs[2], cal_crfs[3]);
+        } else if (predicted_crf < cal_crfs[0] - 2 || predicted_crf > cal_crfs[3] + 2) {
             confidence = 0.75;  // moderate extrapolation
-            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d, %d] — "
-                + "prediction may be inaccurate", predicted_crf, crf_lo, crf_mid, crf_hi);
-        } else if (predicted_crf < crf_lo || predicted_crf > crf_hi) {
+            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d, %d, %d] — "
+                + "prediction may be inaccurate",
+                predicted_crf, cal_crfs[0], cal_crfs[1], cal_crfs[2], cal_crfs[3]);
+        } else if (predicted_crf < cal_crfs[0] || predicted_crf > cal_crfs[3]) {
             confidence = 0.9;   // slight extrapolation (just outside range)
         }
-        // Within [crf_lo, crf_hi]: confidence stays at 1.0 — the quadratic
+        // Within [cal_crfs[0], cal_crfs[3]]: confidence stays at 1.0 — the quadratic
         // model is interpolating between measured points, not extrapolating.
 
         // ── 10b. Sample coverage factor ─────────────────────────────────
@@ -727,24 +849,78 @@ public class SmartOptimizer : GLib.Object {
                 sample_coverage * 100.0);
         }
 
+        // ── 10c. Source bitrate sanity check ─────────────────────────
+        // Compare the estimated output size against the source file size.
+        // If the CRF model predicts a LARGER output while the user wants a
+        // SMALLER file, the prediction is unreliable — reduce confidence
+        // so the tier logic is more likely to trigger two-pass.
+        //
+        // We compare total sizes (not video-only) because the probed audio
+        // bitrate has already been replaced by the tier-based budget — the
+        // original source audio bitrate is no longer available.
+        int source_video_kbps = 0;
+        if (info.file_size_bytes > 0 && encode_duration > 0) {
+            // Source total kbps (using the full file duration, not trimmed,
+            // since file_size_bytes reflects the entire source)
+            double source_total_kbps = (double) info.file_size_bytes * 8.0
+                / (info.duration * 1024.0);
+            // Rough source video kbps — subtract a conservative audio estimate.
+            // 128 kbps covers most common audio codecs without over-subtracting.
+            source_video_kbps = int.max (0,
+                (int) source_total_kbps - 128);
+
+            // If the CRF estimate exceeds the source's size while the user
+            // asked for a smaller target, the model's prediction is suspect.
+            if (source_video_kbps > 0 && available_video_kbps < source_video_kbps) {
+                int estimated_output_kbps = (int) ((double) estimated_total_kb * 8.0 / encode_duration);
+                int source_total_kbps_int = (int) source_total_kbps;
+                if (estimated_output_kbps > source_total_kbps_int) {
+                    confidence *= 0.6;
+                    warning ("Smart Optimizer: CRF estimate (%d kbps) exceeds source (%d kbps) "
+                        + "— prediction is unreliable",
+                        estimated_output_kbps, source_total_kbps_int);
+                }
+            }
+        }
+
         // ── 11. Tier-aware two-pass recommendation ────────────────────
         int target_video_kbps = available_video_kbps;
         bool recommend_two_pass;
-        switch (tier) {
-            case SizeTier.MEDIUM:
-                recommend_two_pass = (confidence < 0.85);
-                break;
-            case SizeTier.LARGE:
-                recommend_two_pass = (confidence < 0.70);
-                break;
-            case SizeTier.XLARGE:
-                // At 200+ MB CRF mode is almost always sufficient
-                recommend_two_pass = false;
-                break;
-            default:
-                // TINY and SMALL — always recommend for size guarantee
-                recommend_two_pass = true;
-                break;
+
+        // Check if the user is asking for a file SMALLER than the source.
+        // When target < source, this is a hard size constraint — CRF mode
+        // cannot guarantee the output fits, so two-pass bitrate targeting
+        // is required regardless of tier.
+        double source_size_mb = (double) info.file_size_bytes / (1024.0 * 1024.0);
+        bool is_reduction = (source_size_mb > 0) && ((double) target_mb < source_size_mb * 0.98);
+
+        // Also check if the CRF estimate already overshoots the target.
+        // Even when source size is unknown, if the model predicts overshoot,
+        // two-pass is the only way to guarantee the target is met.
+        bool crf_overshoots = (estimated_total_kb > target_total_kb * 1.05);
+
+        if (is_reduction || crf_overshoots) {
+            // Hard size constraint — always use two-pass for accuracy
+            recommend_two_pass = true;
+        } else {
+            switch (tier) {
+                case SizeTier.MEDIUM:
+                    recommend_two_pass = (confidence < 0.85);
+                    break;
+                case SizeTier.LARGE:
+                    recommend_two_pass = (confidence < 0.70);
+                    break;
+                case SizeTier.XLARGE:
+                    // Target is generous AND larger than source — CRF will
+                    // comfortably fit. Only skip two-pass when confidence is
+                    // high and the estimate is well under target.
+                    recommend_two_pass = (confidence < 0.60);
+                    break;
+                default:
+                    // TINY and SMALL — always recommend for size guarantee
+                    recommend_two_pass = true;
+                    break;
+            }
         }
 
         // ── 12. Feasibility flags ───────────────────────────────────────
@@ -805,16 +981,22 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("\n── Two-pass mode (size-guaranteed) ──\n");
             notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
                 .printf (target_video_kbps, preset_label));
+            if (is_reduction) {
+                notes.append ("  Source is ~%.0f MB → target %d MB requires size reduction.\n"
+                    .printf (source_size_mb, target_mb));
+            } else if (crf_overshoots) {
+                notes.append ("  CRF estimate (~%d KB) exceeds target (~%.0f KB).\n"
+                    .printf (estimated_total_kb, target_total_kb));
+            } else if (confidence < 1.0) {
+                notes.append ("  Prediction confidence is %.0f%% — two-pass ensures accuracy.\n"
+                    .printf (confidence * 100.0));
+            }
             notes.append ("  This mode guarantees the file fits within the target.\n");
             notes.append ("  Quality is determined by available bitrate, not CRF.\n");
         } else {
             notes.append ("\n── Two-pass: skipped ──\n");
-            if (tier >= SizeTier.XLARGE) {
-                notes.append ("  Target is generous — CRF mode will comfortably fit.\n");
-            } else {
-                notes.append ("  CRF confidence is high (%.0f%%) — CRF mode should hit the target.\n"
-                    .printf (confidence * 100.0));
-            }
+            notes.append ("  CRF confidence is high (%.0f%%) and estimate is under target.\n"
+                .printf (confidence * 100.0));
         }
 
         // --- Warnings ---
@@ -836,32 +1018,35 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Calibration data ---
-        notes.append ("\n── Calibration data (3-point quadratic) ──\n");
-        notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
-            .printf (crf_lo, size_lo_kb));
-        notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
-            .printf (crf_mid, size_mid_kb));
-        notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
-            .printf (crf_hi, size_hi_kb));
+        notes.append ("\n── Calibration data (4-point least-squares quadratic) ──\n");
+        for (int ci = 0; ci < 4; ci++) {
+            notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
+                .printf (cal_crfs[ci], cal_sizes[ci]));
+        }
         notes.append ("  Model: ln(size) = %.4f + %.4f·CRF + %.6f·CRF²\n"
             .printf (qa, qb, qc));
         if (verification_done) {
             notes.append ("  Preset factor = %.2f (verified: %s vs model, table: %.2f)\n"
                 .printf (verified_preset_factor, preset_label, preset_factor));
-            notes.append ("  Verification: model ultrafast→%.0f KB, %s→%.0f KB (ratio %.2f)\n"
+            notes.append ("  Verification: model fastest→%.0f KB, %s→%.0f KB (ratio %.2f)\n"
                 .printf (verify_model_ultrafast_kb, preset_label, verify_preset_kb,
                          verified_preset_factor));
         } else {
-            notes.append ("  Preset efficiency factor = %.2f (%s vs ultrafast, from table)\n"
+            notes.append ("  Preset efficiency factor = %.2f (%s vs fastest, from table)\n"
                 .printf (preset_factor, preset_label));
         }
         notes.append ("  Container overhead: %.0f KB reserved\n"
             .printf (container_overhead_kb));
+        if (source_video_kbps > 0) {
+            notes.append ("  Source: ~%.0f MB, ~%d kbps (est. video) | Target: %d kbps video\n"
+                .printf (source_size_mb, source_video_kbps, target_video_kbps));
+        }
         if (tier == SizeTier.TINY) {
             notes.append ("  Metadata stripped to save space (tiny target)\n");
         }
-        notes.append ("  Sample coverage: %.0f%% (%d × %ds segments)\n"
-            .printf (sample_coverage * 100.0, positions.length, SEGMENT_DURATION));
+        notes.append ("  Sample coverage: %.0f%% (%d × %ds segments%s)\n"
+            .printf (sample_coverage * 100.0, positions.length, SEGMENT_DURATION,
+                     adaptive_expanded ? ", adaptively expanded" : ""));
         if (ctx.effective_duration > 0 && ctx.effective_duration != info.duration) {
             notes.append ("  Trimmed duration: %.1fs (full: %.1fs)\n"
                 .printf (encode_duration, info.duration));
@@ -942,6 +1127,23 @@ public class SmartOptimizer : GLib.Object {
             duration = double.parse (dur_str);
         }
 
+        // ── Source file size ──────────────────────────────────────────────
+        int64 source_size_bytes = 0;
+        if (format != null) {
+            string sz_str = format.get_string_member_with_default ("size", "0");
+            source_size_bytes = int64.parse (sz_str);
+        }
+        if (source_size_bytes <= 0) {
+            // Fallback: stat the file directly
+            try {
+                var finfo = File.new_for_path (path)
+                    .query_info (FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
+                source_size_bytes = finfo.get_size ();
+            } catch (Error e) {
+                warning ("Could not stat source file: %s", e.message);
+            }
+        }
+
         var info = SmartOptimizerVideoInfo () {
             duration                = duration,
             width                   = 0,
@@ -949,7 +1151,8 @@ public class SmartOptimizer : GLib.Object {
             fps                     = 0.0,
             audio_bitrate_kbps      = 0,
             audio_bitrate_estimated = false,
-            audio_codec             = ""
+            audio_codec             = "",
+            file_size_bytes         = source_size_bytes
         };
 
         var streams = root.get_array_member ("streams");
@@ -1022,9 +1225,37 @@ public class SmartOptimizer : GLib.Object {
             return { 0 };
         }
 
-        int n = int.min (MAX_SEGMENTS, (int) (duration / SEGMENT_DURATION));
+        // Scale segment cap with duration — long videos need more coverage
+        // to capture content variability across scenes.
+        int max_segs;
+        if (duration >= VLONG_VIDEO_THRESHOLD) {
+            max_segs = VLONG_MAX_SEGMENTS;
+        } else if (duration >= LONG_VIDEO_THRESHOLD) {
+            max_segs = LONG_MAX_SEGMENTS;
+        } else {
+            max_segs = BASE_MAX_SEGMENTS;
+        }
+        int n = int.min (max_segs, (int) (duration / SEGMENT_DURATION));
         n = int.max (n, 2);
 
+        return spread_positions (duration, n);
+    }
+
+    /**
+     * Pick exactly @requested positions (clamped to what fits in the duration).
+     * Used by adaptive expansion when content variability warrants more samples.
+     */
+    private double[] pick_sample_positions_n (double duration, int requested) {
+        if (duration <= SEGMENT_DURATION * 2) {
+            return { 0 };
+        }
+        int n = int.min (requested, (int) (duration / SEGMENT_DURATION));
+        n = int.max (n, 2);
+
+        return spread_positions (duration, n);
+    }
+
+    private double[] spread_positions (double duration, int n) {
         double usable = duration - SEGMENT_DURATION;
         double start  = usable * SEGMENT_SPREAD;
         double end    = usable * (1.0 - SEGMENT_SPREAD);
@@ -1192,13 +1423,27 @@ public class SmartOptimizer : GLib.Object {
      * Larger targets bias toward faster presets because the marginal
      * quality gain from slower presets diminishes with ample bitrate.
      */
-    private int tier_safe_preset_index (SizeTier tier) {
+    private int tier_safe_preset_index (SizeTier tier, string codec) {
+        // SVT-AV1 uses a different mapping because its preset array was
+        // compacted from {13..0} to {9..0} — indices shifted relative to
+        // x264/x265/vp9 whose arrays didn't change.
+        if (codec == "svt-av1") {
+            switch (tier) {
+                case SizeTier.TINY:   return 4;   // preset 5
+                case SizeTier.SMALL:  return 4;   // preset 5
+                case SizeTier.MEDIUM: return 3;   // preset 6
+                case SizeTier.LARGE:  return 2;   // preset 7
+                case SizeTier.XLARGE: return 1;   // preset 8
+                default:              return 4;
+            }
+        }
+        // x264, x265, vp9 — unchanged
         switch (tier) {
-            case SizeTier.TINY:   return 5;   // medium
-            case SizeTier.SMALL:  return 5;   // medium
-            case SizeTier.MEDIUM: return 4;   // fast
-            case SizeTier.LARGE:  return 4;   // fast
-            case SizeTier.XLARGE: return 3;   // faster
+            case SizeTier.TINY:   return 5;   // x264 medium / vp9 cpu-used 3
+            case SizeTier.SMALL:  return 5;   // x264 medium / vp9 cpu-used 3
+            case SizeTier.MEDIUM: return 4;   // x264 fast / vp9 cpu-used 4
+            case SizeTier.LARGE:  return 4;   // x264 fast / vp9 cpu-used 4
+            case SizeTier.XLARGE: return 3;   // x264 faster / vp9 cpu-used 5
             default:              return 5;
         }
     }
@@ -1239,39 +1484,44 @@ public class SmartOptimizer : GLib.Object {
     // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Choose three CRF calibration points that bracket the expected
+     * Choose four CRF calibration points that bracket the expected
      * answer for the given codec and target size tier.
+     *
+     * Four points give an overdetermined system for the quadratic fit,
+     * enabling least-squares fitting that averages out noise from
+     * individual samples — more robust than an exact 3-point fit.
      *
      * Larger targets need lower CRFs, so the calibration window shifts
      * downward to keep the quadratic model interpolating rather than
      * extrapolating.
      */
     private void pick_calibration_crfs (string codec, SizeTier tier,
-                                         out int crf_lo, out int crf_mid, out int crf_hi) {
+                                         out int crf_a, out int crf_b,
+                                         out int crf_c, out int crf_d) {
         if (codec == "vp9") {
             switch (tier) {
-                case SizeTier.SMALL:  crf_lo = 22; crf_mid = 30; crf_hi = 38; break;
-                case SizeTier.MEDIUM: crf_lo = 18; crf_mid = 26; crf_hi = 34; break;
-                case SizeTier.LARGE:  crf_lo = 15; crf_mid = 23; crf_hi = 31; break;
-                case SizeTier.XLARGE: crf_lo = 12; crf_mid = 20; crf_hi = 28; break;
-                default:              crf_lo = 25; crf_mid = 33; crf_hi = 40; break;
+                case SizeTier.SMALL:  crf_a = 22; crf_b = 27; crf_c = 33; crf_d = 38; break;
+                case SizeTier.MEDIUM: crf_a = 18; crf_b = 23; crf_c = 29; crf_d = 34; break;
+                case SizeTier.LARGE:  crf_a = 15; crf_b = 20; crf_c = 26; crf_d = 31; break;
+                case SizeTier.XLARGE: crf_a = 12; crf_b = 17; crf_c = 23; crf_d = 28; break;
+                default:              crf_a = 25; crf_b = 30; crf_c = 35; crf_d = 40; break;
             }
         } else if (codec == "svt-av1") {
             switch (tier) {
-                case SizeTier.SMALL:  crf_lo = 18; crf_mid = 28; crf_hi = 38; break;
-                case SizeTier.MEDIUM: crf_lo = 15; crf_mid = 24; crf_hi = 33; break;
-                case SizeTier.LARGE:  crf_lo = 12; crf_mid = 20; crf_hi = 28; break;
-                case SizeTier.XLARGE: crf_lo =  8; crf_mid = 16; crf_hi = 24; break;
-                default:              crf_lo = 22; crf_mid = 32; crf_hi = 42; break;
+                case SizeTier.SMALL:  crf_a = 18; crf_b = 25; crf_c = 32; crf_d = 38; break;
+                case SizeTier.MEDIUM: crf_a = 15; crf_b = 21; crf_c = 27; crf_d = 33; break;
+                case SizeTier.LARGE:  crf_a = 12; crf_b = 17; crf_c = 23; crf_d = 28; break;
+                case SizeTier.XLARGE: crf_a =  8; crf_b = 13; crf_c = 19; crf_d = 24; break;
+                default:              crf_a = 22; crf_b = 29; crf_c = 36; crf_d = 42; break;
             }
         } else {
             // x264 and x265 share the same CRF scale
             switch (tier) {
-                case SizeTier.SMALL:  crf_lo = 16; crf_mid = 23; crf_hi = 30; break;
-                case SizeTier.MEDIUM: crf_lo = 14; crf_mid = 21; crf_hi = 28; break;
-                case SizeTier.LARGE:  crf_lo = 10; crf_mid = 18; crf_hi = 26; break;
-                case SizeTier.XLARGE: crf_lo =  8; crf_mid = 16; crf_hi = 24; break;
-                default:              crf_lo = 18; crf_mid = 25; crf_hi = 32; break;
+                case SizeTier.SMALL:  crf_a = 16; crf_b = 21; crf_c = 26; crf_d = 30; break;
+                case SizeTier.MEDIUM: crf_a = 14; crf_b = 19; crf_c = 24; crf_d = 28; break;
+                case SizeTier.LARGE:  crf_a = 10; crf_b = 15; crf_c = 21; crf_d = 26; break;
+                case SizeTier.XLARGE: crf_a =  8; crf_b = 13; crf_c = 19; crf_d = 24; break;
+                default:              crf_a = 18; crf_b = 23; crf_c = 28; crf_d = 32; break;
             }
         }
     }
@@ -1442,7 +1692,8 @@ public class SmartOptimizer : GLib.Object {
         } else if (codec == "svt-av1") {
             cmd.add ("-c:v");      cmd.add ("libsvtav1");
             cmd.add ("-preset");   cmd.add (preset_idx >= 0
-                ? SVT_AV1_PRESETS[preset_idx].to_string () : "13");
+                ? SVT_AV1_PRESETS[preset_idx].to_string ()
+                : SVT_AV1_PRESETS[0].to_string ());
             cmd.add ("-crf");      cmd.add (crf.to_string ());
         } else if (codec == "x265") {
             cmd.add ("-c:v");    cmd.add ("libx265");
