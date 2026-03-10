@@ -55,6 +55,8 @@ public class ColorCorrectionDialog : Adw.Window {
     private SpinButton  levels_romax;
     private SpinButton  levels_gomax;
     private SpinButton  levels_bomax;
+    private Adw.PreferencesGroup levels_in_group;
+    private Adw.PreferencesGroup levels_out_group;
 
     // ── Color Balance ────────────────────────────────────────────────────────
     private CheckButton colorbal_enable;
@@ -76,6 +78,9 @@ public class ColorCorrectionDialog : Adw.Window {
     private SpinButton  highlights_g_spin;
     private Scale       highlights_b_scale;
     private SpinButton  highlights_b_spin;
+    private Adw.PreferencesGroup shadows_group;
+    private Adw.PreferencesGroup midtones_group;
+    private Adw.PreferencesGroup highlights_group;
 
     // ── Advanced ─────────────────────────────────────────────────────────────
     private CheckButton vibrance_enable;
@@ -93,11 +98,16 @@ public class ColorCorrectionDialog : Adw.Window {
     private Scale       vignette_scale;
     private SpinButton  vignette_spin;
 
+    // ── Snapshot (for Cancel / close revert) ─────────────────────────────────
+    private double[] _snap_vals;
+    private bool[]   _snap_enab;
+    private uint     _snap_curves_sel;
+
     public ColorCorrectionDialog (Gtk.Window parent) {
         Object ();
         set_transient_for (parent);
         set_modal (true);
-        set_title ("🎨 Color Correction");
+        set_title ("Color Correction");
         set_default_size (780, 720);
 
         var toolbar_view = new Adw.ToolbarView ();
@@ -149,8 +159,11 @@ public class ColorCorrectionDialog : Adw.Window {
         main_box.append (btn_box);
 
         reset_btn.clicked.connect (reset_to_defaults);
-        ok_btn.clicked.connect (hide);
-        cancel_btn.clicked.connect (hide);
+        ok_btn.clicked.connect (() => set_visible (false));
+        cancel_btn.clicked.connect (() => {
+            restore_state ();
+            set_visible (false);
+        });
 
         toolbar_view.set_content (main_box);
         set_content (toolbar_view);
@@ -158,9 +171,15 @@ public class ColorCorrectionDialog : Adw.Window {
         // Prevent the title-bar close button from destroying the window;
         // just hide it so it can be re-presented later.
         close_request.connect (() => {
-            hide ();
+            restore_state ();
+            set_visible (false);
             return true;   // stop default destroy
         });
+    }
+
+    public new void present () {
+        snapshot_state ();
+        base.present ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -283,51 +302,51 @@ public class ColorCorrectionDialog : Adw.Window {
         enable_row.set_child (levels_enable);
         group.add (enable_row);
 
+        content.append (group);
+
         // Input Levels
-        var in_label = new Adw.PreferencesGroup ();
-        in_label.set_title ("Input Range");
+        levels_in_group = new Adw.PreferencesGroup ();
+        levels_in_group.set_title ("Input Range");
+        levels_in_group.set_sensitive (false);
 
         levels_rimin = make_level_spin (0.0);
         levels_rimax = make_level_spin (1.0);
-        in_label.add (make_level_row ("Red", levels_rimin, levels_rimax));
+        levels_in_group.add (make_level_row ("Red", levels_rimin, levels_rimax));
 
         levels_gimin = make_level_spin (0.0);
         levels_gimax = make_level_spin (1.0);
-        in_label.add (make_level_row ("Green", levels_gimin, levels_gimax));
+        levels_in_group.add (make_level_row ("Green", levels_gimin, levels_gimax));
 
         levels_bimin = make_level_spin (0.0);
         levels_bimax = make_level_spin (1.0);
-        in_label.add (make_level_row ("Blue", levels_bimin, levels_bimax));
+        levels_in_group.add (make_level_row ("Blue", levels_bimin, levels_bimax));
 
-        content.append (group);
-        content.append (in_label);
+        content.append (levels_in_group);
 
         // Output Levels
-        var out_label = new Adw.PreferencesGroup ();
-        out_label.set_title ("Output Range");
+        levels_out_group = new Adw.PreferencesGroup ();
+        levels_out_group.set_title ("Output Range");
+        levels_out_group.set_sensitive (false);
 
         levels_romin = make_level_spin (0.0);
         levels_romax = make_level_spin (1.0);
-        out_label.add (make_level_row ("Red", levels_romin, levels_romax));
+        levels_out_group.add (make_level_row ("Red", levels_romin, levels_romax));
 
         levels_gomin = make_level_spin (0.0);
         levels_gomax = make_level_spin (1.0);
-        out_label.add (make_level_row ("Green", levels_gomin, levels_gomax));
+        levels_out_group.add (make_level_row ("Green", levels_gomin, levels_gomax));
 
         levels_bomin = make_level_spin (0.0);
         levels_bomax = make_level_spin (1.0);
-        out_label.add (make_level_row ("Blue", levels_bomin, levels_bomax));
+        levels_out_group.add (make_level_row ("Blue", levels_bomin, levels_bomax));
 
-        content.append (out_label);
+        content.append (levels_out_group);
 
-        // Wire enable for all level spins
-        SpinButton[] all_levels = {
-            levels_rimin, levels_rimax, levels_gimin, levels_gimax, levels_bimin, levels_bimax,
-            levels_romin, levels_romax, levels_gomin, levels_gomax, levels_bomin, levels_bomax
-        };
-        foreach (var s in all_levels) s.set_sensitive (false);
+        // Wire enable to sub-groups
         levels_enable.toggled.connect (() => {
-            foreach (var s in all_levels) s.set_sensitive (levels_enable.active);
+            bool active = levels_enable.active;
+            levels_in_group.set_sensitive (active);
+            levels_out_group.set_sensitive (active);
         });
     }
 
@@ -348,8 +367,9 @@ public class ColorCorrectionDialog : Adw.Window {
         content.append (group);
 
         // Shadows
-        var shadows_group = new Adw.PreferencesGroup ();
+        shadows_group = new Adw.PreferencesGroup ();
         shadows_group.set_title ("Shadows");
+        shadows_group.set_sensitive (false);
 
         shadows_r_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         shadows_r_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
@@ -369,66 +389,58 @@ public class ColorCorrectionDialog : Adw.Window {
         content.append (shadows_group);
 
         // Midtones
-        var mid_group = new Adw.PreferencesGroup ();
-        mid_group.set_title ("Midtones");
+        midtones_group = new Adw.PreferencesGroup ();
+        midtones_group.set_title ("Midtones");
+        midtones_group.set_sensitive (false);
 
         midtones_r_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         midtones_r_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         midtones_r_spin.set_digits (2); midtones_r_spin.set_value (0.0); midtones_r_scale.set_value (0.0);
-        mid_group.add (make_balance_row ("Red", midtones_r_scale, midtones_r_spin));
+        midtones_group.add (make_balance_row ("Red", midtones_r_scale, midtones_r_spin));
 
         midtones_g_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         midtones_g_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         midtones_g_spin.set_digits (2); midtones_g_spin.set_value (0.0); midtones_g_scale.set_value (0.0);
-        mid_group.add (make_balance_row ("Green", midtones_g_scale, midtones_g_spin));
+        midtones_group.add (make_balance_row ("Green", midtones_g_scale, midtones_g_spin));
 
         midtones_b_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         midtones_b_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         midtones_b_spin.set_digits (2); midtones_b_spin.set_value (0.0); midtones_b_scale.set_value (0.0);
-        mid_group.add (make_balance_row ("Blue", midtones_b_scale, midtones_b_spin));
+        midtones_group.add (make_balance_row ("Blue", midtones_b_scale, midtones_b_spin));
 
-        content.append (mid_group);
+        content.append (midtones_group);
 
         // Highlights
-        var hi_group = new Adw.PreferencesGroup ();
-        hi_group.set_title ("Highlights");
+        highlights_group = new Adw.PreferencesGroup ();
+        highlights_group.set_title ("Highlights");
+        highlights_group.set_sensitive (false);
 
         highlights_r_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         highlights_r_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         highlights_r_spin.set_digits (2); highlights_r_spin.set_value (0.0); highlights_r_scale.set_value (0.0);
-        hi_group.add (make_balance_row ("Red", highlights_r_scale, highlights_r_spin));
+        highlights_group.add (make_balance_row ("Red", highlights_r_scale, highlights_r_spin));
 
         highlights_g_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         highlights_g_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         highlights_g_spin.set_digits (2); highlights_g_spin.set_value (0.0); highlights_g_scale.set_value (0.0);
-        hi_group.add (make_balance_row ("Green", highlights_g_scale, highlights_g_spin));
+        highlights_group.add (make_balance_row ("Green", highlights_g_scale, highlights_g_spin));
 
         highlights_b_scale = new Scale.with_range (Orientation.HORIZONTAL, -1.0, 1.0, 0.01);
         highlights_b_spin  = new SpinButton.with_range (-1.0, 1.0, 0.01);
         highlights_b_spin.set_digits (2); highlights_b_spin.set_value (0.0); highlights_b_scale.set_value (0.0);
-        hi_group.add (make_balance_row ("Blue", highlights_b_scale, highlights_b_spin));
+        highlights_group.add (make_balance_row ("Blue", highlights_b_scale, highlights_b_spin));
 
-        content.append (hi_group);
+        content.append (highlights_group);
 
-        // Wire enable for all color balance controls
-        Scale[] bal_scales = {
-            shadows_r_scale, shadows_g_scale, shadows_b_scale,
-            midtones_r_scale, midtones_g_scale, midtones_b_scale,
-            highlights_r_scale, highlights_g_scale, highlights_b_scale
-        };
-        SpinButton[] bal_spins = {
-            shadows_r_spin, shadows_g_spin, shadows_b_spin,
-            midtones_r_spin, midtones_g_spin, midtones_b_spin,
-            highlights_r_spin, highlights_g_spin, highlights_b_spin
-        };
-        foreach (var s in bal_scales) s.set_sensitive (false);
-        foreach (var s in bal_spins)  s.set_sensitive (false);
+        // Wire enable to sub-groups
         colorbal_enable.toggled.connect (() => {
-            foreach (var s in bal_scales) s.set_sensitive (colorbal_enable.active);
-            foreach (var s in bal_spins)  s.set_sensitive (colorbal_enable.active);
+            bool active = colorbal_enable.active;
+            shadows_group.set_sensitive (active);
+            midtones_group.set_sensitive (active);
+            highlights_group.set_sensitive (active);
         });
 
-        // Wire scale ↔ spin sync
+        // Wire scale <-> spin sync
         wire_scale_spin (shadows_r_scale, shadows_r_spin);
         wire_scale_spin (shadows_g_scale, shadows_g_spin);
         wire_scale_spin (shadows_b_scale, shadows_b_spin);
@@ -487,7 +499,7 @@ public class ColorCorrectionDialog : Adw.Window {
         curves_action_row.set_child (curves_box);
         adv_group.add (curves_action_row);
 
-        // Vignette
+        // Vignette (strength: 0 = no effect, 1 = maximum)
         vignette_enable = new CheckButton.with_label ("Vignette");
         vignette_scale  = new Scale.with_range (Orientation.HORIZONTAL, 0.0, 1.0, 0.01);
         vignette_spin   = new SpinButton.with_range (0.0, 1.0, 0.01);
@@ -597,6 +609,112 @@ public class ColorCorrectionDialog : Adw.Window {
             scale.set_value (spin.get_value ());
             updating = false;
         });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SNAPSHOT / RESTORE (for Cancel)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void snapshot_state () {
+        _snap_vals = {
+            brightness_spin.get_value (),
+            contrast_spin.get_value (),
+            saturation_spin.get_value (),
+            gamma_spin.get_value (),
+            hue_spin.get_value (),
+            exposure_spin.get_value (),
+            red_gamma_spin.get_value (),
+            green_gamma_spin.get_value (),
+            blue_gamma_spin.get_value (),
+            levels_rimin.get_value (), levels_rimax.get_value (),
+            levels_gimin.get_value (), levels_gimax.get_value (),
+            levels_bimin.get_value (), levels_bimax.get_value (),
+            levels_romin.get_value (), levels_romax.get_value (),
+            levels_gomin.get_value (), levels_gomax.get_value (),
+            levels_bomin.get_value (), levels_bomax.get_value (),
+            shadows_r_spin.get_value (), shadows_g_spin.get_value (), shadows_b_spin.get_value (),
+            midtones_r_spin.get_value (), midtones_g_spin.get_value (), midtones_b_spin.get_value (),
+            highlights_r_spin.get_value (), highlights_g_spin.get_value (), highlights_b_spin.get_value (),
+            vibrance_spin.get_value (),
+            temperature_spin.get_value (),
+            vignette_spin.get_value ()
+        };
+        _snap_enab = {
+            brightness_enable.active,
+            contrast_enable.active,
+            saturation_enable.active,
+            gamma_enable.active,
+            hue_enable.active,
+            exposure_enable.active,
+            red_gamma_enable.active,
+            green_gamma_enable.active,
+            blue_gamma_enable.active,
+            levels_enable.active,
+            colorbal_enable.active,
+            vibrance_enable.active,
+            temperature_enable.active,
+            curves_enable.active,
+            vignette_enable.active
+        };
+        _snap_curves_sel = curves_drop.get_selected ();
+    }
+
+    private void restore_state () {
+        if (_snap_vals == null) return;
+
+        // Restore values
+        brightness_spin.set_value (_snap_vals[0]);
+        contrast_spin.set_value (_snap_vals[1]);
+        saturation_spin.set_value (_snap_vals[2]);
+        gamma_spin.set_value (_snap_vals[3]);
+        hue_spin.set_value (_snap_vals[4]);
+        exposure_spin.set_value (_snap_vals[5]);
+        red_gamma_spin.set_value (_snap_vals[6]);
+        green_gamma_spin.set_value (_snap_vals[7]);
+        blue_gamma_spin.set_value (_snap_vals[8]);
+        levels_rimin.set_value (_snap_vals[9]);
+        levels_rimax.set_value (_snap_vals[10]);
+        levels_gimin.set_value (_snap_vals[11]);
+        levels_gimax.set_value (_snap_vals[12]);
+        levels_bimin.set_value (_snap_vals[13]);
+        levels_bimax.set_value (_snap_vals[14]);
+        levels_romin.set_value (_snap_vals[15]);
+        levels_romax.set_value (_snap_vals[16]);
+        levels_gomin.set_value (_snap_vals[17]);
+        levels_gomax.set_value (_snap_vals[18]);
+        levels_bomin.set_value (_snap_vals[19]);
+        levels_bomax.set_value (_snap_vals[20]);
+        shadows_r_spin.set_value (_snap_vals[21]);
+        shadows_g_spin.set_value (_snap_vals[22]);
+        shadows_b_spin.set_value (_snap_vals[23]);
+        midtones_r_spin.set_value (_snap_vals[24]);
+        midtones_g_spin.set_value (_snap_vals[25]);
+        midtones_b_spin.set_value (_snap_vals[26]);
+        highlights_r_spin.set_value (_snap_vals[27]);
+        highlights_g_spin.set_value (_snap_vals[28]);
+        highlights_b_spin.set_value (_snap_vals[29]);
+        vibrance_spin.set_value (_snap_vals[30]);
+        temperature_spin.set_value (_snap_vals[31]);
+        vignette_spin.set_value (_snap_vals[32]);
+
+        // Restore enable states
+        brightness_enable.set_active (_snap_enab[0]);
+        contrast_enable.set_active (_snap_enab[1]);
+        saturation_enable.set_active (_snap_enab[2]);
+        gamma_enable.set_active (_snap_enab[3]);
+        hue_enable.set_active (_snap_enab[4]);
+        exposure_enable.set_active (_snap_enab[5]);
+        red_gamma_enable.set_active (_snap_enab[6]);
+        green_gamma_enable.set_active (_snap_enab[7]);
+        blue_gamma_enable.set_active (_snap_enab[8]);
+        levels_enable.set_active (_snap_enab[9]);
+        colorbal_enable.set_active (_snap_enab[10]);
+        vibrance_enable.set_active (_snap_enab[11]);
+        temperature_enable.set_active (_snap_enab[12]);
+        curves_enable.set_active (_snap_enab[13]);
+        vignette_enable.set_active (_snap_enab[14]);
+
+        curves_drop.set_selected (_snap_curves_sel);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -734,8 +852,10 @@ public class ColorCorrectionDialog : Adw.Window {
             filters += "vibrance=intensity=%.2f".printf (vibrance_spin.get_value ());
 
         // ── Color Temperature ────────────────────────────────────────────────
-        if (temperature_enable.active && (int) temperature_spin.get_value () != 5500)
-            filters += "colortemperature=temperature=%d".printf ((int) temperature_spin.get_value ());
+        if (temperature_enable.active &&
+            (int) Math.round (temperature_spin.get_value ()) != 5500)
+            filters += "colortemperature=temperature=%d".printf (
+                (int) Math.round (temperature_spin.get_value ()));
 
         // ── Curves Preset ────────────────────────────────────────────────────
         if (curves_enable.active) {
@@ -746,9 +866,11 @@ public class ColorCorrectionDialog : Adw.Window {
                 filters += "curves=preset=" + preset;
         }
 
-        // ── Vignette ─────────────────────────────────────────────────────────
-        if (vignette_enable.active)
-            filters += "vignette=angle=%.2f".printf (vignette_spin.get_value ());
+        // ── Vignette (strength 0–1 mapped to angle PI/2–0) ──────────────────
+        if (vignette_enable.active && vignette_spin.get_value () > 0.0) {
+            double angle = (1.0 - vignette_spin.get_value ()) * Math.PI / 2.0;
+            filters += "vignette=angle=%.4f".printf (angle);
+        }
 
         return string.joinv (",", filters);
     }
