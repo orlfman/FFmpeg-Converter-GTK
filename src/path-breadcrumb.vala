@@ -138,7 +138,9 @@ public class PathBreadcrumb : Box {
 
     // Stores the path to the most recently created output file so the
     // "Open Output File" context menu action can open it.
+    // No-op when called on an input breadcrumb (treat_last_as_file == true).
     public void set_last_output_file (string path) {
+        if (open_output_action == null) return;
         last_output_file = path;
         bool exists = path.length > 0 && FileUtils.test (path, FileTest.EXISTS);
         open_output_action.set_enabled (exists);
