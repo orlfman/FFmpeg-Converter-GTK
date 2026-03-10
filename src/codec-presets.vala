@@ -54,10 +54,9 @@ public class CodecPresets : Object {
             tab.restoration_switch.set_active (true);
             tab.tf_switch.set_active (true);
             tab.dlf_switch.set_active (true);
-            tab.tpl_switch.set_active (false);
-            tab.low_latency_switch.set_active (true);
+            tab.tpl_switch.set_active (true);
+            tab.low_latency_switch.set_active (false);
             tab.fast_decode_combo.set_selected (0);
-            tab.scm_combo.set_selected (0);
             configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
             break;
 
@@ -76,7 +75,6 @@ public class CodecPresets : Object {
             tab.dlf_switch.set_active (true);
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
-            tab.scm_combo.set_selected (0);
             configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
             break;
 
@@ -94,7 +92,7 @@ public class CodecPresets : Object {
             tab.dlf_switch.set_active (true);
             tab.tpl_switch.set_active (false);
             tab.low_latency_switch.set_active (false);
-            set_dropdown_by_label (tab.fast_decode_combo, "1");
+            set_dropdown_by_label (tab.fast_decode_combo, "Level 1");
             configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
             break;
 
