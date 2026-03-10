@@ -137,7 +137,7 @@ public class GeneralTab : Box {
         var w_row = new Adw.ActionRow ();
         w_row.set_title ("Width Multiplier");
         w_row.set_subtitle ("1.00 = original width");
-        scale_width_x = new SpinButton.with_range (0.0, 10.0, 0.05);
+        scale_width_x = new SpinButton.with_range (0.05, 10.0, 0.05);
         scale_width_x.set_value (1.0);
         scale_width_x.set_digits (2);
         scale_width_x.set_valign (Align.CENTER);
@@ -148,7 +148,7 @@ public class GeneralTab : Box {
         var h_row = new Adw.ActionRow ();
         h_row.set_title ("Height Multiplier");
         h_row.set_subtitle ("1.00 = original height");
-        scale_height_x = new SpinButton.with_range (0.0, 10.0, 0.05);
+        scale_height_x = new SpinButton.with_range (0.05, 10.0, 0.05);
         scale_height_x.set_value (1.0);
         scale_height_x.set_digits (2);
         scale_height_x.set_valign (Align.CENTER);
@@ -421,6 +421,27 @@ public class GeneralTab : Box {
         custom_frame_rate.set_placeholder_text ("e.g. 23.976");
         custom_frame_rate.set_valign (Align.CENTER);
         custom_frame_rate.set_width_chars (10);
+        custom_frame_rate.set_input_purpose (InputPurpose.NUMBER);
+
+        // Only allow digits and a single decimal point
+        custom_frame_rate.changed.connect (() => {
+            string txt = custom_frame_rate.text;
+            var cleaned = new StringBuilder ();
+            bool has_dot = false;
+            for (int i = 0; i < txt.length; i++) {
+                unichar c = txt[i];
+                if (c >= '0' && c <= '9') {
+                    cleaned.append_unichar (c);
+                } else if (c == '.' && !has_dot) {
+                    cleaned.append_unichar (c);
+                    has_dot = true;
+                }
+            }
+            string result = cleaned.str;
+            if (result != txt) {
+                custom_frame_rate.set_text (result);
+            }
+        });
         custom_fr_row.add_suffix (custom_frame_rate);
         custom_fr_row.set_visible (false);
         group.add (custom_fr_row);
@@ -440,8 +461,8 @@ public class GeneralTab : Box {
 
         var vspeed_row = new Adw.ActionRow ();
         vspeed_row.set_title ("Speed Adjustment");
-        vspeed_row.set_subtitle ("Percentage change (−100 to +100)");
-        video_speed = new SpinButton.with_range (-100, 100, 5);
+        vspeed_row.set_subtitle ("Percentage change (−95 to +100)");
+        video_speed = new SpinButton.with_range (-95, 100, 5);
         video_speed.set_value (0);
         video_speed.set_valign (Align.CENTER);
         vspeed_row.add_suffix (video_speed);
@@ -463,8 +484,8 @@ public class GeneralTab : Box {
 
         var aspeed_row = new Adw.ActionRow ();
         aspeed_row.set_title ("Speed Adjustment");
-        aspeed_row.set_subtitle ("Percentage change (−100 to +100)");
-        audio_speed = new SpinButton.with_range (-100, 100, 5);
+        aspeed_row.set_subtitle ("Percentage change (−95 to +100)");
+        audio_speed = new SpinButton.with_range (-95, 100, 5);
         audio_speed.set_value (0);
         audio_speed.set_valign (Align.CENTER);
         aspeed_row.add_suffix (audio_speed);
@@ -601,8 +622,8 @@ public class GeneralTab : Box {
     //  re-expand or re-activate — the user may have intentionally left them off.
     // ═════════════════════════════════════════════════════════════════════════
 
-    private static string LOCK_REASON = "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
-    private static string LOCK_REASON_CROP = "Disabled while using crop modes in the Crop & Trim tab — switch to Trim Only or Chapter Split mode to unlock";
+    private const string LOCK_REASON = "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
+    private const string LOCK_REASON_CROP = "Disabled while using crop modes in the Crop & Trim tab — switch to Trim Only or Chapter Split mode to unlock";
 
     /**
      * Called by AppController whenever the Crop & Trim tab gains or loses
@@ -650,8 +671,8 @@ public class GeneralTab : Box {
             seek_expander.set_sensitive (true);
             time_expander.set_sensitive (true);
 
-            seek_expander.set_tooltip_text ("");
-            time_expander.set_tooltip_text ("");
+            seek_expander.set_tooltip_text (null);
+            time_expander.set_tooltip_text (null);
         }
     }
 
@@ -665,7 +686,7 @@ public class GeneralTab : Box {
             crop_expander.set_tooltip_text (LOCK_REASON_CROP);
         } else {
             crop_expander.set_sensitive (true);
-            crop_expander.set_tooltip_text ("");
+            crop_expander.set_tooltip_text (null);
         }
     }
 
@@ -764,7 +785,7 @@ public class GeneralTab : Box {
         if (pos == -1) return "";
         string part = line.substring (pos + 5);
         int end = part.index_of_char (' ');
-        return (end > 0) ? part.substring (0, end) : part;
+        return ((end > 0) ? part.substring (0, end) : part).strip ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
