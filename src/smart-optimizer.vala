@@ -231,6 +231,12 @@ public struct OptimizationContext {
      *  so size estimates reflect the actual output resolution/processing. */
     public string video_filter_chain;
 
+    /** Trim start in seconds. 0 means start from the beginning. */
+    public double trim_start_seconds;
+
+    /** Trim end in seconds. 0 means run until the source duration. */
+    public double trim_end_seconds;
+
     /** Effective encode duration in seconds, accounting for seek/time trim.
      *  0 means use the full probed duration. */
     public double effective_duration;
@@ -363,9 +369,32 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // ── 1b. Apply context overrides ─────────────────────────────────
-        double encode_duration = (ctx.effective_duration > 0)
-            ? ctx.effective_duration
+        double trim_start = (ctx.trim_start_seconds > 0)
+            ? double.min (ctx.trim_start_seconds, info.duration)
+            : 0.0;
+        double trim_end = (ctx.trim_end_seconds > 0)
+            ? double.min (ctx.trim_end_seconds, info.duration)
             : info.duration;
+
+        if (ctx.effective_duration > 0) {
+            trim_end = double.min (trim_end, trim_start + ctx.effective_duration);
+        }
+        if (trim_end <= trim_start) {
+            trim_start = 0.0;
+            trim_end = info.duration;
+        }
+
+        bool trim_active = trim_start > 0.0 || trim_end < info.duration;
+        double encode_duration = trim_end - trim_start;
+        if (encode_duration <= 0) {
+            encode_duration = (ctx.effective_duration > 0)
+                ? ctx.effective_duration
+                : info.duration;
+            trim_start = 0.0;
+            trim_end = double.min (encode_duration, info.duration);
+            trim_active = false;
+        }
+        double sample_segment_duration = double.min ((double) SEGMENT_DURATION, encode_duration);
 
         if (ctx.strip_audio) {
             // No audio track — entire budget goes to video
@@ -444,16 +473,17 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // ── 3. Pick sample positions ────────────────────────────────────
-        // Sample from the full video even if a trim is set — the content
-        // characteristics are representative. The encode_duration is only
-        // used for the final size extrapolation.
-        double[] positions = pick_sample_positions (info.duration);
+        // Sample within the effective trim window so analysis matches the
+        // frames that will actually be encoded.
+        double[] positions = pick_sample_positions_in_window (
+            trim_start, encode_duration, sample_segment_duration);
 
         // ── 4. Content detection ────────────────────────────────────────
         ContentProfile profile;
         try {
             cancellable_check (cancellable);
-            profile = yield analyze_content (input_file, positions, vf, cancellable);
+            profile = yield analyze_content (
+                input_file, positions, sample_segment_duration, vf, cancellable);
         } catch (IOError.CANCELLED e) {
             throw e;
         } catch (Error e) {
@@ -478,9 +508,10 @@ public class SmartOptimizer : GLib.Object {
                 int initial_count = positions.length;
                 int expanded_count = int.min (
                     ADAPTIVE_MAX_SEGMENTS,
-                    (int) (info.duration / SEGMENT_DURATION));
+                    (int) (encode_duration / sample_segment_duration));
                 if (expanded_count > initial_count) {
-                    positions = pick_sample_positions_n (info.duration, expanded_count);
+                    positions = pick_sample_positions_n_in_window (
+                        trim_start, encode_duration, sample_segment_duration, expanded_count);
                     adaptive_expanded = true;
                     warning ("Smart Optimizer: high content variability (CV=%.2f) — "
                         + "expanded from %d to %d calibration segments",
@@ -508,7 +539,7 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 cal_sizes[ci] = yield calibration_encode (
                     input_file, preferred_codec, cal_crfs[ci], positions,
-                    encode_duration, vf, cancellable);
+                    encode_duration, sample_segment_duration, vf, cancellable);
             }
         } catch (IOError.CANCELLED e) {
             throw e;
@@ -742,7 +773,7 @@ public class SmartOptimizer : GLib.Object {
                 // Encode at the recommended preset to measure the real ratio
                 verify_preset_kb = yield calibration_encode (
                     input_file, preferred_codec, predicted_crf, verify_pos,
-                    encode_duration, vf, cancellable, preset_idx);
+                    encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
 
                 if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
                     verified_preset_factor = verify_preset_kb / verify_model_ultrafast_kb;
@@ -839,7 +870,7 @@ public class SmartOptimizer : GLib.Object {
         // linear extrapolation (sample_kb × scale) becomes less reliable.
         // Flag this in the notes and reduce confidence accordingly.
         double sample_duration = double.min (
-            (double) positions.length * SEGMENT_DURATION, encode_duration);
+            (double) positions.length * sample_segment_duration, encode_duration);
         double sample_coverage = sample_duration / encode_duration;
         if (sample_coverage < 0.10) {
             // Less than 10% sampled — meaningful uncertainty
@@ -859,15 +890,15 @@ public class SmartOptimizer : GLib.Object {
         // bitrate has already been replaced by the tier-based budget — the
         // original source audio bitrate is no longer available.
         int source_video_kbps = 0;
-        if (info.file_size_bytes > 0 && encode_duration > 0) {
-            // Source total kbps (using the full file duration, not trimmed,
-            // since file_size_bytes reflects the entire source)
-            double source_total_kbps = (double) info.file_size_bytes * 8.0
+        double source_total_kbps = 0.0;
+        if (info.file_size_bytes > 0 && info.duration > 0) {
+            source_total_kbps = (double) info.file_size_bytes * 8.0
                 / (info.duration * 1024.0);
+        }
+        if (!trim_active && source_total_kbps > 0 && encode_duration > 0) {
             // Rough source video kbps — subtract a conservative audio estimate.
             // 128 kbps covers most common audio codecs without over-subtracting.
-            source_video_kbps = int.max (0,
-                (int) source_total_kbps - 128);
+            source_video_kbps = int.max (0, (int) source_total_kbps - 128);
 
             // If the CRF estimate exceeds the source's size while the user
             // asked for a smaller target, the model's prediction is suspect.
@@ -892,7 +923,22 @@ public class SmartOptimizer : GLib.Object {
         // cannot guarantee the output fits, so two-pass bitrate targeting
         // is required regardless of tier.
         double source_size_mb = (double) info.file_size_bytes / (1024.0 * 1024.0);
-        bool is_reduction = (source_size_mb > 0) && ((double) target_mb < source_size_mb * 0.98);
+        double comparison_source_size_mb = source_size_mb;
+        double reduction_confidence = 1.0;
+        if (trim_active && source_total_kbps > 0) {
+            comparison_source_size_mb = source_total_kbps * encode_duration / 8.0 / 1024.0;
+            reduction_confidence = sample_coverage;
+            if (profile.temporal_diff_mean > 0) {
+                double motion_cv = profile.temporal_diff_stddev / profile.temporal_diff_mean;
+                reduction_confidence *= (1.0 - double.min (0.35, motion_cv * 0.20));
+            }
+            reduction_confidence = reduction_confidence.clamp (0.25, 1.0);
+        }
+        double reduction_threshold = trim_active
+            ? (0.85 + 0.10 * reduction_confidence)
+            : 0.98;
+        bool is_reduction = (comparison_source_size_mb > 0)
+            && ((double) target_mb < comparison_source_size_mb * reduction_threshold);
 
         // Also check if the CRF estimate already overshoots the target.
         // Even when source size is unknown, if the model predicts overshoot,
@@ -982,8 +1028,17 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
                 .printf (target_video_kbps, preset_label));
             if (is_reduction) {
-                notes.append ("  Source is ~%.0f MB → target %d MB requires size reduction.\n"
-                    .printf (source_size_mb, target_mb));
+                if (trim_active && comparison_source_size_mb > 0) {
+                    notes.append ("  Trimmed source window is ~%.0f MB (estimated) → target %d MB requires size reduction.\n"
+                        .printf (comparison_source_size_mb, target_mb));
+                    if (reduction_confidence < 0.95) {
+                        notes.append ("  Reduction estimate confidence: %.0f%% (trim-window bitrate inferred from sampled content)\n"
+                            .printf (reduction_confidence * 100.0));
+                    }
+                } else {
+                    notes.append ("  Source is ~%.0f MB → target %d MB requires size reduction.\n"
+                        .printf (source_size_mb, target_mb));
+                }
             } else if (crf_overshoots) {
                 notes.append ("  CRF estimate (~%d KB) exceeds target (~%.0f KB).\n"
                     .printf (estimated_total_kb, target_total_kb));
@@ -1040,14 +1095,24 @@ public class SmartOptimizer : GLib.Object {
         if (source_video_kbps > 0) {
             notes.append ("  Source: ~%.0f MB, ~%d kbps (est. video) | Target: %d kbps video\n"
                 .printf (source_size_mb, source_video_kbps, target_video_kbps));
+        } else if (trim_active && comparison_source_size_mb > 0) {
+            notes.append ("  Trim window: %.1fs→%.1fs | Source window estimate: ~%.0f MB\n"
+                .printf (trim_start, trim_end, comparison_source_size_mb));
         }
         if (tier == SizeTier.TINY) {
             notes.append ("  Metadata stripped to save space (tiny target)\n");
         }
-        notes.append ("  Sample coverage: %.0f%% (%d × %ds segments%s)\n"
-            .printf (sample_coverage * 100.0, positions.length, SEGMENT_DURATION,
+        notes.append ("  Sample coverage: %.0f%% (%d × %.2fs segments%s)\n"
+            .printf (sample_coverage * 100.0, positions.length, sample_segment_duration,
                      adaptive_expanded ? ", adaptively expanded" : ""));
-        if (ctx.effective_duration > 0 && ctx.effective_duration != info.duration) {
+        if (sample_segment_duration != (double) SEGMENT_DURATION) {
+            notes.append ("  Sample segments shortened to %.2fs to stay within the trim window\n"
+                .printf (sample_segment_duration));
+        }
+        if (trim_active) {
+            notes.append ("  Trimmed duration: %.1fs (window %.1fs→%.1fs, full: %.1fs)\n"
+                .printf (encode_duration, trim_start, trim_end, info.duration));
+        } else if (ctx.effective_duration > 0 && ctx.effective_duration != info.duration) {
             notes.append ("  Trimmed duration: %.1fs (full: %.1fs)\n"
                 .printf (encode_duration, info.duration));
         }
@@ -1124,14 +1189,20 @@ public class SmartOptimizer : GLib.Object {
         double duration = 0.0;
         if (format != null) {
             string dur_str = format.get_string_member_with_default ("duration", "0");
-            duration = double.parse (dur_str);
+            double parsed_duration = 0.0;
+            if (try_parse_double (dur_str, out parsed_duration) && parsed_duration > 0) {
+                duration = parsed_duration;
+            }
         }
 
         // ── Source file size ──────────────────────────────────────────────
         int64 source_size_bytes = 0;
         if (format != null) {
             string sz_str = format.get_string_member_with_default ("size", "0");
-            source_size_bytes = int64.parse (sz_str);
+            int64 parsed_size = 0;
+            if (try_parse_int64 (sz_str, out parsed_size) && parsed_size > 0) {
+                source_size_bytes = parsed_size;
+            }
         }
         if (source_size_bytes <= 0) {
             // Fallback: stat the file directly
@@ -1155,33 +1226,46 @@ public class SmartOptimizer : GLib.Object {
             file_size_bytes         = source_size_bytes
         };
 
-        var streams = root.get_array_member ("streams");
-        for (uint i = 0; i < streams.get_length (); i++) {
-            var s     = streams.get_object_element (i);
-            var ctype = s.get_string_member_with_default ("codec_type", "");
+        Json.Array? streams = root.has_member ("streams")
+            ? root.get_array_member ("streams")
+            : null;
+        if (streams != null) {
+            for (uint i = 0; i < streams.get_length (); i++) {
+                var s     = streams.get_object_element (i);
+                var ctype = s.get_string_member_with_default ("codec_type", "");
 
-            if (ctype == "video" && info.width == 0) {
-                info.width  = (int) s.get_int_member ("width");
-                info.height = (int) s.get_int_member ("height");
-                var rfr     = s.get_string_member_with_default ("r_frame_rate", "24/1");
-                info.fps    = parse_fraction (rfr);
+                if (ctype == "video" && info.width == 0) {
+                    info.width  = (int) s.get_int_member ("width");
+                    info.height = (int) s.get_int_member ("height");
+                    var rfr     = s.get_string_member_with_default ("r_frame_rate", "24/1");
+                    info.fps    = parse_fraction (rfr);
 
-                // ── Duration fallback: video stream level ────────────────
-                if (info.duration <= 0) {
-                    string stream_dur = s.get_string_member_with_default ("duration", "0");
-                    info.duration = double.parse (stream_dur);
+                    // ── Duration fallback: video stream level ────────────
+                    if (info.duration <= 0) {
+                        string stream_dur = s.get_string_member_with_default ("duration", "0");
+                        double parsed_stream_dur = 0.0;
+                        if (try_parse_double (stream_dur, out parsed_stream_dur) && parsed_stream_dur > 0) {
+                            info.duration = parsed_stream_dur;
+                        }
+                    }
                 }
-            }
 
-            if (ctype == "audio") {
-                var bstr = s.get_string_member_with_default ("bit_rate", "0");
-                info.audio_bitrate_kbps = (int) (double.parse (bstr) / 1000.0);
-                info.audio_codec = s.get_string_member_with_default ("codec_name", "");
+                if (ctype == "audio") {
+                    var bstr = s.get_string_member_with_default ("bit_rate", "0");
+                    double parsed_audio_bps = 0.0;
+                    if (try_parse_double (bstr, out parsed_audio_bps) && parsed_audio_bps > 0) {
+                        info.audio_bitrate_kbps = (int) (parsed_audio_bps / 1000.0);
+                    }
+                    info.audio_codec = s.get_string_member_with_default ("codec_name", "");
 
-                // ── Duration fallback: audio stream level ────────────────
-                if (info.duration <= 0) {
-                    string stream_dur = s.get_string_member_with_default ("duration", "0");
-                    info.duration = double.parse (stream_dur);
+                    // ── Duration fallback: audio stream level ────────────
+                    if (info.duration <= 0) {
+                        string stream_dur = s.get_string_member_with_default ("duration", "0");
+                        double parsed_stream_dur = 0.0;
+                        if (try_parse_double (stream_dur, out parsed_stream_dur) && parsed_stream_dur > 0) {
+                            info.duration = parsed_stream_dur;
+                        }
+                    }
                 }
             }
         }
@@ -1220,8 +1304,8 @@ public class SmartOptimizer : GLib.Object {
     // SAMPLE POSITION SELECTION
     // ════════════════════════════════════════════════════════════════════════
 
-    private double[] pick_sample_positions (double duration) {
-        if (duration <= SEGMENT_DURATION * 2) {
+    private double[] pick_sample_positions (double duration, double segment_duration) {
+        if (duration <= segment_duration * 2.0) {
             return { 0 };
         }
 
@@ -1235,28 +1319,46 @@ public class SmartOptimizer : GLib.Object {
         } else {
             max_segs = BASE_MAX_SEGMENTS;
         }
-        int n = int.min (max_segs, (int) (duration / SEGMENT_DURATION));
+        int n = int.min (max_segs, (int) (duration / segment_duration));
         n = int.max (n, 2);
 
-        return spread_positions (duration, n);
+        return spread_positions (duration, n, segment_duration);
+    }
+
+    private double[] pick_sample_positions_in_window (
+        double start,
+        double duration,
+        double segment_duration
+    ) {
+        return offset_positions (pick_sample_positions (duration, segment_duration), start);
     }
 
     /**
      * Pick exactly @requested positions (clamped to what fits in the duration).
      * Used by adaptive expansion when content variability warrants more samples.
      */
-    private double[] pick_sample_positions_n (double duration, int requested) {
-        if (duration <= SEGMENT_DURATION * 2) {
+    private double[] pick_sample_positions_n (double duration, double segment_duration, int requested) {
+        if (duration <= segment_duration * 2.0) {
             return { 0 };
         }
-        int n = int.min (requested, (int) (duration / SEGMENT_DURATION));
+        int n = int.min (requested, (int) (duration / segment_duration));
         n = int.max (n, 2);
 
-        return spread_positions (duration, n);
+        return spread_positions (duration, n, segment_duration);
     }
 
-    private double[] spread_positions (double duration, int n) {
-        double usable = duration - SEGMENT_DURATION;
+    private double[] pick_sample_positions_n_in_window (
+        double start,
+        double duration,
+        double segment_duration,
+        int    requested
+    ) {
+        return offset_positions (
+            pick_sample_positions_n (duration, segment_duration, requested), start);
+    }
+
+    private double[] spread_positions (double duration, int n, double segment_duration) {
+        double usable = duration - segment_duration;
         double start  = usable * SEGMENT_SPREAD;
         double end    = usable * (1.0 - SEGMENT_SPREAD);
         double step   = (n > 1) ? (end - start) / (n - 1) : 0;
@@ -1266,6 +1368,14 @@ public class SmartOptimizer : GLib.Object {
             positions[i] = start + step * i;
         }
         return positions;
+    }
+
+    private double[] offset_positions (double[] positions, double start) {
+        var shifted = new double[positions.length];
+        for (int i = 0; i < positions.length; i++) {
+            shifted[i] = positions[i] + start;
+        }
+        return shifted;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1280,14 +1390,13 @@ public class SmartOptimizer : GLib.Object {
     private async ContentProfile analyze_content (
         string        path,
         double[]      positions,
+        double        segment_duration,
         string        video_filter_chain = "",
         Cancellable?  cancellable = null
     ) throws Error {
-        int seg_dur = SEGMENT_DURATION;
-
         // ── Signal stats (color + motion via YDIF) ──────────────────────
         string[] sig_cmd = build_concat_analysis_cmd (
-            path, positions, seg_dur,
+            path, positions, segment_duration,
             "signalstats=stat=tout+vrep+brng",
             video_filter_chain
         );
@@ -1298,7 +1407,7 @@ public class SmartOptimizer : GLib.Object {
 
         // ── Edge detection ──────────────────────────────────────────────
         string[] edge_cmd = build_concat_analysis_cmd (
-            path, positions, seg_dur,
+            path, positions, segment_duration,
             "edgedetect=low=0.08:high=0.25,signalstats",
             video_filter_chain
         );
@@ -1536,18 +1645,18 @@ public class SmartOptimizer : GLib.Object {
         int           crf,
         double[]      positions,
         double        full_duration,
+        double        segment_duration,
         string        video_filter_chain = "",
         Cancellable?  cancellable = null,
         int           preset_idx = -1
     ) throws Error {
-        int seg_dur = SEGMENT_DURATION;
         double sample_duration = double.min (
-            (double) positions.length * seg_dur, full_duration);
+            (double) positions.length * segment_duration, full_duration);
 
         string tmp = tmp_path ("cal_%d".printf (crf));
 
         string[] cmd = build_concat_encode_cmd (
-            input_file, codec, crf, positions, seg_dur, tmp,
+            input_file, codec, crf, positions, segment_duration, tmp,
             video_filter_chain, preset_idx);
 
         try {
@@ -1593,7 +1702,7 @@ public class SmartOptimizer : GLib.Object {
     private string[] build_concat_analysis_cmd (
         string   path,
         double[] positions,
-        int      seg_dur,
+        double   seg_dur,
         string   filter,
         string   video_filter_chain = ""
     ) {
@@ -1605,7 +1714,7 @@ public class SmartOptimizer : GLib.Object {
 
         for (int i = 0; i < positions.length; i++) {
             cmd.add ("-ss");  cmd.add ("%.2f".printf (positions[i]));
-            cmd.add ("-t");   cmd.add (seg_dur.to_string ());
+            cmd.add ("-t");   cmd.add ("%.3f".printf (seg_dur));
             cmd.add ("-i");   cmd.add (path);
         }
 
@@ -1647,7 +1756,7 @@ public class SmartOptimizer : GLib.Object {
         string   codec,
         int      crf,
         double[] positions,
-        int      seg_dur,
+        double   seg_dur,
         string   output,
         string   video_filter_chain = "",
         int      preset_idx = -1
@@ -1660,7 +1769,7 @@ public class SmartOptimizer : GLib.Object {
 
         for (int i = 0; i < positions.length; i++) {
             cmd.add ("-ss");  cmd.add ("%.2f".printf (positions[i]));
-            cmd.add ("-t");   cmd.add (seg_dur.to_string ());
+            cmd.add ("-t");   cmd.add ("%.3f".printf (seg_dur));
             cmd.add ("-i");   cmd.add (path);
         }
 
@@ -1811,14 +1920,63 @@ public class SmartOptimizer : GLib.Object {
      * Parse "30000/1001" or "30" into a double.
      */
     private double parse_fraction (string s) {
-        if ("/" in s) {
-            var parts = s.split ("/");
-            double num = double.parse (parts[0]);
-            double den = double.parse (parts[1]);
-            return (den > 0) ? num / den : 24.0;
+        double parsed = 0.0;
+        if (try_parse_fraction_value (s, out parsed) && parsed > 0) {
+            return parsed;
         }
-        double v = double.parse (s);
-        return (v > 0) ? v : 24.0;
+        return 24.0;
+    }
+
+    private bool try_parse_double (string? text, out double value) {
+        value = 0.0;
+        if (text == null) return false;
+
+        string raw = text.strip ();
+        if (raw.length == 0) return false;
+        if (raw == "N/A" || raw == "nan" || raw == "NaN") return false;
+
+        unowned string unparsed = null;
+        if (!double.try_parse (raw, out value, out unparsed)) return false;
+        return unparsed == null || unparsed.strip ().length == 0;
+    }
+
+    private bool try_parse_int64 (string? text, out int64 value) {
+        value = 0;
+        if (text == null) return false;
+
+        string raw = text.strip ();
+        if (raw.length == 0) return false;
+        if (raw == "N/A") return false;
+
+        unowned string unparsed = null;
+        if (!int64.try_parse (raw, out value, out unparsed, 10)) return false;
+        return unparsed == null || unparsed.strip ().length == 0;
+    }
+
+    private bool try_parse_fraction_value (string? text, out double value) {
+        value = 0.0;
+        if (text == null) return false;
+
+        string raw = text.strip ();
+        if (raw.length == 0 || raw == "N/A") return false;
+
+        if ("/" in raw) {
+            var parts = raw.split ("/");
+            if (parts.length < 2) return false;
+
+            double num = 0.0;
+            double den = 0.0;
+            if (!try_parse_double (parts[0], out num)
+                || !try_parse_double (parts[1], out den)
+                || den <= 0.0) {
+                return false;
+            }
+
+            value = num / den;
+            return value > 0.0;
+        }
+
+        return try_parse_double (raw, out value) && value > 0.0;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1850,7 +2008,7 @@ public class SmartOptimizer : GLib.Object {
     /** Run a command, return its stdout as a string. */
     private async string run_subprocess_stdout (string[] cmd, Cancellable? cancellable = null) throws Error {
         var launcher = new SubprocessLauncher (
-            SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_SILENCE);
+            SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
         var proc = launcher.spawnv (cmd);
         string stdout_buf;
         string stderr_buf;
@@ -1860,13 +2018,14 @@ public class SmartOptimizer : GLib.Object {
             proc.force_exit ();
             throw e;
         }
+        ensure_subprocess_success (proc, cmd, stdout_buf, stderr_buf);
         return stdout_buf ?? "";
     }
 
     /** Run a command, return its stderr as a string (for ffmpeg stats parsing). */
     private async string run_subprocess_stderr (string[] cmd, Cancellable? cancellable = null) throws Error {
         var launcher = new SubprocessLauncher (
-            SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_SILENCE);
+            SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_PIPE);
         var proc = launcher.spawnv (cmd);
         string stdout_buf;
         string stderr_buf;
@@ -1876,6 +2035,7 @@ public class SmartOptimizer : GLib.Object {
             proc.force_exit ();
             throw e;
         }
+        ensure_subprocess_success (proc, cmd, stdout_buf, stderr_buf);
         return stderr_buf ?? "";
     }
 
@@ -1898,13 +2058,26 @@ public class SmartOptimizer : GLib.Object {
         }
 
         if (!proc.get_successful ()) {
-            string detail = (stderr_buf != null && stderr_buf.length > 0)
-                ? stderr_buf.strip ()
-                : "no output";
-            throw new IOError.FAILED (
-                "Command failed: %s\nffmpeg said: %s",
-                string.joinv (" ", cmd), detail);
+            ensure_subprocess_success (proc, cmd, stdout_buf, stderr_buf);
         }
+    }
+
+    private void ensure_subprocess_success (
+        Subprocess proc,
+        string[]   cmd,
+        string?    stdout_buf,
+        string?    stderr_buf
+    ) throws Error {
+        if (proc.get_successful ()) return;
+
+        string detail = (stderr_buf != null && stderr_buf.strip ().length > 0)
+            ? stderr_buf.strip ()
+            : ((stdout_buf != null && stdout_buf.strip ().length > 0)
+                ? stdout_buf.strip ()
+                : "no output");
+        throw new IOError.FAILED (
+            "Command failed: %s\nTool said: %s",
+            string.joinv (" ", cmd), detail);
     }
 
     // ════════════════════════════════════════════════════════════════════════

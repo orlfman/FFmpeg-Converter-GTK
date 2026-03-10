@@ -320,9 +320,19 @@ public class AppController : Object {
                 end = double.min (start + general_tab.get_time_seconds (), full_dur);
             }
 
+            ctx.trim_start_seconds = start;
+            if (full_dur > 0) {
+                ctx.trim_end_seconds = end;
+            }
+
             double eff = end - start;
             if (eff > 0 && eff < full_dur) {
                 ctx.effective_duration = eff;
+            } else if (general_tab.is_time_enabled ()) {
+                double requested = general_tab.get_time_seconds ();
+                if (requested > 0) {
+                    ctx.effective_duration = requested;
+                }
             }
         }
 
