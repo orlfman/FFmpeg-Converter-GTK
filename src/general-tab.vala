@@ -5,10 +5,18 @@ using GLib;
 public class GeneralTab : Box {
 
     // ── Scaling ──────────────────────────────────────────────────────────────
+    public DropDown   scale_mode       { get; private set; }
+    public DropDown   resolution_preset { get; private set; }
     public SpinButton scale_width_x    { get; private set; }
     public SpinButton scale_height_x   { get; private set; }
     public DropDown   scale_algorithm  { get; private set; }
     public DropDown   scale_range      { get; private set; }
+
+    private Adw.ActionRow resolution_preset_row;
+    private Adw.ActionRow width_row;
+    private Adw.ActionRow height_row;
+    private Adw.ActionRow algorithm_row;
+    private Adw.ActionRow range_row;
 
     // ── Rotation & Crop ──────────────────────────────────────────────────────
     public DropDown rotate_combo       { get; private set; }
@@ -133,42 +141,98 @@ public class GeneralTab : Box {
         group.set_title ("Scaling &amp; Transform");
         group.set_description ("Resize, rotate, and crop the video");
 
-        // ── Width Multiplier ─────────────────────────────────────────────────
-        var w_row = new Adw.ActionRow ();
-        w_row.set_title ("Width Multiplier");
-        w_row.set_subtitle ("1.00 = original width");
+        // ── Scaling Mode ─────────────────────────────────────────────────────
+        var mode_row = new Adw.ActionRow ();
+        mode_row.set_title ("Scaling");
+        mode_row.set_subtitle ("Choose how to resize the video");
+        scale_mode = new DropDown (new StringList (
+            { ScaleMode.ORIGINAL, ScaleMode.RESOLUTION, ScaleMode.PERCENTAGE }
+        ), null);
+        scale_mode.set_valign (Align.CENTER);
+        scale_mode.set_selected (0);
+        mode_row.add_suffix (scale_mode);
+        group.add (mode_row);
+
+        // ── Resolution Preset (visible in Resolution mode) ───────────────────
+        resolution_preset_row = new Adw.ActionRow ();
+        resolution_preset_row.set_title ("Resolution");
+        resolution_preset_row.set_subtitle ("Select a target resolution");
+        resolution_preset = new DropDown (new StringList ({
+            "7680×4320 (16:9)",
+            "7680×4800 (16:10)",
+            "3840×2160 (16:9)",
+            "3840×2400 (16:10)",
+            "2960×1440 (18.5:9)",
+            "2868×1320 (19.5:9)",
+            "2778×1284 (19.5:9)",
+            "2622×1206 (19.5:9)",
+            "2560×1440 (16:9)",
+            "2560×1600 (16:10)",
+            "2556×1179 (19.5:9)",
+            "2532×1170 (19.5:9)",
+            "2436×1125 (19.5:9)",
+            "2400×1080 (20:9)",
+            "2340×1080 (19.5:9)",
+            "2160×1080 (18:9)",
+            "1920×1080 (16:9)",
+            "1920×1200 (16:10)",
+            "1280×720 (16:9)",
+            "1280×800 (16:10)",
+            "1080×2400 (9:20)",
+            "1080×2340 (9:19.5)",
+            "1080×1920 (9:16)",
+            "854×480 (16:9)",
+            "960×600 (16:10)",
+            "800×480 (5:3)",
+            "768×480 (16:10)",
+            "720×1280 (9:16)",
+            "640×480 (4:3)"
+        }), null);
+        resolution_preset.set_valign (Align.CENTER);
+        resolution_preset.set_selected (16);  // default to 1920×1080
+        resolution_preset_row.add_suffix (resolution_preset);
+        resolution_preset_row.set_visible (false);
+        group.add (resolution_preset_row);
+
+        // ── Width Multiplier (visible in Percentage mode) ────────────────────
+        width_row = new Adw.ActionRow ();
+        width_row.set_title ("Width Multiplier");
+        width_row.set_subtitle ("1.00 = original width");
         scale_width_x = new SpinButton.with_range (0.05, 10.0, 0.05);
         scale_width_x.set_value (1.0);
         scale_width_x.set_digits (2);
         scale_width_x.set_valign (Align.CENTER);
-        w_row.add_suffix (scale_width_x);
-        group.add (w_row);
+        width_row.add_suffix (scale_width_x);
+        width_row.set_visible (false);
+        group.add (width_row);
 
-        // ── Height Multiplier ────────────────────────────────────────────────
-        var h_row = new Adw.ActionRow ();
-        h_row.set_title ("Height Multiplier");
-        h_row.set_subtitle ("1.00 = original height");
+        // ── Height Multiplier (visible in Percentage mode) ───────────────────
+        height_row = new Adw.ActionRow ();
+        height_row.set_title ("Height Multiplier");
+        height_row.set_subtitle ("1.00 = original height");
         scale_height_x = new SpinButton.with_range (0.05, 10.0, 0.05);
         scale_height_x.set_value (1.0);
         scale_height_x.set_digits (2);
         scale_height_x.set_valign (Align.CENTER);
-        h_row.add_suffix (scale_height_x);
-        group.add (h_row);
+        height_row.add_suffix (scale_height_x);
+        height_row.set_visible (false);
+        group.add (height_row);
 
-        // ── Algorithm ────────────────────────────────────────────────────────
-        var alg_row = new Adw.ActionRow ();
-        alg_row.set_title ("Algorithm");
-        alg_row.set_subtitle ("Scaling filter — Lanczos is best for most content");
+        // ── Algorithm (visible in Resolution or Percentage mode) ─────────────
+        algorithm_row = new Adw.ActionRow ();
+        algorithm_row.set_title ("Algorithm");
+        algorithm_row.set_subtitle ("Scaling filter — Lanczos is best for most content");
         scale_algorithm = new DropDown (new StringList (
             { "lanczos", "point", "bilinear", "bicubic", "spline16", "spline36" }
         ), null);
         scale_algorithm.set_valign (Align.CENTER);
         scale_algorithm.set_selected (0);
-        alg_row.add_suffix (scale_algorithm);
-        group.add (alg_row);
+        algorithm_row.add_suffix (scale_algorithm);
+        algorithm_row.set_visible (false);
+        group.add (algorithm_row);
 
-        // ── Color Range ──────────────────────────────────────────────────────
-        var range_row = new Adw.ActionRow ();
+        // ── Color Range (visible in Resolution or Percentage mode) ───────────
+        range_row = new Adw.ActionRow ();
         range_row.set_title ("Color Range");
         range_row.set_subtitle ("Input preserves the original range");
         scale_range = new DropDown (new StringList (
@@ -177,6 +241,7 @@ public class GeneralTab : Box {
         scale_range.set_valign (Align.CENTER);
         scale_range.set_selected (0);
         range_row.add_suffix (scale_range);
+        range_row.set_visible (false);
         group.add (range_row);
 
         // ── Rotate / Flip ────────────────────────────────────────────────────
@@ -553,6 +618,10 @@ public class GeneralTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
+        scale_mode.notify["selected"].connect (() => {
+            update_scaling_visibility ();
+        });
+
         eight_bit_check.notify["active"].connect (() => {
             eight_bit_fmt_row.set_visible (eight_bit_check.active);
             if (eight_bit_check.active) ten_bit_check.active = false;
@@ -591,6 +660,26 @@ public class GeneralTab : Box {
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
+    public string get_scale_mode_text () {
+        var item = scale_mode.selected_item as StringObject;
+        return item != null ? item.string : ScaleMode.ORIGINAL;
+    }
+
+    /**
+     * Returns the selected resolution preset as "WxH" (e.g. "1920x1080"),
+     * or "" if no preset is selected.
+     */
+    public string get_resolution_preset_value () {
+        var item = resolution_preset.selected_item as StringObject;
+        if (item == null) return "";
+        // Format is "1920×1080 (16:9)" — extract before the space
+        string text = item.string;
+        int space = text.index_of_char (' ');
+        string res = (space > 0) ? text.substring (0, space) : text;
+        // Normalize the × (Unicode multiply) to x for FFmpeg
+        return res.replace ("×", ":");
+    }
+
     public string get_frame_rate_text () {
         var item = frame_rate_combo.selected_item as StringObject;
         return item != null ? item.string : "";
@@ -598,6 +687,19 @@ public class GeneralTab : Box {
 
     public string get_color_filter () {
         return color_dialog != null ? color_dialog.get_filter_string () : "";
+    }
+
+    private void update_scaling_visibility () {
+        string mode = get_scale_mode_text ();
+        bool is_resolution  = (mode == ScaleMode.RESOLUTION);
+        bool is_percentage  = (mode == ScaleMode.PERCENTAGE);
+        bool is_scaling     = is_resolution || is_percentage;
+
+        resolution_preset_row.set_visible (is_resolution);
+        width_row.set_visible (is_percentage);
+        height_row.set_visible (is_percentage);
+        algorithm_row.set_visible (is_scaling);
+        range_row.set_visible (is_scaling);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

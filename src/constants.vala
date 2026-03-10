@@ -130,6 +130,14 @@ public enum OutputNameMode {
     }
 }
 
+// ── Scaling Mode Labels ──────────────────────────────────────────────────────
+
+namespace ScaleMode {
+    public const string ORIGINAL   = "Original";
+    public const string RESOLUTION = "Resolution Preset";
+    public const string PERCENTAGE = "Percentage Scaling";
+}
+
 // ── Scaling Algorithms ───────────────────────────────────────────────────────
 
 namespace ScaleAlgorithm {

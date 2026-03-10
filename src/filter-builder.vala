@@ -43,20 +43,34 @@ namespace FilterBuilder {
         string hdr = tab.video_filters.get_hdr_filter ();
         if (hdr.length > 0) filters += hdr;
 
-        // 5. Scale - clean display + zscale for quality filters
-        double sw = tab.scale_width_x.get_value ();
-        double sh = tab.scale_height_x.get_value ();
-        if (!fp_equal (sw, 1.0) || !fp_equal (sh, 1.0)) {
-            string w = fp_equal (sw, 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
-            string h = fp_equal (sh, 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
-            string alg = get_dropdown_text (tab.scale_algorithm).down ();
+        // 5. Scale
+        string scale_mode = tab.get_scale_mode_text ();
+        string? scale_w = null;
+        string? scale_h = null;
 
-            if (alg == ScaleAlgorithm.POINT) {
-                filters += @"scale=w=$w:h=$h:flags=point";
-            } else {
-                filters += @"zscale=w=$w:h=$h:filter=$alg";
+        if (scale_mode == ScaleMode.RESOLUTION) {
+            string res = tab.get_resolution_preset_value ();
+            if (res.length > 0 && res.contains (":")) {
+                string[] dims = res.split (":");
+                scale_w = dims[0];
+                scale_h = dims[1];
             }
+        } else if (scale_mode == ScaleMode.PERCENTAGE) {
+            double sw = tab.scale_width_x.get_value ();
+            double sh = tab.scale_height_x.get_value ();
+            if (!fp_equal (sw, 1.0) || !fp_equal (sh, 1.0)) {
+                scale_w = fp_equal (sw, 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
+                scale_h = fp_equal (sh, 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
+            }
+        }
 
+        if (scale_w != null && scale_h != null) {
+            string alg = get_dropdown_text (tab.scale_algorithm).down ();
+            if (alg == ScaleAlgorithm.POINT) {
+                filters += @"scale=w=$scale_w:h=$scale_h:flags=point";
+            } else {
+                filters += @"zscale=w=$scale_w:h=$scale_h:filter=$alg";
+            }
             string range = get_dropdown_text (tab.scale_range);
             if (range != "input") filters += @"zscale=range=$range";
         }
