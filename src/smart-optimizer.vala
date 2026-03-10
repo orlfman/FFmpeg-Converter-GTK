@@ -1603,7 +1603,12 @@ public class SmartOptimizer : GLib.Object {
         var proc = launcher.spawnv (cmd);
         string stdout_buf;
         string stderr_buf;
-        yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        try {
+            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            throw e;
+        }
         return stdout_buf ?? "";
     }
 
@@ -1614,7 +1619,12 @@ public class SmartOptimizer : GLib.Object {
         var proc = launcher.spawnv (cmd);
         string stdout_buf;
         string stderr_buf;
-        yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        try {
+            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            throw e;
+        }
         return stderr_buf ?? "";
     }
 
@@ -1629,7 +1639,12 @@ public class SmartOptimizer : GLib.Object {
 
         string stdout_buf;
         string stderr_buf;
-        yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        try {
+            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            throw e;
+        }
 
         if (!proc.get_successful ()) {
             string detail = (stderr_buf != null && stderr_buf.length > 0)

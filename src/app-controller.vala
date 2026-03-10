@@ -18,6 +18,10 @@ public class AppController : Object {
      *  Carries the codec name so MainWindow can ensure the correct tab is visible. */
     public signal void auto_convert_requested (string codec);
 
+    /** Emitted when a Smart Optimizer run starts or finishes, so MainWindow
+     *  can enable/disable the cancel button appropriately. */
+    public signal void smart_optimizer_running (bool running);
+
     // ── References ──────────────────────────────────────────────────────────
     private FilePickers file_pickers;
     private GeneralTab general_tab;
@@ -38,6 +42,7 @@ public class AppController : Object {
     // ── Smart Optimizer ──────────────────────────────────────────────────────
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
+    private int smart_opt_generation = 0;
 
     // ── Codec Registry ───────────────────────────────────────────────────────
     //    Maps ViewStack page names to their ISmartCodecTab, eliminating
@@ -87,6 +92,14 @@ public class AppController : Object {
         codec_registry.insert ("vp9",     vp9_tab);
 
         wire_all ();
+    }
+
+    /** Cancel any in-flight Smart Optimizer analysis. */
+    public void cancel_smart_optimizer () {
+        if (smart_opt_cancel != null) {
+            smart_opt_cancel.cancel ();
+            smart_opt_cancel = null;
+        }
     }
 
     private void wire_all () {
@@ -277,11 +290,13 @@ public class AppController : Object {
             smart_opt_cancel.cancel ();
         }
         smart_opt_cancel = new Cancellable ();
+        int my_generation = ++smart_opt_generation;
 
         int target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
         status_area.set_status ("🔍 Smart Optimizer: analyzing video for %d MB %s target…"
             .printf (target_mb, codec.up ()));
         status_area.start_progress ();
+        smart_optimizer_running (true);
 
         string preferred_codec = codec;
 
@@ -329,6 +344,8 @@ public class AppController : Object {
             if (rec.is_impossible) {
                 status_area.set_status ("⚠️  Smart Optimizer: target may be unreachable.");
                 console_tab.add_line ("[Smart Optimizer] " + rec.notes);
+                if (my_generation == smart_opt_generation)
+                    smart_optimizer_running (false);
                 return;
             }
 
@@ -362,18 +379,29 @@ public class AppController : Object {
                 auto_convert_requested (codec);
             }
 
+            if (my_generation == smart_opt_generation)
+                smart_optimizer_running (false);
+
         } catch (IOError e) {
-            status_area.stop_progress ();
-            if (e is IOError.CANCELLED) {
-                status_area.set_status ("Smart Optimizer cancelled.");
-            } else {
+            // Only touch UI if this is still the current run — a superseded
+            // run must not hide the new run's progress bar or overwrite its status.
+            if (my_generation == smart_opt_generation) {
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                if (e is IOError.CANCELLED) {
+                    status_area.set_status ("Smart Optimizer cancelled.");
+                } else {
+                    status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
+                    console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
+                }
+            }
+        } catch (Error e) {
+            if (my_generation == smart_opt_generation) {
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
                 status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
                 console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
             }
-        } catch (Error e) {
-            status_area.stop_progress ();
-            status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
-            console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
         }
 
     }

@@ -46,6 +46,14 @@ public class MainWindow : Adw.ApplicationWindow {
     // Explicit operation tracking for clean cancel dispatch
     private ActiveOperation current_operation = ActiveOperation.IDLE;
 
+    // Queued auto-convert: if Smart Optimizer finishes while another operation
+    // is running, remember the codec so we can start conversion when idle.
+    private string? pending_auto_convert_codec = null;
+
+    // Smart Optimizer runs concurrently with other operations (it's analysis,
+    // not output encoding), so it's tracked separately from ActiveOperation.
+    private bool smart_optimizer_active = false;
+
     // Guard against re-entrant close_request during the confirmation dialog
     private bool close_dialog_open = false;
 
@@ -68,14 +76,31 @@ public class MainWindow : Adw.ApplicationWindow {
             view_stack
         );
 
+        // Smart Optimizer lifecycle: enable cancel button while running.
+        // Tracked separately from ActiveOperation since analysis can run
+        // concurrently with a conversion/trim/subtitle operation.
+        controller.smart_optimizer_running.connect ((running) => {
+            smart_optimizer_active = running;
+            // Enable cancel if optimizer is running; only disable if no
+            // other operation is using it.
+            if (running) {
+                cancel_button.set_sensitive (true);
+            } else if (current_operation == ActiveOperation.IDLE) {
+                cancel_button.set_sensitive (false);
+            }
+        });
+
         // Auto-convert: Smart Optimizer requests conversion start.
         // Ensure the correct codec tab is visible (user may have switched
-        // tabs while the optimizer was analyzing), and guard against the
-        // unlikely case where another operation started concurrently.
+        // tabs while the optimizer was analyzing).  If another operation is
+        // still running, queue the codec so conversion starts when idle.
         controller.auto_convert_requested.connect ((codec) => {
             if (current_operation == ActiveOperation.IDLE) {
                 view_stack.set_visible_child_name (codec);
                 on_convert_clicked ();
+            } else {
+                pending_auto_convert_codec = codec;
+                status_area.set_status ("⏳ Auto-convert queued for %s — waiting for current operation…".printf (codec.up ()));
             }
         });
 
@@ -85,14 +110,17 @@ public class MainWindow : Adw.ApplicationWindow {
         converter.conversion_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
             post_success_toast ("Conversion complete", output_path);
+            drain_pending_auto_convert ();
         });
         trim_tab.trim_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
             post_success_toast ("Export complete", output_path);
+            drain_pending_auto_convert ();
         });
         subtitles_tab.subtitle_done.connect ((output_path) => {
             current_operation = ActiveOperation.IDLE;
             post_success_toast ("Subtitles applied", output_path);
+            drain_pending_auto_convert ();
         });
 
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
@@ -468,6 +496,18 @@ public class MainWindow : Adw.ApplicationWindow {
         cancel_button.set_sensitive (true);
     }
 
+    /** If Smart Optimizer queued an auto-convert while busy, start it now. */
+    private void drain_pending_auto_convert () {
+        string? codec = pending_auto_convert_codec;
+        if (codec == null) return;
+        pending_auto_convert_codec = null;
+
+        if (current_operation == ActiveOperation.IDLE) {
+            view_stack.set_visible_child_name (codec);
+            on_convert_clicked ();
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  USER ACTIONS — Cancel
     //
@@ -510,8 +550,18 @@ public class MainWindow : Adw.ApplicationWindow {
                 break;
         }
 
+        // Always cancel the optimizer too — it can run alongside other operations.
+        if (smart_optimizer_active) {
+            controller.cancel_smart_optimizer ();
+            smart_optimizer_active = false;
+            if (message == null) {
+                message = "⏹️ Smart Optimizer cancelled by user.";
+            }
+        }
+
         current_operation = ActiveOperation.IDLE;
         cancel_button.set_sensitive (false);
+        pending_auto_convert_codec = null;
         return message;
     }
 
@@ -524,7 +574,7 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool on_close_request () {
-        if (current_operation == ActiveOperation.IDLE) {
+        if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
             return false;  // No operation running — allow close
         }
 
@@ -537,7 +587,9 @@ public class MainWindow : Adw.ApplicationWindow {
             case ActiveOperation.CONVERTING:     operation_label = "conversion";     break;
             case ActiveOperation.TRIMMING:        operation_label = "export";         break;
             case ActiveOperation.SUBTITLE_APPLY:  operation_label = "subtitle apply"; break;
-            default:                              operation_label = "operation";      break;
+            default:
+                operation_label = smart_optimizer_active ? "optimization" : "operation";
+                break;
         }
 
         var dialog = new Adw.AlertDialog (
