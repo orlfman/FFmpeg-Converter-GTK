@@ -7,12 +7,16 @@ public class GeneralTab : Box {
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
     public DropDown   resolution_preset { get; private set; }
+    public SpinButton custom_width     { get; private set; }
+    public SpinButton custom_height    { get; private set; }
     public SpinButton scale_width_x    { get; private set; }
     public SpinButton scale_height_x   { get; private set; }
     public DropDown   scale_algorithm  { get; private set; }
     public DropDown   scale_range      { get; private set; }
 
     private Adw.ActionRow resolution_preset_row;
+    private Adw.ActionRow custom_width_row;
+    private Adw.ActionRow custom_height_row;
     private Adw.ActionRow width_row;
     private Adw.ActionRow height_row;
     private Adw.ActionRow algorithm_row;
@@ -146,7 +150,7 @@ public class GeneralTab : Box {
         mode_row.set_title ("Scaling");
         mode_row.set_subtitle ("Choose how to resize the video");
         scale_mode = new DropDown (new StringList (
-            { ScaleMode.ORIGINAL, ScaleMode.RESOLUTION, ScaleMode.PERCENTAGE }
+            { ScaleMode.ORIGINAL, ScaleMode.RESOLUTION, ScaleMode.CUSTOM, ScaleMode.PERCENTAGE }
         ), null);
         scale_mode.set_valign (Align.CENTER);
         scale_mode.set_selected (0);
@@ -193,6 +197,28 @@ public class GeneralTab : Box {
         resolution_preset_row.add_suffix (resolution_preset);
         resolution_preset_row.set_visible (false);
         group.add (resolution_preset_row);
+
+        // ── Custom Width (visible in Custom Resolution mode) ─────────────────
+        custom_width_row = new Adw.ActionRow ();
+        custom_width_row.set_title ("Width");
+        custom_width_row.set_subtitle ("Target width in pixels (auto-rounded to even)");
+        custom_width = new SpinButton.with_range (2, 15360, 2);
+        custom_width.set_value (1920);
+        custom_width.set_valign (Align.CENTER);
+        custom_width_row.add_suffix (custom_width);
+        custom_width_row.set_visible (false);
+        group.add (custom_width_row);
+
+        // ── Custom Height (visible in Custom Resolution mode) ────────────────
+        custom_height_row = new Adw.ActionRow ();
+        custom_height_row.set_title ("Height");
+        custom_height_row.set_subtitle ("Target height in pixels (auto-rounded to even)");
+        custom_height = new SpinButton.with_range (2, 8640, 2);
+        custom_height.set_value (1080);
+        custom_height.set_valign (Align.CENTER);
+        custom_height_row.add_suffix (custom_height);
+        custom_height_row.set_visible (false);
+        group.add (custom_height_row);
 
         // ── Width Multiplier (visible in Percentage mode) ────────────────────
         width_row = new Adw.ActionRow ();
@@ -680,6 +706,17 @@ public class GeneralTab : Box {
         return res.replace ("×", ":");
     }
 
+    /**
+     * Returns the custom resolution as "W:H" with values rounded to even,
+     * or "" if either dimension is too small.
+     */
+    public string get_custom_resolution_value () {
+        int w = ((int) custom_width.get_value ()) & ~1;   // round down to even
+        int h = ((int) custom_height.get_value ()) & ~1;
+        if (w < 2 || h < 2) return "";
+        return @"$w:$h";
+    }
+
     public string get_frame_rate_text () {
         var item = frame_rate_combo.selected_item as StringObject;
         return item != null ? item.string : "";
@@ -692,10 +729,13 @@ public class GeneralTab : Box {
     private void update_scaling_visibility () {
         string mode = get_scale_mode_text ();
         bool is_resolution  = (mode == ScaleMode.RESOLUTION);
+        bool is_custom      = (mode == ScaleMode.CUSTOM);
         bool is_percentage  = (mode == ScaleMode.PERCENTAGE);
-        bool is_scaling     = is_resolution || is_percentage;
+        bool is_scaling     = is_resolution || is_custom || is_percentage;
 
         resolution_preset_row.set_visible (is_resolution);
+        custom_width_row.set_visible (is_custom);
+        custom_height_row.set_visible (is_custom);
         width_row.set_visible (is_percentage);
         height_row.set_visible (is_percentage);
         algorithm_row.set_visible (is_scaling);
@@ -840,18 +880,13 @@ public class GeneralTab : Box {
             while ((line = reader.read_line (null)) != null) {
                 if (line.contains ("crop=")) {
                     string crop_val = extract_crop_value (line);
-                    if (crop_val.length > 5 && crop_val.contains (":")) {
-                        string[] parts = crop_val.split (":");
-                        if (parts.length == 4 &&
-                            int.parse (parts[0]) > 0 &&
-                            int.parse (parts[1]) > 0) {
-                            last_crop = crop_val;
-                            string log_msg = line.strip ();
-                            Idle.add (() => {
-                                console_tab.add_line ("[CropDetect] " + log_msg);
-                                return Source.REMOVE;
-                            });
-                        }
+                    if (is_valid_crop_value (crop_val)) {
+                        last_crop = crop_val;
+                        string log_msg = line.strip ();
+                        Idle.add (() => {
+                            console_tab.add_line ("[CropDetect] " + log_msg);
+                            return Source.REMOVE;
+                        });
                     }
                 }
             }
@@ -860,7 +895,7 @@ public class GeneralTab : Box {
 
             string result_crop = last_crop;
             Idle.add (() => {
-                if (result_crop.length > 8) {
+                if (is_valid_crop_value (result_crop)) {
                     crop_value.set_text (result_crop);
                     console_tab.add_line (@"✅ Detected stable crop: $result_crop");
                 } else {
@@ -880,6 +915,18 @@ public class GeneralTab : Box {
                 return Source.REMOVE;
             });
         }
+    }
+
+    /**
+     * Validates a crop string in the format "w:h:x:y" where w and h must be
+     * positive integers.
+     */
+    private bool is_valid_crop_value (string crop) {
+        string[] parts = crop.split (":");
+        if (parts.length != 4) return false;
+        int w = int.parse (parts[0]);
+        int h = int.parse (parts[1]);
+        return w > 0 && h > 0;
     }
 
     private string extract_crop_value (string line) {

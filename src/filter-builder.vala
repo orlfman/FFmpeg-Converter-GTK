@@ -77,6 +77,13 @@ namespace FilterBuilder {
                 scale_w = dims[0];
                 scale_h = dims[1];
             }
+        } else if (scale_mode == ScaleMode.CUSTOM) {
+            string res = tab.get_custom_resolution_value ();
+            if (res.length > 0 && res.contains (":")) {
+                string[] dims = res.split (":");
+                scale_w = dims[0];
+                scale_h = dims[1];
+            }
         } else if (scale_mode == ScaleMode.PERCENTAGE) {
             double sw = tab.scale_width_x.get_value ();
             double sh = tab.scale_height_x.get_value ();

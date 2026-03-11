@@ -135,6 +135,7 @@ public enum OutputNameMode {
 namespace ScaleMode {
     public const string ORIGINAL   = "Original";
     public const string RESOLUTION = "Resolution Preset";
+    public const string CUSTOM     = "Custom Resolution";
     public const string PERCENTAGE = "Percentage Scaling";
 }
 
