@@ -71,7 +71,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 Tired of guessing your way to the perfect file size? Just press the **Smart Optimizer** button on the SVT-AV1, x265, x264 or VP9 tab, and the app handles everything else.
 
 ### How it actually works
-It doesn’t rely on some magic lookup table. Instead, it runs **two quick calibration encodes** on *your specific video* at different quality levels, then fits a real exponential curve to the results. It also figures out whether you’re dealing with live-action, anime, or a screencast, and picks the perfect preset + CRF combo to land right on your target size.
+It doesn’t rely on some magic lookup table. Instead, it runs **one to six (based off duration and content of the video) quick calibration encodes** on *your specific video* at different quality levels, then fits a real exponential curve to the results. It also figures out whether you’re dealing with live-action, anime, or a screencast, and picks the perfect preset + CRF or static bitrate combo to land right on your target size.
 
 ### What it actually looks at
 - **Your real content** — Anime with its flat colors and razor-sharp lines compresses totally differently from live-action. The optimizer checks edge density, color saturation, and motion to classify it properly, then uses the right preset table. Anime gets the aggressive (slow) presets it loves; live-action doesn’t waste time on settings that barely help.
@@ -89,6 +89,8 @@ It doesn’t rely on some magic lookup table. Instead, it runs **two quick calib
 It won’t just give up. It tells you exactly why and what to change: “trim to 42 seconds” or “scale down to "X."”
 
 You can set your default target size in **Preferences - Smart Optimizer**.
+
+Remember, its not perfect. Its not artificial intelligence scanning in real time. Its all math at work making the best estimate based off mathematical values and statistics. But its high quality estimations and very accurate for just being math + statistics. From my testing, a solid 70-80% accuracy level. Give it a try! 
 
 **No more encode, check size, re-encode, repeat.**  
 Just pick the mode and go.
