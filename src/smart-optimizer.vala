@@ -60,13 +60,15 @@
 //     duration (accounting for seek/time trim) rather than the full file.
 //
 // v5 improvements:
-//   - Four-point CRF calibration: encodes samples at four CRF values
-//     and fits a quadratic in log-space via least-squares:
+//   - Base + adaptive CRF calibration: starts with four CRF values and fits
+//     a quadratic in log-space via least-squares:
 //       ln(size) = a + b·CRF + c·CRF²
 //     Four points overdetermine the 3-unknown model, so the least-squares
 //     fit averages out noise from individual samples — more robust than
-//     an exact 3-point solve. The quadratic term captures the CRF↔size
-//     curve's bend that the two-point exponential model missed.
+//     an exact 3-point solve. When the solved CRF falls outside or right at
+//     the edge of that base window, the optimizer can add nearby follow-up
+//     CRFs and refit. The quadratic term captures the CRF↔size curve's bend
+//     that the two-point exponential model missed.
 //   - Graceful fallback: if the least-squares system is degenerate (e.g.
 //     two points produced identical sizes), falls back to two-point
 //     exponential automatically.
@@ -87,7 +89,8 @@
 // v7 improvements:
 //   - Source-aware two-pass: when target_mb < source file size, two-pass
 //     bitrate targeting is forced regardless of tier. CRF mode cannot
-//     guarantee a size reduction — only bitrate targeting can.
+//     reliably hold a reduction target on its own, while bitrate targeting
+//     gives the encoder a direct size budget to follow.
 //   - CRF overshoot detection: if the CRF estimate exceeds the target by
 //     >5%, two-pass is forced even when the source size is unknown.
 //   - XLARGE tier no longer unconditionally skips two-pass. It now checks
@@ -267,7 +270,9 @@ public class SmartOptimizer : GLib.Object {
         "medium", "slow", "slower", "veryslow"
     };
     private const int[] VP9_CPU_USED = { 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-    // SVT-AV1 presets 9→0 mapped to 9 indices (fastest to slowest).
+    // SVT-AV1 presets mapped to 9 indices (fastest to slowest).
+    // Preset 1 is skipped — it's barely distinguishable from 0 in quality
+    // and rate control but significantly slower.
     // Presets 10+ are excluded — SVT-AV1 flags them as "automation tooling"
     // with visual artifacts, poor rate control, and no film-grain support.
     // Users who want 10+ can disable auto-convert and set it manually.
@@ -311,6 +316,8 @@ public class SmartOptimizer : GLib.Object {
     private const int    LONG_MAX_SEGMENTS  = 8;        // cap for videos 10–45 min
     private const int    VLONG_MAX_SEGMENTS = 12;       // cap for videos > 45 min
     private const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
+    private const int    ADAPTIVE_CALIBRATION_BASE_MAX_POINTS = 6; // 4 base + up to 2 follow-up CRFs
+    private const int    ADAPTIVE_CALIBRATION_HARD_MAX_POINTS = 8; // one bounded second pass after verification
     private const double LONG_VIDEO_THRESHOLD  = 600.0; // 10 minutes
     private const double VLONG_VIDEO_THRESHOLD = 2700.0; // 45 minutes
     private const double SEGMENT_SPREAD    = 0.15;      // start at 15%, end at 85%
@@ -318,6 +325,8 @@ public class SmartOptimizer : GLib.Object {
     // If temporal_diff stddev/mean exceeds this, content varies significantly
     // across the video and more samples improve prediction accuracy.
     private const double ADAPTIVE_CV_THRESHOLD = 0.60;
+    private const int    ADAPTIVE_CALIBRATION_EDGE_MARGIN = 1;
+    private const int    ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD = 2;
 
     // If the required video bitrate would fall below this threshold it is
     // physically impossible to produce acceptable-quality output.
@@ -339,7 +348,8 @@ public class SmartOptimizer : GLib.Object {
      * Analyze a video and recommend encoding settings to hit a target file size.
      *
      * Returns both a CRF recommendation (quality-focused) and a two-pass
-     * bitrate (size-guaranteed). Caller decides which to use.
+     * bitrate target (more size-directed, but not exact-size guaranteed).
+     * Caller decides which to use.
      *
      * @param ctx  Optional context — video filters, effective duration, audio
      *             bitrate override. Pass a default-initialized struct to use
@@ -520,12 +530,11 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 5. Four-point CRF calibration ──────────────────────────────
+        // ── 5. Base CRF calibration ────────────────────────────────────
         // Encode sample segments at four CRFs with the fastest preset,
-        // measure sizes, fit a quadratic curve in log-space via least-
-        // squares. Four points overdetermine the quadratic model, so the
-        // fit averages out noise from individual samples — more robust
-        // than the exact 3-point solve.
+        // measure sizes, then fit a quadratic curve in log-space via least-
+        // squares. This base window can be adaptively extended later when
+        // the predicted answer falls outside or right at the edge.
         // Video filters are included so calibration reflects the actual
         // output resolution and processing.
 
@@ -535,7 +544,7 @@ public class SmartOptimizer : GLib.Object {
 
         double[] cal_sizes = new double[4];
         try {
-            for (int ci = 0; ci < 4; ci++) {
+            for (int ci = 0; ci < cal_crfs.length; ci++) {
                 cancellable_check (cancellable);
                 cal_sizes[ci] = yield calibration_encode (
                     input_file, preferred_codec, cal_crfs[ci], positions,
@@ -550,19 +559,24 @@ public class SmartOptimizer : GLib.Object {
         }
 
         bool any_invalid = false;
-        for (int ci = 0; ci < 4; ci++) {
+        for (int ci = 0; ci < cal_sizes.length; ci++) {
             if (cal_sizes[ci] <= 0) any_invalid = true;
         }
         if (any_invalid) {
-            warning ("Nonsensical calibration: %.0f / %.0f / %.0f / %.0f",
-                     cal_sizes[0], cal_sizes[1], cal_sizes[2], cal_sizes[3]);
+            for (int ci = 0; ci < cal_sizes.length; ci++) {
+                if (cal_sizes[ci] <= 0) {
+                    warning ("Nonsensical calibration: CRF %d → %.0fKB",
+                        cal_crfs[ci], cal_sizes[ci]);
+                    break;
+                }
+            }
             return make_error_rec (preferred_codec,
                 "Calibration produced invalid results. File may be corrupt.");
         }
 
         // Warn if sizes aren't monotonically decreasing (unusual but the
         // least-squares fit handles it — just means unusual content variance)
-        for (int ci = 0; ci < 3; ci++) {
+        for (int ci = 0; ci < cal_sizes.length - 1; ci++) {
             if (cal_sizes[ci] <= cal_sizes[ci + 1]) {
                 warning ("Non-monotonic calibration: CRF %d→%.0fKB, %d→%.0fKB — "
                     + "proceeding with least-squares fit",
@@ -572,87 +586,9 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // ── 6. Fit CRF↔size curve (least-squares quadratic in log-space) ─
-        // Model:  ln(size) = a + b·crf + c·crf²
-        //
-        // With 4 calibration points, the system is overdetermined (4 eqns,
-        // 3 unknowns). We solve via normal equations:
-        //   [n,    Σx,   Σx² ] [a]   [Σy   ]
-        //   [Σx,   Σx²,  Σx³ ] [b] = [Σxy  ]
-        //   [Σx²,  Σx³,  Σx⁴ ] [c]   [Σx²y ]
-        //
-        // This minimizes the sum of squared residuals, averaging out
-        // noise from individual calibration samples.
-
-        double sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
-        double sy = 0, sxy = 0, sx2y = 0;
-        for (int ci = 0; ci < 4; ci++) {
-            double x = (double) cal_crfs[ci];
-            double y = Math.log (cal_sizes[ci]);
-            double x2 = x * x;
-            sx   += x;
-            sx2  += x2;
-            sx3  += x2 * x;
-            sx4  += x2 * x2;
-            sy   += y;
-            sxy  += x * y;
-            sx2y += x2 * y;
-        }
-        double n_pts = 4.0;
-
         double qa = 0, qb = 0, qc = 0;  // quadratic coefficients
         bool degenerate = false;
-
-        // Solve 3×3 normal equations via Gaussian elimination
-        // Row 0: [n,   sx,  sx2 | sy  ]
-        // Row 1: [sx,  sx2, sx3 | sxy ]
-        // Row 2: [sx2, sx3, sx4 | sx2y]
-        double[,] m = {
-            { n_pts, sx,  sx2, sy   },
-            { sx,    sx2, sx3, sxy  },
-            { sx2,   sx3, sx4, sx2y }
-        };
-
-        // Forward elimination with partial pivoting
-        for (int col = 0; col < 3; col++) {
-            // Find pivot
-            int pivot = col;
-            for (int row = col + 1; row < 3; row++) {
-                if (Math.fabs (m[row, col]) > Math.fabs (m[pivot, col]))
-                    pivot = row;
-            }
-            if (pivot != col) {
-                for (int k = 0; k < 4; k++) {
-                    double tmp = m[col, k];
-                    m[col, k] = m[pivot, k];
-                    m[pivot, k] = tmp;
-                }
-            }
-            if (Math.fabs (m[col, col]) < 1e-12) {
-                // Degenerate — fall back to two-point exponential
-                warning ("Least-squares system degenerate, falling back to two-point");
-                double B_fb = Math.pow (cal_sizes[3] / cal_sizes[0],
-                    1.0 / (cal_crfs[3] - cal_crfs[0]));
-                double A_fb = cal_sizes[0] / Math.pow (B_fb, cal_crfs[0]);
-                qa = Math.log (A_fb);
-                qb = Math.log (B_fb);
-                qc = 0.0;
-                degenerate = true;
-                break;
-            }
-            // Eliminate below
-            for (int row = col + 1; row < 3; row++) {
-                double factor = m[row, col] / m[col, col];
-                for (int k = col; k < 4; k++)
-                    m[row, k] -= factor * m[col, k];
-            }
-        }
-
-        // Back substitution (only if we didn't fall back)
-        if (!degenerate) {
-            qc = m[2, 3] / m[2, 2];
-            qb = (m[1, 3] - m[1, 2] * qc) / m[1, 1];
-            qa = (m[0, 3] - m[0, 1] * qb - m[0, 2] * qc) / m[0, 0];
-        }
+        fit_quadratic_log_curve (cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
 
         // ── 7. Content-aware, tier-scaled preset selection ────────────
         // At larger targets, slower presets have diminishing returns because
@@ -689,50 +625,66 @@ public class SmartOptimizer : GLib.Object {
         }
 
         double ln_target = Math.log (effective_target_kb);
-        double crf_raw;
-        // Midpoint of the calibration range — used for root disambiguation
-        double cal_mid = (double) (cal_crfs[0] + cal_crfs[3]) / 2.0;
-
-        if (Math.fabs (qc) < 1e-15) {
-            // Linear in log-space (pure exponential) — same as two-point
-            if (Math.fabs (qb) < 1e-15) {
-                // Flat curve — CRF has no effect on size. Use midpoint as best guess.
-                crf_raw = cal_mid;
-            } else {
-                crf_raw = (ln_target - qa) / qb;
-            }
-        } else {
-            // Quadratic formula:  c·x² + b·x + (a − ln_target) = 0
-            double disc = qb * qb - 4.0 * qc * (qa - ln_target);
-            if (disc < 0) {
-                // No real solution — curve doesn't reach the target.
-                // Use the vertex (minimum/maximum point) as the best CRF.
-                crf_raw = -qb / (2.0 * qc);
-            } else {
-                double sqrt_disc = Math.sqrt (disc);
-                double r1 = (-qb + sqrt_disc) / (2.0 * qc);
-                double r2 = (-qb - sqrt_disc) / (2.0 * qc);
-                // Pick the root that falls in or nearest the valid CRF range.
-                // For typical video, qc > 0 (curve bends up in log-space at
-                // very high CRFs), so r2 is usually the correct root.
-                if (r1 >= crf_min && r1 <= crf_max && r2 >= crf_min && r2 <= crf_max) {
-                    // Both valid — pick the one closest to the calibration midpoint
-                    crf_raw = (Math.fabs (r1 - cal_mid) < Math.fabs (r2 - cal_mid)) ? r1 : r2;
-                } else if (r1 >= crf_min && r1 <= crf_max) {
-                    crf_raw = r1;
-                } else if (r2 >= crf_min && r2 <= crf_max) {
-                    crf_raw = r2;
-                } else {
-                    // Neither in range — pick closest to valid range
-                    double d1 = double.min (Math.fabs (r1 - crf_min), Math.fabs (r1 - crf_max));
-                    double d2 = double.min (Math.fabs (r2 - crf_min), Math.fabs (r2 - crf_max));
-                    crf_raw = (d1 < d2) ? r1 : r2;
-                }
-            }
-        }
-
+        double cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
+        double crf_raw = solve_crf_from_curve (
+            qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
         int predicted_crf = ((int) Math.round (crf_raw)).clamp (crf_min, crf_max);
         bool crf_at_max = (predicted_crf >= crf_max);
+        bool adaptive_calibration_refined = false;
+        int adaptive_points_added = 0;
+
+        // If the initial 4-point window does not bracket the answer well,
+        // add follow-up CRFs around the predicted area and refit.
+        int[] extra_crfs = pick_adaptive_calibration_crfs (
+            predicted_crf, cal_crfs, crf_min, crf_max,
+            ADAPTIVE_CALIBRATION_BASE_MAX_POINTS);
+        if (extra_crfs.length > 0) {
+            try {
+                for (int ci = 0; ci < extra_crfs.length; ci++) {
+                    try {
+                        cancellable_check (cancellable);
+                        double extra_size = yield calibration_encode (
+                            input_file, preferred_codec, extra_crfs[ci], positions,
+                            encode_duration, sample_segment_duration, vf, cancellable);
+                        if (extra_size <= 0) {
+                            warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKB",
+                                extra_crfs[ci], extra_size);
+                            continue;
+                        }
+                        append_calibration_sample (
+                            ref cal_crfs, ref cal_sizes, extra_crfs[ci], extra_size);
+                        adaptive_points_added++;
+                    } catch (IOError.CANCELLED e) {
+                        throw e;
+                    } catch (Error e) {
+                        warning ("Adaptive calibration encode failed at CRF %d: %s",
+                            extra_crfs[ci], e.message);
+                        continue;
+                    }
+                }
+            } catch (IOError.CANCELLED e) {
+                throw e;
+            }
+
+            if (adaptive_points_added > 0) {
+                adaptive_calibration_refined = true;
+                for (int ci = 0; ci < cal_sizes.length - 1; ci++) {
+                    if (cal_sizes[ci] <= cal_sizes[ci + 1]) {
+                        warning ("Non-monotonic adaptive calibration: CRF %d→%.0fKB, %d→%.0fKB — "
+                            + "proceeding with least-squares fit",
+                            cal_crfs[ci], cal_sizes[ci], cal_crfs[ci + 1], cal_sizes[ci + 1]);
+                        break;
+                    }
+                }
+
+                fit_quadratic_log_curve (cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
+                cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
+                crf_raw = solve_crf_from_curve (
+                    qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
+                predicted_crf = ((int) Math.round (crf_raw)).clamp (crf_min, crf_max);
+                crf_at_max = (predicted_crf >= crf_max);
+            }
+        }
 
         // ── 8b. Verification encode ─────────────────────────────────────
         // Encode spread segments at the predicted CRF + recommended preset
@@ -780,58 +732,119 @@ public class SmartOptimizer : GLib.Object {
                     // Sanity: clamp to reasonable range (0.2–1.0)
                     verified_preset_factor = verified_preset_factor.clamp (0.20, 1.0);
                     verification_done = true;
+                    bool verification_invalidated = false;
 
                     // Re-solve CRF if the verified factor differs significantly
                     // from the table factor (>5% difference)
                     if (Math.fabs (verified_preset_factor - preset_factor) / preset_factor > 0.05) {
+                        int verify_base_crf = predicted_crf;
+                        bool verification_curve_refit = false;
                         double re_target_kb = video_target_kb / verified_preset_factor;
                         double re_ln_target = Math.log (re_target_kb);
-                        double re_crf_raw;
+                        double re_crf_raw = solve_crf_from_curve (
+                            qa, qb, qc, re_ln_target, cal_mid, crf_min, crf_max);
+                        int re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
 
-                        if (Math.fabs (qc) < 1e-15) {
-                            re_crf_raw = (Math.fabs (qb) < 1e-15)
-                                ? cal_mid
-                                : (re_ln_target - qa) / qb;
-                        } else {
-                            double re_disc = qb * qb - 4.0 * qc * (qa - re_ln_target);
-                            if (re_disc < 0) {
-                                re_crf_raw = -qb / (2.0 * qc);
-                            } else {
-                                double re_sqrt = Math.sqrt (re_disc);
-                                double re_r1 = (-qb + re_sqrt) / (2.0 * qc);
-                                double re_r2 = (-qb - re_sqrt) / (2.0 * qc);
-                                if (re_r1 >= crf_min && re_r1 <= crf_max &&
-                                    re_r2 >= crf_min && re_r2 <= crf_max) {
-                                    re_crf_raw = (Math.fabs (re_r1 - cal_mid) <
-                                                  Math.fabs (re_r2 - cal_mid)) ? re_r1 : re_r2;
-                                } else if (re_r1 >= crf_min && re_r1 <= crf_max) {
-                                    re_crf_raw = re_r1;
-                                } else if (re_r2 >= crf_min && re_r2 <= crf_max) {
-                                    re_crf_raw = re_r2;
-                                } else {
-                                    double d1 = double.min (
-                                        Math.fabs (re_r1 - crf_min), Math.fabs (re_r1 - crf_max));
-                                    double d2 = double.min (
-                                        Math.fabs (re_r2 - crf_min), Math.fabs (re_r2 - crf_max));
-                                    re_crf_raw = (d1 < d2) ? re_r1 : re_r2;
+                        int cal_first_now = cal_crfs[0];
+                        int cal_last_now = cal_crfs[cal_crfs.length - 1];
+                        bool needs_second_refinement =
+                            Math.fabs ((double) (re_crf - verify_base_crf))
+                                >= ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD
+                            && (re_crf < cal_first_now - ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD
+                                || re_crf > cal_last_now + ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD);
+
+                        if (needs_second_refinement) {
+                            int[] verify_extra_crfs = pick_adaptive_calibration_crfs (
+                                re_crf, cal_crfs, crf_min, crf_max,
+                                ADAPTIVE_CALIBRATION_HARD_MAX_POINTS);
+                            int second_points_added = 0;
+                            for (int ci = 0; ci < verify_extra_crfs.length; ci++) {
+                                try {
+                                    cancellable_check (cancellable);
+                                    double extra_size = yield calibration_encode (
+                                        input_file, preferred_codec, verify_extra_crfs[ci], positions,
+                                        encode_duration, sample_segment_duration, vf, cancellable);
+                                    if (extra_size <= 0) {
+                                        warning ("Adaptive verification calibration produced invalid result: CRF %d → %.0fKB",
+                                            verify_extra_crfs[ci], extra_size);
+                                        continue;
+                                    }
+                                    append_calibration_sample (
+                                        ref cal_crfs, ref cal_sizes, verify_extra_crfs[ci], extra_size);
+                                    second_points_added++;
+                                } catch (IOError.CANCELLED e) {
+                                    throw e;
+                                } catch (Error e) {
+                                    warning ("Adaptive verification calibration encode failed at CRF %d: %s",
+                                        verify_extra_crfs[ci], e.message);
+                                    continue;
                                 }
+                            }
+
+                            if (second_points_added > 0) {
+                                adaptive_calibration_refined = true;
+                                adaptive_points_added += second_points_added;
+                                verification_curve_refit = true;
+                                fit_quadratic_log_curve (
+                                    cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
+                                cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
+                                verify_model_ultrafast_kb = Math.exp (
+                                    qa + qb * verify_base_crf + qc * verify_base_crf * verify_base_crf);
+                                if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
+                                    verified_preset_factor = (verify_preset_kb / verify_model_ultrafast_kb)
+                                        .clamp (0.20, 1.0);
+                                    re_target_kb = video_target_kb / verified_preset_factor;
+                                    re_ln_target = Math.log (re_target_kb);
+                                } else {
+                                    verification_done = false;
+                                    verified_preset_factor = preset_factor;
+                                }
+                                re_crf_raw = solve_crf_from_curve (
+                                    qa, qb, qc, re_ln_target, cal_mid, crf_min, crf_max);
+                                re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
                             }
                         }
 
-                        int re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
-                        if (re_crf != predicted_crf) {
+                        if (verification_curve_refit && re_crf == verify_base_crf) {
+                            verification_done = (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0);
+                        }
+
+                        if (re_crf != verify_base_crf) {
                             warning ("Smart Optimizer: verification shifted CRF %d → %d "
                                 + "(table factor %.2f, measured %.2f)",
-                                predicted_crf, re_crf, preset_factor, verified_preset_factor);
+                                verify_base_crf, re_crf, preset_factor, verified_preset_factor);
                             predicted_crf = re_crf;
                             crf_at_max = (predicted_crf >= crf_max);
+                            verification_invalidated = true;
+                        }
+                    }
+
+                    if (verification_invalidated) {
+                        verification_done = false;
+                        verified_preset_factor = preset_factor;
+                    }
+
+                    if (verification_invalidated && !crf_at_max) {
+                        verify_model_ultrafast_kb = Math.exp (
+                            qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
+                        verify_preset_kb = yield calibration_encode (
+                            input_file, preferred_codec, predicted_crf, verify_pos,
+                            encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
+
+                        if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
+                            verified_preset_factor = (verify_preset_kb / verify_model_ultrafast_kb)
+                                .clamp (0.20, 1.0);
+                            verification_done = true;
+                        } else {
+                            warning ("Final verification at CRF %d produced invalid results; using table preset factor",
+                                predicted_crf);
                         }
                     }
                 }
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
-                // Verification failed — fall back to the table-based factor
+                // Verification failed before a usable measured factor was applied.
                 warning ("Verification encode failed, using table preset factor: %s", e.message);
             }
         }
@@ -844,25 +857,27 @@ public class SmartOptimizer : GLib.Object {
         int estimated_total_kb = estimated_video_kb + (int) audio_kb + (int) container_overhead_kb;
 
         // ── 10. Confidence ──────────────────────────────────────────────
-        // Four-point calibration is most accurate within [cal_crfs[0], cal_crfs[3]]
-        // where the quadratic interpolates rather than extrapolates. Outside
-        // that range, confidence degrades proportionally to distance.
+        // Calibration is most accurate within [cal_first, cal_last] where
+        // the quadratic interpolates rather than extrapolates. Outside that
+        // range, confidence degrades proportionally to distance.
         double confidence = 1.0;
-        int cal_range = cal_crfs[3] - cal_crfs[0];   // e.g. 14 for x264, 15 for vp9
-        if (predicted_crf < cal_crfs[0] - cal_range || predicted_crf > cal_crfs[3] + cal_range) {
+        int cal_first = cal_crfs[0];
+        int cal_last = cal_crfs[cal_crfs.length - 1];
+        int cal_range = cal_last - cal_first;
+        if (predicted_crf < cal_first - cal_range || predicted_crf > cal_last + cal_range) {
             confidence = 0.5;   // far extrapolation (> one full range outside)
-            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d, %d, %d] — "
+            warning ("Smart Optimizer: CRF %d is far outside calibration range [%d, %d] (%d points) — "
                 + "prediction reliability is low",
-                predicted_crf, cal_crfs[0], cal_crfs[1], cal_crfs[2], cal_crfs[3]);
-        } else if (predicted_crf < cal_crfs[0] - 2 || predicted_crf > cal_crfs[3] + 2) {
+                predicted_crf, cal_first, cal_last, cal_crfs.length);
+        } else if (predicted_crf < cal_first - 2 || predicted_crf > cal_last + 2) {
             confidence = 0.75;  // moderate extrapolation
-            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d, %d, %d] — "
+            warning ("Smart Optimizer: CRF %d is outside calibration range [%d, %d] (%d points) — "
                 + "prediction may be inaccurate",
-                predicted_crf, cal_crfs[0], cal_crfs[1], cal_crfs[2], cal_crfs[3]);
-        } else if (predicted_crf < cal_crfs[0] || predicted_crf > cal_crfs[3]) {
+                predicted_crf, cal_first, cal_last, cal_crfs.length);
+        } else if (predicted_crf < cal_first || predicted_crf > cal_last) {
             confidence = 0.9;   // slight extrapolation (just outside range)
         }
-        // Within [cal_crfs[0], cal_crfs[3]]: confidence stays at 1.0 — the quadratic
+        // Within [cal_first, cal_last]: confidence stays at 1.0 — the quadratic
         // model is interpolating between measured points, not extrapolating.
 
         // ── 10b. Sample coverage factor ─────────────────────────────────
@@ -918,10 +933,9 @@ public class SmartOptimizer : GLib.Object {
         int target_video_kbps = available_video_kbps;
         bool recommend_two_pass;
 
-        // Check if the user is asking for a file SMALLER than the source.
-        // When target < source, this is a hard size constraint — CRF mode
-        // cannot guarantee the output fits, so two-pass bitrate targeting
-        // is required regardless of tier.
+        // Check whether the user is asking for a file smaller than the
+        // source. Tiny/Small still treat that as a hard cap; Medium+
+        // allow CRF when the estimate is confident and lands near target.
         double source_size_mb = (double) info.file_size_bytes / (1024.0 * 1024.0);
         double comparison_source_size_mb = source_size_mb;
         double reduction_confidence = 1.0;
@@ -940,13 +954,19 @@ public class SmartOptimizer : GLib.Object {
         bool is_reduction = (comparison_source_size_mb > 0)
             && ((double) target_mb < comparison_source_size_mb * reduction_threshold);
 
-        // Also check if the CRF estimate already overshoots the target.
-        // Even when source size is unknown, if the model predicts overshoot,
-        // two-pass is the only way to guarantee the target is met.
-        bool crf_overshoots = (estimated_total_kb > target_total_kb * 1.05);
+        bool strict_targeting = tier_uses_strict_targeting (tier);
+        double target_tolerance_kb = strict_targeting
+            ? target_total_kb * 0.05
+            : tier_target_tolerance_kb (tier, target_total_kb);
+        bool within_target_band = Math.fabs (estimated_total_kb - target_total_kb) <= target_tolerance_kb;
 
-        if (is_reduction || crf_overshoots) {
-            // Hard size constraint — always use two-pass for accuracy
+        // For Tiny/Small, even modest overshoot is unacceptable.
+        // For Medium+, treat the target as a symmetric landing zone around
+        // the requested size, with some leniency above or below target.
+        bool crf_overshoots = estimated_total_kb > (target_total_kb + target_tolerance_kb);
+
+        if (strict_targeting) {
+            // TINY and SMALL always prefer strict size targeting.
             recommend_two_pass = true;
         } else {
             switch (tier) {
@@ -957,23 +977,31 @@ public class SmartOptimizer : GLib.Object {
                     recommend_two_pass = (confidence < 0.70);
                     break;
                 case SizeTier.XLARGE:
-                    // Target is generous AND larger than source — CRF will
-                    // comfortably fit. Only skip two-pass when confidence is
-                    // high and the estimate is well under target.
                     recommend_two_pass = (confidence < 0.60);
                     break;
                 default:
-                    // TINY and SMALL — always recommend for size guarantee
                     recommend_two_pass = true;
                     break;
+            }
+
+            // For Medium+, allow CRF only when the estimate is both
+            // confident enough for the tier and lands inside the symmetric
+            // target band around the requested size.
+            if (!recommend_two_pass) {
+                if (crf_overshoots) {
+                    recommend_two_pass = true;
+                } else if (!within_target_band) {
+                    recommend_two_pass = true;
+                }
             }
         }
 
         // ── 12. Feasibility flags ───────────────────────────────────────
         bool is_impossible = crf_at_max && (estimated_total_kb > target_total_kb * 1.1);
 
-        // Force two-pass when CRF alone can't hit the target
-        if (crf_at_max && !is_impossible) {
+        // Force two-pass when CRF alone cannot comfortably hit the target,
+        // including cases where even max CRF still looks too large.
+        if (crf_at_max) {
             recommend_two_pass = true;
         }
 
@@ -1024,11 +1052,14 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Two-pass mode ---
         if (recommend_two_pass) {
-            notes.append ("\n── Two-pass mode (size-guaranteed) ──\n");
+            notes.append ("\n── Two-pass mode (size-targeted) ──\n");
             notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
                 .printf (target_video_kbps, preset_label));
             if (is_reduction) {
-                if (trim_active && comparison_source_size_mb > 0) {
+                if (!strict_targeting && !within_target_band) {
+                    notes.append ("  CRF estimate (~%d KB) falls outside the ±%.0f MB target band for this tier.\n"
+                        .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
+                } else if (trim_active && comparison_source_size_mb > 0) {
                     notes.append ("  Trimmed source window is ~%.0f MB (estimated) → target %d MB requires size reduction.\n"
                         .printf (comparison_source_size_mb, target_mb));
                     if (reduction_confidence < 0.95) {
@@ -1040,25 +1071,39 @@ public class SmartOptimizer : GLib.Object {
                         .printf (source_size_mb, target_mb));
                 }
             } else if (crf_overshoots) {
-                notes.append ("  CRF estimate (~%d KB) exceeds target (~%.0f KB).\n"
-                    .printf (estimated_total_kb, target_total_kb));
+                if (strict_targeting) {
+                    notes.append ("  CRF estimate (~%d KB) exceeds target (~%.0f KB).\n"
+                        .printf (estimated_total_kb, target_total_kb));
+                } else {
+                    notes.append ("  CRF estimate (~%d KB) exceeds the ±%.0f MB target band.\n"
+                        .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
+                }
+            } else if (!strict_targeting && !within_target_band) {
+                notes.append ("  CRF estimate (~%d KB) falls outside the ±%.0f MB target band for this tier.\n"
+                    .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
             } else if (confidence < 1.0) {
                 notes.append ("  Prediction confidence is %.0f%% — two-pass ensures accuracy.\n"
                     .printf (confidence * 100.0));
             }
-            notes.append ("  This mode guarantees the file fits within the target.\n");
+            notes.append ("  This mode targets the requested size more directly.\n");
+            notes.append ("  Final size can still land above or below target depending on codec, audio, and container behavior.\n");
             notes.append ("  Quality is determined by available bitrate, not CRF.\n");
         } else {
             notes.append ("\n── Two-pass: skipped ──\n");
-            notes.append ("  CRF confidence is high (%.0f%%) and estimate is under target.\n"
-                .printf (confidence * 100.0));
+            if (within_target_band) {
+                notes.append ("  CRF confidence is high (%.0f%%) and estimate is within the ±%.0f MB target band.\n"
+                    .printf (confidence * 100.0, target_tolerance_kb / 1024.0));
+            } else {
+                notes.append ("  CRF confidence is high (%.0f%%), but the estimate is outside the target band.\n"
+                    .printf (confidence * 100.0));
+            }
         }
 
         // --- Warnings ---
         if (is_impossible) {
             notes.append ("\n⚠️  Even maximum compression will likely exceed the %d MB target.\n"
                 .printf (target_mb));
-            notes.append ("    Two-pass will fit the file but expect severe quality loss.\n");
+            notes.append ("    Two-pass can push the file closer to the target, but expect severe quality loss.\n");
             notes.append ("    Consider trimming, scaling down, or raising the target.\n");
         } else if (target_video_kbps < 200) {
             notes.append ("\n⚠️  Very low available bitrate (%d kbps) — ".printf (target_video_kbps));
@@ -1073,13 +1118,18 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Calibration data ---
-        notes.append ("\n── Calibration data (4-point least-squares quadratic) ──\n");
-        for (int ci = 0; ci < 4; ci++) {
+        notes.append ("\n── Calibration data (%d-point least-squares quadratic) ──\n"
+            .printf (cal_crfs.length));
+        for (int ci = 0; ci < cal_crfs.length; ci++) {
             notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
                 .printf (cal_crfs[ci], cal_sizes[ci]));
         }
         notes.append ("  Model: ln(size) = %.4f + %.4f·CRF + %.6f·CRF²\n"
             .printf (qa, qb, qc));
+        if (adaptive_calibration_refined) {
+            notes.append ("  Adaptive refinement: +%d follow-up point%s around the solved CRF path\n"
+                .printf (adaptive_points_added, adaptive_points_added == 1 ? "" : "s"));
+        }
         if (verification_done) {
             notes.append ("  Preset factor = %.2f (verified: %s vs model, table: %.2f)\n"
                 .printf (verified_preset_factor, preset_label, preset_factor));
@@ -1588,6 +1638,252 @@ public class SmartOptimizer : GLib.Object {
         }
     }
 
+    /**
+     * Tiny and Small are treated as strict size targets.
+     * Medium and above treat the target as an approximate landing zone.
+     */
+    private bool tier_uses_strict_targeting (SizeTier tier) {
+        switch (tier) {
+            case SizeTier.TINY:
+            case SizeTier.SMALL:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Acceptable distance from the requested size for quality-focused tiers.
+     * Medium+ should land near the target, not necessarily under it.
+     */
+    private double tier_target_tolerance_kb (SizeTier tier, double target_total_kb) {
+        switch (tier) {
+            case SizeTier.MEDIUM:
+                return double.max (8.0 * 1024.0, target_total_kb * 0.10);
+            case SizeTier.LARGE:
+                return double.max (10.0 * 1024.0, target_total_kb * 0.10);
+            case SizeTier.XLARGE:
+                return double.max (16.0 * 1024.0, target_total_kb * 0.12);
+            default:
+                return 0.0;
+        }
+    }
+
+    /**
+     * Fit ln(size) = a + b*CRF + c*CRF^2 using least squares over an
+     * arbitrary number of calibration points. Falls back to a two-point
+     * exponential when the quadratic system is degenerate.
+     */
+    private void fit_quadratic_log_curve (
+        int[]    cal_crfs,
+        double[] cal_sizes,
+        out double qa,
+        out double qb,
+        out double qc,
+        out bool   degenerate
+    ) {
+        double sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
+        double sy = 0, sxy = 0, sx2y = 0;
+        for (int ci = 0; ci < cal_crfs.length; ci++) {
+            double x = (double) cal_crfs[ci];
+            double y = Math.log (cal_sizes[ci]);
+            double x2 = x * x;
+            sx   += x;
+            sx2  += x2;
+            sx3  += x2 * x;
+            sx4  += x2 * x2;
+            sy   += y;
+            sxy  += x * y;
+            sx2y += x2 * y;
+        }
+        double n_pts = (double) cal_crfs.length;
+
+        qa = 0;
+        qb = 0;
+        qc = 0;
+        degenerate = false;
+
+        double[,] m = {
+            { n_pts, sx,  sx2, sy   },
+            { sx,    sx2, sx3, sxy  },
+            { sx2,   sx3, sx4, sx2y }
+        };
+
+        for (int col = 0; col < 3; col++) {
+            int pivot = col;
+            for (int row = col + 1; row < 3; row++) {
+                if (Math.fabs (m[row, col]) > Math.fabs (m[pivot, col]))
+                    pivot = row;
+            }
+            if (pivot != col) {
+                for (int k = 0; k < 4; k++) {
+                    double tmp = m[col, k];
+                    m[col, k] = m[pivot, k];
+                    m[pivot, k] = tmp;
+                }
+            }
+            if (Math.fabs (m[col, col]) < 1e-12) {
+                warning ("Least-squares system degenerate, falling back to two-point");
+                double B_fb = Math.pow (
+                    cal_sizes[cal_sizes.length - 1] / cal_sizes[0],
+                    1.0 / (cal_crfs[cal_crfs.length - 1] - cal_crfs[0]));
+                double A_fb = cal_sizes[0] / Math.pow (B_fb, cal_crfs[0]);
+                qa = Math.log (A_fb);
+                qb = Math.log (B_fb);
+                qc = 0.0;
+                degenerate = true;
+                break;
+            }
+            for (int row = col + 1; row < 3; row++) {
+                double factor = m[row, col] / m[col, col];
+                for (int k = col; k < 4; k++)
+                    m[row, k] -= factor * m[col, k];
+            }
+        }
+
+        if (!degenerate) {
+            qc = m[2, 3] / m[2, 2];
+            qb = (m[1, 3] - m[1, 2] * qc) / m[1, 1];
+            qa = (m[0, 3] - m[0, 1] * qb - m[0, 2] * qc) / m[0, 0];
+        }
+    }
+
+    /**
+     * Solve c*x^2 + b*x + (a - ln(target)) = 0 for CRF and select the root
+     * that is valid or nearest the valid CRF range.
+     */
+    private double solve_crf_from_curve (
+        double qa,
+        double qb,
+        double qc,
+        double ln_target,
+        double cal_mid,
+        int    crf_min,
+        int    crf_max
+    ) {
+        if (Math.fabs (qc) < 1e-15) {
+            if (Math.fabs (qb) < 1e-15)
+                return cal_mid;
+            return (ln_target - qa) / qb;
+        }
+
+        double disc = qb * qb - 4.0 * qc * (qa - ln_target);
+        if (disc < 0)
+            return -qb / (2.0 * qc);
+
+        double sqrt_disc = Math.sqrt (disc);
+        double r1 = (-qb + sqrt_disc) / (2.0 * qc);
+        double r2 = (-qb - sqrt_disc) / (2.0 * qc);
+
+        if (r1 >= crf_min && r1 <= crf_max && r2 >= crf_min && r2 <= crf_max)
+            return (Math.fabs (r1 - cal_mid) < Math.fabs (r2 - cal_mid)) ? r1 : r2;
+        if (r1 >= crf_min && r1 <= crf_max)
+            return r1;
+        if (r2 >= crf_min && r2 <= crf_max)
+            return r2;
+
+        double d1 = double.min (Math.fabs (r1 - crf_min), Math.fabs (r1 - crf_max));
+        double d2 = double.min (Math.fabs (r2 - crf_min), Math.fabs (r2 - crf_max));
+        return (d1 < d2) ? r1 : r2;
+    }
+
+    private bool calibration_contains_crf (int[] cal_crfs, int crf) {
+        for (int i = 0; i < cal_crfs.length; i++) {
+            if (cal_crfs[i] == crf)
+                return true;
+        }
+        return false;
+    }
+
+    private void append_calibration_sample (
+        ref int[]    cal_crfs,
+        ref double[] cal_sizes,
+        int          crf,
+        double       size_kb
+    ) {
+        int old_len = cal_crfs.length;
+        int[] new_crfs = new int[old_len + 1];
+        double[] new_sizes = new double[old_len + 1];
+
+        for (int i = 0; i < old_len; i++) {
+            new_crfs[i] = cal_crfs[i];
+            new_sizes[i] = cal_sizes[i];
+        }
+        new_crfs[old_len] = crf;
+        new_sizes[old_len] = size_kb;
+
+        for (int i = 1; i < new_crfs.length; i++) {
+            int cur_crf = new_crfs[i];
+            double cur_size = new_sizes[i];
+            int j = i - 1;
+            while (j >= 0 && new_crfs[j] > cur_crf) {
+                new_crfs[j + 1] = new_crfs[j];
+                new_sizes[j + 1] = new_sizes[j];
+                j--;
+            }
+            new_crfs[j + 1] = cur_crf;
+            new_sizes[j + 1] = cur_size;
+        }
+
+        cal_crfs = new_crfs;
+        cal_sizes = new_sizes;
+    }
+
+    private bool should_refine_calibration_window (int predicted_crf, int[] cal_crfs) {
+        int cal_first = cal_crfs[0];
+        int cal_last  = cal_crfs[cal_crfs.length - 1];
+        return predicted_crf < cal_first
+            || predicted_crf > cal_last
+            || predicted_crf <= cal_first + ADAPTIVE_CALIBRATION_EDGE_MARGIN
+            || predicted_crf >= cal_last - ADAPTIVE_CALIBRATION_EDGE_MARGIN;
+    }
+
+    /**
+     * Pick up to two extra CRFs near the predicted answer when the initial
+     * four-point window does not bracket it well.
+     */
+    private int[] pick_adaptive_calibration_crfs (
+        int   predicted_crf,
+        int[] cal_crfs,
+        int   crf_min,
+        int   crf_max,
+        int   max_points
+    ) {
+        var extra_list = new GenericArray<int?> ();
+        int remaining = max_points - cal_crfs.length;
+        if (remaining <= 0 || !should_refine_calibration_window (predicted_crf, cal_crfs))
+            return {};
+
+        int cal_first = cal_crfs[0];
+        int cal_last  = cal_crfs[cal_crfs.length - 1];
+        double avg_gap = (cal_crfs.length > 1)
+            ? (double) (cal_last - cal_first) / (double) (cal_crfs.length - 1)
+            : 4.0;
+        int step = int.max (2, (int) Math.round (avg_gap / 2.0));
+        int[] offsets = { 0, -step, step, -2 * step, 2 * step, -3 * step, 3 * step };
+
+        for (int i = 0; i < offsets.length && extra_list.length < remaining; i++) {
+            int candidate = (predicted_crf + offsets[i]).clamp (crf_min, crf_max);
+            if (calibration_contains_crf (cal_crfs, candidate))
+                continue;
+
+            bool already_added = false;
+            for (int j = 0; j < extra_list.length; j++) {
+                if (extra_list[j] == candidate) {
+                    already_added = true;
+                    break;
+                }
+            }
+            if (!already_added)
+                extra_list.add (candidate);
+        }
+
+        int[] extra = new int[extra_list.length];
+        for (int i = 0; i < extra_list.length; i++)
+            extra[i] = extra_list[i];
+        return extra;
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // CALIBRATION ENCODING
     // ════════════════════════════════════════════════════════════════════════
@@ -1894,13 +2190,20 @@ public class SmartOptimizer : GLib.Object {
         if (idx < 0) return null;
 
         string after = line.substring (idx + key.length);
-        return extract_number (after);
+        double val = 0.0;
+        if (try_extract_number (after, out val))
+            return val;
+        return null;
     }
 
     /**
      * Extract the first numeric value from a string.
+     * Returns false if no digits were found (distinguishes parse failure
+     * from a legitimately parsed 0.0). Uses g_ascii_strtod via
+     * double.try_parse for locale independence.
      */
-    private double extract_number (string text) {
+    private bool try_extract_number (string text, out double value) {
+        value = 0.0;
         var  buf       = new StringBuilder ();
         bool in_number = false;
         for (int i = 0; i < text.length && buf.len < 16; i++) {
@@ -1913,7 +2216,11 @@ public class SmartOptimizer : GLib.Object {
                 break;
             }
         }
-        return (buf.len > 0) ? double.parse (buf.str) : 0.0;
+        if (buf.len == 0) return false;
+        unowned string unparsed = null;
+        if (!double.try_parse (buf.str, out value, out unparsed))
+            return false;
+        return true;
     }
 
     /**
@@ -2112,7 +2419,7 @@ public class SmartOptimizer : GLib.Object {
     }
 
     private void cleanup_file (string path) {
-        if (FileUtils.unlink (path) != 0) {
+        if (FileUtils.test (path, FileTest.EXISTS) && FileUtils.unlink (path) != 0) {
             warning ("Failed to clean up temp file %s: %s", path, strerror (errno));
         }
     }
