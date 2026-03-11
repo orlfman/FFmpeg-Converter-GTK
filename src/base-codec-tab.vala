@@ -1,5 +1,6 @@
 using Gtk;
 using Adw;
+using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BaseCodecTab — Abstract base class for codec-specific tabs
@@ -22,6 +23,8 @@ using Adw;
 
 public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
 
+    protected delegate void GeneralTabSyncFunc ();
+
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void smart_optimizer_requested ();
 
@@ -35,6 +38,20 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public Switch        two_pass_switch       { get; protected set; }
     public DropDown      keyint_combo          { get; protected set; }
     public DropDown      custom_keyframe_combo { get; protected set; }
+
+    // ── Shared GeneralTab binding for codec/profile compatibility logic ─────
+    protected GeneralTab? profile_general_tab = null;
+    public bool general_tab_sync_active { get; set; default = false; }
+    private ulong general_tab_8bit_handler = 0;
+    private ulong general_tab_10bit_handler = 0;
+    private ulong general_tab_8bit_fmt_handler = 0;
+    private ulong general_tab_10bit_fmt_handler = 0;
+
+    public override void dispose () {
+        disconnect_general_tab_signals ();
+        profile_general_tab = null;
+        base.dispose ();
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  ICodecTab — Concrete implementations (identical across all 4 tabs)
@@ -70,6 +87,66 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
 
     // Each codec applies recommendations differently
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
+
+    protected void rebind_general_tab (GeneralTab? value, GeneralTabSyncFunc sync_func) {
+        if (value == profile_general_tab) {
+            sync_func ();
+            return;
+        }
+
+        disconnect_general_tab_signals ();
+        profile_general_tab = value;
+        connect_general_tab_signals (sync_func);
+        sync_func ();
+    }
+
+    public abstract void sync_general_tab_now ();
+
+    private void disconnect_general_tab_signals () {
+        if (profile_general_tab == null) {
+            general_tab_8bit_handler = 0;
+            general_tab_10bit_handler = 0;
+            general_tab_8bit_fmt_handler = 0;
+            general_tab_10bit_fmt_handler = 0;
+            return;
+        }
+
+        if (general_tab_8bit_handler != 0) {
+            SignalHandler.disconnect (profile_general_tab.eight_bit_check, general_tab_8bit_handler);
+            general_tab_8bit_handler = 0;
+        }
+        if (general_tab_10bit_handler != 0) {
+            SignalHandler.disconnect (profile_general_tab.ten_bit_check, general_tab_10bit_handler);
+            general_tab_10bit_handler = 0;
+        }
+        if (general_tab_8bit_fmt_handler != 0) {
+            SignalHandler.disconnect (profile_general_tab.eight_bit_format, general_tab_8bit_fmt_handler);
+            general_tab_8bit_fmt_handler = 0;
+        }
+        if (general_tab_10bit_fmt_handler != 0) {
+            SignalHandler.disconnect (profile_general_tab.ten_bit_format, general_tab_10bit_fmt_handler);
+            general_tab_10bit_fmt_handler = 0;
+        }
+    }
+
+    private void connect_general_tab_signals (GeneralTabSyncFunc sync_func) {
+        if (profile_general_tab == null) return;
+
+        general_tab_8bit_handler =
+            profile_general_tab.eight_bit_check.notify["active"].connect (() => sync_func ());
+        general_tab_10bit_handler =
+            profile_general_tab.ten_bit_check.notify["active"].connect (() => sync_func ());
+        general_tab_8bit_fmt_handler =
+            profile_general_tab.eight_bit_format.notify["selected"].connect (() => sync_func ());
+        general_tab_10bit_fmt_handler =
+            profile_general_tab.ten_bit_format.notify["selected"].connect (() => sync_func ());
+    }
+
+    protected void set_dropdown_options (DropDown dropdown,
+                                         string[] options,
+                                         string fallback_option) {
+        CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  SHARED SMART OPTIMIZER UI BUILDER

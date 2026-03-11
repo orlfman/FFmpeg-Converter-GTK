@@ -25,26 +25,14 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         args += "-preset";
         args += ((int) tab.preset_spin.get_value ()).to_string ();
 
-        // ── Profile → Pixel Format ──────────────────────────────────────────
-        // AV1 profiles are determined by chroma format. Instead of -profile:v
-        // (which validates before seeing frames), we force -pix_fmt so FFmpeg
-        // delivers the correct format to the encoder, and SVT-AV1 auto-selects
-        // the matching profile.
-        string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
-        if (profile != "Auto" && profile != "Main") {
-            bool is_10bit = (tab.general_tab != null && tab.general_tab.ten_bit_check.active);
-
-            if (profile == "High") {
-                // High (profile 1): requires 4:4:4
-                args += "-pix_fmt";
-                args += is_10bit ? "yuv444p10le" : "yuv444p";
-            } else if (profile == "Professional") {
-                // Professional (profile 2): 8-bit needs 4:2:2, 10-bit allows any
-                if (!is_10bit) {
-                    args += "-pix_fmt";
-                    args += "yuv422p";
-                }
-            }
+        // ── Pixel Format ────────────────────────────────────────────────────
+        // This SVT-AV1 path currently produces 4:2:0 output. Emit -pix_fmt
+        // explicitly whenever the user selected 8-bit or 10-bit so ffmpeg
+        // does not silently downgrade 4:2:2/4:4:4 behind the UI's back.
+        string svt_pix_fmt = CodecUtils.get_svt_av1_pix_fmt (tab.general_tab);
+        if (svt_pix_fmt.length > 0) {
+            args += "-pix_fmt";
+            args += svt_pix_fmt;
         }
 
         // ── Rate Control ────────────────────────────────────────────────────

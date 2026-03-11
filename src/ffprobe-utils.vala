@@ -25,6 +25,85 @@ public class ChapterInfo : Object {
 
 namespace FfprobeUtils {
 
+    private int infer_bit_depth_from_pix_fmt (string pix_fmt) {
+        string pix = pix_fmt.down ().strip ();
+
+        if (pix.contains ("p16") || pix.contains ("16le") || pix.contains ("16be"))
+            return 16;
+        if (pix.contains ("p14") || pix.contains ("14le") || pix.contains ("14be"))
+            return 14;
+        if (pix.contains ("p12") || pix.contains ("12le") || pix.contains ("12be"))
+            return 12;
+        if (pix.contains ("p10") || pix.contains ("10le") || pix.contains ("10be"))
+            return 10;
+        if (pix.contains ("p9") || pix.contains ("9le") || pix.contains ("9be"))
+            return 9;
+
+        return 8;
+    }
+
+    /**
+     * Probe the source video stream bit depth. Returns 0 on failure.
+     *
+     * Prefers bits_per_raw_sample when ffprobe exposes it, then falls back to
+     * inferring from the pixel-format name.
+     */
+    public int probe_video_bit_depth (string input_file) {
+        try {
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "quiet",
+                "-print_format", "json",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=bits_per_raw_sample,pix_fmt",
+                input_file
+            };
+            string stdout_text, stderr_text;
+            int status;
+
+            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
+                                null, out stdout_text, out stderr_text, out status);
+
+            if (status != 0 || stdout_text == null || stdout_text.strip ().length == 0)
+                return 0;
+
+            var parser = new Json.Parser ();
+            parser.load_from_data (stdout_text);
+
+            var root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT)
+                return 0;
+
+            var root_obj = root.get_object ();
+            if (!root_obj.has_member ("streams"))
+                return 0;
+
+            var streams = root_obj.get_array_member ("streams");
+            if (streams == null || streams.get_length () == 0)
+                return 0;
+
+            var stream = streams.get_object_element (0);
+            if (stream == null)
+                return 0;
+
+            string bits_raw = stream.get_string_member_with_default ("bits_per_raw_sample", "");
+            if (bits_raw != null && bits_raw.strip ().length > 0) {
+                int bits = 0;
+                if (int.try_parse (bits_raw.strip (), out bits) && bits > 0)
+                    return bits;
+            }
+
+            string pix_fmt = stream.get_string_member_with_default ("pix_fmt", "");
+            if (pix_fmt != null && pix_fmt.strip ().length > 0)
+                return infer_bit_depth_from_pix_fmt (pix_fmt);
+
+        } catch (Error e) {
+            // probe failed — caller can skip the warning
+        }
+
+        return 0;
+    }
+
     /**
      * Probe the frame rate of the first video stream in @input_file
      * using ffprobe.  Returns 0.0 on any failure so callers can fall

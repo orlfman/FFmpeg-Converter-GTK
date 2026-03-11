@@ -7,6 +7,138 @@ using GLib;
 
 namespace ConversionUtils {
 
+    public class FileSignature : Object {
+        public string path { get; construct set; }
+        public int64 size { get; construct set; }
+        public uint64 mtime { get; construct set; }
+        public uint32 mtime_usec { get; construct set; }
+
+        public FileSignature (string path,
+                              int64 size,
+                              uint64 mtime,
+                              uint32 mtime_usec) {
+            Object (
+                path: path,
+                size: size,
+                mtime: mtime,
+                mtime_usec: mtime_usec
+            );
+        }
+
+        public bool matches (FileSignature other) {
+            return path == other.path
+                && size == other.size
+                && mtime == other.mtime
+                && mtime_usec == other.mtime_usec;
+        }
+    }
+
+    public class CachedFileProbeEntry<G> : Object {
+        public FileSignature signature;
+        public G value;
+
+        public CachedFileProbeEntry (FileSignature signature, G value) {
+            this.signature = signature;
+            this.value = value;
+        }
+    }
+
+    public class CachedFileProbe<G> : Object {
+        public const int DEFAULT_MAX_ENTRIES = 32;
+        private HashTable<string, CachedFileProbeEntry<G>> entries =
+            new HashTable<string, CachedFileProbeEntry<G>> (str_hash, str_equal);
+        private string[] lru_paths = {};
+        private int max_entries;
+
+        public CachedFileProbe (int max_entries = DEFAULT_MAX_ENTRIES) {
+            this.max_entries = (max_entries > 0) ? max_entries : DEFAULT_MAX_ENTRIES;
+        }
+
+        private void remove_path_from_lru (string path) {
+            int idx = -1;
+            for (int i = 0; i < lru_paths.length; i++) {
+                if (lru_paths[i] == path) {
+                    idx = i;
+                    break;
+                }
+            }
+
+            if (idx < 0)
+                return;
+
+            string[] next = {};
+            for (int i = 0; i < lru_paths.length; i++) {
+                if (i != idx)
+                    next += lru_paths[i];
+            }
+            lru_paths = next;
+        }
+
+        private void touch_path (string path) {
+            remove_path_from_lru (path);
+            lru_paths += path;
+
+            while (lru_paths.length > max_entries) {
+                string evicted = lru_paths[0];
+                string[] next = {};
+                for (int i = 1; i < lru_paths.length; i++)
+                    next += lru_paths[i];
+                lru_paths = next;
+                entries.remove (evicted);
+            }
+        }
+
+        public CachedFileProbeEntry<G>? lookup (FileSignature signature) {
+            var entry = entries.lookup (signature.path);
+            if (entry != null && entry.signature.matches (signature)) {
+                touch_path (signature.path);
+                return entry;
+            }
+            if (entry != null) {
+                entries.remove (signature.path);
+                remove_path_from_lru (signature.path);
+            }
+            return null;
+        }
+
+        public void store (FileSignature signature, G value) {
+            entries.insert (signature.path, new CachedFileProbeEntry<G> (signature, value));
+            touch_path (signature.path);
+        }
+
+        public void clear_path (string path) {
+            entries.remove (path);
+            remove_path_from_lru (path);
+        }
+
+        public void clear () {
+            entries.remove_all ();
+            lru_paths = {};
+        }
+    }
+
+    public FileSignature? query_file_signature (string path) {
+        try {
+            var info = File.new_for_path (path).query_info (
+                "%s,%s,%s".printf (
+                    FileAttribute.STANDARD_SIZE,
+                    FileAttribute.TIME_MODIFIED,
+                    FileAttribute.TIME_MODIFIED_USEC
+                ),
+                FileQueryInfoFlags.NONE
+            );
+
+            return new FileSignature (
+                path,
+                info.get_size (),
+                info.get_attribute_uint64 (FileAttribute.TIME_MODIFIED),
+                info.get_attribute_uint32 (FileAttribute.TIME_MODIFIED_USEC)
+            );
+        } catch (Error e) {
+            return null;
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  OUTPUT PATH COMPUTATION
     // ═════════════════════════════════════════════════════════════════════════

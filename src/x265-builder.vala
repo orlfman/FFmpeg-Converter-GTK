@@ -25,9 +25,17 @@ public class X265Builder : Object, ICodecBuilder {
         args += "-preset";
         args += tab.get_active_preset ();
 
-        // ── Profile ──────────────────────────────────────────────────────────
+        // ── Profile / Pixel Format ──────────────────────────────────────────
+        // Defense in depth: explicit x265 profiles must be paired with a
+        // compatible pixel format even if the UI state somehow drifts.
         string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
         if (profile != "Auto" && profile.length > 0) {
+            string forced_pix_fmt = CodecUtils.get_x265_profile_pix_fmt (profile);
+            if (forced_pix_fmt.length > 0) {
+                args += "-pix_fmt";
+                args += forced_pix_fmt;
+            }
+
             args += "-profile:v";
             args += profile.down ();
         }

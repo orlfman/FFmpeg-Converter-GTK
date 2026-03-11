@@ -10,6 +10,7 @@ public class SubtitlesTab : Box {
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void subtitle_done (string output_path);
+    public signal void general_tab_context_changed ();
 
     // ── Runner ───────────────────────────────────────────────────────────────
     private SubtitlesRunner runner = new SubtitlesRunner ();
@@ -654,6 +655,12 @@ public class SubtitlesTab : Box {
     private void connect_signals () {
         extract_button.clicked.connect (on_extract_clicked);
         extract_all_button.clicked.connect (on_extract_all_clicked);
+        mode_combo.notify["selected"].connect (() => {
+            general_tab_context_changed ();
+        });
+        burn_codec_combo.notify["selected"].connect (() => {
+            general_tab_context_changed ();
+        });
 
         runner.operation_done.connect ((path) => {
             _is_busy = false;
@@ -995,6 +1002,29 @@ public class SubtitlesTab : Box {
         return mode_combo.get_selected () == 1;
     }
 
+    /** Current input file used by the subtitles workflow. */
+    public string get_input_file () {
+        return current_input_file;
+    }
+
+    /** True when burn-in mode will re-encode through SVT-AV1. */
+    public bool will_use_svt_av1_burn_in () {
+        return is_burn_in_mode () && burn_codec_combo.get_selected () == 0;
+    }
+
+    public BaseCodecTab? get_general_tab_sync_owner () {
+        if (!is_burn_in_mode ())
+            return null;
+
+        switch (burn_codec_combo.get_selected ()) {
+            case 0:  return svt_tab as BaseCodecTab;
+            case 1:  return x265_tab as BaseCodecTab;
+            case 2:  return x264_tab as BaseCodecTab;
+            case 3:  return vp9_tab as BaseCodecTab;
+            default: return null;
+        }
+    }
+
     public bool can_apply () {
         if (current_input_file.length == 0) return false;
         if (_is_busy) return false;
@@ -1166,14 +1196,6 @@ public class SubtitlesTab : Box {
             case 3:  return vp9_tab;
             default: return svt_tab;
         }
-    }
-
-    /** Get the ICodecBuilder for the burn-in codec selector.
-     *  Delegates to the tab's get_codec_builder() so the builder
-     *  is constructed with the typed tab reference automatically. */
-    private ICodecBuilder? get_selected_codec_builder () {
-        ICodecTab? tab = get_selected_codec_tab ();
-        return tab != null ? tab.get_codec_builder () : null;
     }
 
     /** Output extension for burn-in — comes from the selected codec tab's container. */
@@ -1355,7 +1377,6 @@ public class SubtitlesTab : Box {
     private void update_ui_state () {
         bool has_file    = (current_input_file.length > 0);
         bool has_streams = (detected_streams.length > 0);
-        bool has_added   = (added_subtitles.length > 0);
 
         extract_button.set_sensitive (has_file && has_streams && !_is_busy);
         extract_all_button.set_sensitive (has_file && has_streams && !_is_busy);

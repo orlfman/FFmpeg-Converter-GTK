@@ -12,18 +12,9 @@ public class X264Tab : BaseCodecTab {
     public DropDown  profile_combo      { get; private set; }
 
     // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
-    private GeneralTab? _general_tab = null;
     public GeneralTab? general_tab {
-        get { return _general_tab; }
-        set {
-            _general_tab = value;
-            if (_general_tab != null) {
-                _general_tab.eight_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.eight_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-            }
-        }
+        get { return profile_general_tab; }
+        set { rebind_general_tab (value, apply_profile_format_requirements); }
     }
 
     // ── Rate Control ─────────────────────────────────────────────────────────
@@ -83,6 +74,10 @@ public class X264Tab : BaseCodecTab {
     public DropDown  threads_combo       { get; private set; }
 
     private Adw.ActionRow custom_keyframe_row;
+    private bool baseline_profile_override_active = false;
+    private double baseline_saved_bframes = 3;
+    private uint baseline_saved_b_adapt = 1;
+    private bool baseline_saved_cabac = true;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -170,7 +165,7 @@ public class X264Tab : BaseCodecTab {
         // Profile
         var profile_row = new Adw.ActionRow ();
         profile_row.set_title ("Profile");
-        profile_row.set_subtitle ("Higher profiles support more features — Auto selects based on settings");
+        profile_row.set_subtitle ("Explicit profiles force exact output depth and chroma — Auto selects based on settings");
         profile_combo = new DropDown (new StringList ({
             "Auto", "Baseline", "Main", "High", "High10", "High422", "High444"
         }), null);
@@ -710,44 +705,151 @@ public class X264Tab : BaseCodecTab {
     //  x264 profile constraints:
     //    Baseline / Main / High  → 8-bit only, 4:2:0 only
     //    High10                  → 10-bit, 4:2:0 only
-    //    High422                 → 8 or 10-bit, 4:2:0 or 4:2:2
-    //    High444                 → 8 or 10-bit, any chroma
+    //    High422                 → 8 or 10-bit, 4:2:2 only
+    //    High444                 → 8 or 10-bit, 4:4:4 only
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
 
+    private void apply_baseline_profile_overrides (string profile) {
+        bool baseline_selected = (profile == "Baseline");
+
+        if (baseline_selected && !baseline_profile_override_active) {
+            baseline_saved_bframes = bframes_spin.get_value ();
+            baseline_saved_b_adapt = b_adapt_combo.get_selected ();
+            baseline_saved_cabac = cabac_switch.active;
+            baseline_profile_override_active = true;
+        }
+
+        if (baseline_selected) {
+            bframes_spin.set_value (0);
+            bframes_spin.set_sensitive (false);
+            b_adapt_combo.set_selected (0);
+            b_adapt_combo.set_sensitive (false);
+            cabac_switch.set_active (false);
+            cabac_switch.set_sensitive (false);
+            return;
+        }
+
+        if (baseline_profile_override_active) {
+            bframes_spin.set_value (baseline_saved_bframes);
+            b_adapt_combo.set_selected (baseline_saved_b_adapt);
+            cabac_switch.set_active (baseline_saved_cabac);
+            baseline_profile_override_active = false;
+        }
+
+        bframes_spin.set_sensitive (true);
+        b_adapt_combo.set_sensitive (true);
+        cabac_switch.set_sensitive (true);
+    }
+
     private void apply_profile_format_requirements () {
-        if (_general_tab == null || _applying_profile) return;
+        if (_applying_profile || !general_tab_sync_active) return;
 
         string profile = get_dropdown_text (profile_combo);
 
-        if (profile == "Auto") return;
-
         _applying_profile = true;
+        apply_baseline_profile_overrides (profile);
 
-        bool has_8bit  = _general_tab.eight_bit_check.active;
-        bool has_10bit = _general_tab.ten_bit_check.active;
+        if (profile_general_tab == null) {
+            _applying_profile = false;
+            return;
+        }
 
         if (profile == "Baseline" || profile == "Main" || profile == "High") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+        } else if (profile == "High10") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0" },
+                                  "10-bit 4:2:0");
+        } else if (profile == "High422") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:2" },
+                                  "8-bit 4:2:2");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:2" },
+                                  "10-bit 4:2:2");
+        } else if (profile == "High444") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:4:4" },
+                                  "8-bit 4:4:4");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:4:4" },
+                                  "10-bit 4:4:4");
+        } else {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+            // Auto: reset bit-depth overrides back to off (let ffmpeg decide)
+            if (profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_check.set_active (false);
+            if (profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_check.set_active (false);
+            _applying_profile = false;
+            return;
+        }
+
+        bool has_8bit  = profile_general_tab.eight_bit_check.active;
+        bool has_10bit = profile_general_tab.ten_bit_check.active;
+
+        if (profile == "Baseline") {
+            // Exact Constrained Baseline output: 8-bit 4:2:0 with no B-frames
+            // and no CABAC so x264 cannot silently rise to Main.
+            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
+            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
+            profile_general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+        }
+        else if (profile == "Main" || profile == "High") {
             // 8-bit only, 4:2:0 only
-            if (has_10bit) _general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) _general_tab.eight_bit_check.set_active (true);
-            _general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
+            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
+            profile_general_tab.eight_bit_format.set_selected (0);  // 4:2:0
         }
         else if (profile == "High10") {
             // 10-bit, 4:2:0 only
-            if (has_8bit) _general_tab.eight_bit_check.set_active (false);
-            if (!has_10bit) _general_tab.ten_bit_check.set_active (true);
-            _general_tab.ten_bit_format.set_selected (0);  // 4:2:0
+            if (has_8bit) profile_general_tab.eight_bit_check.set_active (false);
+            if (!has_10bit) profile_general_tab.ten_bit_check.set_active (true);
+            profile_general_tab.ten_bit_format.set_selected (0);  // 4:2:0
         }
         else if (profile == "High422") {
-            // 8 or 10-bit, 4:2:0 or 4:2:2 — clamp 4:4:4 down to 4:2:2
-            if (has_8bit && (int) _general_tab.eight_bit_format.get_selected () == 2)
-                _general_tab.eight_bit_format.set_selected (1);  // 4:2:2
-            if (has_10bit && (int) _general_tab.ten_bit_format.get_selected () == 2)
-                _general_tab.ten_bit_format.set_selected (1);  // 4:2:2
+            // Exact High 4:2:2 output: preserve explicit 8/10-bit choice,
+            // otherwise default to 8-bit 4:2:2.
+            if (!has_8bit && !has_10bit) {
+                profile_general_tab.eight_bit_check.set_active (true);
+                has_8bit = true;
+            }
+
+            if (has_10bit) {
+                profile_general_tab.ten_bit_format.set_selected (1);  // 4:2:2
+            } else {
+                profile_general_tab.eight_bit_format.set_selected (1);  // 4:2:2
+            }
         }
-        // High444: any 8/10-bit, any chroma — no constraints
+        else if (profile == "High444") {
+            // Exact High 4:4:4 Predictive output: preserve explicit 8/10-bit
+            // choice, otherwise default to 8-bit 4:4:4.
+            if (!has_8bit && !has_10bit) {
+                profile_general_tab.eight_bit_check.set_active (true);
+                has_8bit = true;
+            }
+
+            if (has_10bit) {
+                profile_general_tab.ten_bit_format.set_selected (2);  // 4:4:4
+            } else {
+                profile_general_tab.eight_bit_format.set_selected (2);  // 4:4:4
+            }
+        }
 
         _applying_profile = false;
     }
@@ -770,6 +872,10 @@ public class X264Tab : BaseCodecTab {
 
     public override ICodecBuilder get_codec_builder () {
         return new X264Builder (this);
+    }
+
+    public override void sync_general_tab_now () {
+        apply_profile_format_requirements ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -11,18 +11,9 @@ public class SvtAv1Tab : BaseCodecTab {
     public DropDown  profile_combo       { get; private set; }
 
     // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
-    private GeneralTab? _general_tab = null;
     public GeneralTab? general_tab {
-        get { return _general_tab; }
-        set {
-            _general_tab = value;
-            if (_general_tab != null) {
-                _general_tab.eight_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.eight_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-            }
-        }
+        get { return profile_general_tab; }
+        set { rebind_general_tab (value, apply_profile_format_requirements); }
     }
 
     // ── Rate Control ─────────────────────────────────────────────────────────
@@ -159,14 +150,13 @@ public class SvtAv1Tab : BaseCodecTab {
         preset_row.add_suffix (preset_spin);
         group.add (preset_row);
 
-        // Profile — AV1 profiles control chroma format compatibility.
-        // Main = 4:2:0 only, High = 4:4:4, Professional = 4:2:2+ (at 8-bit).
-        // Selecting a non-Auto profile auto-configures the General tab format.
+        // Profile — this app's SVT-AV1 path currently supports 4:2:0 output.
+        // Main keeps that constraint explicit; Auto is recommended.
         var profile_row = new Adw.ActionRow ();
         profile_row.set_title ("Profile");
-        profile_row.set_subtitle ("Auto is recommended — High/Professional require specific pixel formats");
+        profile_row.set_subtitle ("SVT-AV1 outputs 4:2:0 here — Auto is recommended");
         profile_combo = new DropDown (new StringList ({
-            "Auto", "Main", "High", "Professional"
+            "Auto", "Main"
         }), null);
         profile_combo.set_valign (Align.CENTER);
         profile_combo.set_selected (0);
@@ -706,56 +696,59 @@ public class SvtAv1Tab : BaseCodecTab {
     //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
     //
     //  AV1 profiles are tied to chroma subsampling:
-    //    Main         (0) → 4:2:0 only
-    //    High         (1) → 4:4:4 only
-    //    Professional (2) → 8-bit: 4:2:2 only / 10-bit: any chroma
+    //    Auto        → leave the shared General tab unchanged
+    //    Main        → force a concrete 4:2:0-compatible format
     //
-    //  When the user selects a non-Auto profile, we auto-configure the
-    //  General tab's pixel format so the encode won't fail.
+    //  Builder-side hardening still emits an explicit 4:2:0 pix_fmt when the
+    //  user selected 8-bit or 10-bit output. The UI only coerces formats for
+    //  explicit Main so Auto does not mutate the universal General tab.
     // ═══════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
 
     private void apply_profile_format_requirements () {
-        if (_general_tab == null || _applying_profile) return;
+        if (profile_general_tab == null || _applying_profile || !general_tab_sync_active) return;
 
         string profile = CodecUtils.get_dropdown_text (profile_combo);
 
-        if (profile == "Auto") return;
-
         _applying_profile = true;
 
-        bool has_8bit  = _general_tab.eight_bit_check.active;
-        bool has_10bit = _general_tab.ten_bit_check.active;
-
         if (profile == "Main") {
-            // Main: 4:2:0 only — enable 8-bit if nothing is set
-            if (!has_8bit && !has_10bit)
-                _general_tab.eight_bit_check.set_active (true);
-            if (_general_tab.eight_bit_check.active)
-                _general_tab.eight_bit_format.set_selected (0);   // 4:2:0
-            if (_general_tab.ten_bit_check.active)
-                _general_tab.ten_bit_format.set_selected (0);     // 4:2:0
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0" },
+                                  "10-bit 4:2:0");
+        } else {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+            // Auto: reset bit-depth overrides back to off (let ffmpeg decide)
+            if (profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_check.set_active (false);
+            if (profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_check.set_active (false);
+            _applying_profile = false;
+            return;
         }
-        else if (profile == "High") {
-            // High: 4:4:4 only — prefer 10-bit if nothing is set
-            if (!has_8bit && !has_10bit)
-                _general_tab.ten_bit_check.set_active (true);
-            if (_general_tab.eight_bit_check.active)
-                _general_tab.eight_bit_format.set_selected (2);   // 4:4:4
-            if (_general_tab.ten_bit_check.active)
-                _general_tab.ten_bit_format.set_selected (2);     // 4:4:4
+
+        bool has_8bit  = profile_general_tab.eight_bit_check.active;
+        bool has_10bit = profile_general_tab.ten_bit_check.active;
+
+        if (profile == "Main" && !has_8bit && !has_10bit) {
+            // If Main is selected explicitly with no depth override yet,
+            // default to 8-bit 4:2:0 for a concrete compatible output format.
+            profile_general_tab.eight_bit_check.set_active (true);
         }
-        else if (profile == "Professional") {
-            // Professional: 8-bit requires 4:2:2, 10-bit allows anything
-            if (!has_8bit && !has_10bit) {
-                _general_tab.eight_bit_check.set_active (true);
-                _general_tab.eight_bit_format.set_selected (1);   // 4:2:2
-            } else if (_general_tab.eight_bit_check.active) {
-                _general_tab.eight_bit_format.set_selected (1);   // 4:2:2
-            }
-            // 10-bit: all chroma formats are valid — don't constrain
-        }
+
+        if (profile_general_tab.eight_bit_check.active)
+            profile_general_tab.eight_bit_format.set_selected (0);   // 4:2:0
+        if (profile_general_tab.ten_bit_check.active)
+            profile_general_tab.ten_bit_format.set_selected (0);     // 4:2:0
 
         _applying_profile = false;
     }
@@ -771,6 +764,10 @@ public class SvtAv1Tab : BaseCodecTab {
 
     public override ICodecBuilder get_codec_builder () {
         return new SvtAv1Builder (this);
+    }
+
+    public override void sync_general_tab_now () {
+        apply_profile_format_requirements ();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

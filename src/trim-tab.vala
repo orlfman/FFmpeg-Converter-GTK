@@ -61,6 +61,8 @@ public class SegmentCodecArgs : Object {
 
 public class TrimTab : Box, ICodecTab {
 
+    public signal void general_tab_context_changed ();
+
     // ── Mode ─────────────────────────────────────────────────────────────────
     public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
     private Mode current_mode = Mode.TRIM_ONLY;
@@ -189,6 +191,52 @@ public class TrimTab : Box, ICodecTab {
 
     /** Returns the current operation mode as an int (0=Trim Only, 1=Crop Only, 2=Crop & Trim). */
     public int get_current_mode () { return (int) current_mode; }
+
+    /** True when the current export settings will re-encode through any codec. */
+    public bool will_reencode_output () {
+        if (current_mode == Mode.CHAPTER_SPLIT)
+            return !copy_mode_switch.active;
+
+        if (current_mode == Mode.CROP_ONLY)
+            return global_crop_value.strip ().length > 0;
+
+        if (!copy_mode_switch.active)
+            return true;
+
+        if (current_mode == Mode.TRIM_AND_CROP
+            && !crop_scope_switch.active
+            && global_crop_value.strip ().length > 0) {
+            return true;
+        }
+
+        for (int i = 0; i < segments.length; i++) {
+            if (segments[i].has_crop ())
+                return true;
+        }
+
+        return false;
+    }
+
+    /** True when the current export settings will re-encode through SVT-AV1. */
+    public bool will_use_svt_av1_reencode () {
+        if ((int) codec_choice.get_selected () != 0)
+            return false;
+
+        return will_reencode_output ();
+    }
+
+    public BaseCodecTab? get_general_tab_sync_owner () {
+        if (!reencode_codec_row.get_visible ())
+            return null;
+
+        switch ((int) codec_choice.get_selected ()) {
+            case 0:  return svt_tab;
+            case 1:  return x265_tab;
+            case 2:  return x264_tab;
+            case 3:  return vp9_tab;
+            default: return null;
+        }
+    }
 
     public void load_video (string path) {
         if (path.length > 0) {
@@ -927,6 +975,8 @@ public class TrimTab : Box, ICodecTab {
         } else {
             reencode_codec_row.set_subtitle ("Uses the settings from the selected codec tab + all General tab options");
         }
+
+        general_tab_context_changed ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1435,6 +1485,10 @@ public class TrimTab : Box, ICodecTab {
             update_concat_audio_constraint ();
             update_smart_optimize_visibility ();
             keyframe_cut_row.set_visible (copy_mode_switch.active);
+        });
+
+        codec_choice.notify["selected"].connect (() => {
+            general_tab_context_changed ();
         });
 
         // ── Export as separate files ─────────────────────────────────────────

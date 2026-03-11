@@ -34,6 +34,20 @@ public class Vp9Builder : Object, ICodecBuilder {
             args += deadline;
         }
 
+        // ── Profile ────────────────────────────────────────────────────────
+        string profile = CodecUtils.get_dropdown_text (tab.profile_combo);
+        string profile_arg = CodecUtils.get_vp9_profile_arg (profile);
+        if (profile_arg.length > 0) {
+            args += "-profile:v";
+            args += profile_arg;
+
+            string forced_pix_fmt = CodecUtils.get_vp9_profile_pix_fmt (profile, tab.general_tab);
+            if (forced_pix_fmt.length > 0) {
+                args += "-pix_fmt";
+                args += forced_pix_fmt;
+            }
+        }
+
         // ── Rate Control ──────────────────────────────────────────────────
         string rc_mode = CodecUtils.get_dropdown_text (tab.rc_mode_combo);
 

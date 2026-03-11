@@ -30,6 +30,12 @@ public class X264Builder : Object, ICodecBuilder {
         if (profile != "Auto" && profile.length > 0) {
             args += "-profile:v";
             args += profile.down ();
+
+            string forced_pix_fmt = CodecUtils.get_x264_profile_pix_fmt (profile, tab.general_tab);
+            if (forced_pix_fmt.length > 0) {
+                args += "-pix_fmt";
+                args += forced_pix_fmt;
+            }
         }
 
         // ── Rate Control ──────────────────────────────────────────────────
@@ -78,9 +84,13 @@ public class X264Builder : Object, ICodecBuilder {
             params += "ref=" + ref_val;
 
         int bframes = (int) tab.bframes_spin.get_value ();
+        if (profile == "Baseline")
+            bframes = 0;
         params += "bframes=" + bframes.to_string ();
 
         int b_adapt = (int) tab.b_adapt_combo.get_selected ();
+        if (profile == "Baseline")
+            b_adapt = 0;
         params += "b-adapt=" + b_adapt.to_string ();
 
         if (!tab.weightp_switch.active)
@@ -114,7 +124,7 @@ public class X264Builder : Object, ICodecBuilder {
             params += "no-psy";
         }
 
-        if (!tab.cabac_switch.active)
+        if (profile == "Baseline" || !tab.cabac_switch.active)
             params += "no-cabac";
 
         if (!tab.mbtree_switch.active)

@@ -12,18 +12,9 @@ public class X265Tab : BaseCodecTab {
     public DropDown  profile_combo      { get; private set; }
 
     // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
-    private GeneralTab? _general_tab = null;
     public GeneralTab? general_tab {
-        get { return _general_tab; }
-        set {
-            _general_tab = value;
-            if (_general_tab != null) {
-                _general_tab.eight_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_check.notify["active"].connect (apply_profile_format_requirements);
-                _general_tab.eight_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-                _general_tab.ten_bit_format.notify["selected"].connect (apply_profile_format_requirements);
-            }
-        }
+        get { return profile_general_tab; }
+        set { rebind_general_tab (value, apply_profile_format_requirements); }
     }
 
     // ── Rate Control ─────────────────────────────────────────────────────────
@@ -155,12 +146,12 @@ public class X265Tab : BaseCodecTab {
         preset_row.add_suffix (preset_combo);
         group.add (preset_row);
 
-        // Profile (#8)
+        // Profile
         var profile_row = new Adw.ActionRow ();
         profile_row.set_title ("Profile");
-        profile_row.set_subtitle ("Higher profiles support more features — Auto selects based on input");
+        profile_row.set_subtitle ("Higher profiles require compatible output formats");
         profile_combo = new DropDown (new StringList ({
-            "Auto", "Main", "Main10", "Main12"
+            "Auto", "Main", "Main10"
         }), null);
         profile_combo.set_valign (Align.CENTER);
         profile_combo.set_selected (0);
@@ -595,36 +586,65 @@ public class X265Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
     //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
     //
-    //  x265 profile constraints:
-    //    Main           → 8-bit only, 4:2:0 only
-    //    Main10         → 8 or 10-bit, 4:2:0 only
-    //    Main12         → 8 or 10-bit, 4:2:0 only
+    //  x265 profile constraints in this UI:
+    //    Main           → 8-bit 4:2:0 only
+    //    Main10         → 10-bit 4:2:0 only
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
 
     private void apply_profile_format_requirements () {
-        if (_general_tab == null || _applying_profile) return;
+        if (profile_general_tab == null || _applying_profile || !general_tab_sync_active) return;
 
         string profile = get_dropdown_text (profile_combo);
 
-        if (profile == "Auto") return;
-
         _applying_profile = true;
 
-        bool has_8bit  = _general_tab.eight_bit_check.active;
-        bool has_10bit = _general_tab.ten_bit_check.active;
+        if (profile == "Main") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+        } else if (profile == "Main10") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0" },
+                                  "10-bit 4:2:0");
+        } else {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+            // Auto: reset bit-depth overrides back to off (let ffmpeg decide)
+            if (profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_check.set_active (false);
+            if (profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_check.set_active (false);
+            _applying_profile = false;
+            return;
+        }
 
         if (profile == "Main") {
-            // 8-bit only, 4:2:0 only
-            if (has_10bit) _general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) _general_tab.eight_bit_check.set_active (true);
-            _general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+            // Main: force 8-bit 4:2:0 so -profile:v main always matches output.
+            if (profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_check.set_active (false);
+            if (!profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_check.set_active (true);
+            profile_general_tab.eight_bit_format.set_selected (0);  // 4:2:0
         }
-        else if (profile == "Main10" || profile == "Main12") {
-            // 8 or 10-bit, 4:2:0 only
-            if (has_8bit)  _general_tab.eight_bit_format.set_selected (0);   // 4:2:0
-            if (has_10bit) _general_tab.ten_bit_format.set_selected (0);     // 4:2:0
+        else if (profile == "Main10") {
+            // Main10: force 10-bit 4:2:0 so the selected profile is encodable.
+            if (profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_check.set_active (false);
+            if (!profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_check.set_active (true);
+            profile_general_tab.ten_bit_format.set_selected (0);     // 4:2:0
         }
 
         _applying_profile = false;
@@ -644,6 +664,10 @@ public class X265Tab : BaseCodecTab {
 
     public override ICodecBuilder get_codec_builder () {
         return new X265Builder (this);
+    }
+
+    public override void sync_general_tab_now () {
+        apply_profile_format_requirements ();
     }
 
     // get_container() already exists above

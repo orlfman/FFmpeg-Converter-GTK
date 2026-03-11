@@ -10,6 +10,55 @@ using Gtk;
 
 namespace CodecUtils {
 
+    public StringList build_dropdown_string_list (string[] options) {
+        var model = new StringList (null);
+        foreach (unowned string option in options) {
+            model.append (option);
+        }
+        return model;
+    }
+
+    public bool dropdown_matches_options (DropDown dropdown, string[] options) {
+        var model = dropdown.get_model ();
+        if (model == null || model.get_n_items () != options.length) {
+            return false;
+        }
+
+        for (uint i = 0; i < model.get_n_items (); i++) {
+            var item = model.get_item (i) as StringObject;
+            if (item == null || item.get_string () != options[i]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public void set_dropdown_options (DropDown dropdown,
+                                      string[] options,
+                                      string fallback_option) {
+        string current = get_dropdown_text (dropdown);
+        int selected = 0;
+
+        for (int i = 0; i < options.length; i++) {
+            if (options[i] == current) {
+                selected = i;
+                break;
+            }
+            if (options[i] == fallback_option) {
+                selected = i;
+            }
+        }
+
+        if (!dropdown_matches_options (dropdown, options)) {
+            dropdown.set_model (build_dropdown_string_list (options));
+        }
+
+        if (dropdown.get_selected () != selected) {
+            dropdown.set_selected (selected);
+        }
+    }
+
     /**
      * Extract the display string from a StringList-backed DropDown.
      * Returns "" if the model or selected item is null.
@@ -17,6 +66,118 @@ namespace CodecUtils {
     public string get_dropdown_text (DropDown dropdown) {
         var item = dropdown.selected_item as StringObject;
         return item != null ? item.string : "";
+    }
+
+    /**
+     * Map explicit x265 profile selections to the pixel format they require.
+     * Returns "" for Auto or any profile that does not need a forced pix_fmt.
+     */
+    public string get_x265_profile_pix_fmt (string profile) {
+        switch (profile) {
+            case "Main":
+                return PixelFormat.YUV420P;
+            case "Main10":
+                return PixelFormat.YUV420P10LE;
+            default:
+                return "";
+        }
+    }
+
+    /**
+     * Map explicit x264 profile selections to the exact pixel format they
+     * require for truthful output-profile matching.
+     *
+     * High422 and High444 preserve an explicit 10-bit selection when present;
+     * otherwise they default to their 8-bit variants.
+     */
+    public string get_x264_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+        switch (profile) {
+            case "Baseline":
+            case "Main":
+            case "High":
+                return PixelFormat.YUV420P;
+            case "High10":
+                return PixelFormat.YUV420P10LE;
+            case "High422":
+                if (general_tab != null && general_tab.ten_bit_check.active)
+                    return PixelFormat.YUV422P10LE;
+                return PixelFormat.YUV422P;
+            case "High444":
+                if (general_tab != null && general_tab.ten_bit_check.active)
+                    return PixelFormat.YUV444P10LE;
+                return PixelFormat.YUV444P;
+            default:
+                return "";
+        }
+    }
+
+    /**
+     * Map explicit VP9 profile labels to the numeric -profile:v value.
+     * Returns "" for Auto or unknown labels.
+     */
+    public string get_vp9_profile_arg (string profile) {
+        switch (profile) {
+            case "Profile 0 (8-bit 4:2:0)":
+                return "0";
+            case "Profile 1 (8-bit 4:2:2 / 4:4:4)":
+                return "1";
+            case "Profile 2 (10-bit 4:2:0)":
+                return "2";
+            case "Profile 3 (10-bit 4:2:2 / 4:4:4)":
+                return "3";
+            default:
+                return "";
+        }
+    }
+
+    /**
+     * Map explicit VP9 profile selections to an exact pixel format so the
+     * encoded bitstream profile matches the user's chosen profile.
+     *
+     * Profiles 1 and 3 preserve an explicit 4:4:4 selection when present;
+     * otherwise they default to their 4:2:2 variants.
+     */
+    public string get_vp9_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+        switch (profile) {
+            case "Profile 0 (8-bit 4:2:0)":
+                return PixelFormat.YUV420P;
+            case "Profile 1 (8-bit 4:2:2 / 4:4:4)":
+                if (general_tab != null
+                    && general_tab.eight_bit_check.active
+                    && get_dropdown_text (general_tab.eight_bit_format).contains (Chroma.C444)) {
+                    return PixelFormat.YUV444P;
+                }
+                return PixelFormat.YUV422P;
+            case "Profile 2 (10-bit 4:2:0)":
+                return PixelFormat.YUV420P10LE;
+            case "Profile 3 (10-bit 4:2:2 / 4:4:4)":
+                if (general_tab != null
+                    && general_tab.ten_bit_check.active
+                    && get_dropdown_text (general_tab.ten_bit_format).contains (Chroma.C444)) {
+                    return PixelFormat.YUV444P10LE;
+                }
+                return PixelFormat.YUV422P10LE;
+            default:
+                return "";
+        }
+    }
+
+    /**
+     * Map the active General tab depth selection to the SVT-AV1 pixel format
+     * this app/runtime supports. Returns "" when no output depth override is
+     * currently selected.
+     */
+    public string get_svt_av1_pix_fmt (GeneralTab? general_tab) {
+        if (general_tab == null)
+            return "";
+
+        if (general_tab.ten_bit_check.active)
+            return PixelFormat.YUV420P10LE;
+
+        if (general_tab.eight_bit_check.active)
+            return PixelFormat.YUV420P;
+
+        return "";
     }
 
     /**
@@ -103,9 +264,6 @@ namespace CodecUtils {
 
             args += "-preset";
             args += rec.preset;
-
-            args += "-profile:v";
-            args += "high";
 
             // Content-aware tune
             switch (rec.content_type) {
