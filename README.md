@@ -80,7 +80,7 @@ It doesn’t rely on some magic lookup table. Instead, it runs **one to six (bas
 - **Audio** — It subtracts the real audio bitrate from your target so the video gets an honest budget (no more “whoops, audio ate 30% of my file” surprises).
 
 ### What you actually get
-- A **CRF + preset recommendation** (best quality for the size)
+- A **CRF or static bitrate + preset recommendation** (best quality for the size)
 - A **two-pass bitrate version** as a guaranteed-size backup
 - A **confidence score** so you know how much the prediction had to guess
 - Full calibration numbers dumped to the Console tab
