@@ -14,6 +14,32 @@ namespace FilterBuilder {
         return Math.fabs (a - b) < EPSILON;
     }
 
+    private bool try_get_speed_multiplier (double pct,
+                                           string filter_name,
+                                           out double multiplier) {
+        multiplier = 1.0;
+
+        if (!pct.is_finite ()) {
+            warning ("FilterBuilder: Ignoring %s speed percent because it is not finite: %g",
+                     filter_name, pct);
+            return false;
+        }
+
+        if (fp_equal (pct, 0.0)) {
+            return false;
+        }
+
+        multiplier = 1.0 + pct / 100.0;
+        if (!multiplier.is_finite () || multiplier <= 0.0) {
+            warning ("FilterBuilder: Ignoring %s speed percent %.6f because it produces "
+                     + "an invalid multiplier %.6f", filter_name, pct, multiplier);
+            multiplier = 1.0;
+            return false;
+        }
+
+        return true;
+    }
+
     private string[] get_rotation_filters_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
         string rot = snapshot.rotate;
@@ -124,9 +150,8 @@ namespace FilterBuilder {
 
         // 7. Video Speed
         if (snapshot.video_speed_enabled) {
-            double pct = snapshot.video_speed_percent;
-            if (!fp_equal (pct, 0.0)) {
-                double mult = 1.0 + pct / 100.0;
+            double mult;
+            if (try_get_speed_multiplier (snapshot.video_speed_percent, "video", out mult)) {
                 double factor = 1.0 / mult;
                 filters += "setpts=" + ConversionUtils.format_ffmpeg_double (factor, "%.6f") + "*PTS";
             }
@@ -174,10 +199,9 @@ namespace FilterBuilder {
 
         // Audio Speed
         if (snapshot.audio_speed_enabled) {
-            double pct = snapshot.audio_speed_percent;
-            if (!fp_equal (pct, 0.0)) {
-                double m = 1.0 + pct / 100.0;
-                string chain = build_atempo_chain (m);
+            double mult;
+            if (try_get_speed_multiplier (snapshot.audio_speed_percent, "audio", out mult)) {
+                string chain = build_atempo_chain (mult);
                 if (chain.length > 0) filters += chain;
             }
         }
@@ -186,6 +210,11 @@ namespace FilterBuilder {
     }
 
     public string build_atempo_chain (double multiplier) {
+        if (!multiplier.is_finite () || multiplier <= 0.0) {
+            warning ("FilterBuilder: Ignoring invalid atempo multiplier %.6f", multiplier);
+            return "";
+        }
+
         if (fp_equal (multiplier, 1.0)) return "";
 
         string[] parts = {};

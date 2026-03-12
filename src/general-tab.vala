@@ -3,6 +3,10 @@ using Adw;
 using GLib;
 
 public class GeneralTab : Box {
+    private const double SPEED_MIN_PERCENT = -99.0;
+    private const double SPEED_MAX_PERCENT = 100.0;
+    private const double SPEED_STEP_PERCENT = 1.0;
+    private const double SPEED_EPSILON = 1e-9;
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -74,6 +78,8 @@ public class GeneralTab : Box {
 
     private Adw.ExpanderRow video_speed_expander;
     private Adw.ExpanderRow audio_speed_expander;
+    private bool last_video_speed_effective = false;
+    private bool last_audio_speed_effective = false;
 
     // ── Audio ────────────────────────────────────────────────────────────────
     public Switch normalize_audio      { get; private set; }
@@ -83,13 +89,14 @@ public class GeneralTab : Box {
     public Switch remove_chapters      { get; private set; }
 
     // ── Forwarding Signals ─────────────────────────────────────────────────
-    //    Emitted when the corresponding internal switch/toggle changes state.
-    //    AppController and other consumers should connect to these instead of
-    //    reaching into the raw Switch widgets directly.
+    //    Emitted when the corresponding effective feature state changes.
+    //    For speed controls, that means the toggle is on and the percent is
+    //    a non-zero sanitized value. AppController and other consumers should
+    //    connect to these instead of reaching into the raw widgets directly.
 
-    /** Fired when the audio speed toggle changes. */
+    /** Fired when effective audio speed filtering changes state. */
     public signal void audio_speed_toggled (bool active);
-    /** Fired when the video speed toggle changes. */
+    /** Fired when effective video speed filtering changes state. */
     public signal void video_speed_toggled (bool active);
     /** Fired when the normalize audio toggle changes. */
     public signal void normalize_toggled (bool active);
@@ -134,6 +141,77 @@ public class GeneralTab : Box {
         build_metadata_group ();
 
         connect_signals ();
+    }
+
+    private double sanitize_speed_percent_value (double value, string control_name) {
+        if (!value.is_finite ()) {
+            warning ("GeneralTab: Resetting %s speed percent because it is not finite: %g",
+                     control_name, value);
+            return 0.0;
+        }
+
+        return Math.round (value).clamp (SPEED_MIN_PERCENT, SPEED_MAX_PERCENT);
+    }
+
+    private double get_sanitized_speed_percent (SpinButton spin, string control_name) {
+        update_speed_spin_if_needed (spin, control_name);
+        return spin.get_value ();
+    }
+
+    private bool is_speed_effectively_enabled (bool toggle_active,
+                                               double value,
+                                               string control_name) {
+        if (!toggle_active) {
+            return false;
+        }
+
+        double sanitized = sanitize_speed_percent_value (value, control_name);
+        return Math.fabs (sanitized) > SPEED_EPSILON;
+    }
+
+    private bool update_speed_spin_if_needed (SpinButton spin, string control_name) {
+        double current = spin.get_value ();
+        double sanitized = sanitize_speed_percent_value (current, control_name);
+
+        if (!current.is_finite () || Math.fabs (current - sanitized) > SPEED_EPSILON) {
+            spin.set_value (sanitized);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void emit_audio_speed_if_changed () {
+        bool active = is_audio_speed_enabled ();
+        if (active == last_audio_speed_effective) {
+            return;
+        }
+
+        last_audio_speed_effective = active;
+        audio_speed_toggled (active);
+    }
+
+    private void emit_video_speed_if_changed () {
+        bool active = is_video_speed_enabled ();
+        if (active == last_video_speed_effective) {
+            return;
+        }
+
+        last_video_speed_effective = active;
+        video_speed_toggled (active);
+    }
+
+    private SpinButton create_speed_spin () {
+        var spin = new SpinButton.with_range (SPEED_MIN_PERCENT,
+                                              SPEED_MAX_PERCENT,
+                                              SPEED_STEP_PERCENT);
+        spin.set_digits (0);
+        spin.set_numeric (true);
+        spin.set_snap_to_ticks (true);
+        spin.set_update_policy (SpinButtonUpdatePolicy.IF_VALID);
+        spin.set_value (0);
+        spin.set_valign (Align.CENTER);
+        return spin;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -552,10 +630,8 @@ public class GeneralTab : Box {
 
         var vspeed_row = new Adw.ActionRow ();
         vspeed_row.set_title ("Speed Adjustment");
-        vspeed_row.set_subtitle ("Percentage change (−95 to +100)");
-        video_speed = new SpinButton.with_range (-95, 100, 5);
-        video_speed.set_value (0);
-        video_speed.set_valign (Align.CENTER);
+        vspeed_row.set_subtitle ("Percentage change (−99 to +100)");
+        video_speed = create_speed_spin ();
         vspeed_row.add_suffix (video_speed);
         video_speed_expander.add_row (vspeed_row);
         group.add (video_speed_expander);
@@ -575,10 +651,8 @@ public class GeneralTab : Box {
 
         var aspeed_row = new Adw.ActionRow ();
         aspeed_row.set_title ("Speed Adjustment");
-        aspeed_row.set_subtitle ("Percentage change (−95 to +100)");
-        audio_speed = new SpinButton.with_range (-95, 100, 5);
-        audio_speed.set_value (0);
-        audio_speed.set_valign (Align.CENTER);
+        aspeed_row.set_subtitle ("Percentage change (−99 to +100)");
+        audio_speed = create_speed_spin ();
         aspeed_row.add_suffix (audio_speed);
         audio_speed_expander.add_row (aspeed_row);
         group.add (audio_speed_expander);
@@ -669,10 +743,22 @@ public class GeneralTab : Box {
 
         // ── Forwarding signals ───────────────────────────────────────────────
         audio_speed_check.notify["active"].connect (() => {
-            audio_speed_toggled (audio_speed_check.active);
+            emit_audio_speed_if_changed ();
         });
         video_speed_check.notify["active"].connect (() => {
-            video_speed_toggled (video_speed_check.active);
+            emit_video_speed_if_changed ();
+        });
+        audio_speed.value_changed.connect (() => {
+            if (update_speed_spin_if_needed (audio_speed, "audio")) {
+                return;
+            }
+            emit_audio_speed_if_changed ();
+        });
+        video_speed.value_changed.connect (() => {
+            if (update_speed_spin_if_needed (video_speed, "video")) {
+                return;
+            }
+            emit_video_speed_if_changed ();
         });
         normalize_audio.notify["active"].connect (() => {
             normalize_toggled (normalize_audio.active);
@@ -740,10 +826,10 @@ public class GeneralTab : Box {
         snapshot.crop_value = crop_value.text.strip ();
         snapshot.frame_rate_text = get_frame_rate_text ();
         snapshot.custom_frame_rate_text = get_custom_frame_rate_text ();
-        snapshot.video_speed_enabled = video_speed_check.active;
-        snapshot.video_speed_percent = video_speed.get_value ();
-        snapshot.audio_speed_enabled = audio_speed_check.active;
-        snapshot.audio_speed_percent = audio_speed.get_value ();
+        snapshot.video_speed_enabled = is_video_speed_enabled ();
+        snapshot.video_speed_percent = get_sanitized_speed_percent (video_speed, "video");
+        snapshot.audio_speed_enabled = is_audio_speed_enabled ();
+        snapshot.audio_speed_percent = get_sanitized_speed_percent (audio_speed, "audio");
         snapshot.eight_bit_selected = eight_bit_check.active;
         snapshot.eight_bit_format_text = CodecUtils.get_dropdown_text (eight_bit_format);
         snapshot.ten_bit_selected = ten_bit_check.active;
@@ -1007,8 +1093,22 @@ public class GeneralTab : Box {
 
     // ── Speed & Audio ────────────────────────────────────────────────────────
 
-    public bool is_video_speed_enabled ()  { return video_speed_check.active; }
-    public bool is_audio_speed_enabled ()  { return audio_speed_check.active; }
+    public bool is_video_speed_enabled ()  {
+        return is_speed_effectively_enabled (
+            video_speed_check.active,
+            video_speed.get_value (),
+            "video"
+        );
+    }
+
+    public bool is_audio_speed_enabled ()  {
+        return is_speed_effectively_enabled (
+            audio_speed_check.active,
+            audio_speed.get_value (),
+            "audio"
+        );
+    }
+
     public bool is_normalize_enabled ()    { return normalize_audio.active; }
 
     // ── Crop ─────────────────────────────────────────────────────────────────
