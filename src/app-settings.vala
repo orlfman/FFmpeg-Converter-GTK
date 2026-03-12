@@ -79,8 +79,66 @@ public class AppSettings : Object {
             Environment.get_user_config_dir (), "FFmpeg-Converter-GTK");
         config_file = Path.build_filename (config_dir, "settings.ini");
 
-        load ();
+        bool normalized_path_settings = load ();
+        if (normalized_path_settings) {
+            save_internal (false);
+        }
         ensure_output_directory ();
+    }
+
+    /**
+     * Expand a home-relative path for the current user.
+     * Leaves bare names and unsupported forms like ~otheruser unchanged.
+     */
+    public static string expand_home_path (string path) {
+        if (path == "~" || path == "~/") {
+            return Environment.get_home_dir ();
+        }
+
+        if (path.has_prefix ("~/")) {
+            return Path.build_filename (Environment.get_home_dir (), path.substring (2));
+        }
+
+        return path;
+    }
+
+    /**
+     * Collapse a path inside the current user's home directory to use ~.
+     */
+    public static string collapse_home_path (string path) {
+        string home = Environment.get_home_dir ();
+
+        if (path == home) {
+            return "~";
+        }
+
+        string home_prefix = home + "/";
+        if (path.has_prefix (home_prefix)) {
+            return "~/" + path.substring (home_prefix.length);
+        }
+
+        return path;
+    }
+
+    /**
+     * Normalize an executable setting.
+     * Empty values fall back to the default bare executable name.
+     */
+    public static string normalize_executable_path (string value, string default_name) {
+        string path = value.strip ();
+        if (path.length == 0) {
+            return default_name;
+        }
+
+        path = expand_home_path (path);
+
+        // Stabilize explicit relative paths before persistence/runtime use so
+        // they do not depend on the process working directory on a later launch.
+        if (path.contains ("/") && !Path.is_absolute (path) && !path.has_prefix ("~")) {
+            return Filename.canonicalize (path, Environment.get_current_dir ());
+        }
+
+        return path;
     }
 
     public string ffmpeg_path {
@@ -97,7 +155,7 @@ public class AppSettings : Object {
         set {
             mutex.lock ();
             try {
-                _ffmpeg_path = (value.strip ().length > 0) ? value.strip () : "ffmpeg";
+                _ffmpeg_path = normalize_executable_path (value, "ffmpeg");
             } finally {
                 mutex.unlock ();
             }
@@ -118,7 +176,7 @@ public class AppSettings : Object {
         set {
             mutex.lock ();
             try {
-                _ffprobe_path = (value.strip ().length > 0) ? value.strip () : "ffprobe";
+                _ffprobe_path = normalize_executable_path (value, "ffprobe");
             } finally {
                 mutex.unlock ();
             }
@@ -139,7 +197,7 @@ public class AppSettings : Object {
         set {
             mutex.lock ();
             try {
-                _ffplay_path = (value.strip ().length > 0) ? value.strip () : "ffplay";
+                _ffplay_path = normalize_executable_path (value, "ffplay");
             } finally {
                 mutex.unlock ();
             }
@@ -297,9 +355,9 @@ public class AppSettings : Object {
     //  LOAD — Read settings from disk
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void load () {
+    private bool load () {
         if (!FileUtils.test (config_file, FileTest.EXISTS)) {
-            return;  // First run — use defaults
+            return false;  // First run — use defaults
         }
 
         var kf = new KeyFile ();
@@ -307,12 +365,15 @@ public class AppSettings : Object {
             kf.load_from_file (config_file, KeyFileFlags.NONE);
         } catch (Error e) {
             warning ("AppSettings: Failed to load %s: %s", config_file, e.message);
-            return;
+            return false;
         }
 
-        string ffmpeg_path = read_string (kf, GROUP_PATHS,  "ffmpeg",            "ffmpeg");
-        string ffprobe_path = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
-        string ffplay_path = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
+        string raw_ffmpeg_path = read_string (kf, GROUP_PATHS,  "ffmpeg",            "ffmpeg");
+        string raw_ffprobe_path = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
+        string raw_ffplay_path = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
+        string ffmpeg_path = normalize_executable_path (raw_ffmpeg_path, "ffmpeg");
+        string ffprobe_path = normalize_executable_path (raw_ffprobe_path, "ffprobe");
+        string ffplay_path = normalize_executable_path (raw_ffplay_path, "ffplay");
         string default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
         OutputNameMode output_name_mode = OutputNameMode.from_string (
             read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
@@ -337,6 +398,10 @@ public class AppSettings : Object {
         } finally {
             mutex.unlock ();
         }
+
+        return ffmpeg_path != raw_ffmpeg_path
+            || ffprobe_path != raw_ffprobe_path
+            || ffplay_path != raw_ffplay_path;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -344,6 +409,10 @@ public class AppSettings : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void save () {
+        save_internal (true);
+    }
+
+    private void save_internal (bool emit_signal) {
         DirUtils.create_with_parents (config_dir, 0755);
 
         var kf = new KeyFile ();
@@ -393,7 +462,9 @@ public class AppSettings : Object {
         }
 
         ensure_output_directory ();
-        settings_changed ();
+        if (emit_signal) {
+            settings_changed ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

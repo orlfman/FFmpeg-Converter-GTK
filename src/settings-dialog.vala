@@ -18,6 +18,13 @@ using Adw;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class SettingsDialog : Adw.PreferencesDialog {
+    private const uint BINARY_VALIDATION_DEBOUNCE_MS = 300;
+
+    private class BinaryValidationState : Object {
+        public uint generation = 0;
+        public uint debounce_id = 0;
+        public Cancellable? cancellable = null;
+    }
 
     // ── Path entries ──────────────────────────────────────────────────────────
     private Entry ffmpeg_entry;
@@ -45,6 +52,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Label ffmpeg_status;
     private Label ffprobe_status;
     private Label ffplay_status;
+    private BinaryValidationState ffmpeg_validation = new BinaryValidationState ();
+    private BinaryValidationState ffprobe_validation = new BinaryValidationState ();
+    private BinaryValidationState ffplay_validation = new BinaryValidationState ();
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -68,6 +78,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // Persist when the dialog closes
         this.closed.connect (() => {
+            cancel_validation (ffmpeg_validation);
+            cancel_validation (ffprobe_validation);
+            cancel_validation (ffplay_validation);
             save_to_settings ();
         });
     }
@@ -90,6 +103,14 @@ public class SettingsDialog : Adw.PreferencesDialog {
             "}\n" +
             ".settings-path-missing {\n" +
             "    color: #e74856;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".settings-path-checking {\n" +
+            "    color: #e5a50a;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".settings-path-warning {\n" +
+            "    color: #e5a50a;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".settings-overwrite-warning .title {\n" +
@@ -284,7 +305,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         ffmpeg_status = new Label ("");
         build_binary_row (ffmpeg_group, "ffmpeg Path",
                           "Encoder, decoder, and muxer — the core tool",
-                          ffmpeg_entry, ffmpeg_status, "ffmpeg");
+                          ffmpeg_entry, ffmpeg_status, "ffmpeg", true, ffmpeg_validation);
         page.add (ffmpeg_group);
 
         // ── FFprobe ──────────────────────────────────────────────────────────
@@ -295,7 +316,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         ffprobe_status = new Label ("");
         build_binary_row (ffprobe_group, "ffprobe Path",
                           "Media analyzer — used for duration probing and stream info",
-                          ffprobe_entry, ffprobe_status, "ffprobe");
+                          ffprobe_entry, ffprobe_status, "ffprobe", false, ffprobe_validation);
         page.add (ffprobe_group);
 
         // ── FFplay ───────────────────────────────────────────────────────────
@@ -306,7 +327,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         ffplay_status = new Label ("");
         build_binary_row (ffplay_group, "ffplay Path",
                           "Media player — reserved for future playback features",
-                          ffplay_entry, ffplay_status, "ffplay");
+                          ffplay_entry, ffplay_status, "ffplay", false, ffplay_validation);
         page.add (ffplay_group);
 
         // ── Reset All Paths ──────────────────────────────────────────────────
@@ -323,9 +344,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
             ffmpeg_entry.set_text ("");
             ffprobe_entry.set_text ("");
             ffplay_entry.set_text ("");
-            validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg");
-            validate_path (ffprobe_entry, ffprobe_status, "ffprobe");
-            validate_path (ffplay_entry,  ffplay_status,  "ffplay");
+            validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg",  true,  ffmpeg_validation);
+            validate_path (ffprobe_entry, ffprobe_status, "ffprobe", false, ffprobe_validation);
+            validate_path (ffplay_entry,  ffplay_status,  "ffplay",  false, ffplay_validation);
         });
         reset_row.add_suffix (reset_btn);
         actions_group.add (reset_row);
@@ -343,7 +364,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
                                    string subtitle,
                                    Entry entry,
                                    Label status,
-                                   string default_name) {
+                                   string default_name,
+                                   bool check_codec_support,
+                                   BinaryValidationState validation_state) {
         var row = new Adw.ActionRow ();
         row.set_title (title);
         row.set_subtitle (subtitle);
@@ -354,7 +377,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         entry.set_valign (Align.CENTER);
         entry.add_css_class ("monospace");
         entry.changed.connect (() => {
-            validate_path (entry, status, default_name);
+            validate_path (entry, status, default_name, check_codec_support, validation_state);
         });
         row.add_suffix (entry);
 
@@ -387,7 +410,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var dialog = new Gtk.FileDialog ();
         dialog.set_title ("Select %s binary".printf (binary_name));
 
-        string current = target_entry.get_text ().strip ();
+        string current = AppSettings.expand_home_path (target_entry.get_text ().strip ());
         if (current.length > 0 && FileUtils.test (current, FileTest.EXISTS)) {
             dialog.set_initial_folder (
                 File.new_for_path (Path.get_dirname (current)));
@@ -397,7 +420,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             (Gtk.Window) this.get_root (), null, (obj, res) => {
             try {
                 var file = dialog.open.end (res);
-                target_entry.set_text (file.get_path ());
+                target_entry.set_text (AppSettings.collapse_home_path (file.get_path ()));
             } catch (Error e) {
                 // User cancelled
             }
@@ -406,48 +429,69 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     /**
      * Validate a binary path and update the status label.
-     * Handles: empty (system default), absolute paths, and bare names in PATH.
+     * Handles: empty (system default), file paths, and bare names in PATH.
      */
-    private void validate_path (Entry entry, Label status, string default_name) {
+    private void validate_path (Entry entry, Label status, string default_name,
+                                bool check_codec_support,
+                                BinaryValidationState validation_state) {
         string path = entry.get_text ().strip ();
 
-        status.remove_css_class ("settings-path-found");
-        status.remove_css_class ("settings-path-missing");
+        uint generation = begin_validation (validation_state);
 
         if (path.length == 0) {
             // Empty → system default via PATH
             string? found = Environment.find_program_in_path (default_name);
             if (found != null) {
-                status.set_text ("✓ Using system %s → %s".printf (default_name, found));
-                status.add_css_class ("settings-path-found");
+                string display_path = AppSettings.collapse_home_path (found);
+                schedule_runtime_validation (
+                    status,
+                    validation_state,
+                    generation,
+                    found,
+                    "⟳ Checking system %s → %s".printf (default_name, display_path),
+                    "✓ Using system %s → %s".printf (default_name, display_path),
+                    "✗ System %s at %s failed to run".printf (default_name, display_path),
+                    check_codec_support
+                );
             } else {
-                status.set_text ("⚠ %s not found in PATH".printf (default_name));
-                status.add_css_class ("settings-path-missing");
+                set_status (status,
+                    "⚠ %s not found in PATH".printf (default_name),
+                    "settings-path-missing");
             }
             return;
         }
 
-        // Absolute path
-        if (path.has_prefix ("/")) {
-            if (FileUtils.test (path, FileTest.EXISTS)) {
-                status.set_text ("✓ Found: %s".printf (path));
-                status.add_css_class ("settings-path-found");
-            } else {
-                status.set_text ("✗ File not found: %s".printf (path));
-                status.add_css_class ("settings-path-missing");
-            }
-            return;
-        }
+        string normalized = AppSettings.normalize_executable_path (path, default_name);
+        string display_path = AppSettings.collapse_home_path (normalized);
 
-        // Home-relative path
-        if (path.has_prefix ("~")) {
-            string expanded = Environment.get_home_dir () + path.substring (1);
-            if (FileUtils.test (expanded, FileTest.EXISTS)) {
-                status.set_text ("✓ Found: %s".printf (expanded));
-                status.add_css_class ("settings-path-found");
+        // Explicit file path (absolute, home-relative, or slash-containing relative path)
+        if (path.has_prefix ("/") || path.has_prefix ("~") || path.contains ("/")) {
+            if (is_executable_file (normalized)) {
+                if (is_runtime_probe_exempt (normalized)) {
+                    set_status (status,
+                        "✓ Ready: %s\nRuntime probe skipped for the fake hang test helper."
+                            .printf (display_path),
+                        "settings-path-found");
+                } else {
+                    schedule_runtime_validation (
+                        status,
+                        validation_state,
+                        generation,
+                        normalized,
+                        "⟳ Checking: %s".printf (display_path),
+                        "✓ Ready: %s".printf (display_path),
+                        "✗ Cannot run on this system: %s".printf (display_path),
+                        check_codec_support
+                    );
+                }
+            } else if (FileUtils.test (normalized, FileTest.EXISTS)) {
+                set_status (status,
+                    "✗ Not executable: %s".printf (display_path),
+                    "settings-path-missing");
             } else {
-                status.set_text ("✗ File not found: %s".printf (expanded));
-                status.add_css_class ("settings-path-missing");
+                set_status (status,
+                    "✗ File not found: %s".printf (display_path),
+                    "settings-path-missing");
             }
             return;
         }
@@ -455,12 +499,336 @@ public class SettingsDialog : Adw.PreferencesDialog {
         // Bare name → search PATH
         string? found = Environment.find_program_in_path (path);
         if (found != null) {
-            status.set_text ("✓ Found in PATH → %s".printf (found));
-            status.add_css_class ("settings-path-found");
+            string display_found = AppSettings.collapse_home_path (found);
+            if (is_runtime_probe_exempt (found)) {
+                set_status (status,
+                    "✓ Found in PATH → %s\nRuntime probe skipped for the fake hang test helper."
+                        .printf (display_found),
+                    "settings-path-found");
+            } else {
+                schedule_runtime_validation (
+                    status,
+                    validation_state,
+                    generation,
+                    found,
+                    "⟳ Checking PATH entry \"%s\" → %s".printf (path, display_found),
+                    "✓ Found in PATH → %s".printf (display_found),
+                    "✗ \"%s\" resolves to %s but failed to run".printf (path, display_found),
+                    check_codec_support
+                );
+            }
         } else {
-            status.set_text ("⚠ \"%s\" not found in PATH".printf (path));
-            status.add_css_class ("settings-path-missing");
+            set_status (status,
+                "⚠ \"%s\" not found in PATH".printf (path),
+                "settings-path-missing");
         }
+    }
+
+    private bool is_executable_file (string path) {
+        return FileUtils.test (path, FileTest.EXISTS)
+            && !FileUtils.test (path, FileTest.IS_DIR)
+            && FileUtils.test (path, FileTest.IS_EXECUTABLE);
+    }
+
+    private bool is_runtime_probe_exempt (string path) {
+        return Path.get_basename (path) == "fake-ffmpeg-hang.sh";
+    }
+
+    private uint begin_validation (BinaryValidationState validation_state) {
+        cancel_validation (validation_state);
+        validation_state.generation++;
+        return validation_state.generation;
+    }
+
+    private void cancel_validation (BinaryValidationState validation_state) {
+        if (validation_state.debounce_id != 0) {
+            Source.remove (validation_state.debounce_id);
+            validation_state.debounce_id = 0;
+        }
+        if (validation_state.cancellable != null) {
+            validation_state.cancellable.cancel ();
+            validation_state.cancellable = null;
+        }
+    }
+
+    private void schedule_runtime_validation (Label status,
+                                              BinaryValidationState validation_state,
+                                              uint generation,
+                                              string binary_path,
+                                              string pending_text,
+                                              string success_prefix,
+                                              string failure_prefix,
+                                              bool check_codec_support) {
+        var cancellable = new Cancellable ();
+        validation_state.cancellable = cancellable;
+
+        set_status (status, pending_text, "settings-path-checking");
+
+        validation_state.debounce_id = Timeout.add (BINARY_VALIDATION_DEBOUNCE_MS, () => {
+            validation_state.debounce_id = 0;
+            if (validation_state.generation != generation
+                || validation_state.cancellable != cancellable
+                || cancellable.is_cancelled ()) {
+                return Source.REMOVE;
+            }
+
+            validate_runtime_async.begin (
+                status,
+                validation_state,
+                generation,
+                binary_path,
+                success_prefix,
+                failure_prefix,
+                check_codec_support,
+                cancellable
+            );
+            return Source.REMOVE;
+        });
+    }
+
+    private async void validate_runtime_async (Label status,
+                                               BinaryValidationState validation_state,
+                                               uint generation,
+                                               string binary_path,
+                                               string success_prefix,
+                                               string failure_prefix,
+                                               bool check_codec_support,
+                                               Cancellable cancellable) {
+        BinaryProbeResult result;
+        try {
+            result = yield probe_binary_runtime (binary_path, check_codec_support, cancellable);
+        } catch (IOError.CANCELLED e) {
+            if (validation_state.cancellable == cancellable) {
+                validation_state.cancellable = null;
+            }
+            return;
+        } catch (Error e) {
+            if (validation_state.cancellable == cancellable) {
+                validation_state.cancellable = null;
+            }
+            if (validation_state.generation != generation || cancellable.is_cancelled ()) {
+                return;
+            }
+
+            set_status (status,
+                failure_prefix + "\n" + describe_runtime_error (e.message),
+                "settings-path-missing");
+            return;
+        }
+
+        if (validation_state.cancellable == cancellable) {
+            validation_state.cancellable = null;
+        }
+        if (validation_state.generation != generation || cancellable.is_cancelled ()) {
+            return;
+        }
+
+        string success_text = success_prefix + "\n" + result.runtime_summary;
+        if (result.codec_warning != null) {
+            set_status (status,
+                success_text + "\n" + result.codec_warning,
+                "settings-path-warning");
+        } else {
+            set_status (status, success_text, "settings-path-found");
+        }
+    }
+
+    private class BinaryProbeResult : Object {
+        public string runtime_summary { get; set; default = ""; }
+        public string? codec_warning { get; set; default = null; }
+    }
+
+    private async BinaryProbeResult probe_binary_runtime (string binary_path,
+                                                          bool check_codec_support,
+                                                          Cancellable cancellable) throws Error {
+        var launcher = new SubprocessLauncher (
+            SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
+        string[] cmd = { binary_path, "-version" };
+        var proc = launcher.spawnv (cmd);
+
+        bool timed_out = false;
+        uint timeout_id = 0;
+        timeout_id = Timeout.add (2000, () => {
+            timed_out = true;
+            cancellable.cancel ();
+            timeout_id = 0;
+            return Source.REMOVE;
+        });
+
+        string stdout_buf;
+        string stderr_buf;
+        try {
+            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            if (timeout_id != 0) {
+                Source.remove (timeout_id);
+            }
+            if (timed_out) {
+                throw new IOError.TIMED_OUT ("Version probe timed out");
+            }
+            throw e;
+        }
+
+        if (timeout_id != 0) {
+            Source.remove (timeout_id);
+        }
+
+        if (!proc.get_successful ()) {
+            string? detail = first_nonempty_line (stderr_buf);
+            if (detail == null) {
+                detail = first_nonempty_line (stdout_buf);
+            }
+            if (detail == null) {
+                detail = "Version probe exited with status %d".printf (proc.get_exit_status ());
+            }
+            throw new IOError.FAILED (detail);
+        }
+
+        var result = new BinaryProbeResult ();
+        result.runtime_summary = describe_runtime_success (stdout_buf, stderr_buf);
+        if (check_codec_support) {
+            result.codec_warning = yield probe_ffmpeg_codec_support (binary_path, cancellable);
+        }
+        return result;
+    }
+
+    private string describe_runtime_error (string message) {
+        string detail = first_nonempty_line (message) ?? message.strip ();
+        if (detail.index_of ("cannot execute binary file") >= 0
+            || detail.index_of ("Exec format error") >= 0) {
+            return "Wrong CPU architecture or unsupported executable format.";
+        }
+        if (detail.index_of ("Version probe timed out") >= 0) {
+            return "Started, but did not answer a quick -version probe.";
+        }
+        if (detail.index_of ("Permission denied") >= 0) {
+            return "Permission denied while starting the executable.";
+        }
+        if (detail.index_of ("No such file or directory") >= 0) {
+            return "Missing interpreter, dynamic loader, or dependent library.";
+        }
+        return detail;
+    }
+
+    private string describe_runtime_success (string? stdout_buf, string? stderr_buf) {
+        string? detail = first_nonempty_line (stdout_buf);
+        if (detail == null) {
+            detail = first_nonempty_line (stderr_buf);
+        }
+        if (detail == null) {
+            return "Responded to -version successfully.";
+        }
+
+        detail = detail.strip ();
+        if (detail.length > 160) {
+            detail = detail.substring (0, 157) + "...";
+        }
+        return detail;
+    }
+
+    private async string? probe_ffmpeg_codec_support (string binary_path,
+                                                      Cancellable cancellable) throws Error {
+        string encoders_output = yield run_subprocess_capture (
+            { binary_path, "-hide_banner", "-encoders" }, cancellable);
+
+        string[] required_encoders = {
+            "libsvtav1",
+            "libx264",
+            "libx265",
+            "libvpx-vp9"
+        };
+        string[] codec_labels = {
+            "SVT-AV1",
+            "x264",
+            "x265",
+            "VP9"
+        };
+
+        string[] missing = {};
+        for (int i = 0; i < required_encoders.length; i++) {
+            if (!encoders_output.contains (required_encoders[i])) {
+                missing += codec_labels[i];
+            }
+        }
+
+        if (missing.length == 0) {
+            return null;
+        }
+
+        return "Missing codec support: %s.".printf (string.joinv (", ", missing));
+    }
+
+    private async string run_subprocess_capture (string[] cmd,
+                                                 Cancellable cancellable) throws Error {
+        var launcher = new SubprocessLauncher (
+            SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
+        var proc = launcher.spawnv (cmd);
+
+        bool timed_out = false;
+        uint timeout_id = 0;
+        timeout_id = Timeout.add (2000, () => {
+            timed_out = true;
+            cancellable.cancel ();
+            timeout_id = 0;
+            return Source.REMOVE;
+        });
+
+        string stdout_buf;
+        string stderr_buf;
+        try {
+            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            if (timeout_id != 0) {
+                Source.remove (timeout_id);
+            }
+            if (timed_out) {
+                throw new IOError.TIMED_OUT ("Subprocess probe timed out");
+            }
+            throw e;
+        }
+
+        if (timeout_id != 0) {
+            Source.remove (timeout_id);
+        }
+
+        if (!proc.get_successful ()) {
+            string? detail = first_nonempty_line (stderr_buf);
+            if (detail == null) {
+                detail = first_nonempty_line (stdout_buf);
+            }
+            if (detail == null) {
+                detail = "Subprocess probe exited with status %d".printf (proc.get_exit_status ());
+            }
+            throw new IOError.FAILED (detail);
+        }
+
+        return (stdout_buf ?? "") + "\n" + (stderr_buf ?? "");
+    }
+
+    private string? first_nonempty_line (string? text) {
+        if (text == null) {
+            return null;
+        }
+
+        foreach (string line in text.split ("\n")) {
+            string clean = line.strip ();
+            if (clean.length > 0) {
+                return clean;
+            }
+        }
+
+        return null;
+    }
+
+    private void set_status (Label status, string text, string css_class) {
+        status.remove_css_class ("settings-path-found");
+        status.remove_css_class ("settings-path-missing");
+        status.remove_css_class ("settings-path-checking");
+        status.remove_css_class ("settings-path-warning");
+        status.set_text (text);
+        status.add_css_class (css_class);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -683,13 +1051,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // Only show custom paths — leave empty for defaults
         string ffmpeg = s.ffmpeg_path;
-        ffmpeg_entry.set_text ((ffmpeg == "ffmpeg") ? "" : ffmpeg);
+        ffmpeg_entry.set_text ((ffmpeg == "ffmpeg") ? "" : AppSettings.collapse_home_path (ffmpeg));
 
         string ffprobe = s.ffprobe_path;
-        ffprobe_entry.set_text ((ffprobe == "ffprobe") ? "" : ffprobe);
+        ffprobe_entry.set_text ((ffprobe == "ffprobe") ? "" : AppSettings.collapse_home_path (ffprobe));
 
         string ffplay = s.ffplay_path;
-        ffplay_entry.set_text ((ffplay == "ffplay") ? "" : ffplay);
+        ffplay_entry.set_text ((ffplay == "ffplay") ? "" : AppSettings.collapse_home_path (ffplay));
 
         saved_output_dir = s.default_output_dir;
         output_dir_entry.set_text (saved_output_dir);
@@ -715,9 +1083,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
         strip_audio_switch.set_active (s.smart_optimizer_strip_audio);
 
         // Trigger initial validation
-        validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg");
-        validate_path (ffprobe_entry, ffprobe_status, "ffprobe");
-        validate_path (ffplay_entry,  ffplay_status,  "ffplay");
+        validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg",  true,  ffmpeg_validation);
+        validate_path (ffprobe_entry, ffprobe_status, "ffprobe", false, ffprobe_validation);
+        validate_path (ffplay_entry,  ffplay_status,  "ffplay",  false, ffplay_validation);
     }
 
     private void save_to_settings () {
