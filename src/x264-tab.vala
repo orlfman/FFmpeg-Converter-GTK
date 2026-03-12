@@ -756,6 +756,8 @@ public class X264Tab : BaseCodecTab {
             return;
         }
 
+        bool sync_just_activated = consume_general_tab_sync_activation ();
+
         if (profile == "Auto") {
             set_dropdown_options (profile_general_tab.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
@@ -763,7 +765,9 @@ public class X264Tab : BaseCodecTab {
             set_dropdown_options (profile_general_tab.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (was_last_profile_sync_auto ()) {
+            if (sync_just_activated && has_saved_auto_profile_general_state ()) {
+                restore_auto_profile_general_state ();
+            } else if (was_last_profile_sync_auto ()) {
                 capture_auto_profile_general_state ();
             } else {
                 restore_auto_profile_general_state ();

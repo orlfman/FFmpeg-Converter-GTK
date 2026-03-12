@@ -12,6 +12,7 @@ public class SubtitlesTab : Box {
     public signal void subtitle_done (string output_path);
     public signal void subtitle_apply_succeeded (uint64 operation_id, string output_path);
     public signal void subtitle_apply_failed (uint64 operation_id);
+    public signal void subtitle_apply_cancelled (uint64 operation_id);
     public signal void general_tab_context_changed ();
 
     // ── Runner ───────────────────────────────────────────────────────────────
@@ -698,6 +699,17 @@ public class SubtitlesTab : Box {
             update_ui_state ();
             subtitle_apply_failed (operation_id);
         });
+
+        runner.apply_cancelled.connect ((operation_id) => {
+            if (active_apply_operation_id != operation_id) {
+                return;
+            }
+
+            _is_busy = false;
+            active_apply_operation_id = 0;
+            update_ui_state ();
+            subtitle_apply_cancelled (operation_id);
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -747,10 +759,10 @@ public class SubtitlesTab : Box {
     }
 
     public void cancel_operation () {
+        if (active_apply_operation_id == 0) {
+            return;
+        }
         runner.cancel ();
-        _is_busy = false;
-        active_apply_operation_id = 0;
-        update_ui_state ();
     }
 
     public bool is_busy () {
@@ -1089,6 +1101,7 @@ public class SubtitlesTab : Box {
 
     public bool start_apply (uint64 operation_id, bool allow_overwrite = false) {
         if (current_input_file == "") return false;
+        if (_is_busy || active_apply_operation_id != 0) return false;
 
         bool started;
         if (is_burn_in_mode ()) {

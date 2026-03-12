@@ -49,6 +49,9 @@ public class MainWindow : Adw.ApplicationWindow {
     private ActiveOperation current_operation = ActiveOperation.IDLE;
     private uint64 active_operation_id = 0;
     private uint64 next_operation_id = 1;
+    private bool operation_launch_pending = false;
+    private Adw.AlertDialog? active_preflight_dialog = null;
+    private Cancellable? active_preflight_dialog_cancellable = null;
 
     // Queued auto-convert: if Smart Optimizer finishes while another operation
     // is running, remember the codec so we can start conversion when idle.
@@ -62,6 +65,7 @@ public class MainWindow : Adw.ApplicationWindow {
     // Smart Optimizer runs concurrently with other operations (it's analysis,
     // not output encoding), so it's tracked separately from ActiveOperation.
     private bool smart_optimizer_active = false;
+    private bool close_after_cancellation = false;
 
     // Guard against re-entrant close_request during the confirmation dialog
     private bool close_dialog_open = false;
@@ -91,6 +95,7 @@ public class MainWindow : Adw.ApplicationWindow {
         controller.smart_optimizer_running.connect ((running) => {
             smart_optimizer_active = running;
             update_cancel_button_state ();
+            maybe_finish_close_after_cancellation ();
         });
 
         // Auto-convert: Smart Optimizer requests conversion start.
@@ -117,9 +122,15 @@ public class MainWindow : Adw.ApplicationWindow {
             }
 
             post_success_toast ("Conversion complete", output_path);
+            maybe_finish_close_after_cancellation ();
         });
         converter.conversion_failed.connect ((operation_id) => {
-            complete_tracked_operation (ActiveOperation.CONVERTING, operation_id, true);
+            complete_tracked_operation_with_close (
+                ActiveOperation.CONVERTING, operation_id, true);
+        });
+        converter.conversion_cancelled.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.CONVERTING, operation_id, true);
         });
         trim_tab.trim_succeeded.connect ((operation_id, output_path) => {
             if (!complete_tracked_operation (
@@ -128,9 +139,15 @@ public class MainWindow : Adw.ApplicationWindow {
             }
 
             post_success_toast ("Export complete", output_path);
+            maybe_finish_close_after_cancellation ();
         });
         trim_tab.trim_failed.connect ((operation_id) => {
-            complete_tracked_operation (ActiveOperation.TRIMMING, operation_id, true);
+            complete_tracked_operation_with_close (
+                ActiveOperation.TRIMMING, operation_id, true);
+        });
+        trim_tab.trim_cancelled.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.TRIMMING, operation_id, true);
         });
         subtitles_tab.subtitle_apply_succeeded.connect ((operation_id, output_path) => {
             if (!complete_tracked_operation (
@@ -139,13 +156,30 @@ public class MainWindow : Adw.ApplicationWindow {
             }
 
             post_success_toast ("Subtitles applied", output_path);
+            maybe_finish_close_after_cancellation ();
         });
         subtitles_tab.subtitle_apply_failed.connect ((operation_id) => {
-            complete_tracked_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
+            complete_tracked_operation_with_close (
+                ActiveOperation.SUBTITLE_APPLY, operation_id, true);
+        });
+        subtitles_tab.subtitle_apply_cancelled.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.SUBTITLE_APPLY, operation_id, true);
         });
 
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
         close_request.connect (on_close_request);
+    }
+
+    private bool complete_tracked_operation_with_close (ActiveOperation operation,
+                                                        uint64 operation_id,
+                                                        bool drain_auto_convert_queue) {
+        bool completed = complete_tracked_operation (
+            operation, operation_id, drain_auto_convert_queue);
+        if (completed) {
+            maybe_finish_close_after_cancellation ();
+        }
+        return completed;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -293,6 +327,10 @@ public class MainWindow : Adw.ApplicationWindow {
         }
     }
 
+    private string get_operation_activity_phrase () {
+        return operation_launch_pending ? "is already being prepared" : "is already running";
+    }
+
     private void set_general_format_options (DropDown dropdown,
                                              string[] options,
                                              string fallback_option) {
@@ -387,7 +425,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private void on_convert_clicked () {
         if (current_operation != ActiveOperation.IDLE) {
             status_area.set_status (
-                @"⚠️ A $(get_operation_label (current_operation)) is already running. Cancel it before starting another one."
+                @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
             );
             return;
         }
@@ -396,7 +434,16 @@ public class MainWindow : Adw.ApplicationWindow {
 
         // ── Subtitles has its own path (remux / burn-in, no codec tab) ────
         if (page == "subtitles") {
-            start_subtitle_apply ();
+            if (!subtitles_tab.can_apply ()) {
+                status_area.set_status (
+                    "⚠️ Load a file with subtitle tracks or add external subtitles first!");
+                return;
+            }
+
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.SUBTITLE_APPLY, out operation_id))
+                return;
+            start_subtitle_apply (operation_id);
             return;
         }
 
@@ -417,9 +464,15 @@ public class MainWindow : Adw.ApplicationWindow {
 
         // ── Dispatch to the appropriate conversion path ───────────────────
         if (codec_tab is TrimTab) {
-            start_trim_operation ((TrimTab) codec_tab, input_file);
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.TRIMMING, out operation_id))
+                return;
+            start_trim_operation ((TrimTab) codec_tab, input_file, operation_id);
         } else {
-            start_codec_conversion (input_file, codec_tab);
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.CONVERTING, out operation_id))
+                return;
+            start_codec_conversion (input_file, codec_tab, operation_id);
         }
     }
 
@@ -439,6 +492,7 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private delegate void ProceedCallback ();
+    private delegate void DialogResponseCallback (string response);
 
     private int get_cached_input_bit_depth (string input_file) {
         if (input_file == "")
@@ -480,7 +534,8 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private void maybe_warn_implicit_depth_downgrade (string input_file,
-                                                      owned ProceedCallback on_continue) {
+                                                      owned ProceedCallback on_continue,
+                                                      owned ProceedCallback? on_cancel = null) {
         string source_depth;
         string fallback_depth;
         if (!get_implicit_depth_warning (input_file, out source_depth, out fallback_depth)) {
@@ -499,10 +554,12 @@ public class MainWindow : Adw.ApplicationWindow {
         dialog.set_default_response ("continue");
         dialog.set_close_response ("cancel");
 
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-            if (response == "continue")
+        choose_preflight_dialog (dialog, (response) => {
+            if (response == "continue") {
                 on_continue ();
+            } else if (on_cancel != null) {
+                on_cancel ();
+            }
         });
     }
 
@@ -524,7 +581,8 @@ public class MainWindow : Adw.ApplicationWindow {
         return !requested_format.contains (Chroma.C420);
     }
 
-    private void maybe_warn_svt_av1_chroma_downgrade (owned ProceedCallback on_continue) {
+    private void maybe_warn_svt_av1_chroma_downgrade (owned ProceedCallback on_continue,
+                                                      owned ProceedCallback? on_cancel = null) {
         string requested_format;
         string effective_format;
         if (!get_svt_av1_chroma_warning (out requested_format, out effective_format)) {
@@ -543,82 +601,136 @@ public class MainWindow : Adw.ApplicationWindow {
         dialog.set_default_response ("continue");
         dialog.set_close_response ("cancel");
 
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-            if (response == "continue")
+        choose_preflight_dialog (dialog, (response) => {
+            if (response == "continue") {
                 on_continue ();
+            } else if (on_cancel != null) {
+                on_cancel ();
+            }
         });
     }
 
     // ── Subtitles path ───────────────────────────────────────────────────────
 
-    private void start_subtitle_apply () {
+    private void start_subtitle_apply (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+            return;
+        }
+
         if (!subtitles_tab.can_apply ()) {
             status_area.set_status (
                 "⚠️ Load a file with subtitle tracks or add external subtitles first!");
+            release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
             return;
         }
 
         if (subtitles_tab.is_burn_in_mode ()) {
             string input_file = subtitles_tab.get_input_file ();
             maybe_warn_implicit_depth_downgrade (input_file, () => {
+                if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+                    return;
+                }
+
                 if (subtitles_tab.will_use_svt_av1_burn_in ()) {
                     maybe_warn_svt_av1_chroma_downgrade (() => {
-                        continue_start_subtitle_apply ();
+                        if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+                            return;
+                        }
+                        continue_start_subtitle_apply (operation_id);
+                    }, () => {
+                        release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
                     });
                     return;
                 }
 
-                continue_start_subtitle_apply ();
+                continue_start_subtitle_apply (operation_id);
+            }, () => {
+                release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
             });
             return;
         }
 
-        continue_start_subtitle_apply ();
+        continue_start_subtitle_apply (operation_id);
     }
 
-    private void continue_start_subtitle_apply () {
+    private void continue_start_subtitle_apply (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+            return;
+        }
+
         var settings = AppSettings.get_default ();
         string expected = subtitles_tab.get_expected_output_path ();
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            launch_subtitle_apply (true);
+            launch_subtitle_apply (operation_id, true);
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, true,
                 () => {
-                    launch_subtitle_apply (true);
+                    if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+                        return;
+                    }
+                    launch_subtitle_apply (operation_id, true);
                 },
                 () => {
-                    launch_subtitle_apply (false);
+                    if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+                        return;
+                    }
+                    launch_subtitle_apply (operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
                 }
             );
         } else {
-            launch_subtitle_apply ();
+            launch_subtitle_apply (operation_id);
         }
     }
 
     // ── Crop & Trim path ─────────────────────────────────────────────────────
 
-    private void start_trim_operation (TrimTab trim, string input_file) {
+    private void start_trim_operation (TrimTab trim,
+                                       string input_file,
+                                       uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+            return;
+        }
+
         if (!trim.will_reencode_output ()) {
-            continue_start_trim_operation (trim, input_file);
+            continue_start_trim_operation (trim, input_file, operation_id);
             return;
         }
 
         maybe_warn_implicit_depth_downgrade (input_file, () => {
+            if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+                return;
+            }
+
             if (trim.will_use_svt_av1_reencode ()) {
                 maybe_warn_svt_av1_chroma_downgrade (() => {
-                    continue_start_trim_operation (trim, input_file);
+                    if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+                        return;
+                    }
+                    continue_start_trim_operation (trim, input_file, operation_id);
+                }, () => {
+                    release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
                 });
                 return;
             }
 
-            continue_start_trim_operation (trim, input_file);
+            continue_start_trim_operation (trim, input_file, operation_id);
+        }, () => {
+            release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
         });
     }
 
-    private void continue_start_trim_operation (TrimTab trim, string input_file) {
+    private void continue_start_trim_operation (TrimTab trim,
+                                                string input_file,
+                                                uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+            return;
+        }
+
         string out_folder = file_pickers.output_entry.get_text ();
         string expected = trim.get_expected_output_path (input_file, out_folder);
 
@@ -626,34 +738,60 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            launch_trim_export (trim, input_file, out_folder);
+            launch_trim_export (trim, input_file, out_folder, operation_id);
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, false,
                 () => {
-                    launch_trim_export (trim, input_file, out_folder);
+                    if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+                        return;
+                    }
+                    launch_trim_export (trim, input_file, out_folder, operation_id);
+                },
+                null,
+                () => {
+                    release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
                 }
             );
         } else {
-            launch_trim_export (trim, input_file, out_folder);
+            launch_trim_export (trim, input_file, out_folder, operation_id);
         }
     }
 
     // ── Normal codec conversion path ─────────────────────────────────────────
 
-    private void start_codec_conversion (string input_file, ICodecTab codec_tab) {
+    private void start_codec_conversion (string input_file,
+                                         ICodecTab codec_tab,
+                                         uint64 operation_id) {
         maybe_warn_implicit_depth_downgrade (input_file, () => {
+            if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+                return;
+            }
+
             if (codec_tab is SvtAv1Tab) {
                 maybe_warn_svt_av1_chroma_downgrade (() => {
-                    continue_start_codec_conversion (input_file, codec_tab);
+                    if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+                        return;
+                    }
+                    continue_start_codec_conversion (input_file, codec_tab, operation_id);
+                }, () => {
+                    release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
                 });
                 return;
             }
 
-            continue_start_codec_conversion (input_file, codec_tab);
+            continue_start_codec_conversion (input_file, codec_tab, operation_id);
+        }, () => {
+            release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
         });
     }
 
-    private void continue_start_codec_conversion (string input_file, ICodecTab codec_tab) {
+    private void continue_start_codec_conversion (string input_file,
+                                                  ICodecTab codec_tab,
+                                                  uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+            return;
+        }
+
         ICodecBuilder builder = codec_tab.get_codec_builder ();
 
         string output_file = Converter.compute_output_path (
@@ -667,27 +805,43 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            begin_conversion (input_file, output_file, codec_tab, builder);
+            begin_conversion (input_file, output_file, codec_tab, builder, operation_id);
         } else if (FileUtils.test (output_file, FileTest.EXISTS)) {
             confirm_overwrite (output_file, true,
-                () => { begin_conversion (input_file, output_file, codec_tab, builder); },
                 () => {
+                    if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+                        return;
+                    }
+                    begin_conversion (input_file, output_file, codec_tab, builder, operation_id);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+                        return;
+                    }
                     string unique = Converter.find_unique_path (output_file);
-                    begin_conversion (input_file, unique, codec_tab, builder);
+                    begin_conversion (input_file, unique, codec_tab, builder, operation_id);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
                 }
             );
         } else {
-            begin_conversion (input_file, output_file, codec_tab, builder);
+            begin_conversion (input_file, output_file, codec_tab, builder, operation_id);
         }
     }
 
     private void begin_conversion (string input_file,
                                    string output_file,
                                    ICodecTab codec_tab,
-                                   ICodecBuilder builder) {
-        uint64 operation_id = reserve_operation_id ();
+                                   ICodecBuilder builder,
+                                   uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+            return;
+        }
+
         if (!converter.start_conversion (
                 input_file, output_file, codec_tab, builder, operation_id)) {
+            release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
             return;
         }
 
@@ -709,7 +863,8 @@ public class MainWindow : Adw.ApplicationWindow {
     private void confirm_overwrite (string output_path,
                                     bool offer_rename,
                                     owned OverwriteCallback on_overwrite,
-                                    owned OverwriteCallback? on_rename = null) {
+                                    owned OverwriteCallback? on_rename = null,
+                                    owned OverwriteCallback? on_cancel = null) {
         string basename = Path.get_basename (output_path);
 
         var dialog = new Adw.AlertDialog (
@@ -731,13 +886,13 @@ public class MainWindow : Adw.ApplicationWindow {
         dialog.set_response_appearance ("overwrite", Adw.ResponseAppearance.DESTRUCTIVE);
         dialog.set_close_response ("cancel");
 
-        dialog.choose.begin (this, null, (obj, res) => {
-            string response = dialog.choose.end (res);
-
+        choose_preflight_dialog (dialog, (response) => {
             if (response == "overwrite") {
                 on_overwrite ();
             } else if (response == "rename" && on_rename != null) {
                 on_rename ();
+            } else if (on_cancel != null) {
+                on_cancel ();
             }
         });
     }
@@ -746,9 +901,14 @@ public class MainWindow : Adw.ApplicationWindow {
     //  OPERATION LIFECYCLE HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void launch_subtitle_apply (bool allow_overwrite = false) {
-        uint64 operation_id = reserve_operation_id ();
+    private void launch_subtitle_apply (uint64 operation_id,
+                                        bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+            return;
+        }
+
         if (!subtitles_tab.start_apply (operation_id, allow_overwrite)) {
+            release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
             return;
         }
 
@@ -757,10 +917,15 @@ public class MainWindow : Adw.ApplicationWindow {
 
     private void launch_trim_export (TrimTab trim,
                                      string input_file,
-                                     string output_folder) {
-        uint64 operation_id = reserve_operation_id ();
+                                     string output_folder,
+                                     uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+            return;
+        }
+
         if (!trim.start_trim_export (
                 input_file, output_folder, status_area, console_tab, operation_id)) {
+            release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
             return;
         }
 
@@ -771,10 +936,84 @@ public class MainWindow : Adw.ApplicationWindow {
         return next_operation_id++;
     }
 
+    private void choose_preflight_dialog (Adw.AlertDialog dialog,
+                                          owned DialogResponseCallback on_response) {
+        var cancellable = new Cancellable ();
+        active_preflight_dialog = dialog;
+        active_preflight_dialog_cancellable = cancellable;
+
+        dialog.choose.begin (this, cancellable, (obj, res) => {
+            if (active_preflight_dialog == dialog
+                && active_preflight_dialog_cancellable == cancellable) {
+                active_preflight_dialog = null;
+                active_preflight_dialog_cancellable = null;
+            }
+
+            string response = dialog.choose.end (res);
+            on_response (response);
+        });
+    }
+
+    private void dismiss_active_preflight_dialog () {
+        Cancellable? cancellable = active_preflight_dialog_cancellable;
+        Adw.AlertDialog? dialog = active_preflight_dialog;
+
+        active_preflight_dialog_cancellable = null;
+        active_preflight_dialog = null;
+
+        if (cancellable != null) {
+            cancellable.cancel ();
+        }
+
+        if (dialog != null) {
+            dialog.force_close ();
+        }
+    }
+
+    private bool reserve_pending_operation (ActiveOperation operation,
+                                            out uint64 operation_id) {
+        operation_id = 0;
+
+        if (current_operation != ActiveOperation.IDLE) {
+            return false;
+        }
+
+        operation_id = reserve_operation_id ();
+        current_operation = operation;
+        active_operation_id = operation_id;
+        operation_launch_pending = true;
+        update_cancel_button_state ();
+        update_convert_sensitivity ();
+        return true;
+    }
+
+    private bool is_pending_operation (ActiveOperation operation, uint64 operation_id) {
+        return operation_launch_pending
+            && current_operation == operation
+            && active_operation_id == operation_id;
+    }
+
+    private bool release_pending_operation (ActiveOperation operation,
+                                            uint64 operation_id,
+                                            bool drain_auto_convert_queue) {
+        if (!is_pending_operation (operation, operation_id)) {
+            return false;
+        }
+
+        reset_tracked_operation_state ();
+
+        if (drain_auto_convert_queue) {
+            drain_pending_auto_convert ();
+        }
+
+        return true;
+    }
+
     /** Record the active operation and update the Cancel button. */
     private void activate_cancel (ActiveOperation operation, uint64 operation_id) {
         current_operation = operation;
         active_operation_id = operation_id;
+        operation_launch_pending = false;
         update_cancel_button_state ();
         update_convert_sensitivity ();
     }
@@ -786,16 +1025,34 @@ public class MainWindow : Adw.ApplicationWindow {
             return false;
         }
 
-        current_operation = ActiveOperation.IDLE;
-        active_operation_id = 0;
-        update_cancel_button_state ();
-        update_convert_sensitivity ();
+        reset_tracked_operation_state ();
 
         if (drain_auto_convert_queue) {
             drain_pending_auto_convert ();
         }
 
         return true;
+    }
+
+    private void reset_tracked_operation_state () {
+        current_operation = ActiveOperation.IDLE;
+        active_operation_id = 0;
+        operation_launch_pending = false;
+        update_cancel_button_state ();
+        update_convert_sensitivity ();
+    }
+
+    private void maybe_finish_close_after_cancellation () {
+        if (!close_after_cancellation) {
+            return;
+        }
+
+        if (current_operation != ActiveOperation.IDLE || smart_optimizer_active) {
+            return;
+        }
+
+        close_after_cancellation = false;
+        destroy ();
     }
 
     private void update_cancel_button_state () {
@@ -838,40 +1095,51 @@ public class MainWindow : Adw.ApplicationWindow {
      */
     private string? cancel_current_operation () {
         string? message = null;
+        bool should_release_operation = true;
 
-        switch (current_operation) {
-            case ActiveOperation.SUBTITLE_APPLY:
-                subtitles_tab.cancel_operation ();
-                message = "⏹️ Subtitle operation cancelled by user.";
-                break;
+        dismiss_active_preflight_dialog ();
 
-            case ActiveOperation.TRIMMING:
-                trim_tab.cancel_trim ();
-                message = "⏹️ Export cancelled by user.";
-                break;
+        if (operation_launch_pending) {
+            message = @"⏹️ Pending $(get_operation_label (current_operation)) cancelled by user.";
+        } else {
+            switch (current_operation) {
+                case ActiveOperation.SUBTITLE_APPLY:
+                    subtitles_tab.cancel_operation ();
+                    message = "⏹️ Subtitle operation cancelled by user.";
+                    should_release_operation = false;
+                    break;
 
-            case ActiveOperation.CONVERTING:
-                converter.cancel ();
-                message = "⏹️ Conversion cancelled by user.";
-                break;
+                case ActiveOperation.TRIMMING:
+                    trim_tab.cancel_trim ();
+                    message = "⏹️ Export cancelled by user.";
+                    should_release_operation = false;
+                    break;
 
-            default:
-                break;
+                case ActiveOperation.CONVERTING:
+                    converter.cancel ();
+                    should_release_operation = false;
+                    break;
+
+                default:
+                    break;
+            }
         }
 
         // Always cancel the optimizer too — it can run alongside other operations.
         if (smart_optimizer_active) {
             controller.cancel_smart_optimizer ();
-            smart_optimizer_active = false;
-            if (message == null) {
+            if (message == null && current_operation == ActiveOperation.IDLE) {
                 message = "⏹️ Smart Optimizer cancelled by user.";
             }
         }
 
-        current_operation = ActiveOperation.IDLE;
-        active_operation_id = 0;
-        update_cancel_button_state ();
-        update_convert_sensitivity ();
+        if (should_release_operation) {
+            current_operation = ActiveOperation.IDLE;
+            active_operation_id = 0;
+            operation_launch_pending = false;
+            update_cancel_button_state ();
+            update_convert_sensitivity ();
+        }
         pending_auto_convert_codec = null;
         return message;
     }
@@ -885,6 +1153,10 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool on_close_request () {
+        if (close_after_cancellation) {
+            return true;
+        }
+
         if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
             return false;  // No operation running — allow close
         }
@@ -900,7 +1172,9 @@ public class MainWindow : Adw.ApplicationWindow {
 
         var dialog = new Adw.AlertDialog (
             "Operation in Progress",
-            @"A $operation_label is currently running.\n\nClosing now will cancel it and may leave incomplete output files."
+            operation_launch_pending
+                ? @"A $operation_label is being prepared.\n\nClosing now will cancel it."
+                : @"A $operation_label is currently running.\n\nClosing now will cancel it and may leave incomplete output files."
         );
 
         dialog.add_response ("stay", "Keep Working");
@@ -930,12 +1204,8 @@ public class MainWindow : Adw.ApplicationWindow {
      */
     private void force_cancel_and_close () {
         cancel_current_operation ();
-
-        // Allow a moment for the subprocess SIGTERM to land, then close.
-        Timeout.add (150, () => {
-            destroy ();
-            return Source.REMOVE;
-        });
+        close_after_cancellation = true;
+        maybe_finish_close_after_cancellation ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -590,6 +590,7 @@ public class Vp9Tab : BaseCodecTab {
         string profile = get_dropdown_text (profile_combo);
 
         _applying_profile = true;
+        bool sync_just_activated = consume_general_tab_sync_activation ();
 
         bool has_8bit = profile_general_tab.eight_bit_check.active;
         bool has_10bit = profile_general_tab.ten_bit_check.active;
@@ -601,7 +602,9 @@ public class Vp9Tab : BaseCodecTab {
             set_dropdown_options (profile_general_tab.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (was_last_profile_sync_auto ()) {
+            if (sync_just_activated && has_saved_auto_profile_general_state ()) {
+                restore_auto_profile_general_state ();
+            } else if (was_last_profile_sync_auto ()) {
                 capture_auto_profile_general_state ();
             } else {
                 restore_auto_profile_general_state ();

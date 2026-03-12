@@ -27,43 +27,47 @@ public class ConversionRunner {
             if (two_pass) {
                 if (converter.is_cancelled (process_runner)) return;
 
-                converter.set_phase (ConversionPhase.PASS1);
-                converter.update_status ("🔄 Pass 1/2: Analyzing video...");
+                converter.set_phase_if_active (process_runner, ConversionPhase.PASS1);
+                converter.update_status_if_active (process_runner, "🔄 Pass 1/2: Analyzing video...");
                 string[] pass1 = build_pass1 (input);
                 if (converter.execute_ffmpeg (process_runner, pass1, 0.0, 50.0) != 0) {
                     if (!converter.is_cancelled (process_runner))
-                        converter.report_error ("Pass 1 failed.");
+                        converter.report_error_if_active (process_runner, "Pass 1 failed.");
                     return;
                 }
 
                 if (converter.is_cancelled (process_runner)) return;
 
-                converter.set_phase (ConversionPhase.PASS2);
-                converter.update_status (
+                converter.set_phase_if_active (process_runner, ConversionPhase.PASS2);
+                converter.update_status_if_active (
+                    process_runner,
                     @"🔄 Pass 2/2: Encoding final $(config.profile.codec_name) video...");
                 string[] pass2 = build_pass2 (input, safe_output);
                 if (converter.execute_ffmpeg (process_runner, pass2, 50.0, 50.0) != 0) {
                     if (!converter.is_cancelled (process_runner))
-                        converter.report_error ("Pass 2 failed.");
+                        converter.report_error_if_active (process_runner, "Pass 2 failed.");
                     return;
                 }
             } else {
                 if (converter.is_cancelled (process_runner)) return;
 
-                converter.set_phase (ConversionPhase.ENCODING);
-                converter.update_status (
+                converter.set_phase_if_active (process_runner, ConversionPhase.ENCODING);
+                converter.update_status_if_active (
+                    process_runner,
                     @"🔄 Encoding with $(config.profile.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);
                 if (converter.execute_ffmpeg (process_runner, cmd) != 0) {
                     if (!converter.is_cancelled (process_runner))
-                        converter.report_error ("Encoding failed.");
+                        converter.report_error_if_active (process_runner, "Encoding failed.");
                     return;
                 }
             }
 
             if (converter.is_cancelled (process_runner)) return;
 
-            converter.update_status (@"✅ Conversion completed successfully!\n\nSaved to:\n$safe_output");
+            converter.update_status_if_active (
+                process_runner,
+                @"✅ Conversion completed successfully!\n\nSaved to:\n$safe_output");
             succeeded = true;
         } finally {
             converter.finish_conversion (

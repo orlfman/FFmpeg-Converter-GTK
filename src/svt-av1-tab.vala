@@ -695,14 +695,12 @@ public class SvtAv1Tab : BaseCodecTab {
     // ═══════════════════════════════════════════════════════════════════════════
     //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
     //
-    //  AV1 profiles are tied to chroma subsampling:
-    //    Auto        → restore unrestricted General-tab formats and preserve
-    //                  any manual 8-bit / 10-bit override
-    //    Main        → force a concrete 4:2:0-compatible format
+    //  This SVT-AV1 path is 4:2:0-only, so both Auto and Main must keep the
+    //  General tab aligned with that contract. Auto remains less opinionated:
+    //  it preserves the user's active 8-bit / 10-bit choice when present,
+    //  while still constraining the chroma dropdowns to 4:2:0.
     //
-    //  Builder-side hardening still emits an explicit 4:2:0 pix_fmt when the
-    //  user selected 8-bit or 10-bit output. The UI only coerces formats for
-    //  explicit Main so Auto does not mutate the universal General tab.
+    //  The builder still emits an explicit 4:2:0 pix_fmt as defense in depth.
     // ═══════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
@@ -713,6 +711,7 @@ public class SvtAv1Tab : BaseCodecTab {
         string profile = CodecUtils.get_dropdown_text (profile_combo);
 
         _applying_profile = true;
+        bool sync_just_activated = consume_general_tab_sync_activation ();
 
         if (profile == "Main") {
             if (was_last_profile_sync_auto ())
@@ -727,16 +726,25 @@ public class SvtAv1Tab : BaseCodecTab {
                                   "10-bit 4:2:0");
         } else {
             set_dropdown_options (profile_general_tab.eight_bit_format,
-                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  { "8-bit 4:2:0" },
                                   "8-bit 4:2:0");
             set_dropdown_options (profile_general_tab.ten_bit_format,
-                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  { "10-bit 4:2:0" },
                                   "10-bit 4:2:0");
-            if (was_last_profile_sync_auto ()) {
+
+            if (sync_just_activated && has_saved_auto_profile_general_state ()) {
+                restore_auto_profile_general_state ();
+            } else if (was_last_profile_sync_auto ()) {
                 capture_auto_profile_general_state ();
             } else {
                 restore_auto_profile_general_state ();
             }
+
+            if (profile_general_tab.eight_bit_check.active)
+                profile_general_tab.eight_bit_format.set_selected (0);   // 4:2:0
+            if (profile_general_tab.ten_bit_check.active)
+                profile_general_tab.ten_bit_format.set_selected (0);     // 4:2:0
+
             mark_last_profile_sync_auto (true);
             _applying_profile = false;
             return;

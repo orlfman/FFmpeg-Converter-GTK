@@ -410,13 +410,19 @@ namespace CodecUtils {
 
     /**
      * Build FFmpeg video codec arguments directly from a SmartOptimizer
-     * recommendation, without going through a codec tab's UI state.
+     * recommendation, without going through a codec tab's live UI state.
      *
      * Used for per-segment Smart Optimization in the Crop & Trim tab,
      * where each segment gets its own recommendation and needs its own
      * codec args independently of the codec tab widgets.
+     *
+     * When a General-tab snapshot is available, codec-specific hardening can
+     * still mirror the normal builder path. This currently matters for the
+     * SVT-AV1 trim path, which must keep an explicit 4:2:0 pix_fmt in sync
+     * with the selected output depth.
      */
-    public string[] build_smart_codec_args (OptimizationRecommendation rec) {
+    public string[] build_smart_codec_args (OptimizationRecommendation rec,
+                                            GeneralSettingsSnapshot? general_settings = null) {
         string[] args = {};
 
         if (rec.codec == "x264") {
@@ -507,6 +513,13 @@ namespace CodecUtils {
 
             // rec.preset for SVT-AV1 is "preset N" — extract the number
             string preset_str = rec.preset.replace ("preset ", "");
+
+            string svt_pix_fmt = CodecUtils.get_svt_av1_pix_fmt_from_snapshot (
+                general_settings);
+            if (svt_pix_fmt.length > 0) {
+                args += "-pix_fmt";
+                args += svt_pix_fmt;
+            }
 
             if (rec.two_pass && rec.target_bitrate_kbps > 0) {
                 args += "-b:v";

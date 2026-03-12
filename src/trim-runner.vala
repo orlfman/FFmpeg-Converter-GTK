@@ -135,6 +135,10 @@ public class TrimRunner : Object {
         runner.cancel ();
     }
 
+    public bool is_cancelled () {
+        return runner.is_cancelled ();
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNAL — Main pipeline
     // ═════════════════════════════════════════════════════════════════════════

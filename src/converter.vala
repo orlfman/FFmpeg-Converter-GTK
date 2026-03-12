@@ -47,6 +47,7 @@ public class Converter : Object {
     public signal void conversion_done (string output_file);
     public signal void conversion_succeeded (uint64 operation_id, string output_file);
     public signal void conversion_failed (uint64 operation_id);
+    public signal void conversion_cancelled (uint64 operation_id);
 
     // ── Stable dependencies ─────────────────────────────────────────────────
     private StatusArea status_area;
@@ -60,6 +61,8 @@ public class Converter : Object {
     // ── Per-conversion state (all guarded by state_mutex) ───────────────────
     private Mutex state_mutex = Mutex ();
     private bool is_converting = false;
+    private bool cancel_pending = false;
+    private bool cancel_progress_hidden = false;
     private ConversionPhase current_phase = ConversionPhase.IDLE;
     private double total_duration = 0.0;
     private uint64 active_operation_id = 0;
@@ -158,6 +161,8 @@ public class Converter : Object {
             }
 
             is_converting = true;
+            cancel_pending = false;
+            cancel_progress_hidden = false;
             current_phase = ConversionPhase.IDLE;
             total_duration = 0.0;
             active_operation_id = operation_id;
@@ -174,6 +179,8 @@ public class Converter : Object {
         try {
             if (active_operation_id == operation_id && active_runner == runner) {
                 is_converting = false;
+                cancel_pending = false;
+                cancel_progress_hidden = false;
                 current_phase = ConversionPhase.IDLE;
                 total_duration = 0.0;
                 active_operation_id = 0;
@@ -236,14 +243,22 @@ public class Converter : Object {
                     state_mutex.unlock ();
                 }
 
-                if (!still_active || runner.is_cancelled ()) {
+                if (!still_active) {
                     return;
                 }
 
                 bool pulse = (dur <= 0);
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
                 progress_tracker.set_pulse_mode (pulse);
 
                 if (!pulse) {
+                    if (!accepts_runner_updates (runner)) {
+                        finish_conversion (operation_id, runner, false);
+                        return;
+                    }
                     progress_tracker.switch_to_determinate ();
                 }
 
@@ -320,7 +335,7 @@ public class Converter : Object {
                                  double pass_start = 0.0,
                                  double pass_range = 100.0) {
         int exit = process_runner.execute (argv, (clean) => {
-            if (!owns_active_runner (process_runner)) {
+            if (!accepts_runner_updates (process_runner)) {
                 return;
             }
 
@@ -356,7 +371,7 @@ public class Converter : Object {
         });
 
         print ("\n=== FFmpeg command ===\n%s\n", string.joinv (" ", argv));
-        if (owns_active_runner (process_runner)) {
+        if (accepts_runner_updates (process_runner)) {
             console_tab.set_command (string.joinv (" ", argv));
         }
 
@@ -370,6 +385,7 @@ public class Converter : Object {
     public void cancel () {
         ProcessRunner? runner_to_cancel = null;
         ConversionPhase phase = ConversionPhase.IDLE;
+        bool hide_cancelled_progress = false;
 
         state_mutex.lock ();
         try {
@@ -377,11 +393,10 @@ public class Converter : Object {
                 return;
             }
             phase = current_phase;
-            is_converting = false;
-            current_phase = ConversionPhase.IDLE;
-            active_operation_id = 0;
+            cancel_pending = true;
+            hide_cancelled_progress = !cancel_progress_hidden;
+            cancel_progress_hidden = true;
             runner_to_cancel = active_runner;
-            active_runner = null;
         } finally {
             state_mutex.unlock ();
         }
@@ -396,13 +411,13 @@ public class Converter : Object {
         }
 
         update_status (cancel_msg);
-        progress_tracker.hide_cancelled ();
+        if (hide_cancelled_progress) {
+            progress_tracker.hide_cancelled ();
+        }
 
         if (runner_to_cancel != null) {
             runner_to_cancel.cancel ();
         }
-
-        cleanup_passlog ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -414,9 +429,25 @@ public class Converter : Object {
         console_tab.add_line ("❌ " + message);
     }
 
+    internal void report_error_if_active (ProcessRunner process_runner, string message) {
+        if (!accepts_runner_updates (process_runner)) {
+            return;
+        }
+
+        report_error (message);
+    }
+
     internal void update_status (string message) {
         status_area.set_status (message);
         console_tab.add_line (message);
+    }
+
+    internal void update_status_if_active (ProcessRunner process_runner, string message) {
+        if (!accepts_runner_updates (process_runner)) {
+            return;
+        }
+
+        update_status (message);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -448,9 +479,12 @@ public class Converter : Object {
     //  PHASE MANAGEMENT
     // ═════════════════════════════════════════════════════════════════════════
 
-    internal void set_phase (ConversionPhase phase) {
+    internal void set_phase_if_active (ProcessRunner process_runner, ConversionPhase phase) {
         state_mutex.lock ();
         try {
+            if (active_runner != process_runner || cancel_pending) {
+                return;
+            }
             current_phase = phase;
         } finally {
             state_mutex.unlock ();
@@ -461,15 +495,16 @@ public class Converter : Object {
         return process_runner.is_cancelled ();
     }
 
-    private bool owns_active_runner (ProcessRunner process_runner) {
-        bool owns_runner;
+    internal bool accepts_runner_updates (ProcessRunner process_runner) {
+        bool accepts_updates;
         state_mutex.lock ();
         try {
-            owns_runner = (active_runner == process_runner);
+            accepts_updates = (active_runner == process_runner && !cancel_pending);
         } finally {
             state_mutex.unlock ();
         }
-        return owns_runner;
+
+        return accepts_updates;
     }
 
     internal void finish_conversion (uint64 operation_id,
@@ -480,13 +515,19 @@ public class Converter : Object {
 
         Idle.add (() => {
             bool should_emit;
+            bool was_cancelled = false;
+            bool hide_cancelled_progress = false;
 
             state_mutex.lock ();
             try {
                 should_emit = (active_operation_id == operation_id &&
                                active_runner == process_runner);
                 if (should_emit) {
+                    was_cancelled = cancel_pending;
+                    hide_cancelled_progress = was_cancelled && !cancel_progress_hidden;
                     is_converting = false;
+                    cancel_pending = false;
+                    cancel_progress_hidden = false;
                     current_phase = ConversionPhase.IDLE;
                     active_operation_id = 0;
                     active_runner = null;
@@ -499,8 +540,17 @@ public class Converter : Object {
                 return Source.REMOVE;
             }
 
-            progress_tracker.hide ();
             cleanup_passlog ();
+
+            if (was_cancelled) {
+                if (hide_cancelled_progress) {
+                    progress_tracker.hide_cancelled ();
+                }
+                conversion_cancelled (operation_id);
+                return Source.REMOVE;
+            }
+
+            progress_tracker.hide ();
 
             if (succeeded && completed_output != null) {
                 conversion_done (completed_output);

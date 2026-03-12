@@ -41,12 +41,25 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
 
     // ── Shared GeneralTab binding for codec/profile compatibility logic ─────
     protected GeneralTab? profile_general_tab = null;
-    public bool general_tab_sync_active { get; set; default = false; }
+    private bool _general_tab_sync_active = false;
+    public bool general_tab_sync_active {
+        get { return _general_tab_sync_active; }
+        set {
+            if (_general_tab_sync_active == value) {
+                return;
+            }
+
+            _general_tab_sync_active = value;
+            general_tab_sync_just_activated = value;
+        }
+    }
     private ulong general_tab_8bit_handler = 0;
     private ulong general_tab_10bit_handler = 0;
     private ulong general_tab_8bit_fmt_handler = 0;
     private ulong general_tab_10bit_fmt_handler = 0;
+    private bool general_tab_sync_just_activated = false;
     private bool last_profile_sync_was_auto = true;
+    private bool has_auto_profile_general_state = false;
     private bool auto_profile_8bit_active = false;
     private string auto_profile_8bit_format = "8-bit 4:2:0";
     private bool auto_profile_10bit_active = false;
@@ -181,11 +194,22 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         last_profile_sync_was_auto = is_auto;
     }
 
+    protected bool consume_general_tab_sync_activation () {
+        bool activated = general_tab_sync_just_activated;
+        general_tab_sync_just_activated = false;
+        return activated;
+    }
+
+    protected bool has_saved_auto_profile_general_state () {
+        return has_auto_profile_general_state;
+    }
+
     protected void capture_auto_profile_general_state () {
         if (profile_general_tab == null) {
             return;
         }
 
+        has_auto_profile_general_state = true;
         auto_profile_8bit_active = profile_general_tab.eight_bit_check.active;
         auto_profile_8bit_format = CodecUtils.get_dropdown_text (
             profile_general_tab.eight_bit_format);

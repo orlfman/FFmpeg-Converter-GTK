@@ -88,6 +88,7 @@ public class SubtitlesRunner : Object {
     public signal void operation_failed (string message);
     public signal void apply_done (uint64 operation_id, string output_path);
     public signal void apply_failed (uint64 operation_id, string message);
+    public signal void apply_cancelled (uint64 operation_id);
 
     private static bool is_blank (string? value) {
         return value == null || value.strip ().length == 0;
@@ -639,6 +640,10 @@ public class SubtitlesRunner : Object {
 
         if (runner.is_cancelled ()) {
             report_status ("⏹️ Remux cancelled.");
+            Idle.add (() => {
+                apply_cancelled (operation_id);
+                return Source.REMOVE;
+            });
             return;
         }
 
@@ -848,6 +853,10 @@ public class SubtitlesRunner : Object {
 
             if (runner.is_cancelled ()) {
                 report_status ("⏹️ Burn-in cancelled.");
+                Idle.add (() => {
+                    apply_cancelled (operation_id);
+                    return Source.REMOVE;
+                });
                 return;
             }
 
