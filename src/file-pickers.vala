@@ -325,9 +325,6 @@ public class FilePickers : Box {
             ".path-breadcrumb .path-crumb.path-file:hover {\n" +
             "    background: alpha(currentColor, 0.09);\n" +
             "}\n" +
-            ".path-breadcrumb .path-file-chip {\n" +
-            "    spacing: 5px;\n" +
-            "}\n" +
             ".path-breadcrumb .path-file-icon {\n" +
             "    opacity: 0.72;\n" +
             "}\n" +

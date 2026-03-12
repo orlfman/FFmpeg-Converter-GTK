@@ -239,7 +239,7 @@ public class SvtAv1Tab : BaseCodecTab {
 
     private void build_quality_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Quality & Tuning");
+        group.set_title ("Quality &amp; Tuning");
 
         // Tune
         var tune_row = new Adw.ActionRow ();
@@ -545,7 +545,7 @@ public class SvtAv1Tab : BaseCodecTab {
 
     private void build_threading_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Threading & Keyframes");
+        group.set_title ("Threading &amp; Keyframes");
 
         // Keyframe Interval
         var keyint_row = new Adw.ActionRow ();
@@ -696,7 +696,8 @@ public class SvtAv1Tab : BaseCodecTab {
     //  PROFILE → PIXEL FORMAT AUTO-CONFIGURATION
     //
     //  AV1 profiles are tied to chroma subsampling:
-    //    Auto        → leave the shared General tab unchanged
+    //    Auto        → restore unrestricted General-tab formats and preserve
+    //                  any manual 8-bit / 10-bit override
     //    Main        → force a concrete 4:2:0-compatible format
     //
     //  Builder-side hardening still emits an explicit 4:2:0 pix_fmt when the
@@ -714,6 +715,10 @@ public class SvtAv1Tab : BaseCodecTab {
         _applying_profile = true;
 
         if (profile == "Main") {
+            if (was_last_profile_sync_auto ())
+                capture_auto_profile_general_state ();
+            mark_last_profile_sync_auto (false);
+
             set_dropdown_options (profile_general_tab.eight_bit_format,
                                   { "8-bit 4:2:0" },
                                   "8-bit 4:2:0");
@@ -727,11 +732,12 @@ public class SvtAv1Tab : BaseCodecTab {
             set_dropdown_options (profile_general_tab.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            // Auto: reset bit-depth overrides back to off (let ffmpeg decide)
-            if (profile_general_tab.eight_bit_check.active)
-                profile_general_tab.eight_bit_check.set_active (false);
-            if (profile_general_tab.ten_bit_check.active)
-                profile_general_tab.ten_bit_check.set_active (false);
+            if (was_last_profile_sync_auto ()) {
+                capture_auto_profile_general_state ();
+            } else {
+                restore_auto_profile_general_state ();
+            }
+            mark_last_profile_sync_auto (true);
             _applying_profile = false;
             return;
         }

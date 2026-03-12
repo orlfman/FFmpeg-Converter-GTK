@@ -14,9 +14,9 @@ namespace FilterBuilder {
         return Math.fabs (a - b) < EPSILON;
     }
 
-    private string[] get_rotation_filters (GeneralTab tab) {
+    private string[] get_rotation_filters_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
-        string rot = get_dropdown_text (tab.rotate_combo);
+        string rot = snapshot.rotate;
         if (rot == Rotation.CW_90) filters += "transpose=1";
         else if (rot == Rotation.CCW_90) filters += "transpose=2";
         else if (rot == Rotation.ROTATE_180) filters += "transpose=1,transpose=1";
@@ -27,10 +27,17 @@ namespace FilterBuilder {
 
     public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false,
                                                string codec_name = "") {
+        return build_video_filter_chain_from_snapshot (
+            tab.snapshot_settings (), skip_crop, codec_name);
+    }
+
+    public string build_video_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot,
+                                                          bool skip_crop = false,
+                                                          string codec_name = "") {
         string[] filters = {};
 
         // 1. Rotation / Flip
-        string[] rot_filters = get_rotation_filters (tab);
+        string[] rot_filters = get_rotation_filters_from_snapshot (snapshot);
         bool has_vflip = false;
         foreach (string f in rot_filters) {
             filters += f;
@@ -48,8 +55,8 @@ namespace FilterBuilder {
         }
 
         // 2. Crop (skipped when the Crop & Trim tab provides its own)
-        if (!skip_crop && tab.crop_check.active) {
-            string c = tab.crop_value.text.strip ();
+        if (!skip_crop && snapshot.crop_enabled) {
+            string c = snapshot.crop_value;
             if (c.length > 0 && c != "w:h:x:y") {
                 if (c.has_prefix ("crop=")) c = c.substring (5);
                 filters += "crop=" + c;
@@ -57,36 +64,36 @@ namespace FilterBuilder {
         }
 
         // 3. Video Processing Filters
-        foreach (string f in tab.video_filters.get_processing_filters ()) {
+        foreach (string f in snapshot.video_filters.processing_filters) {
             filters += f;
         }
 
         // 4. HDR to SDR Tonemap
-        string hdr = tab.video_filters.get_hdr_filter ();
+        string hdr = snapshot.video_filters.hdr_filter;
         if (hdr.length > 0) filters += hdr;
 
         // 5. Scale
-        string scale_mode = tab.get_scale_mode_text ();
+        string scale_mode = snapshot.scale_mode;
         string? scale_w = null;
         string? scale_h = null;
 
         if (scale_mode == ScaleMode.RESOLUTION) {
-            string res = tab.get_resolution_preset_value ();
+            string res = snapshot.resolution_preset_value;
             if (res.length > 0 && res.contains (":")) {
                 string[] dims = res.split (":");
                 scale_w = dims[0];
                 scale_h = dims[1];
             }
         } else if (scale_mode == ScaleMode.CUSTOM) {
-            string res = tab.get_custom_resolution_value ();
+            string res = snapshot.custom_resolution_value;
             if (res.length > 0 && res.contains (":")) {
                 string[] dims = res.split (":");
                 scale_w = dims[0];
                 scale_h = dims[1];
             }
         } else if (scale_mode == ScaleMode.PERCENTAGE) {
-            double sw = tab.scale_width_x.get_value ();
-            double sh = tab.scale_height_x.get_value ();
+            double sw = snapshot.scale_width_multiplier;
+            double sh = snapshot.scale_height_multiplier;
             if (!fp_equal (sw, 1.0) || !fp_equal (sh, 1.0)) {
                 scale_w = fp_equal (sw, 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
                 scale_h = fp_equal (sh, 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
@@ -94,26 +101,26 @@ namespace FilterBuilder {
         }
 
         if (scale_w != null && scale_h != null) {
-            string alg = get_dropdown_text (tab.scale_algorithm).down ();
+            string alg = snapshot.scale_algorithm.down ();
             if (alg == ScaleAlgorithm.POINT) {
                 filters += @"scale=w=$scale_w:h=$scale_h:flags=point";
             } else {
                 filters += @"zscale=w=$scale_w:h=$scale_h:filter=$alg";
             }
-            string range = get_dropdown_text (tab.scale_range);
+            string range = snapshot.scale_range;
             if (range != "input") filters += @"zscale=range=$range";
         }
 
         // 6. Frame Rate
-        string fr = get_dropdown_text (tab.frame_rate_combo);
+        string fr = snapshot.frame_rate_text;
         if (fr != FrameRateLabel.ORIGINAL) {
-            string fps = (fr == FrameRateLabel.CUSTOM) ? tab.custom_frame_rate.text.strip () : fr;
+            string fps = (fr == FrameRateLabel.CUSTOM) ? snapshot.custom_frame_rate_text : fr;
             if (fps.length > 0) filters += "fps=" + fps;
         }
 
         // 7. Video Speed
-        if (tab.video_speed_check.active) {
-            double pct = tab.video_speed.get_value ();
+        if (snapshot.video_speed_enabled) {
+            double pct = snapshot.video_speed_percent;
             if (!fp_equal (pct, 0.0)) {
                 double mult = 1.0 + pct / 100.0;
                 double factor = 1.0 / mult;
@@ -124,14 +131,14 @@ namespace FilterBuilder {
         // 8. Pixel Format
         string pixfmt = "";
 
-        if (tab.ten_bit_check.active) {
-            string f = get_dropdown_text (tab.ten_bit_format);
+        if (snapshot.ten_bit_selected) {
+            string f = snapshot.ten_bit_format_text;
             pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P10LE :
                      f.contains (Chroma.C422) ? PixelFormat.YUV422P10LE :
                                                 PixelFormat.YUV444P10LE;
         }
-        else if (tab.eight_bit_check.active) {
-            string f = get_dropdown_text (tab.eight_bit_format);
+        else if (snapshot.eight_bit_selected) {
+            string f = snapshot.eight_bit_format_text;
             pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P :
                      f.contains (Chroma.C422) ? PixelFormat.YUV422P :
                                                 PixelFormat.YUV444P;
@@ -142,7 +149,7 @@ namespace FilterBuilder {
         }
 
         // 9. Color Correction
-        string cc = tab.get_color_filter ();
+        string cc = snapshot.color_filter;
         if (cc.length > 0)
             filters += cc;
 
@@ -150,16 +157,20 @@ namespace FilterBuilder {
     }
 
     public string build_audio_filter_chain (GeneralTab tab) {
+        return build_audio_filter_chain_from_snapshot (tab.snapshot_settings ());
+    }
+
+    public string build_audio_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
 
         // Normalize Audio
-        if (tab.normalize_audio.active) {
+        if (snapshot.normalize_audio) {
             filters += "loudnorm=I=-23:TP=-1.5:LRA=11";
         }
 
         // Audio Speed
-        if (tab.audio_speed_check.active) {
-            double pct = tab.audio_speed.get_value ();
+        if (snapshot.audio_speed_enabled) {
+            double pct = snapshot.audio_speed_percent;
             if (!fp_equal (pct, 0.0)) {
                 double m = 1.0 + pct / 100.0;
                 string chain = build_atempo_chain (m);
@@ -252,9 +263,10 @@ namespace FilterBuilder {
     // Detect Crop helper
     public string get_crop_detection_chain (GeneralTab tab) {
         string[] filters = {};
+        GeneralSettingsSnapshot snapshot = tab.snapshot_settings ();
 
         // 1. Rotation / Flip (must come first)
-        foreach (string f in get_rotation_filters (tab)) filters += f;
+        foreach (string f in get_rotation_filters_from_snapshot (snapshot)) filters += f;
 
         // 2. Cropdetect
         filters += "cropdetect=24:2:0";

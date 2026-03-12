@@ -186,7 +186,18 @@ public class TrimTab : Box, ICodecTab {
 
     public bool get_two_pass () { return false; }
     public string get_container () { return "mkv"; }
-    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) { return {}; }
+    public CodecTabSettingsSnapshot snapshot_settings (
+        GeneralSettingsSnapshot? general_settings = null) {
+        var snapshot = new CodecTabSettingsSnapshot ();
+        snapshot.container = "mkv";
+        snapshot.keyframe_settings = snapshot_keyframe_settings (general_settings);
+        snapshot.audio_settings = new AudioSettingsSnapshot ();
+        return snapshot;
+    }
+    public KeyframeSettingsSnapshot snapshot_keyframe_settings (
+        GeneralSettingsSnapshot? general_settings) {
+        return new KeyframeSettingsSnapshot ();
+    }
     public string[] get_audio_args () { return { "-c:a", "copy" }; }
 
     /** Returns the current operation mode as an int (0=Trim Only, 1=Crop Only, 2=Crop & Trim). */
@@ -392,23 +403,30 @@ public class TrimTab : Box, ICodecTab {
             runner.operation_label = "Trim export";
         }
 
-        // Set up re-encode delegates when not in copy mode,
-        // or when some segments need crop (which requires re-encoding)
+        // Snapshot re-encode settings on the main thread when some path
+        // needs encoding. The runner only consumes plain data objects.
         if (!runner.copy_mode || force_reencode) {
-            runner.general_tab = general_tab;
             int sel = (int) codec_choice.get_selected ();
+            ICodecBuilder? builder = null;
+            ICodecTab? codec_tab = null;
             if (sel == 0 && svt_tab != null) {
-                runner.reencode_builder   = svt_tab.get_codec_builder ();
-                runner.reencode_codec_tab = svt_tab;
+                builder = svt_tab.get_codec_builder ();
+                codec_tab = svt_tab;
             } else if (sel == 1 && x265_tab != null) {
-                runner.reencode_builder   = x265_tab.get_codec_builder ();
-                runner.reencode_codec_tab = x265_tab;
+                builder = x265_tab.get_codec_builder ();
+                codec_tab = x265_tab;
             } else if (sel == 2 && x264_tab != null) {
-                runner.reencode_builder   = x264_tab.get_codec_builder ();
-                runner.reencode_codec_tab = x264_tab;
+                builder = x264_tab.get_codec_builder ();
+                codec_tab = x264_tab;
             } else if (sel == 3 && vp9_tab != null) {
-                runner.reencode_builder   = vp9_tab.get_codec_builder ();
-                runner.reencode_codec_tab = vp9_tab;
+                builder = vp9_tab.get_codec_builder ();
+                codec_tab = vp9_tab;
+            }
+
+            if (builder != null && codec_tab != null) {
+                GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings ();
+                runner.reencode_profile = CodecUtils.snapshot_encode_profile (
+                    builder, codec_tab, general_settings);
             }
         }
 

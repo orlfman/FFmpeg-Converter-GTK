@@ -8,6 +8,7 @@ public class ConversionRunner {
 
     private Converter converter;
     private ConversionConfig config;
+    private string[]? resolved_codec_args = null;
 
     public ConversionRunner (Converter converter, ConversionConfig config) {
         this.converter = converter;
@@ -33,7 +34,8 @@ public class ConversionRunner {
                 if (converter.is_cancelled ()) return;
 
                 converter.set_phase (ConversionPhase.PASS2);
-                converter.update_status (@"🔄 Pass 2/2: Encoding final $(config.codec_name) video...");
+                converter.update_status (
+                    @"🔄 Pass 2/2: Encoding final $(config.profile.codec_name) video...");
                 string[] pass2 = build_pass2 (input, safe_output);
                 if (converter.execute_ffmpeg (pass2, 50.0, 50.0) != 0) {
                     if (!converter.is_cancelled ())
@@ -44,7 +46,8 @@ public class ConversionRunner {
                 if (converter.is_cancelled ()) return;
 
                 converter.set_phase (ConversionPhase.PASS2);
-                converter.update_status (@"🔄 Encoding with $(config.codec_name) (single pass...)");
+                converter.update_status (
+                    @"🔄 Encoding with $(config.profile.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);
                 if (converter.execute_ffmpeg (cmd) != 0) {
                     if (!converter.is_cancelled ())
@@ -89,13 +92,21 @@ public class ConversionRunner {
 
         cmd += "-i"; cmd += input;
 
-        if (config.video_filters != "") {
-            cmd += "-vf"; cmd += config.video_filters;
+        if (config.profile.video_filters != "") {
+            cmd += "-vf"; cmd += config.profile.video_filters;
         }
 
-        foreach (string arg in config.codec_args) cmd += arg;
+        foreach (string arg in get_codec_args (input)) cmd += arg;
 
         return cmd;
+    }
+
+    private string[] get_codec_args (string input) {
+        if (resolved_codec_args == null) {
+            resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
+                config.profile, input);
+        }
+        return resolved_codec_args;
     }
 
     /**
@@ -121,8 +132,8 @@ public class ConversionRunner {
     private string[] build_metadata_args () {
         string[] args = {};
 
-        if (config.preserve_metadata) { args += "-map_metadata"; args += "0"; }
-        if (config.remove_chapters)   { args += "-map_chapters"; args += "-1"; }
+        if (config.profile.preserve_metadata) { args += "-map_metadata"; args += "0"; }
+        if (config.profile.remove_chapters)   { args += "-map_chapters"; args += "-1"; }
 
         return args;
     }
@@ -176,6 +187,7 @@ public class ConversionRunner {
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] get_audio_args_with_filters () {
-        return FilterBuilder.merge_audio_filters (config.audio_filters, config.audio_args);
+        return FilterBuilder.merge_audio_filters (
+            config.profile.audio_filters, config.profile.audio_args);
     }
 }

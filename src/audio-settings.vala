@@ -5,6 +5,19 @@ using Adw;
 //  AudioSettings — Reusable audio encoding widget
 // ═══════════════════════════════════════════════════════════════════════════════
 
+public class AudioSettingsSnapshot : Object {
+    public bool enabled = true;
+    public string codec = AudioCodecName.COPY;
+    public int sample_rate_hz = 48000;
+    public int bitrate_kbps = 128;
+    public string opus_vbr_mode = "Default";
+    public bool opus_surround_fix = true;
+    public string aac_quality = "Disabled";
+    public string mp3_vbr_quality = "Disabled";
+    public string flac_compression = "5";
+    public string vorbis_quality = "Disabled";
+}
+
 public class AudioSettings : Object {
 
     // ── Widgets ──────────────────────────────────────────────────────────────
@@ -284,11 +297,39 @@ public class AudioSettings : Object {
     //  GET FFMPEG AUDIO ARGS
     // ═════════════════════════════════════════════════════════════════════════
 
+    public AudioSettingsSnapshot snapshot_settings () {
+        var snapshot = new AudioSettingsSnapshot ();
+        snapshot.enabled = audio_expander.enable_expansion;
+        snapshot.codec = get_codec_text ();
+
+        string sr_text = get_dropdown_text (sample_rate_combo);
+        string sr_num = sr_text.replace (" kHz", "");
+        if (sr_num.length > 0)
+            snapshot.sample_rate_hz = int.parse (sr_num) * 1000;
+
+        string br_text = get_dropdown_text (bitrate_combo);
+        string br_num = br_text.replace (" kbps", "");
+        if (br_num.length > 0)
+            snapshot.bitrate_kbps = int.parse (br_num);
+
+        snapshot.opus_vbr_mode = get_dropdown_text (opus_vbr_combo);
+        snapshot.opus_surround_fix = opus_surround_fix.active;
+        snapshot.aac_quality = get_dropdown_text (aac_quality_combo);
+        snapshot.mp3_vbr_quality = get_dropdown_text (mp3_vbr_combo);
+        snapshot.flac_compression = get_dropdown_text (flac_compression_combo);
+        snapshot.vorbis_quality = get_dropdown_text (vorbis_quality_combo);
+        return snapshot;
+    }
+
     public string[] get_audio_args () {
-        if (!audio_expander.enable_expansion)
+        return build_audio_args_from_snapshot (snapshot_settings ());
+    }
+
+    public static string[] build_audio_args_from_snapshot (AudioSettingsSnapshot snapshot) {
+        if (!snapshot.enabled)
             return { "-an" };
 
-        string codec = get_codec_text ();
+        string codec = snapshot.codec;
 
         if (codec == AudioCodecName.COPY)
             return { "-c:a", "copy" };
@@ -309,30 +350,25 @@ public class AudioSettings : Object {
         args += ffmpeg_codec;
 
         // Sample rate
-        string sr_text = get_dropdown_text (sample_rate_combo);
-        string sr_num = sr_text.replace (" kHz", "");
-        int sr = int.parse (sr_num) * 1000;
         args += "-ar";
-        args += sr.to_string ();
+        args += snapshot.sample_rate_hz.to_string ();
 
         // Bitrate (not applicable for lossless FLAC)
         if (codec != AudioCodecName.FLAC) {
-            string br_text = get_dropdown_text (bitrate_combo);
-            string br = br_text.replace (" kbps", "") + "k";
             args += "-b:a";
-            args += br;
+            args += snapshot.bitrate_kbps.to_string () + "k";
         }
 
         // ── Codec-specific options ───────────────────────────────────────────
         if (codec == AudioCodecName.OPUS) {
-            if (opus_surround_fix.active) {
+            if (snapshot.opus_surround_fix) {
                 args += "-af";
                 args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
             }
             args += "-mapping_family";
             args += "1";
 
-            string vbr = get_dropdown_text (opus_vbr_combo);
+            string vbr = snapshot.opus_vbr_mode;
             if (vbr == "Constrained") {
                 args += "-vbr";
                 args += "constrained";
@@ -341,23 +377,22 @@ public class AudioSettings : Object {
                 args += "off";
             }
         } else if (codec == AudioCodecName.AAC) {
-            string q = get_dropdown_text (aac_quality_combo);
+            string q = snapshot.aac_quality;
             if (q != "Disabled") {
                 args += "-q:a";
                 args += q;
             }
         } else if (codec == AudioCodecName.MP3) {
-            string q = get_dropdown_text (mp3_vbr_combo);
+            string q = snapshot.mp3_vbr_quality;
             if (q != "Disabled") {
                 args += "-q:a";
                 args += q;
             }
         } else if (codec == AudioCodecName.FLAC) {
-            string cl = get_dropdown_text (flac_compression_combo);
             args += "-compression_level";
-            args += cl;
+            args += snapshot.flac_compression;
         } else if (codec == AudioCodecName.VORBIS) {
-            string q = get_dropdown_text (vorbis_quality_combo);
+            string q = snapshot.vorbis_quality;
             if (q != "Disabled") {
                 args += "-q:a";
                 args += q;

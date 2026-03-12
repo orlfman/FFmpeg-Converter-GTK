@@ -1,5 +1,3 @@
-using Gtk;
-
 // ═══════════════════════════════════════════════════════════════════════════════
 //  TrimBuilder — ICodecBuilder for the Trim tab's stream-copy mode
 //
@@ -14,11 +12,22 @@ using Gtk;
 
 public class TrimBuilder : Object, ICodecBuilder {
 
+    public Object? snapshot_settings (
+        GeneralSettingsSnapshot? general_settings = null) {
+        if (general_settings != null)
+            return general_settings;
+        return null;
+    }
+
     public string get_codec_name () {
         return "copy";
     }
 
-    public string[] get_codec_args () {
+    public string[] build_codec_args_from_snapshot (Object? snapshot) {
         return { "-c:v", "copy", "-c:a", "copy" };
+    }
+
+    public string[] get_codec_args () {
+        return build_codec_args_from_snapshot (snapshot_settings ());
     }
 }

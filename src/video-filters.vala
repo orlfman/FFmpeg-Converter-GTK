@@ -750,9 +750,20 @@ public class VideoFilters : Object {
     //  FILTER STRING BUILDERS
     // ═════════════════════════════════════════════════════════════════════════
 
+    public VideoFilterSettingsSnapshot snapshot_settings (bool ten_bit_selected) {
+        var snapshot = new VideoFilterSettingsSnapshot ();
+        snapshot.processing_filters = build_processing_filters (ten_bit_selected);
+        snapshot.hdr_filter = build_hdr_filter ();
+        return snapshot;
+    }
+
     // Returns processing filters (everything except HDR, which needs
     // special pipeline placement).  Called by FilterBuilder.
     public string[] get_processing_filters () {
+        return build_processing_filters (is_ten_bit_selected ());
+    }
+
+    private string[] build_processing_filters (bool ten_bit_selected) {
         string[] filters = {};
 
         // ── Restoration ──────────────────────────────────────────────────────
@@ -802,8 +813,7 @@ public class VideoFilters : Object {
                 // OpenCL GPU path: upload → process → download
                 // nlmeans_opencl supports limited formats — use the
                 // highest bit depth that OpenCL can handle
-                bool ten_bit = is_ten_bit_selected ();
-                string fmt = ten_bit ? "yuv420p10le" : "yuv420p";
+                string fmt = ten_bit_selected ? "yuv420p10le" : "yuv420p";
                 filters += "format=" + fmt;
                 filters += "hwupload";
                 filters += "nlmeans_opencl=h=%.1f:p=%d:r=%d".printf (s, p, r);
@@ -875,6 +885,10 @@ public class VideoFilters : Object {
     // Kept separate because it requires special placement in the pipeline
     // (after zscale linear conversion, before final output format).
     public string get_hdr_filter () {
+        return build_hdr_filter ();
+    }
+
+    private string build_hdr_filter () {
         if (!hdr_tonemap_check.active) return "";
 
         string desat = "0.35";

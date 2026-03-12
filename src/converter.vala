@@ -14,11 +14,7 @@ internal enum ConversionPhase {
 
 public class ConversionConfig : Object {
     // ── FFmpeg arguments ────────────────────────────────────────────────────
-    public string video_filters  { get; set; default = ""; }
-    public string audio_filters  { get; set; default = ""; }
-    public string[] codec_args;
-    public string[] audio_args;
-    public string codec_name     { get; set; default = ""; }
+    public EncodeProfileSnapshot profile { get; set; default = new EncodeProfileSnapshot (); }
     public string passlog_base   { get; set; default = ""; }
 
     // ── Seek / Duration ─────────────────────────────────────────────────────
@@ -26,10 +22,6 @@ public class ConversionConfig : Object {
     public string seek_timestamp { get; set; default = "00:00:00"; }
     public bool   time_enabled   { get; set; default = false; }
     public string time_timestamp { get; set; default = "00:00:00"; }
-
-    // ── Metadata ────────────────────────────────────────────────────────────
-    public bool preserve_metadata { get; set; default = false; }
-    public bool remove_chapters   { get; set; default = false; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -212,22 +204,8 @@ public class Converter : Object {
         passlog_base = plog;
         config.passlog_base = plog;
 
-        // Filters
-        config.video_filters = FilterBuilder.build_video_filter_chain (general_tab, false,
-                                                                       builder.get_codec_name ());
-        config.audio_filters = FilterBuilder.build_audio_filter_chain (general_tab);
-
-        // Codec
-        config.codec_name = builder.get_codec_name ();
-        // (#3) Builder already holds a typed tab reference — no parameter needed
-        string[] built_codec_args = builder.get_codec_args ();
-        foreach (string kf in codec_tab.resolve_keyframe_args (input_file, general_tab)) {
-            built_codec_args += kf;
-        }
-        config.codec_args = built_codec_args;
-
-        // Audio
-        config.audio_args = codec_tab.get_audio_args ();
+        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings ();
+        config.profile = CodecUtils.snapshot_encode_profile (builder, codec_tab, general_settings);
 
         // Seek / Duration
         config.seek_enabled = general_tab.is_seek_enabled ();
@@ -240,9 +218,6 @@ public class Converter : Object {
         }
 
         // Metadata
-        config.preserve_metadata = general_tab.is_preserve_metadata ();
-        config.remove_chapters   = general_tab.is_remove_chapters ();
-
         return config;
     }
 
@@ -324,7 +299,6 @@ public class Converter : Object {
 
         update_status (cancel_msg);
         progress_tracker.hide_cancelled ();
-        progress_tracker.stop_pulsing ();
 
         // Delegate to ProcessRunner (proper kill + SIGKILL escalation)
         process_runner.cancel ();
@@ -395,7 +369,6 @@ public class Converter : Object {
         current_phase = ConversionPhase.IDLE;
         state_mutex.unlock ();
 
-        progress_tracker.stop_pulsing ();
         progress_tracker.hide ();
         cleanup_passlog ();
     }

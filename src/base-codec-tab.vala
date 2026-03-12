@@ -9,7 +9,7 @@ using GLib;
 //  and Vp9Tab:
 //
 //   • ICodecTab implementations: get_container, get_two_pass, get_audio_args,
-//     resolve_keyframe_args
+//     snapshot_keyframe_settings
 //   • ISmartCodecTab implementations: get_auto_convert_active,
 //     get_strip_audio_active, get_audio_settings_ref
 //   • Smart Optimizer UI section (smart_row, auto_convert_row, strip_audio_row)
@@ -46,6 +46,11 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     private ulong general_tab_10bit_handler = 0;
     private ulong general_tab_8bit_fmt_handler = 0;
     private ulong general_tab_10bit_fmt_handler = 0;
+    private bool last_profile_sync_was_auto = true;
+    private bool auto_profile_8bit_active = false;
+    private string auto_profile_8bit_format = "8-bit 4:2:0";
+    private bool auto_profile_10bit_active = false;
+    private string auto_profile_10bit_format = "10-bit 4:2:0";
 
     public override void dispose () {
         disconnect_general_tab_signals ();
@@ -69,9 +74,29 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         return audio_settings.get_audio_args ();
     }
 
-    public string[] resolve_keyframe_args (string input_file, GeneralTab general_tab) {
-        return CodecUtils.resolve_custom_keyframe_args (
-            keyint_combo, custom_keyframe_combo, input_file, general_tab);
+    public CodecTabSettingsSnapshot snapshot_settings (
+        GeneralSettingsSnapshot? general_settings = null) {
+        var snapshot = new CodecTabSettingsSnapshot ();
+        string container = get_container ();
+        if (container.length > 0)
+            snapshot.container = container;
+        snapshot.keyframe_settings = snapshot_keyframe_settings (general_settings);
+        snapshot.audio_settings = audio_settings.snapshot_settings ();
+        return snapshot;
+    }
+
+    public KeyframeSettingsSnapshot snapshot_keyframe_settings (
+        GeneralSettingsSnapshot? general_settings) {
+        var snapshot = new KeyframeSettingsSnapshot ();
+        snapshot.keyint_text = CodecUtils.get_dropdown_text (keyint_combo);
+        snapshot.custom_mode = (int) custom_keyframe_combo.get_selected ();
+
+        if (general_settings != null) {
+            snapshot.frame_rate_text = general_settings.frame_rate_text;
+            snapshot.custom_frame_rate_text = general_settings.custom_frame_rate_text;
+        }
+
+        return snapshot;
     }
 
     // Each codec provides its own builder
@@ -146,6 +171,62 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
                                          string[] options,
                                          string fallback_option) {
         CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
+    }
+
+    protected bool was_last_profile_sync_auto () {
+        return last_profile_sync_was_auto;
+    }
+
+    protected void mark_last_profile_sync_auto (bool is_auto) {
+        last_profile_sync_was_auto = is_auto;
+    }
+
+    protected void capture_auto_profile_general_state () {
+        if (profile_general_tab == null) {
+            return;
+        }
+
+        auto_profile_8bit_active = profile_general_tab.eight_bit_check.active;
+        auto_profile_8bit_format = CodecUtils.get_dropdown_text (
+            profile_general_tab.eight_bit_format);
+        auto_profile_10bit_active = profile_general_tab.ten_bit_check.active;
+        auto_profile_10bit_format = CodecUtils.get_dropdown_text (
+            profile_general_tab.ten_bit_format);
+    }
+
+    protected void restore_auto_profile_general_state () {
+        if (profile_general_tab == null) {
+            return;
+        }
+
+        if (auto_profile_8bit_active) {
+            if (!profile_general_tab.eight_bit_check.active) {
+                profile_general_tab.eight_bit_check.set_active (true);
+            }
+            CodecUtils.set_dropdown_selection_by_text (
+                profile_general_tab.eight_bit_format,
+                auto_profile_8bit_format
+            );
+            return;
+        }
+
+        if (auto_profile_10bit_active) {
+            if (!profile_general_tab.ten_bit_check.active) {
+                profile_general_tab.ten_bit_check.set_active (true);
+            }
+            CodecUtils.set_dropdown_selection_by_text (
+                profile_general_tab.ten_bit_format,
+                auto_profile_10bit_format
+            );
+            return;
+        }
+
+        if (profile_general_tab.eight_bit_check.active) {
+            profile_general_tab.eight_bit_check.set_active (false);
+        }
+        if (profile_general_tab.ten_bit_check.active) {
+            profile_general_tab.ten_bit_check.set_active (false);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -161,7 +161,7 @@ public class ProgressTracker : Object {
         });
     }
 
-    public void stop_pulsing () {
+    private void stop_pulsing () {
         if (pulse_source != 0) {
             Source.remove (pulse_source);
             pulse_source = 0;

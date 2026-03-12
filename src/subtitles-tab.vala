@@ -1159,22 +1159,9 @@ public class SubtitlesTab : Box {
         }
 
         ICodecBuilder builder = codec_tab.get_codec_builder ();
-        string[] codec_args = builder.get_codec_args ();
-        if (general_tab != null) {
-            foreach (string kf in codec_tab.resolve_keyframe_args (
-                         current_input_file, general_tab)) {
-                codec_args += kf;
-            }
-        }
-
-        string[] audio_args = codec_tab.get_audio_args ();
-        string vf = (general_tab != null)
-            ? FilterBuilder.build_video_filter_chain (general_tab, false,
-                                                      builder.get_codec_name ()) : "";
-        string af = (general_tab != null)
-            ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
-        bool preserve_meta = (general_tab != null) ? general_tab.is_preserve_metadata () : false;
-        bool no_chapters    = (general_tab != null) ? general_tab.is_remove_chapters () : false;
+        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings ();
+        EncodeProfileSnapshot profile = CodecUtils.snapshot_encode_profile (
+            builder, codec_tab, general_settings);
 
         _is_busy = true;
         update_ui_state ();
@@ -1182,8 +1169,7 @@ public class SubtitlesTab : Box {
         runner.burn_in_subtitle (
             current_input_file, output,
             sub_stream_index, external_sub_path, is_bitmap,
-            codec_args, audio_args, vf, af,
-            preserve_meta, no_chapters
+            profile
         );
     }
 

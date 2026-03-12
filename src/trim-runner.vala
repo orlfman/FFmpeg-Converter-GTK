@@ -39,10 +39,8 @@ public class TrimRunner : Object {
     public int video_width { get; set; default = 0; }
     public int video_height { get; set; default = 0; }
 
-    // Re-encode delegates (only used when copy_mode == false)
-    public ICodecBuilder? reencode_builder { get; set; default = null; }
-    public ICodecTab? reencode_codec_tab { get; set; default = null; }
-    public GeneralTab? general_tab { get; set; default = null; }
+    // Re-encode snapshot (only used when some path needs encoding)
+    public EncodeProfileSnapshot? reencode_profile { get; set; default = null; }
 
     // UI references
     public Label? status_label { get; set; default = null; }
@@ -54,7 +52,7 @@ public class TrimRunner : Object {
 
     // ── Per-segment Smart Optimizer codec overrides ──────────────────────
     // When non-null, per_segment_codec_args[i] contains FFmpeg video codec
-    // arguments for segment i, overriding reencode_builder.  Built by
+    // arguments for segment i, overriding the shared re-encode profile. Built by
     // TrimTab's per-segment Smart Optimizer pipeline.
     private GenericArray<SegmentCodecArgs>? per_segment_codec_args = null;
 
@@ -63,6 +61,7 @@ public class TrimRunner : Object {
 
     // ── Progress tracker (fix #3: consistent with Converter) ────────────────
     private ProgressTracker? tracker = null;
+    private string[]? resolved_reencode_codec_args = null;
 
     private string last_output = "";
 
@@ -81,7 +80,7 @@ public class TrimRunner : Object {
     /**
      * Set per-segment Smart Optimizer codec overrides.
      * When set, segment i uses per_segment_codec_args[i] instead of
-     * the shared reencode_builder for its video codec arguments.
+     * the shared re-encode profile for its video codec arguments.
      */
     public void set_per_segment_codec_args (GenericArray<SegmentCodecArgs>? args) {
         per_segment_codec_args = args;
@@ -102,6 +101,8 @@ public class TrimRunner : Object {
             report_status ("⚠️ Please select an input file first!");
             return;
         }
+
+        resolved_reencode_codec_args = null;
 
         // Fix #3: Create a ProgressTracker for consistent progress behavior
         if (progress_bar != null) {
@@ -386,8 +387,7 @@ public class TrimRunner : Object {
         // ── Build filter_complex ─────────────────────────────────────────────
         var fc = new StringBuilder ();
 
-        string general_af = (general_tab != null)
-            ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
+        string general_af = get_general_audio_filters ();
 
         for (int i = 0; i < segments.length; i++) {
             var seg = segments[i];
@@ -449,16 +449,8 @@ public class TrimRunner : Object {
         }
 
         // ── Video codec args ─────────────────────────────────────────────────
-        if (reencode_builder != null && reencode_codec_tab != null) {
-            string[] codec_args = reencode_builder.get_codec_args ();
-
-            if (general_tab != null) {
-                foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
-                             input_file, general_tab)) {
-                    codec_args += kf;
-                }
-            }
-
+        string[] codec_args = get_reencode_codec_args ();
+        if (codec_args.length > 0) {
             foreach (string arg in codec_args) cmd += arg;
         } else {
             log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
@@ -479,15 +471,13 @@ public class TrimRunner : Object {
         }
 
         // ── Metadata ─────────────────────────────────────────────────────────
-        if (general_tab != null) {
-            if (general_tab.preserve_metadata.active) {
-                cmd += "-map_metadata";
-                cmd += "0";
-            }
-            if (general_tab.remove_chapters.active) {
-                cmd += "-map_chapters";
-                cmd += "-1";
-            }
+        if (should_preserve_metadata ()) {
+            cmd += "-map_metadata";
+            cmd += "0";
+        }
+        if (should_remove_chapters ()) {
+            cmd += "-map_chapters";
+            cmd += "-1";
         }
 
         cmd += "-progress";
@@ -502,8 +492,8 @@ public class TrimRunner : Object {
         string[] audio_args = get_audio_args ();
 
         if (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy") {
-            string container = (reencode_codec_tab != null)
-                ? reencode_codec_tab.get_container () : ContainerExt.MKV;
+            string container = (reencode_profile != null)
+                ? reencode_profile.container : ContainerExt.MKV;
 
             if (container == ContainerExt.WEBM) {
                 return { "-c:a", "libopus", "-b:a", "128k" };
@@ -591,16 +581,8 @@ public class TrimRunner : Object {
             }
 
             if (!used_smart_args) {
-                if (reencode_builder != null && reencode_codec_tab != null) {
-                    string[] codec_args = reencode_builder.get_codec_args ();
-
-                    if (general_tab != null) {
-                        foreach (string kf in reencode_codec_tab.resolve_keyframe_args (
-                                     input_file, general_tab)) {
-                            codec_args += kf;
-                        }
-                    }
-
+                string[] codec_args = get_reencode_codec_args ();
+                if (codec_args.length > 0) {
                     foreach (string arg in codec_args) cmd += arg;
                 } else {
                     log_line ("⚠️ No codec builder set — using fallback: libx264 crf 18 medium");
@@ -613,20 +595,17 @@ public class TrimRunner : Object {
                 }
             }
 
-            string af = (general_tab != null)
-                ? FilterBuilder.build_audio_filter_chain (general_tab) : "";
+            string af = get_general_audio_filters ();
             string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
-            if (general_tab != null) {
-                if (general_tab.preserve_metadata.active) {
-                    cmd += "-map_metadata";
-                    cmd += "0";
-                }
-                if (general_tab.remove_chapters.active) {
-                    cmd += "-map_chapters";
-                    cmd += "-1";
-                }
+            if (should_preserve_metadata ()) {
+                cmd += "-map_metadata";
+                cmd += "0";
+            }
+            if (should_remove_chapters ()) {
+                cmd += "-map_chapters";
+                cmd += "-1";
             }
         }
 
@@ -646,13 +625,11 @@ public class TrimRunner : Object {
             filters += "crop=" + c;
         }
 
-        if (general_tab != null) {
-            string codec_name = (reencode_builder != null) ? reencode_builder.get_codec_name () : "";
-            string general_vf = FilterBuilder.build_video_filter_chain (general_tab, seg.has_crop (),
-                                                                        codec_name);
-            if (general_vf.length > 0) {
-                filters += general_vf;
-            }
+        string general_vf = seg.has_crop ()
+            ? get_general_video_filters_skip_crop ()
+            : get_general_video_filters ();
+        if (general_vf.length > 0) {
+            filters += general_vf;
         }
 
         return string.joinv (",", filters);
@@ -750,8 +727,8 @@ public class TrimRunner : Object {
     }
 
     private string[] get_audio_args () {
-        if (reencode_codec_tab != null) {
-            return reencode_codec_tab.get_audio_args ();
+        if (reencode_profile != null && reencode_profile.audio_args.length > 0) {
+            return reencode_profile.audio_args;
         }
         return { "-c:a", "copy" };
     }
@@ -765,12 +742,51 @@ public class TrimRunner : Object {
             return input_ext;
         }
 
-        if (reencode_codec_tab != null) {
-            string container = reencode_codec_tab.get_container ();
-            if (container.length > 0) return "." + container;
+        if (reencode_profile != null && reencode_profile.container.length > 0) {
+            return "." + reencode_profile.container;
         }
 
         return ".mkv";
+    }
+
+    private string[] get_reencode_codec_args () {
+        if (reencode_profile != null) {
+            if (resolved_reencode_codec_args == null) {
+                resolved_reencode_codec_args = CodecUtils.build_codec_args_from_snapshot (
+                    reencode_profile, input_file);
+            }
+            return resolved_reencode_codec_args;
+        }
+        return {};
+    }
+
+    private string get_general_audio_filters () {
+        if (reencode_profile != null) {
+            return reencode_profile.audio_filters;
+        }
+        return "";
+    }
+
+    private string get_general_video_filters () {
+        if (reencode_profile != null) {
+            return reencode_profile.video_filters;
+        }
+        return "";
+    }
+
+    private string get_general_video_filters_skip_crop () {
+        if (reencode_profile != null) {
+            return reencode_profile.video_filters_skip_crop;
+        }
+        return "";
+    }
+
+    private bool should_preserve_metadata () {
+        return reencode_profile != null && reencode_profile.preserve_metadata;
+    }
+
+    private bool should_remove_chapters () {
+        return reencode_profile != null && reencode_profile.remove_chapters;
     }
 
     // ═════════════════════════════════════════════════════════════════════════

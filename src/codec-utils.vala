@@ -1,14 +1,83 @@
 using Gtk;
 
+public class VideoFilterSettingsSnapshot : Object {
+    public string[] processing_filters = {};
+    public string hdr_filter = "";
+}
+
+public class GeneralSettingsSnapshot : Object {
+    public string scale_mode = ScaleMode.ORIGINAL;
+    public string resolution_preset_value = "";
+    public string custom_resolution_value = "";
+    public double scale_width_multiplier = 1.0;
+    public double scale_height_multiplier = 1.0;
+    public string scale_algorithm = "lanczos";
+    public string scale_range = "input";
+    public string rotate = Rotation.NONE;
+    public bool crop_enabled = false;
+    public string crop_value = "";
+    public VideoFilterSettingsSnapshot video_filters { get; set; default = new VideoFilterSettingsSnapshot (); }
+    public string frame_rate_text = FrameRateLabel.ORIGINAL;
+    public string custom_frame_rate_text = "";
+    public bool video_speed_enabled = false;
+    public double video_speed_percent = 0.0;
+    public bool audio_speed_enabled = false;
+    public double audio_speed_percent = 0.0;
+    public bool eight_bit_selected = false;
+    public string eight_bit_format_text = "";
+    public bool ten_bit_selected = false;
+    public string ten_bit_format_text = "";
+    public string color_filter = "";
+    public bool normalize_audio = false;
+    public bool preserve_metadata = false;
+    public bool remove_chapters = false;
+}
+
+public class CodecTabSettingsSnapshot : Object {
+    public string container = ContainerExt.MKV;
+    public KeyframeSettingsSnapshot keyframe_settings { get; set; default = new KeyframeSettingsSnapshot (); }
+    public AudioSettingsSnapshot audio_settings { get; set; default = new AudioSettingsSnapshot (); }
+}
+
+public class KeyframeSettingsSnapshot : Object {
+    public string keyint_text = "";
+    public int custom_mode = 0;
+    public string frame_rate_text = "";
+    public string custom_frame_rate_text = "";
+}
+
+public class EncodeProfileSnapshot : Object {
+    public string codec_name = "";
+    public string container = ContainerExt.MKV;
+    public string[] codec_args = {};
+    public KeyframeSettingsSnapshot? keyframe_settings { get; set; default = null; }
+    public string[] audio_args = {};
+    public string video_filters = "";
+    public string video_filters_skip_crop = "";
+    public string audio_filters = "";
+    public bool preserve_metadata = false;
+    public bool remove_chapters = false;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  CodecUtils — Shared helpers for all codec tabs and builders
 //
-//  Eliminates duplicated get_dropdown_text() and resolve_keyframe_args() that
+//  Eliminates duplicated get_dropdown_text() and keyframe resolution that
 //  were previously copy-pasted identically across SvtAv1Tab, X264Tab, X265Tab,
 //  and Vp9Tab.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace CodecUtils {
+
+    public GeneralSettingsSnapshot? resolve_general_settings_snapshot (
+        GeneralSettingsSnapshot? general_settings,
+        GeneralTab? general_tab) {
+        if (general_settings != null)
+            return general_settings;
+        if (general_tab != null)
+            return general_tab.snapshot_settings ();
+        return null;
+    }
 
     public StringList build_dropdown_string_list (string[] options) {
         var model = new StringList (null);
@@ -59,6 +128,33 @@ namespace CodecUtils {
         }
     }
 
+    public void set_dropdown_selection_by_text (DropDown dropdown,
+                                                string value,
+                                                uint fallback_index = 0) {
+        var model = dropdown.get_model ();
+        if (model == null) {
+            return;
+        }
+
+        uint n_items = model.get_n_items ();
+        uint selected = fallback_index;
+        if (selected >= n_items) {
+            selected = 0;
+        }
+
+        for (uint i = 0; i < n_items; i++) {
+            var item = model.get_item (i) as StringObject;
+            if (item != null && item.get_string () == value) {
+                selected = i;
+                break;
+            }
+        }
+
+        if (dropdown.get_selected () != selected) {
+            dropdown.set_selected (selected);
+        }
+    }
+
     /**
      * Extract the display string from a StringList-backed DropDown.
      * Returns "" if the model or selected item is null.
@@ -90,7 +186,8 @@ namespace CodecUtils {
      * High422 and High444 preserve an explicit 10-bit selection when present;
      * otherwise they default to their 8-bit variants.
      */
-    public string get_x264_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+    public string get_x264_profile_pix_fmt_from_snapshot (string profile,
+                                                          GeneralSettingsSnapshot? general_settings) {
         switch (profile) {
             case "Baseline":
             case "Main":
@@ -99,16 +196,22 @@ namespace CodecUtils {
             case "High10":
                 return PixelFormat.YUV420P10LE;
             case "High422":
-                if (general_tab != null && general_tab.ten_bit_check.active)
+                if (general_settings != null && general_settings.ten_bit_selected)
                     return PixelFormat.YUV422P10LE;
                 return PixelFormat.YUV422P;
             case "High444":
-                if (general_tab != null && general_tab.ten_bit_check.active)
+                if (general_settings != null && general_settings.ten_bit_selected)
                     return PixelFormat.YUV444P10LE;
                 return PixelFormat.YUV444P;
             default:
                 return "";
         }
+    }
+
+    public string get_x264_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
+            null, general_tab);
+        return get_x264_profile_pix_fmt_from_snapshot (profile, general_settings);
     }
 
     /**
@@ -137,23 +240,24 @@ namespace CodecUtils {
      * Profiles 1 and 3 preserve an explicit 4:4:4 selection when present;
      * otherwise they default to their 4:2:2 variants.
      */
-    public string get_vp9_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+    public string get_vp9_profile_pix_fmt_from_snapshot (string profile,
+                                                         GeneralSettingsSnapshot? general_settings) {
         switch (profile) {
             case "Profile 0 (8-bit 4:2:0)":
                 return PixelFormat.YUV420P;
             case "Profile 1 (8-bit 4:2:2 / 4:4:4)":
-                if (general_tab != null
-                    && general_tab.eight_bit_check.active
-                    && get_dropdown_text (general_tab.eight_bit_format).contains (Chroma.C444)) {
+                if (general_settings != null
+                    && general_settings.eight_bit_selected
+                    && general_settings.eight_bit_format_text.contains (Chroma.C444)) {
                     return PixelFormat.YUV444P;
                 }
                 return PixelFormat.YUV422P;
             case "Profile 2 (10-bit 4:2:0)":
                 return PixelFormat.YUV420P10LE;
             case "Profile 3 (10-bit 4:2:2 / 4:4:4)":
-                if (general_tab != null
-                    && general_tab.ten_bit_check.active
-                    && get_dropdown_text (general_tab.ten_bit_format).contains (Chroma.C444)) {
+                if (general_settings != null
+                    && general_settings.ten_bit_selected
+                    && general_settings.ten_bit_format_text.contains (Chroma.C444)) {
                     return PixelFormat.YUV444P10LE;
                 }
                 return PixelFormat.YUV422P10LE;
@@ -162,48 +266,63 @@ namespace CodecUtils {
         }
     }
 
+    public string get_vp9_profile_pix_fmt (string profile, GeneralTab? general_tab) {
+        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
+            null, general_tab);
+        return get_vp9_profile_pix_fmt_from_snapshot (profile, general_settings);
+    }
+
     /**
      * Map the active General tab depth selection to the SVT-AV1 pixel format
      * this app/runtime supports. Returns "" when no output depth override is
      * currently selected.
      */
-    public string get_svt_av1_pix_fmt (GeneralTab? general_tab) {
-        if (general_tab == null)
+    public string get_svt_av1_pix_fmt_from_snapshot (GeneralSettingsSnapshot? general_settings) {
+        if (general_settings == null)
             return "";
 
-        if (general_tab.ten_bit_check.active)
+        if (general_settings.ten_bit_selected)
             return PixelFormat.YUV420P10LE;
 
-        if (general_tab.eight_bit_check.active)
+        if (general_settings.eight_bit_selected)
             return PixelFormat.YUV420P;
 
         return "";
     }
 
+    public string get_svt_av1_pix_fmt (GeneralTab? general_tab) {
+        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
+            null, general_tab);
+        return get_svt_av1_pix_fmt_from_snapshot (general_settings);
+    }
+
     /**
-     * Resolve the custom keyframe interval into FFmpeg arguments.
+     * Resolve custom keyframe settings from a previously captured snapshot.
      *
      * All four codec tabs share identical keyframe logic:
      *  • "Auto" or a numeric value → handled by the builder (returns {})
      *  • "Custom" → one of four strategies (2s/5s × fixed-time/fps-based)
      *
-     * @param keyint_combo            The Keyframe Interval dropdown
-     * @param custom_keyframe_combo   The Custom Mode dropdown
-     * @param input_file              Path to the source file (for fps probing)
-     * @param general_tab             General settings tab (for frame rate info)
+     * The snapshot must be captured on the main thread before starting worker
+     * processing. Any fallback ffprobe work happens here, off the UI thread.
+     *
+     * @param snapshot    Main-thread snapshot of keyframe + frame-rate state
+     * @param input_file  Path to the source file (for fps probing fallback)
      * @return FFmpeg keyframe arguments, or {} if the builder handles it
      */
-    public string[] resolve_custom_keyframe_args (DropDown keyint_combo,
-                                                   DropDown custom_keyframe_combo,
-                                                   string input_file,
-                                                   GeneralTab general_tab) {
-        string keyint = get_dropdown_text (keyint_combo);
+    public string[] resolve_custom_keyframe_args_from_snapshot (
+        KeyframeSettingsSnapshot? snapshot,
+        string input_file) {
+        if (snapshot == null)
+            return {};
+
+        string keyint = snapshot.keyint_text;
 
         // Not "Custom" — the builder emits -g for numeric values
         if (keyint != "Custom")
             return {};
 
-        int mode = (int) custom_keyframe_combo.get_selected ();
+        int mode = snapshot.custom_mode;
         // 0 = 2 s fixed, 1 = 2 s × fps, 2 = 5 s fixed, 3 = 5 s × fps
         int seconds = (mode == 0 || mode == 1) ? 2 : 5;
         bool use_fixed_time = (mode == 0 || mode == 2);
@@ -216,9 +335,9 @@ namespace CodecUtils {
         // ── fps-based: check General tab first, then probe ───────────────
         double fps = 0.0;
 
-        string fr_text = general_tab.get_frame_rate_text ();
+        string fr_text = snapshot.frame_rate_text;
         if (fr_text == FrameRateLabel.CUSTOM) {
-            string custom_fr = general_tab.get_custom_frame_rate_text ();
+            string custom_fr = snapshot.custom_frame_rate_text;
             if (custom_fr.length > 0)
                 fps = double.parse (custom_fr);
         } else if (fr_text != FrameRateLabel.ORIGINAL) {
@@ -237,6 +356,56 @@ namespace CodecUtils {
         if (gop < 10) gop = 240;
 
         return { "-g", gop.to_string () };
+    }
+
+    /**
+     * Snapshot all encode-relevant UI state on the main thread into a plain
+     * data object that background workers can consume safely.
+     */
+    public EncodeProfileSnapshot snapshot_encode_profile (
+        ICodecBuilder builder,
+        ICodecTab codec_tab,
+        GeneralSettingsSnapshot? general_settings) {
+        var snapshot = new EncodeProfileSnapshot ();
+        Object? builder_snapshot = builder.snapshot_settings (general_settings);
+        CodecTabSettingsSnapshot codec_settings = codec_tab.snapshot_settings (general_settings);
+
+        snapshot.codec_name = builder.get_codec_name ();
+        snapshot.codec_args = builder.build_codec_args_from_snapshot (builder_snapshot);
+        snapshot.keyframe_settings = codec_settings.keyframe_settings;
+        snapshot.audio_args = AudioSettings.build_audio_args_from_snapshot (
+            codec_settings.audio_settings);
+
+        string container = codec_settings.container;
+        if (container.length > 0) {
+            snapshot.container = container;
+        }
+
+        if (general_settings != null) {
+            snapshot.video_filters = FilterBuilder.build_video_filter_chain_from_snapshot (
+                general_settings, false, snapshot.codec_name);
+            snapshot.video_filters_skip_crop = FilterBuilder.build_video_filter_chain_from_snapshot (
+                general_settings, true, snapshot.codec_name);
+            snapshot.audio_filters = FilterBuilder.build_audio_filter_chain_from_snapshot (
+                general_settings);
+            snapshot.preserve_metadata = general_settings.preserve_metadata;
+            snapshot.remove_chapters = general_settings.remove_chapters;
+        }
+
+        return snapshot;
+    }
+
+    public string[] build_codec_args_from_snapshot (EncodeProfileSnapshot? snapshot,
+                                                    string input_file) {
+        if (snapshot == null)
+            return {};
+
+        string[] codec_args = snapshot.codec_args;
+        foreach (string arg in resolve_custom_keyframe_args_from_snapshot (
+                     snapshot.keyframe_settings, input_file)) {
+            codec_args += arg;
+        }
+        return codec_args;
     }
 
     /**

@@ -609,12 +609,7 @@ public class SubtitlesRunner : Object {
                                    int sub_stream_index,
                                    string? external_sub_path,
                                    bool is_bitmap,
-                                   owned string[] codec_args,
-                                   owned string[] audio_args,
-                                   string video_filters,
-                                   string audio_filters,
-                                   bool preserve_metadata,
-                                   bool remove_chapters) {
+                                   EncodeProfileSnapshot profile) {
         runner.reset ();
         report_status ("🔄 Burning in subtitles (full re-encode)…");
 
@@ -629,6 +624,8 @@ public class SubtitlesRunner : Object {
         new Thread<void> ("subtitle-burn-in", () => {
             // Probe duration for progress tracking
             double duration = probe_duration (input_file);
+            string[] resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
+                profile, input_file);
 
             if (tracker != null) {
                 if (duration > 0) {
@@ -651,7 +648,8 @@ public class SubtitlesRunner : Object {
             }
 
             // ── Determine audio state ────────────────────────────────────────
-            bool audio_disabled = (audio_args.length > 0 && audio_args[0] == "-an");
+            bool audio_disabled = (
+                profile.audio_args.length > 0 && profile.audio_args[0] == "-an");
 
             // ── Build subtitle filter + combine with general video filters ───
             if (is_bitmap) {
@@ -664,8 +662,8 @@ public class SubtitlesRunner : Object {
                 }
 
                 string fc;
-                if (video_filters.length > 0) {
-                    fc = overlay_src + "," + video_filters + "[outv]";
+                if (profile.video_filters.length > 0) {
+                    fc = overlay_src + "," + profile.video_filters + "[outv]";
                 } else {
                     fc = overlay_src + "[outv]";
                 }
@@ -689,8 +687,8 @@ public class SubtitlesRunner : Object {
                 }
 
                 string full_vf;
-                if (video_filters.length > 0) {
-                    full_vf = sub_filter + "," + video_filters;
+                if (profile.video_filters.length > 0) {
+                    full_vf = sub_filter + "," + profile.video_filters;
                 } else {
                     full_vf = sub_filter;
                 }
@@ -706,19 +704,20 @@ public class SubtitlesRunner : Object {
             }
 
             // ── Codec args ───────────────────────────────────────────────────
-            foreach (string arg in codec_args) cmd += arg;
+            foreach (string arg in resolved_codec_args) cmd += arg;
 
             // ── Audio args (merged with General-tab audio filters) ───────────
             if (audio_disabled) {
                 cmd += "-an";
             } else {
-                string[] merged = FilterBuilder.merge_audio_filters (audio_filters, audio_args);
+                string[] merged = FilterBuilder.merge_audio_filters (
+                    profile.audio_filters, profile.audio_args);
                 foreach (string a in merged) cmd += a;
             }
 
             // ── Metadata ─────────────────────────────────────────────────────
-            if (preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
-            if (remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
+            if (profile.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
+            if (profile.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
 
             cmd += "-progress";
             cmd += "pipe:2";

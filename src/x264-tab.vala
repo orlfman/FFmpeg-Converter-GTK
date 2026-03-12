@@ -274,7 +274,7 @@ public class X264Tab : BaseCodecTab {
 
     private void build_quality_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Quality & Tuning");
+        group.set_title ("Quality &amp; Tuning");
 
         // Tune
         var tune_row = new Adw.ActionRow ();
@@ -574,7 +574,7 @@ public class X264Tab : BaseCodecTab {
 
     private void build_threading_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Threading & Keyframes");
+        group.set_title ("Threading &amp; Keyframes");
 
         // Keyframe Interval
         var keyint_row = new Adw.ActionRow ();
@@ -756,6 +756,27 @@ public class X264Tab : BaseCodecTab {
             return;
         }
 
+        if (profile == "Auto") {
+            set_dropdown_options (profile_general_tab.eight_bit_format,
+                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
+                                  "8-bit 4:2:0");
+            set_dropdown_options (profile_general_tab.ten_bit_format,
+                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
+                                  "10-bit 4:2:0");
+            if (was_last_profile_sync_auto ()) {
+                capture_auto_profile_general_state ();
+            } else {
+                restore_auto_profile_general_state ();
+            }
+            mark_last_profile_sync_auto (true);
+            _applying_profile = false;
+            return;
+        }
+
+        if (was_last_profile_sync_auto ())
+            capture_auto_profile_general_state ();
+        mark_last_profile_sync_auto (false);
+
         if (profile == "Baseline" || profile == "Main" || profile == "High") {
             set_dropdown_options (profile_general_tab.eight_bit_format,
                                   { "8-bit 4:2:0" },
@@ -784,20 +805,6 @@ public class X264Tab : BaseCodecTab {
             set_dropdown_options (profile_general_tab.ten_bit_format,
                                   { "10-bit 4:4:4" },
                                   "10-bit 4:4:4");
-        } else {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
-                                  { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
-                                  "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
-                                  { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
-                                  "10-bit 4:2:0");
-            // Auto: reset bit-depth overrides back to off (let ffmpeg decide)
-            if (profile_general_tab.eight_bit_check.active)
-                profile_general_tab.eight_bit_check.set_active (false);
-            if (profile_general_tab.ten_bit_check.active)
-                profile_general_tab.ten_bit_check.set_active (false);
-            _applying_profile = false;
-            return;
         }
 
         bool has_8bit  = profile_general_tab.eight_bit_check.active;

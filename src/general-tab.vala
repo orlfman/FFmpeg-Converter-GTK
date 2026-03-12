@@ -726,6 +726,36 @@ public class GeneralTab : Box {
         return color_dialog != null ? color_dialog.get_filter_string () : "";
     }
 
+    public GeneralSettingsSnapshot snapshot_settings () {
+        var snapshot = new GeneralSettingsSnapshot ();
+        snapshot.scale_mode = get_scale_mode_text ();
+        snapshot.resolution_preset_value = get_resolution_preset_value ();
+        snapshot.custom_resolution_value = get_custom_resolution_value ();
+        snapshot.scale_width_multiplier = scale_width_x.get_value ();
+        snapshot.scale_height_multiplier = scale_height_x.get_value ();
+        snapshot.scale_algorithm = CodecUtils.get_dropdown_text (scale_algorithm);
+        snapshot.scale_range = CodecUtils.get_dropdown_text (scale_range);
+        snapshot.rotate = CodecUtils.get_dropdown_text (rotate_combo);
+        snapshot.crop_enabled = crop_check.active;
+        snapshot.crop_value = crop_value.text.strip ();
+        snapshot.frame_rate_text = get_frame_rate_text ();
+        snapshot.custom_frame_rate_text = get_custom_frame_rate_text ();
+        snapshot.video_speed_enabled = video_speed_check.active;
+        snapshot.video_speed_percent = video_speed.get_value ();
+        snapshot.audio_speed_enabled = audio_speed_check.active;
+        snapshot.audio_speed_percent = audio_speed.get_value ();
+        snapshot.eight_bit_selected = eight_bit_check.active;
+        snapshot.eight_bit_format_text = CodecUtils.get_dropdown_text (eight_bit_format);
+        snapshot.ten_bit_selected = ten_bit_check.active;
+        snapshot.ten_bit_format_text = CodecUtils.get_dropdown_text (ten_bit_format);
+        snapshot.color_filter = get_color_filter ();
+        snapshot.normalize_audio = normalize_audio.active;
+        snapshot.preserve_metadata = preserve_metadata.active;
+        snapshot.remove_chapters = remove_chapters.active;
+        snapshot.video_filters = video_filters.snapshot_settings (ten_bit_check.active);
+        return snapshot;
+    }
+
     private void update_scaling_visibility () {
         string mode = get_scale_mode_text ();
         bool is_resolution  = (mode == ScaleMode.RESOLUTION);
