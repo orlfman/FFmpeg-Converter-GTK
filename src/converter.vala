@@ -4,6 +4,7 @@ using Posix;
 
 internal enum ConversionPhase {
     IDLE,
+    ENCODING,
     PASS1,
     PASS2
 }
@@ -194,6 +195,12 @@ public class Converter : Object {
         }
 
         var runner = new ProcessRunner ();
+        runner.set_event_logger ((message) => {
+            Idle.add (() => {
+                console_tab.add_line (message);
+                return Source.REMOVE;
+            });
+        });
 
         if (!try_reserve_conversion_start (operation_id, runner)) {
             status_area.set_status ("⚠️ A conversion is already running!");
@@ -380,7 +387,9 @@ public class Converter : Object {
         }
 
         string cancel_msg = "⏹️ Cancelling conversion...";
-        if (phase == ConversionPhase.PASS1) {
+        if (phase == ConversionPhase.ENCODING) {
+            cancel_msg = "⏹️ Cancelling encoding...";
+        } else if (phase == ConversionPhase.PASS1) {
             cancel_msg = "⏹️ Cancelling Pass 1 (analysis)...";
         } else if (phase == ConversionPhase.PASS2) {
             cancel_msg = "⏹️ Cancelling Pass 2 (encoding)...";

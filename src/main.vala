@@ -828,6 +828,7 @@ public class MainWindow : Adw.ApplicationWindow {
         string? message = cancel_current_operation ();
         if (message != null) {
             status_area.set_status (message);
+            console_tab.add_line (message);
         }
     }
 

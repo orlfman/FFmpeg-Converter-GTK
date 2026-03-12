@@ -371,9 +371,15 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // Status line below the row
         var status_row = new Adw.ActionRow ();
-        status.set_halign (Align.START);
+        status_row.set_activatable (false);
+        status.set_halign (Align.FILL);
         status.set_valign (Align.CENTER);
-        status_row.add_suffix (status);
+        status.set_hexpand (true);
+        status.set_xalign (0.0f);
+        status.set_wrap (true);
+        status.set_wrap_mode (Pango.WrapMode.WORD_CHAR);
+        status.set_selectable (true);
+        status_row.add_prefix (status);
         group.add (status_row);
     }
 

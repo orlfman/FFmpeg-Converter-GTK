@@ -50,7 +50,7 @@ public class ConversionRunner {
             } else {
                 if (converter.is_cancelled (process_runner)) return;
 
-                converter.set_phase (ConversionPhase.PASS2);
+                converter.set_phase (ConversionPhase.ENCODING);
                 converter.update_status (
                     @"🔄 Encoding with $(config.profile.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);

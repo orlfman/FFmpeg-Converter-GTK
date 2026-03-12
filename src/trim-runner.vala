@@ -65,6 +65,15 @@ public class TrimRunner : Object {
 
     private string last_output = "";
 
+    private void log_runner_event (string text) {
+        if (console_tab != null) {
+            Idle.add (() => {
+                console_tab.add_line (text);
+                return Source.REMOVE;
+            });
+        }
+    }
+
     // ── Signal ──────────────────────────────────────────────────────────────
     public signal void export_done (string output_path);
     public signal void export_failed (string message);
@@ -91,8 +100,6 @@ public class TrimRunner : Object {
      * Safe to call from the main thread — starts its own Thread.
      */
     public void run () {
-        runner.reset ();
-
         if (segments.length == 0) {
             report_status ("⚠️ No segments defined — add at least one segment.");
             return;
@@ -101,6 +108,9 @@ public class TrimRunner : Object {
             report_status ("⚠️ Please select an input file first!");
             return;
         }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
 
         resolved_reencode_codec_args = null;
 

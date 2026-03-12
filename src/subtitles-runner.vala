@@ -89,6 +89,19 @@ public class SubtitlesRunner : Object {
     public signal void apply_done (uint64 operation_id, string output_path);
     public signal void apply_failed (uint64 operation_id, string message);
 
+    private static bool is_blank (string? value) {
+        return value == null || value.strip ().length == 0;
+    }
+
+    private void log_runner_event (string text) {
+        if (console_tab != null) {
+            Idle.add (() => {
+                console_tab.add_line (text);
+                return Source.REMOVE;
+            });
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  PROBE — Discover subtitle streams in an input file (synchronous)
     //
@@ -167,7 +180,21 @@ public class SubtitlesRunner : Object {
     public void extract_subtitle (string input_file,
                                   SubtitleStream stream,
                                   string output_path) {
-        runner.reset ();
+        if (is_blank (input_file)) {
+            report_error ("No input file selected for subtitle extraction.");
+            return;
+        }
+        if (stream.sub_index < 0) {
+            report_error ("Invalid subtitle track selection.");
+            return;
+        }
+        if (is_blank (output_path)) {
+            report_error ("No output path selected for subtitle extraction.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
         report_status (@"🔄 Extracting subtitle track #$(stream.sub_index)…");
 
         new Thread<void> ("subtitle-extract", () => {
@@ -278,7 +305,25 @@ public class SubtitlesRunner : Object {
                                        string output_dir,
                                        string base_name,
                                        GenericArray<SubtitleStream> streams) {
-        runner.reset ();
+        if (is_blank (input_file)) {
+            report_error ("No input file selected for subtitle extraction.");
+            return;
+        }
+        if (is_blank (output_dir)) {
+            report_error ("No output folder selected for subtitle extraction.");
+            return;
+        }
+        if (is_blank (base_name)) {
+            report_error ("Could not determine a base filename for subtitle extraction.");
+            return;
+        }
+        if (streams.length == 0) {
+            report_error ("No subtitle tracks available to extract.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
         report_status (@"🔄 Extracting all $(streams.length) subtitle tracks…");
 
         // Snapshot streams for background thread
@@ -370,7 +415,23 @@ public class SubtitlesRunner : Object {
                                  GenericArray<SubtitleStream> existing_streams,
                                  GenericArray<ExternalSubtitle> added_subs,
                                  GenericArray<int> final_order) {
-        runner.reset ();
+        if (is_blank (input_file)) {
+            report_apply_error (operation_id, "No input file selected for subtitle remux.");
+            return;
+        }
+        if (is_blank (output_path)) {
+            report_apply_error (operation_id, "No output path selected for subtitle remux.");
+            return;
+        }
+        for (int i = 0; i < added_subs.length; i++) {
+            if (is_blank (added_subs[i].file_path)) {
+                report_apply_error (operation_id, @"Added subtitle #$(i + 1) is missing a file path.");
+                return;
+            }
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
         report_status ("🔄 Applying subtitle changes…");
 
         // Create tracker on main thread (GTK widgets must not be touched from bg)
@@ -619,7 +680,21 @@ public class SubtitlesRunner : Object {
                                    string? external_sub_path,
                                    bool is_bitmap,
                                    EncodeProfileSnapshot profile) {
-        runner.reset ();
+        if (is_blank (input_file)) {
+            report_apply_error (operation_id, "No input file selected for subtitle burn-in.");
+            return;
+        }
+        if (is_blank (output_path)) {
+            report_apply_error (operation_id, "No output path selected for subtitle burn-in.");
+            return;
+        }
+        if (is_blank (external_sub_path) && sub_stream_index < 0) {
+            report_apply_error (operation_id, "No subtitle track selected for burn-in.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
         report_status ("🔄 Burning in subtitles (full re-encode)…");
 
         // Create tracker on main thread (GTK widgets must not be touched from bg)
