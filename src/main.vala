@@ -3,18 +3,18 @@ using Adw;
 using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  ActiveOperation — Tracks which operation is running for clean cancellation
+//  ActiveOperation — Tracks the primary operation MainWindow launched
 //
-//  Instead of interrogating three different objects (subtitles_tab.is_busy,
-//  trim_tab.is_exporting, converter) to figure out what to cancel, we
-//  explicitly track which operation was started.  This eliminates the implicit
-//  priority chain and ensures cancel always dispatches to the right target.
+//  Conversion, trim, subtitle extract, and subtitle apply runs are tracked
+//  explicitly so cancel dispatch and close protection stay consistent across
+//  all long-running operations.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 private enum ActiveOperation {
     IDLE,
     CONVERTING,
     TRIMMING,
+    SUBTITLE_EXTRACT,
     SUBTITLE_APPLY
 }
 
@@ -103,7 +103,7 @@ public class MainWindow : Adw.ApplicationWindow {
         // tabs while the optimizer was analyzing).  If another operation is
         // still running, queue the codec so conversion starts when idle.
         controller.auto_convert_requested.connect ((codec) => {
-            if (current_operation == ActiveOperation.IDLE) {
+            if (can_start_primary_operation ()) {
                 view_stack.set_visible_child_name (codec);
                 on_convert_clicked ();
             } else {
@@ -148,6 +148,45 @@ public class MainWindow : Adw.ApplicationWindow {
         trim_tab.trim_cancelled.connect ((operation_id) => {
             complete_tracked_operation_with_close (
                 ActiveOperation.TRIMMING, operation_id, true);
+        });
+        subtitles_tab.subtitle_extract_requested.connect ((input_file, stream, output_path) => {
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, out operation_id)) {
+                status_area.set_status (
+                    @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
+                );
+                return;
+            }
+
+            start_subtitle_extract (operation_id, input_file, stream, output_path);
+        });
+        subtitles_tab.subtitle_extract_all_requested.connect ((input_file, output_dir, base_name) => {
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, out operation_id)) {
+                status_area.set_status (
+                    @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
+                );
+                return;
+            }
+
+            start_subtitle_extract_all (operation_id, input_file, output_dir, base_name);
+        });
+        subtitles_tab.subtitle_extract_succeeded.connect ((operation_id, output_path) => {
+            if (!complete_tracked_operation (
+                    ActiveOperation.SUBTITLE_EXTRACT, operation_id, true)) {
+                return;
+            }
+
+            post_success_toast ("Subtitles extracted", output_path);
+            maybe_finish_close_after_cancellation ();
+        });
+        subtitles_tab.subtitle_extract_failed.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.SUBTITLE_EXTRACT, operation_id, true);
+        });
+        subtitles_tab.subtitle_extract_cancelled.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.SUBTITLE_EXTRACT, operation_id, true);
         });
         subtitles_tab.subtitle_apply_succeeded.connect ((operation_id, output_path) => {
             if (!complete_tracked_operation (
@@ -314,16 +353,21 @@ public class MainWindow : Adw.ApplicationWindow {
         string? page = view_stack.visible_child_name;
         bool active = page == "svt-av1" || page == "x265" || page == "x264"
                    || page == "vp9"     || page == "trim" || page == "subtitles";
-        convert_button.set_sensitive (active && current_operation == ActiveOperation.IDLE);
+        convert_button.set_sensitive (active && can_start_primary_operation ());
+    }
+
+    private bool can_start_primary_operation () {
+        return current_operation == ActiveOperation.IDLE;
     }
 
     private string get_operation_label (ActiveOperation operation,
                                         string idle_fallback = "operation") {
         switch (operation) {
-            case ActiveOperation.CONVERTING:     return "conversion";
-            case ActiveOperation.TRIMMING:       return "export";
-            case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
-            default:                             return idle_fallback;
+        case ActiveOperation.CONVERTING:     return "conversion";
+        case ActiveOperation.TRIMMING:       return "export";
+        case ActiveOperation.SUBTITLE_EXTRACT: return "subtitle extraction";
+        case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
+        default:                             return idle_fallback;
         }
     }
 
@@ -423,9 +467,10 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_convert_clicked () {
-        if (current_operation != ActiveOperation.IDLE) {
+        if (!can_start_primary_operation ()) {
             status_area.set_status (
-                @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
+                @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). " +
+                "Cancel it before starting another one."
             );
             return;
         }
@@ -611,6 +656,39 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     // ── Subtitles path ───────────────────────────────────────────────────────
+
+    private void start_subtitle_extract (uint64 operation_id,
+                                         string input_file,
+                                         SubtitleStream stream,
+                                         string output_path) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, operation_id)) {
+            return;
+        }
+
+        if (!subtitles_tab.start_extract (operation_id, input_file, stream, output_path)) {
+            release_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.SUBTITLE_EXTRACT, operation_id);
+    }
+
+    private void start_subtitle_extract_all (uint64 operation_id,
+                                             string input_file,
+                                             string output_dir,
+                                             string base_name) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, operation_id)) {
+            return;
+        }
+
+        if (!subtitles_tab.start_extract_all (
+                operation_id, input_file, output_dir, base_name)) {
+            release_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.SUBTITLE_EXTRACT, operation_id);
+    }
 
     private void start_subtitle_apply (uint64 operation_id) {
         if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
@@ -982,6 +1060,7 @@ public class MainWindow : Adw.ApplicationWindow {
         current_operation = operation;
         active_operation_id = operation_id;
         operation_launch_pending = true;
+        update_subtitle_operation_lock ();
         update_cancel_button_state ();
         update_convert_sensitivity ();
         return true;
@@ -1014,6 +1093,7 @@ public class MainWindow : Adw.ApplicationWindow {
         current_operation = operation;
         active_operation_id = operation_id;
         operation_launch_pending = false;
+        update_subtitle_operation_lock ();
         update_cancel_button_state ();
         update_convert_sensitivity ();
     }
@@ -1038,6 +1118,7 @@ public class MainWindow : Adw.ApplicationWindow {
         current_operation = ActiveOperation.IDLE;
         active_operation_id = 0;
         operation_launch_pending = false;
+        update_subtitle_operation_lock ();
         update_cancel_button_state ();
         update_convert_sensitivity ();
     }
@@ -1057,28 +1138,33 @@ public class MainWindow : Adw.ApplicationWindow {
 
     private void update_cancel_button_state () {
         cancel_button.set_sensitive (
-            smart_optimizer_active || current_operation != ActiveOperation.IDLE
+            smart_optimizer_active
+            || current_operation != ActiveOperation.IDLE
         );
+    }
+
+    private void update_subtitle_operation_lock () {
+        subtitles_tab.set_operation_locked (current_operation != ActiveOperation.IDLE);
     }
 
     /** If Smart Optimizer queued an auto-convert while busy, start it now. */
     private void drain_pending_auto_convert () {
         string? codec = pending_auto_convert_codec;
         if (codec == null) return;
-        pending_auto_convert_codec = null;
 
-        if (current_operation == ActiveOperation.IDLE) {
-            view_stack.set_visible_child_name (codec);
-            on_convert_clicked ();
+        if (!can_start_primary_operation ()) {
+            return;
         }
+
+        pending_auto_convert_codec = null;
+        view_stack.set_visible_child_name (codec);
+        on_convert_clicked ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  USER ACTIONS — Cancel
     //
-    //  Dispatches to the correct cancel target based on the tracked
-    //  operation, instead of probing multiple objects to guess which
-    //  one is active.
+    //  Dispatches to the correct cancel target for the tracked operation.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_cancel_clicked () {
@@ -1103,6 +1189,7 @@ public class MainWindow : Adw.ApplicationWindow {
             message = @"⏹️ Pending $(get_operation_label (current_operation)) cancelled by user.";
         } else {
             switch (current_operation) {
+                case ActiveOperation.SUBTITLE_EXTRACT:
                 case ActiveOperation.SUBTITLE_APPLY:
                     subtitles_tab.cancel_operation ();
                     message = "⏹️ Subtitle operation cancelled by user.";
@@ -1167,8 +1254,7 @@ public class MainWindow : Adw.ApplicationWindow {
 
         string operation_label = get_operation_label (
             current_operation,
-            smart_optimizer_active ? "optimization" : "operation"
-        );
+            smart_optimizer_active ? "optimization" : "operation");
 
         var dialog = new Adw.AlertDialog (
             "Operation in Progress",

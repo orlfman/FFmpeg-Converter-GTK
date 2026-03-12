@@ -10,6 +10,15 @@ public class SubtitlesTab : Box {
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void subtitle_done (string output_path);
+    public signal void subtitle_extract_requested (string input_file,
+                                                   SubtitleStream stream,
+                                                   string output_path);
+    public signal void subtitle_extract_all_requested (string input_file,
+                                                       string output_dir,
+                                                       string base_name);
+    public signal void subtitle_extract_succeeded (uint64 operation_id, string output_path);
+    public signal void subtitle_extract_failed (uint64 operation_id);
+    public signal void subtitle_extract_cancelled (uint64 operation_id);
     public signal void subtitle_apply_succeeded (uint64 operation_id, string output_path);
     public signal void subtitle_apply_failed (uint64 operation_id);
     public signal void subtitle_apply_cancelled (uint64 operation_id);
@@ -33,6 +42,8 @@ public class SubtitlesTab : Box {
     private GenericArray<SubtitleStream>   detected_streams = new GenericArray<SubtitleStream> ();
     private GenericArray<ExternalSubtitle> added_subtitles  = new GenericArray<ExternalSubtitle> ();
     private bool _is_busy = false;
+    private bool operation_locked = false;
+    private uint64 active_extract_operation_id = 0;
     private uint64 active_apply_operation_id = 0;
     private bool _updating_defaults = false;
 
@@ -667,14 +678,31 @@ public class SubtitlesTab : Box {
         });
 
         runner.operation_done.connect ((path) => {
-            _is_busy = false;
-            update_ui_state ();
+            uint64 operation_id = active_extract_operation_id;
+            active_extract_operation_id = 0;
+            set_busy (false);
             subtitle_done (path);
+            if (operation_id != 0) {
+                subtitle_extract_succeeded (operation_id, path);
+            }
         });
 
         runner.operation_failed.connect ((msg) => {
-            _is_busy = false;
-            update_ui_state ();
+            uint64 operation_id = active_extract_operation_id;
+            active_extract_operation_id = 0;
+            set_busy (false);
+            if (operation_id != 0) {
+                subtitle_extract_failed (operation_id);
+            }
+        });
+
+        runner.operation_cancelled.connect (() => {
+            uint64 operation_id = active_extract_operation_id;
+            active_extract_operation_id = 0;
+            set_busy (false);
+            if (operation_id != 0) {
+                subtitle_extract_cancelled (operation_id);
+            }
         });
 
         runner.apply_done.connect ((operation_id, path) => {
@@ -682,9 +710,8 @@ public class SubtitlesTab : Box {
                 return;
             }
 
-            _is_busy = false;
             active_apply_operation_id = 0;
-            update_ui_state ();
+            set_busy (false);
             subtitle_done (path);
             subtitle_apply_succeeded (operation_id, path);
         });
@@ -694,9 +721,8 @@ public class SubtitlesTab : Box {
                 return;
             }
 
-            _is_busy = false;
             active_apply_operation_id = 0;
-            update_ui_state ();
+            set_busy (false);
             subtitle_apply_failed (operation_id);
         });
 
@@ -705,11 +731,19 @@ public class SubtitlesTab : Box {
                 return;
             }
 
-            _is_busy = false;
             active_apply_operation_id = 0;
-            update_ui_state ();
+            set_busy (false);
             subtitle_apply_cancelled (operation_id);
         });
+    }
+
+    private void set_busy (bool busy) {
+        if (_is_busy == busy) {
+            return;
+        }
+
+        _is_busy = busy;
+        update_ui_state ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -759,7 +793,7 @@ public class SubtitlesTab : Box {
     }
 
     public void cancel_operation () {
-        if (active_apply_operation_id == 0) {
+        if (!_is_busy && active_extract_operation_id == 0 && active_apply_operation_id == 0) {
             return;
         }
         runner.cancel ();
@@ -767,6 +801,15 @@ public class SubtitlesTab : Box {
 
     public bool is_busy () {
         return _is_busy;
+    }
+
+    public void set_operation_locked (bool locked) {
+        if (operation_locked == locked) {
+            return;
+        }
+
+        operation_locked = locked;
+        update_ui_state ();
     }
 
     public void set_ui_refs (StatusArea status_area, ConsoleTab console) {
@@ -834,10 +877,12 @@ public class SubtitlesTab : Box {
             try {
                 var file = dialog.save.end (res);
                 if (file != null) {
-                    string path = file.get_path ();
-                    _is_busy = true;
-                    update_ui_state ();
-                    runner.extract_subtitle (current_input_file, stream, path);
+                    string? path = file.get_path ();
+                    if (path == null || path.length == 0) {
+                        return;
+                    }
+
+                    subtitle_extract_requested (current_input_file, stream, path);
                 }
             } catch (Error e) {
                 // User cancelled
@@ -894,10 +939,7 @@ public class SubtitlesTab : Box {
                 int dot = basename.last_index_of_char ('.');
                 string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
 
-                _is_busy = true;
-                update_ui_state ();
-                runner.extract_all_subtitles (
-                    current_input_file, dir_path, name_no_ext, detected_streams);
+                subtitle_extract_all_requested (current_input_file, dir_path, name_no_ext);
             } catch (Error e) {
                 // User cancelled
             }
@@ -1099,9 +1141,47 @@ public class SubtitlesTab : Box {
         return Path.build_filename (dir, name + suffix + ext);
     }
 
+    public bool start_extract (uint64 operation_id,
+                               string input_file,
+                               SubtitleStream stream,
+                               string output_path) {
+        if (current_input_file == "" || current_input_file != input_file) {
+            report_local_warning ("The input file changed before subtitle extraction started.");
+            return false;
+        }
+        if (_is_busy || active_extract_operation_id != 0 || active_apply_operation_id != 0) {
+            return false;
+        }
+
+        active_extract_operation_id = operation_id;
+        set_busy (true);
+        runner.extract_subtitle (input_file, stream, output_path);
+        return true;
+    }
+
+    public bool start_extract_all (uint64 operation_id,
+                                   string input_file,
+                                   string output_dir,
+                                   string base_name) {
+        if (current_input_file == "" || current_input_file != input_file) {
+            report_local_warning ("The input file changed before subtitle extraction started.");
+            return false;
+        }
+        if (_is_busy || active_extract_operation_id != 0 || active_apply_operation_id != 0) {
+            return false;
+        }
+
+        active_extract_operation_id = operation_id;
+        set_busy (true);
+        runner.extract_all_subtitles (input_file, output_dir, base_name, detected_streams);
+        return true;
+    }
+
     public bool start_apply (uint64 operation_id, bool allow_overwrite = false) {
         if (current_input_file == "") return false;
-        if (_is_busy || active_apply_operation_id != 0) return false;
+        if (_is_busy || active_extract_operation_id != 0 || active_apply_operation_id != 0) {
+            return false;
+        }
 
         bool started;
         if (is_burn_in_mode ()) {
@@ -1144,8 +1224,7 @@ public class SubtitlesTab : Box {
         for (int i = 0; i < added_subtitles.length; i++)
             order.add (detected_streams.length + i);
 
-        _is_busy = true;
-        update_ui_state ();
+        set_busy (true);
         runner.remux_subtitles (
             operation_id, current_input_file, output, detected_streams, added_subtitles, order
         );
@@ -1213,8 +1292,7 @@ public class SubtitlesTab : Box {
         EncodeProfileSnapshot profile = CodecUtils.snapshot_encode_profile (
             builder, codec_tab, general_settings);
 
-        _is_busy = true;
-        update_ui_state ();
+        set_busy (true);
 
         runner.burn_in_subtitle (
             operation_id,
@@ -1249,6 +1327,12 @@ public class SubtitlesTab : Box {
     private void report_burn_in_error (string message) {
         if (_status_label != null)
             _status_label.set_text (@"⚠️ $message");
+    }
+
+    private void report_local_warning (string message) {
+        if (_status_label != null) {
+            _status_label.set_text (@"⚠️ $message");
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1416,8 +1500,8 @@ public class SubtitlesTab : Box {
         bool has_file    = (current_input_file.length > 0);
         bool has_streams = (detected_streams.length > 0);
 
-        extract_button.set_sensitive (has_file && has_streams && !_is_busy);
-        extract_all_button.set_sensitive (has_file && has_streams && !_is_busy);
+        extract_button.set_sensitive (has_file && has_streams && !_is_busy && !operation_locked);
+        extract_all_button.set_sensitive (has_file && has_streams && !_is_busy && !operation_locked);
 
         // Burn-in widgets
         burn_codec_combo.set_sensitive (!_is_busy);

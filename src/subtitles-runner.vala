@@ -86,6 +86,7 @@ public class SubtitlesRunner : Object {
     // Signals
     public signal void operation_done (string output_path);
     public signal void operation_failed (string message);
+    public signal void operation_cancelled ();
     public signal void apply_done (uint64 operation_id, string output_path);
     public signal void apply_failed (uint64 operation_id, string message);
     public signal void apply_cancelled (uint64 operation_id);
@@ -215,7 +216,7 @@ public class SubtitlesRunner : Object {
             });
 
             if (runner.is_cancelled ()) {
-                report_status ("⏹️ Extraction cancelled.");
+                report_operation_cancelled ("⏹️ Extraction cancelled.");
                 return;
             }
 
@@ -250,6 +251,11 @@ public class SubtitlesRunner : Object {
                 exit = runner.execute (retry_cmd, (line) => {
                     log_line (line);
                 });
+
+                if (runner.is_cancelled ()) {
+                    report_operation_cancelled ("⏹️ Extraction cancelled.");
+                    return;
+                }
             }
 
             string result_path = output_path;
@@ -338,7 +344,8 @@ public class SubtitlesRunner : Object {
 
             for (int i = 0; i < snap.length; i++) {
                 if (runner.is_cancelled ()) {
-                    report_status (@"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                    report_operation_cancelled (
+                        @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
                     return;
                 }
 
@@ -366,6 +373,12 @@ public class SubtitlesRunner : Object {
                     log_line (line);
                 });
 
+                if (runner.is_cancelled ()) {
+                    report_operation_cancelled (
+                        @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                    return;
+                }
+
                 if (exit == 0) {
                     success++;
                 } else {
@@ -375,7 +388,8 @@ public class SubtitlesRunner : Object {
             }
 
             if (runner.is_cancelled ()) {
-                report_status (@"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                report_operation_cancelled (
+                    @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
                 return;
             }
 
@@ -921,6 +935,15 @@ public class SubtitlesRunner : Object {
             if (status_label != null)
                 status_label.set_text (@"❌ $err\nCheck the console for details.");
             operation_failed (err);
+            return Source.REMOVE;
+        });
+    }
+
+    private void report_operation_cancelled (string message) {
+        report_status (message);
+
+        Idle.add (() => {
+            operation_cancelled ();
             return Source.REMOVE;
         });
     }
