@@ -87,15 +87,16 @@
 //     targeting ≤25 MB — every byte counts at imageboard sizes.
 //
 // v7 improvements:
-//   - Source-aware two-pass: when target_mb < source file size, two-pass
-//     bitrate targeting is forced regardless of tier. CRF mode cannot
-//     reliably hold a reduction target on its own, while bitrate targeting
-//     gives the encoder a direct size budget to follow.
-//   - CRF overshoot detection: if the CRF estimate exceeds the target by
-//     >5%, two-pass is forced even when the source size is unknown.
+//   - Source-aware targeting policy: TINY/SMALL treat reduction targets as
+//     strict size ceilings and force two-pass. MEDIUM+ may still use CRF
+//     when the prediction is confident and lands inside the tier's target
+//     band, prioritizing quality when the estimate is credible.
+//   - Tier-aware overshoot detection: strict tiers force two-pass on even
+//     modest CRF overshoot, while MEDIUM+ fall back to two-pass whenever the
+//     estimate lands outside the tier's acceptable target band.
 //   - XLARGE tier no longer unconditionally skips two-pass. It now checks
-//     confidence (threshold 0.60) and defers to the reduction/overshoot
-//     checks above. Prevents 400MB→1.2GB blowups on large targets.
+//     confidence (threshold 0.60) plus the target-band gates above, which
+//     prevents large-target blowups while still allowing confident CRF picks.
 //   - Source file size probed from ffprobe format.size with stat fallback,
 //     stored in SmartOptimizerVideoInfo.file_size_bytes.
 //   - Duration-scaled sampling: videos >10 min now sample up to 8 segments
@@ -104,7 +105,8 @@
 //   - Source bitrate sanity check: computes the source's effective video
 //     bitrate and compares it against the CRF estimate. If the model
 //     predicts a larger output than the source while the target is smaller,
-//     confidence is reduced to force two-pass.
+//     confidence is reduced so the tier policy is more likely to choose
+//     two-pass.
 //   - Multi-segment verification: verification encode now uses 2–3 spread
 //     positions (quartiles) instead of a single middle segment, catching
 //     content variability in the preset factor measurement.
@@ -933,9 +935,11 @@ public class SmartOptimizer : GLib.Object {
         int target_video_kbps = available_video_kbps;
         bool recommend_two_pass;
 
-        // Check whether the user is asking for a file smaller than the
-        // source. Tiny/Small still treat that as a hard cap; Medium+
-        // allow CRF when the estimate is confident and lands near target.
+        // Track whether the requested output is meaningfully smaller than the
+        // source. This feeds user-facing notes and reduction messaging.
+        // TINY/SMALL still force two-pass via strict_targeting below; for
+        // MEDIUM+ a reduction target alone does not override a confident CRF
+        // estimate that lands inside the tier's target band.
         double source_size_mb = (double) info.file_size_bytes / (1024.0 * 1024.0);
         double comparison_source_size_mb = source_size_mb;
         double reduction_confidence = 1.0;
@@ -951,7 +955,7 @@ public class SmartOptimizer : GLib.Object {
         double reduction_threshold = trim_active
             ? (0.85 + 0.10 * reduction_confidence)
             : 0.98;
-        bool is_reduction = (comparison_source_size_mb > 0)
+        bool target_is_size_reduction = (comparison_source_size_mb > 0)
             && ((double) target_mb < comparison_source_size_mb * reduction_threshold);
 
         bool strict_targeting = tier_uses_strict_targeting (tier);
@@ -960,8 +964,8 @@ public class SmartOptimizer : GLib.Object {
             : tier_target_tolerance_kb (tier, target_total_kb);
         bool within_target_band = Math.fabs (estimated_total_kb - target_total_kb) <= target_tolerance_kb;
 
-        // For Tiny/Small, even modest overshoot is unacceptable.
-        // For Medium+, treat the target as a symmetric landing zone around
+        // For TINY/SMALL, even modest overshoot is unacceptable.
+        // For MEDIUM+, treat the target as a symmetric landing zone around
         // the requested size, with some leniency above or below target.
         bool crf_overshoots = estimated_total_kb > (target_total_kb + target_tolerance_kb);
 
@@ -984,9 +988,10 @@ public class SmartOptimizer : GLib.Object {
                     break;
             }
 
-            // For Medium+, allow CRF only when the estimate is both
+            // For MEDIUM+, allow CRF only when the estimate is both
             // confident enough for the tier and lands inside the symmetric
-            // target band around the requested size.
+            // target band around the requested size. Reduction targets still
+            // go through this same gate unless the tier is strict.
             if (!recommend_two_pass) {
                 if (crf_overshoots) {
                     recommend_two_pass = true;
@@ -1055,7 +1060,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("\n── Two-pass mode (size-targeted) ──\n");
             notes.append ("  Target bitrate: %d kbps / Preset: %s\n"
                 .printf (target_video_kbps, preset_label));
-            if (is_reduction) {
+            if (target_is_size_reduction) {
                 if (!strict_targeting && !within_target_band) {
                     notes.append ("  CRF estimate (~%d KB) falls outside the ±%.0f MB target band for this tier.\n"
                         .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
