@@ -95,8 +95,12 @@ namespace FilterBuilder {
             double sw = snapshot.scale_width_multiplier;
             double sh = snapshot.scale_height_multiplier;
             if (!fp_equal (sw, 1.0) || !fp_equal (sh, 1.0)) {
-                scale_w = fp_equal (sw, 1.0) ? "iw" : @"trunc(iw*%.6f/2)*2".printf (sw);
-                scale_h = fp_equal (sh, 1.0) ? "ih" : @"trunc(ih*%.6f/2)*2".printf (sh);
+                scale_w = fp_equal (sw, 1.0)
+                    ? "iw"
+                    : "trunc(iw*" + ConversionUtils.format_ffmpeg_double (sw, "%.6f") + "/2)*2";
+                scale_h = fp_equal (sh, 1.0)
+                    ? "ih"
+                    : "trunc(ih*" + ConversionUtils.format_ffmpeg_double (sh, "%.6f") + "/2)*2";
             }
         }
 
@@ -124,7 +128,7 @@ namespace FilterBuilder {
             if (!fp_equal (pct, 0.0)) {
                 double mult = 1.0 + pct / 100.0;
                 double factor = 1.0 / mult;
-                filters += "setpts=%.6f*PTS".printf (factor);
+                filters += "setpts=" + ConversionUtils.format_ffmpeg_double (factor, "%.6f") + "*PTS";
             }
         }
 
@@ -200,7 +204,7 @@ namespace FilterBuilder {
         }
 
         if (!fp_equal (t, 1.0)) {
-            parts += "atempo=%.6f".printf (t);
+            parts += "atempo=" + ConversionUtils.format_ffmpeg_double (t, "%.6f");
         }
 
         return string.joinv (",", parts);

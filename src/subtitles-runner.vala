@@ -86,6 +86,8 @@ public class SubtitlesRunner : Object {
     // Signals
     public signal void operation_done (string output_path);
     public signal void operation_failed (string message);
+    public signal void apply_done (uint64 operation_id, string output_path);
+    public signal void apply_failed (uint64 operation_id, string message);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  PROBE — Discover subtitle streams in an input file (synchronous)
@@ -362,7 +364,8 @@ public class SubtitlesRunner : Object {
     //  modified according to the user's configuration.
     // ═════════════════════════════════════════════════════════════════════════
 
-    public void remux_subtitles (string input_file,
+    public void remux_subtitles (uint64 operation_id,
+                                 string input_file,
                                  string output_path,
                                  GenericArray<SubtitleStream> existing_streams,
                                  GenericArray<ExternalSubtitle> added_subs,
@@ -392,11 +395,15 @@ public class SubtitlesRunner : Object {
             snap_order.add (final_order[i]);
 
         new Thread<void> ("subtitle-remux", () => {
-            run_remux (input_file, output_path, snap_existing, snap_added, snap_order, tracker);
+            run_remux (
+                operation_id,
+                input_file, output_path, snap_existing, snap_added, snap_order, tracker
+            );
         });
     }
 
-    private void run_remux (string input_file,
+    private void run_remux (uint64 operation_id,
+                            string input_file,
                             string output_path,
                             GenericArray<SubtitleStream> existing,
                             GenericArray<ExternalSubtitle> added,
@@ -578,18 +585,19 @@ public class SubtitlesRunner : Object {
         if (exit == 0) {
             report_status (@"✅ Subtitle changes applied!\n\nSaved to:\n$result");
             Idle.add (() => {
-                operation_done (result);
+                apply_done (operation_id, result);
                 return Source.REMOVE;
             });
         } else if (saw_format_mismatch) {
-            report_error (
+            report_apply_error (
+                operation_id,
                 "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
                 "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
                 "are not interchangeable. Use a container that supports the original format (MKV is safest), " +
                 "or use Burn In mode to hardcode bitmap subtitles into the video."
             );
         } else {
-            report_error (@"Remux failed (exit code $exit).");
+            report_apply_error (operation_id, @"Remux failed (exit code $exit).");
         }
     }
 
@@ -604,7 +612,8 @@ public class SubtitlesRunner : Object {
     //  to avoid cross-thread widget access.
     // ═════════════════════════════════════════════════════════════════════════
 
-    public void burn_in_subtitle (string input_file,
+    public void burn_in_subtitle (uint64 operation_id,
+                                  string input_file,
                                    string output_path,
                                    int sub_stream_index,
                                    string? external_sub_path,
@@ -771,18 +780,19 @@ public class SubtitlesRunner : Object {
                 string result = output_path;
                 report_status (@"✅ Subtitles burned in!\n\nSaved to:\n$result");
                 Idle.add (() => {
-                    operation_done (result);
+                    apply_done (operation_id, result);
                     return Source.REMOVE;
                 });
             } else if (saw_format_mismatch) {
-                report_error (
+                report_apply_error (
+                    operation_id,
                     "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
                     "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
                     "are not interchangeable. For bitmap subtitles, make sure the burn-in track " +
                     "is correctly detected as bitmap — the overlay filter will be used automatically."
                 );
             } else {
-                report_error (@"Burn-in failed (exit code $exit).");
+                report_apply_error (operation_id, @"Burn-in failed (exit code $exit).");
             }
         });
     }
@@ -827,6 +837,18 @@ public class SubtitlesRunner : Object {
             if (status_label != null)
                 status_label.set_text (@"❌ $err\nCheck the console for details.");
             operation_failed (err);
+            return Source.REMOVE;
+        });
+    }
+
+    private void report_apply_error (uint64 operation_id, string message) {
+        log_line ("❌ " + message);
+
+        string err = message;
+        Idle.add (() => {
+            if (status_label != null)
+                status_label.set_text (@"❌ $err\nCheck the console for details.");
+            apply_failed (operation_id, err);
             return Source.REMOVE;
         });
     }

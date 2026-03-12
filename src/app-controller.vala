@@ -169,14 +169,13 @@ public class AppController : Object {
         });
     }
 
-    // ── Conversion done → probe output, update hamburger, disable cancel ────
+    // ── Conversion done → probe output, update hamburger ────────────────────
 
     private void wire_conversion_done () {
         converter.conversion_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
             file_pickers.output_entry.set_last_output_file (output_path);
-            cancel_button.set_sensitive (false);
         });
     }
 
@@ -187,7 +186,6 @@ public class AppController : Object {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
             file_pickers.output_entry.set_last_output_file (output_path);
-            cancel_button.set_sensitive (false);
         });
     }
 
@@ -239,14 +237,13 @@ public class AppController : Object {
         }
     }
 
-    // ── Subtitle operation done → probe output, update hamburger, disable cancel ──
+    // ── Subtitle operation done → probe output, update hamburger ────────────
 
     private void wire_subtitle_done () {
         subtitles_tab.subtitle_done.connect ((output_path) => {
             info_tab.load_output_info (output_path);
             hamburger.set_last_output_file (output_path);
             file_pickers.output_entry.set_last_output_file (output_path);
-            cancel_button.set_sensitive (false);
         });
     }
 

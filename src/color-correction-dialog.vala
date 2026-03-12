@@ -784,49 +784,82 @@ public class ColorCorrectionDialog : Adw.Window {
         string[] eq_parts = {};
 
         if (brightness_enable.active)
-            eq_parts += "brightness=%.2f".printf (brightness_spin.get_value ());
+            eq_parts += "brightness=" + ConversionUtils.format_ffmpeg_double (
+                brightness_spin.get_value (), "%.2f");
         if (contrast_enable.active)
-            eq_parts += "contrast=%.2f".printf (contrast_spin.get_value ());
+            eq_parts += "contrast=" + ConversionUtils.format_ffmpeg_double (
+                contrast_spin.get_value (), "%.2f");
         if (saturation_enable.active)
-            eq_parts += "saturation=%.2f".printf (saturation_spin.get_value ());
+            eq_parts += "saturation=" + ConversionUtils.format_ffmpeg_double (
+                saturation_spin.get_value (), "%.2f");
         if (gamma_enable.active)
-            eq_parts += "gamma=%.2f".printf (gamma_spin.get_value ());
+            eq_parts += "gamma=" + ConversionUtils.format_ffmpeg_double (
+                gamma_spin.get_value (), "%.2f");
 
         // Per-channel gamma (part of the eq filter)
         if (red_gamma_enable.active)
-            eq_parts += "gamma_r=%.2f".printf (red_gamma_spin.get_value ());
+            eq_parts += "gamma_r=" + ConversionUtils.format_ffmpeg_double (
+                red_gamma_spin.get_value (), "%.2f");
         if (green_gamma_enable.active)
-            eq_parts += "gamma_g=%.2f".printf (green_gamma_spin.get_value ());
+            eq_parts += "gamma_g=" + ConversionUtils.format_ffmpeg_double (
+                green_gamma_spin.get_value (), "%.2f");
         if (blue_gamma_enable.active)
-            eq_parts += "gamma_b=%.2f".printf (blue_gamma_spin.get_value ());
+            eq_parts += "gamma_b=" + ConversionUtils.format_ffmpeg_double (
+                blue_gamma_spin.get_value (), "%.2f");
 
         if (eq_parts.length > 0)
             filters += "eq=" + string.joinv (":", eq_parts);
 
         // ── Hue ──────────────────────────────────────────────────────────────
         if (hue_enable.active && hue_spin.get_value () != 0.0)
-            filters += "hue=h=%.1f".printf (hue_spin.get_value ());
+            filters += "hue=h=" + ConversionUtils.format_ffmpeg_double (
+                hue_spin.get_value (), "%.1f");
 
         // ── Exposure ─────────────────────────────────────────────────────────
         if (exposure_enable.active && exposure_spin.get_value () != 0.0)
-            filters += "exposure=exposure=%.1f".printf (exposure_spin.get_value ());
+            filters += "exposure=exposure=" + ConversionUtils.format_ffmpeg_double (
+                exposure_spin.get_value (), "%.1f");
 
         // ── Color Levels ─────────────────────────────────────────────────────
         if (levels_enable.active) {
             string[] lp = {};
             // Only emit parameters that differ from defaults
-            if (levels_rimin.get_value () != 0.0) lp += "rimin=%.2f".printf (levels_rimin.get_value ());
-            if (levels_rimax.get_value () != 1.0) lp += "rimax=%.2f".printf (levels_rimax.get_value ());
-            if (levels_gimin.get_value () != 0.0) lp += "gimin=%.2f".printf (levels_gimin.get_value ());
-            if (levels_gimax.get_value () != 1.0) lp += "gimax=%.2f".printf (levels_gimax.get_value ());
-            if (levels_bimin.get_value () != 0.0) lp += "bimin=%.2f".printf (levels_bimin.get_value ());
-            if (levels_bimax.get_value () != 1.0) lp += "bimax=%.2f".printf (levels_bimax.get_value ());
-            if (levels_romin.get_value () != 0.0) lp += "romin=%.2f".printf (levels_romin.get_value ());
-            if (levels_romax.get_value () != 1.0) lp += "romax=%.2f".printf (levels_romax.get_value ());
-            if (levels_gomin.get_value () != 0.0) lp += "gomin=%.2f".printf (levels_gomin.get_value ());
-            if (levels_gomax.get_value () != 1.0) lp += "gomax=%.2f".printf (levels_gomax.get_value ());
-            if (levels_bomin.get_value () != 0.0) lp += "bomin=%.2f".printf (levels_bomin.get_value ());
-            if (levels_bomax.get_value () != 1.0) lp += "bomax=%.2f".printf (levels_bomax.get_value ());
+            if (levels_rimin.get_value () != 0.0)
+                lp += "rimin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_rimin.get_value (), "%.2f");
+            if (levels_rimax.get_value () != 1.0)
+                lp += "rimax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_rimax.get_value (), "%.2f");
+            if (levels_gimin.get_value () != 0.0)
+                lp += "gimin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_gimin.get_value (), "%.2f");
+            if (levels_gimax.get_value () != 1.0)
+                lp += "gimax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_gimax.get_value (), "%.2f");
+            if (levels_bimin.get_value () != 0.0)
+                lp += "bimin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_bimin.get_value (), "%.2f");
+            if (levels_bimax.get_value () != 1.0)
+                lp += "bimax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_bimax.get_value (), "%.2f");
+            if (levels_romin.get_value () != 0.0)
+                lp += "romin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_romin.get_value (), "%.2f");
+            if (levels_romax.get_value () != 1.0)
+                lp += "romax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_romax.get_value (), "%.2f");
+            if (levels_gomin.get_value () != 0.0)
+                lp += "gomin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_gomin.get_value (), "%.2f");
+            if (levels_gomax.get_value () != 1.0)
+                lp += "gomax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_gomax.get_value (), "%.2f");
+            if (levels_bomin.get_value () != 0.0)
+                lp += "bomin=" + ConversionUtils.format_ffmpeg_double (
+                    levels_bomin.get_value (), "%.2f");
+            if (levels_bomax.get_value () != 1.0)
+                lp += "bomax=" + ConversionUtils.format_ffmpeg_double (
+                    levels_bomax.get_value (), "%.2f");
             if (lp.length > 0)
                 filters += "colorlevels=" + string.joinv (":", lp);
         }
@@ -834,22 +867,41 @@ public class ColorCorrectionDialog : Adw.Window {
         // ── Color Balance ────────────────────────────────────────────────────
         if (colorbal_enable.active) {
             string[] bp = {};
-            if (shadows_r_spin.get_value () != 0.0) bp += "rs=%.2f".printf (shadows_r_spin.get_value ());
-            if (shadows_g_spin.get_value () != 0.0) bp += "gs=%.2f".printf (shadows_g_spin.get_value ());
-            if (shadows_b_spin.get_value () != 0.0) bp += "bs=%.2f".printf (shadows_b_spin.get_value ());
-            if (midtones_r_spin.get_value () != 0.0) bp += "rm=%.2f".printf (midtones_r_spin.get_value ());
-            if (midtones_g_spin.get_value () != 0.0) bp += "gm=%.2f".printf (midtones_g_spin.get_value ());
-            if (midtones_b_spin.get_value () != 0.0) bp += "bm=%.2f".printf (midtones_b_spin.get_value ());
-            if (highlights_r_spin.get_value () != 0.0) bp += "rh=%.2f".printf (highlights_r_spin.get_value ());
-            if (highlights_g_spin.get_value () != 0.0) bp += "gh=%.2f".printf (highlights_g_spin.get_value ());
-            if (highlights_b_spin.get_value () != 0.0) bp += "bh=%.2f".printf (highlights_b_spin.get_value ());
+            if (shadows_r_spin.get_value () != 0.0)
+                bp += "rs=" + ConversionUtils.format_ffmpeg_double (
+                    shadows_r_spin.get_value (), "%.2f");
+            if (shadows_g_spin.get_value () != 0.0)
+                bp += "gs=" + ConversionUtils.format_ffmpeg_double (
+                    shadows_g_spin.get_value (), "%.2f");
+            if (shadows_b_spin.get_value () != 0.0)
+                bp += "bs=" + ConversionUtils.format_ffmpeg_double (
+                    shadows_b_spin.get_value (), "%.2f");
+            if (midtones_r_spin.get_value () != 0.0)
+                bp += "rm=" + ConversionUtils.format_ffmpeg_double (
+                    midtones_r_spin.get_value (), "%.2f");
+            if (midtones_g_spin.get_value () != 0.0)
+                bp += "gm=" + ConversionUtils.format_ffmpeg_double (
+                    midtones_g_spin.get_value (), "%.2f");
+            if (midtones_b_spin.get_value () != 0.0)
+                bp += "bm=" + ConversionUtils.format_ffmpeg_double (
+                    midtones_b_spin.get_value (), "%.2f");
+            if (highlights_r_spin.get_value () != 0.0)
+                bp += "rh=" + ConversionUtils.format_ffmpeg_double (
+                    highlights_r_spin.get_value (), "%.2f");
+            if (highlights_g_spin.get_value () != 0.0)
+                bp += "gh=" + ConversionUtils.format_ffmpeg_double (
+                    highlights_g_spin.get_value (), "%.2f");
+            if (highlights_b_spin.get_value () != 0.0)
+                bp += "bh=" + ConversionUtils.format_ffmpeg_double (
+                    highlights_b_spin.get_value (), "%.2f");
             if (bp.length > 0)
                 filters += "colorbalance=" + string.joinv (":", bp);
         }
 
         // ── Vibrance ─────────────────────────────────────────────────────────
         if (vibrance_enable.active && vibrance_spin.get_value () != 0.0)
-            filters += "vibrance=intensity=%.2f".printf (vibrance_spin.get_value ());
+            filters += "vibrance=intensity=" + ConversionUtils.format_ffmpeg_double (
+                vibrance_spin.get_value (), "%.2f");
 
         // ── Color Temperature ────────────────────────────────────────────────
         if (temperature_enable.active &&
@@ -869,7 +921,8 @@ public class ColorCorrectionDialog : Adw.Window {
         // ── Vignette (strength 0–1 mapped to angle PI/2–0) ──────────────────
         if (vignette_enable.active && vignette_spin.get_value () > 0.0) {
             double angle = (1.0 - vignette_spin.get_value ()) * Math.PI / 2.0;
-            filters += "vignette=angle=%.4f".printf (angle);
+            filters += "vignette=angle=" + ConversionUtils.format_ffmpeg_double (
+                angle, "%.4f");
         }
 
         return string.joinv (",", filters);

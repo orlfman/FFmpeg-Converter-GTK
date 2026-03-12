@@ -566,19 +566,25 @@ public class ConsoleTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void resolve_system_font () {
-        try {
-            var settings = new GLib.Settings ("org.gnome.desktop.interface");
-            string font_name = settings.get_string ("monospace-font-name");
+        var schema_source = SettingsSchemaSource.get_default ();
+        if (schema_source != null) {
+            var schema = schema_source.lookup ("org.gnome.desktop.interface", true);
+            if (schema != null && schema.has_key ("monospace-font-name")) {
+                var settings = new GLib.Settings.full (schema, null, null);
+                string font_name = settings.get_string ("monospace-font-name");
 
-            if (font_name != null && font_name.length > 0) {
-                var font_desc = Pango.FontDescription.from_string (font_name);
-                base_font_family = font_desc.get_family ();
-                base_font_size_pt = font_desc.get_size () / Pango.SCALE;
-                if (base_font_size_pt <= 0) base_font_size_pt = 10;
-                return;
+                if (font_name != null && font_name.length > 0) {
+                    var font_desc = Pango.FontDescription.from_string (font_name);
+                    var font_family = font_desc.get_family ();
+                    if (font_family != null && font_family.length > 0) {
+                        base_font_family = font_family;
+                    }
+
+                    base_font_size_pt = font_desc.get_size () / Pango.SCALE;
+                    if (base_font_size_pt <= 0) base_font_size_pt = 10;
+                    return;
+                }
             }
-        } catch (Error e) {
-            // Non-GNOME desktop — use defaults
         }
 
         base_font_family = "monospace";

@@ -796,11 +796,11 @@ public class VideoFilters : Object {
 
         // ── Noise Reduction ──────────────────────────────────────────────────
         if (hqdn3d_check.active) {
-            filters += "hqdn3d=%.1f:%.1f:%.1f:%.1f".printf (
-                hqdn3d_luma_s.get_value (),
-                hqdn3d_chroma_s.get_value (),
-                hqdn3d_luma_t.get_value (),
-                hqdn3d_chroma_t.get_value ()
+            filters += "hqdn3d=%s:%s:%s:%s".printf (
+                ConversionUtils.format_ffmpeg_double (hqdn3d_luma_s.get_value (), "%.1f"),
+                ConversionUtils.format_ffmpeg_double (hqdn3d_chroma_s.get_value (), "%.1f"),
+                ConversionUtils.format_ffmpeg_double (hqdn3d_luma_t.get_value (), "%.1f"),
+                ConversionUtils.format_ffmpeg_double (hqdn3d_chroma_t.get_value (), "%.1f")
             );
         }
 
@@ -816,11 +816,13 @@ public class VideoFilters : Object {
                 string fmt = ten_bit_selected ? "yuv420p10le" : "yuv420p";
                 filters += "format=" + fmt;
                 filters += "hwupload";
-                filters += "nlmeans_opencl=h=%.1f:p=%d:r=%d".printf (s, p, r);
+                filters += "nlmeans_opencl=h=%s:p=%d:r=%d".printf (
+                    ConversionUtils.format_ffmpeg_double (s, "%.1f"), p, r);
                 filters += "hwdownload";
                 filters += "format=" + fmt;
             } else {
-                filters += "nlmeans=s=%.1f:p=%d:r=%d".printf (s, p, r);
+                filters += "nlmeans=s=%s:p=%d:r=%d".printf (
+                    ConversionUtils.format_ffmpeg_double (s, "%.1f"), p, r);
             }
         }
 
@@ -833,14 +835,17 @@ public class VideoFilters : Object {
             int[] sizes = { 3, 5, 7, 9, 13 };
             int idx = (int) unsharp_matrix.get_selected ();
             int sz = (idx >= 0 && idx < sizes.length) ? sizes[idx] : 5;
-            filters += "unsharp=%d:%d:%.1f:%d:%d:%.1f".printf (
-                sz, sz, unsharp_luma_amount.get_value (),
-                sz, sz, unsharp_chroma_amount.get_value ()
+            filters += "unsharp=%d:%d:%s:%d:%d:%s".printf (
+                sz, sz,
+                ConversionUtils.format_ffmpeg_double (unsharp_luma_amount.get_value (), "%.1f"),
+                sz, sz,
+                ConversionUtils.format_ffmpeg_double (unsharp_chroma_amount.get_value (), "%.1f")
             );
         }
 
         if (cas_check.active) {
-            filters += "cas=%.2f".printf (cas_strength.get_value ());
+            filters += "cas=" + ConversionUtils.format_ffmpeg_double (
+                cas_strength.get_value (), "%.2f");
         }
 
         // ── Blur ─────────────────────────────────────────────────────────────
@@ -852,7 +857,8 @@ public class VideoFilters : Object {
         }
 
         if (gblur_check.active) {
-            filters += "gblur=sigma=%.1f".printf (gblur_sigma.get_value ());
+            filters += "gblur=sigma=" + ConversionUtils.format_ffmpeg_double (
+                gblur_sigma.get_value (), "%.1f");
         }
 
         // ── Grain & Texture ──────────────────────────────────────────────────
@@ -870,7 +876,7 @@ public class VideoFilters : Object {
         }
 
         if (deband_check.active) {
-            string thr = "%.3f".printf (deband_1thr.get_value ());
+            string thr = ConversionUtils.format_ffmpeg_double (deband_1thr.get_value (), "%.3f");
             int range = (int) deband_range.get_value ();
             int blur = deband_blur.active ? 1 : 0;
             filters += "deband=1thr=%s:2thr=%s:3thr=%s:4thr=%s:range=%d:blur=%d".printf (
@@ -895,7 +901,8 @@ public class VideoFilters : Object {
         var item = tonemap_mode.selected_item as StringObject;
         string mode = item != null ? item.string : "";
         if (mode == "Less Saturation") desat = "0.00";
-        else if (mode == "Custom") desat = "%.2f".printf (tonemap_desat.get_value ());
+        else if (mode == "Custom")
+            desat = ConversionUtils.format_ffmpeg_double (tonemap_desat.get_value (), "%.2f");
 
         return "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=%s,zscale=t=bt709:m=bt709:r=tv".printf (desat);
     }

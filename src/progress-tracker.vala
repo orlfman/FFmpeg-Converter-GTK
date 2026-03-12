@@ -25,15 +25,22 @@ public class ProgressTracker : Object {
 
     public void set_pulse_mode (bool pulse) {
         progress_mutex.lock ();
-        use_pulse_mode = pulse;
-        progress_mutex.unlock ();
+        try {
+            use_pulse_mode = pulse;
+        } finally {
+            progress_mutex.unlock ();
+        }
     }
 
     public bool get_pulse_mode () {
+        bool pulse;
         progress_mutex.lock ();
-        bool p = use_pulse_mode;
-        progress_mutex.unlock ();
-        return p;
+        try {
+            pulse = use_pulse_mode;
+        } finally {
+            progress_mutex.unlock ();
+        }
+        return pulse;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -126,11 +133,15 @@ public class ProgressTracker : Object {
                                   double pass_start, double pass_range) {
         if (current_sec < 0 || total_dur <= 0) return false;
 
+        bool should_update;
         progress_mutex.lock ();
-        int64 now = GLib.get_monotonic_time ();
-        bool should_update = (now - last_progress_update > 250000);
-        if (should_update) last_progress_update = now;
-        progress_mutex.unlock ();
+        try {
+            int64 now = GLib.get_monotonic_time ();
+            should_update = (now - last_progress_update > 250000);
+            if (should_update) last_progress_update = now;
+        } finally {
+            progress_mutex.unlock ();
+        }
 
         if (!should_update) return false;
 
@@ -145,8 +156,11 @@ public class ProgressTracker : Object {
      */
     public void reset_throttle () {
         progress_mutex.lock ();
-        last_progress_update = 0;
-        progress_mutex.unlock ();
+        try {
+            last_progress_update = 0;
+        } finally {
+            progress_mutex.unlock ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

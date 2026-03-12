@@ -38,12 +38,18 @@ public class ProcessRunner : Object {
      * Safe to call from any thread (main or background).
      */
     public void cancel () {
+        Pid pid_to_kill;
+        int64 gen;
+
         state_mutex.lock ();
-        cancelled = true;
-        Pid pid_to_kill = current_pid;
-        current_pid = 0;
-        int64 gen = cancel_generation;
-        state_mutex.unlock ();
+        try {
+            cancelled = true;
+            pid_to_kill = current_pid;
+            current_pid = 0;
+            gen = cancel_generation;
+        } finally {
+            state_mutex.unlock ();
+        }
 
         if (pid_to_kill <= 0) return;
 
@@ -67,9 +73,14 @@ public class ProcessRunner : Object {
         Pid kill_pid = pid_to_kill;
         int64 kill_gen = gen;
         Timeout.add (3000, () => {
+            bool still_valid;
+
             state_mutex.lock ();
-            bool still_valid = (cancel_generation == kill_gen);
-            state_mutex.unlock ();
+            try {
+                still_valid = (cancel_generation == kill_gen);
+            } finally {
+                state_mutex.unlock ();
+            }
 
             if (still_valid && Posix.kill (kill_pid, 0) == 0) {
                 print ("ProcessRunner: PID %d still alive after 3s — sending SIGKILL\n", kill_pid);
@@ -84,10 +95,15 @@ public class ProcessRunner : Object {
      * Thread-safe — can be called from any thread.
      */
     public bool is_cancelled () {
+        bool is_cancelled;
+
         state_mutex.lock ();
-        bool c = cancelled;
-        state_mutex.unlock ();
-        return c;
+        try {
+            is_cancelled = cancelled;
+        } finally {
+            state_mutex.unlock ();
+        }
+        return is_cancelled;
     }
 
     /**
@@ -97,10 +113,13 @@ public class ProcessRunner : Object {
      */
     public void reset () {
         state_mutex.lock ();
-        cancelled = false;
-        current_pid = 0;
-        cancel_generation++;
-        state_mutex.unlock ();
+        try {
+            cancelled = false;
+            current_pid = 0;
+            cancel_generation++;
+        } finally {
+            state_mutex.unlock ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -116,6 +135,9 @@ public class ProcessRunner : Object {
      * @return           Exit status (0 = success) or -1 on error
      */
     public int execute (string[] argv, owned LineCallback? on_line = null) {
+        int64 exec_generation = 0;
+        Pid exec_pid = 0;
+
         try {
             var launcher = new SubprocessLauncher (SubprocessFlags.STDERR_PIPE);
             var process = launcher.spawnv (argv);
@@ -126,8 +148,13 @@ public class ProcessRunner : Object {
                 int parsed = int.parse (id_str);
                 if (parsed > 0) {
                     state_mutex.lock ();
-                    current_pid = (Pid) parsed;
-                    state_mutex.unlock ();
+                    try {
+                        exec_generation = cancel_generation;
+                        current_pid = (Pid) parsed;
+                        exec_pid = current_pid;
+                    } finally {
+                        state_mutex.unlock ();
+                    }
                 }
             }
 
@@ -149,8 +176,14 @@ public class ProcessRunner : Object {
             process.wait ();
 
             state_mutex.lock ();
-            current_pid = 0;
-            state_mutex.unlock ();
+            try {
+                // Only the still-current execution may clear the tracked PID.
+                if (cancel_generation == exec_generation && current_pid == exec_pid) {
+                    current_pid = 0;
+                }
+            } finally {
+                state_mutex.unlock ();
+            }
 
             return process.get_exit_status ();
 
@@ -160,8 +193,14 @@ public class ProcessRunner : Object {
             }
 
             state_mutex.lock ();
-            current_pid = 0;
-            state_mutex.unlock ();
+            try {
+                // Only the still-current execution may clear the tracked PID.
+                if (cancel_generation == exec_generation && current_pid == exec_pid) {
+                    current_pid = 0;
+                }
+            } finally {
+                state_mutex.unlock ();
+            }
 
             return -1;
         }

@@ -2009,8 +2009,8 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("info");   // info level required for signalstats output
 
         for (int i = 0; i < positions.length; i++) {
-            cmd.add ("-ss");  cmd.add ("%.2f".printf (positions[i]));
-            cmd.add ("-t");   cmd.add ("%.3f".printf (seg_dur));
+            cmd.add ("-ss");  cmd.add (ConversionUtils.format_ffmpeg_double (positions[i], "%.2f"));
+            cmd.add ("-t");   cmd.add (ConversionUtils.format_ffmpeg_double (seg_dur, "%.3f"));
             cmd.add ("-i");   cmd.add (path);
         }
 
@@ -2064,8 +2064,8 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-v"); cmd.add ("warning");
 
         for (int i = 0; i < positions.length; i++) {
-            cmd.add ("-ss");  cmd.add ("%.2f".printf (positions[i]));
-            cmd.add ("-t");   cmd.add ("%.3f".printf (seg_dur));
+            cmd.add ("-ss");  cmd.add (ConversionUtils.format_ffmpeg_double (positions[i], "%.2f"));
+            cmd.add ("-t");   cmd.add (ConversionUtils.format_ffmpeg_double (seg_dur, "%.3f"));
             cmd.add ("-i");   cmd.add (path);
         }
 

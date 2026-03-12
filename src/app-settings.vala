@@ -85,141 +85,211 @@ public class AppSettings : Object {
 
     public string ffmpeg_path {
         owned get {
+            string ffmpeg_path;
             mutex.lock ();
-            string v = _ffmpeg_path;
-            mutex.unlock ();
-            return v;
+            try {
+                ffmpeg_path = _ffmpeg_path;
+            } finally {
+                mutex.unlock ();
+            }
+            return ffmpeg_path;
         }
         set {
             mutex.lock ();
-            _ffmpeg_path = (value.strip ().length > 0) ? value.strip () : "ffmpeg";
-            mutex.unlock ();
+            try {
+                _ffmpeg_path = (value.strip ().length > 0) ? value.strip () : "ffmpeg";
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public string ffprobe_path {
         owned get {
+            string ffprobe_path;
             mutex.lock ();
-            string v = _ffprobe_path;
-            mutex.unlock ();
-            return v;
+            try {
+                ffprobe_path = _ffprobe_path;
+            } finally {
+                mutex.unlock ();
+            }
+            return ffprobe_path;
         }
         set {
             mutex.lock ();
-            _ffprobe_path = (value.strip ().length > 0) ? value.strip () : "ffprobe";
-            mutex.unlock ();
+            try {
+                _ffprobe_path = (value.strip ().length > 0) ? value.strip () : "ffprobe";
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public string ffplay_path {
         owned get {
+            string ffplay_path;
             mutex.lock ();
-            string v = _ffplay_path;
-            mutex.unlock ();
-            return v;
+            try {
+                ffplay_path = _ffplay_path;
+            } finally {
+                mutex.unlock ();
+            }
+            return ffplay_path;
         }
         set {
             mutex.lock ();
-            _ffplay_path = (value.strip ().length > 0) ? value.strip () : "ffplay";
-            mutex.unlock ();
+            try {
+                _ffplay_path = (value.strip ().length > 0) ? value.strip () : "ffplay";
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public string default_output_dir {
         owned get {
+            string default_output_dir;
             mutex.lock ();
-            string v = _default_output_dir;
-            mutex.unlock ();
-            return v;
+            try {
+                default_output_dir = _default_output_dir;
+            } finally {
+                mutex.unlock ();
+            }
+            return default_output_dir;
         }
         set {
             mutex.lock ();
-            _default_output_dir = value.strip ();
-            mutex.unlock ();
+            try {
+                _default_output_dir = value.strip ();
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public OutputNameMode output_name_mode {
         get {
+            OutputNameMode output_name_mode;
             mutex.lock ();
-            OutputNameMode v = _output_name_mode;
-            mutex.unlock ();
-            return v;
+            try {
+                output_name_mode = _output_name_mode;
+            } finally {
+                mutex.unlock ();
+            }
+            return output_name_mode;
         }
         set {
             mutex.lock ();
-            _output_name_mode = value;
-            mutex.unlock ();
+            try {
+                _output_name_mode = value;
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public string output_custom_name {
         owned get {
+            string output_custom_name;
             mutex.lock ();
-            string v = _output_custom_name;
-            mutex.unlock ();
-            return v;
+            try {
+                output_custom_name = _output_custom_name;
+            } finally {
+                mutex.unlock ();
+            }
+            return output_custom_name;
         }
         set {
             mutex.lock ();
-            _output_custom_name = value.strip ();
-            mutex.unlock ();
+            try {
+                _output_custom_name = value.strip ();
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public bool overwrite_enabled {
         get {
+            bool overwrite_enabled;
             mutex.lock ();
-            bool v = _overwrite_enabled;
-            mutex.unlock ();
-            return v;
+            try {
+                overwrite_enabled = _overwrite_enabled;
+            } finally {
+                mutex.unlock ();
+            }
+            return overwrite_enabled;
         }
         set {
             mutex.lock ();
-            _overwrite_enabled = value;
-            mutex.unlock ();
+            try {
+                _overwrite_enabled = value;
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public int smart_optimizer_target_mb {
         get {
+            int target_mb;
             mutex.lock ();
-            int v = _smart_optimizer_target_mb;
-            mutex.unlock ();
-            return v;
+            try {
+                target_mb = _smart_optimizer_target_mb;
+            } finally {
+                mutex.unlock ();
+            }
+            return target_mb;
         }
         set {
             mutex.lock ();
-            _smart_optimizer_target_mb = value.clamp (1, 4096);
-            mutex.unlock ();
+            try {
+                _smart_optimizer_target_mb = value.clamp (1, 4096);
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public bool smart_optimizer_auto_convert {
         get {
+            bool auto_convert;
             mutex.lock ();
-            bool v = _smart_optimizer_auto_convert;
-            mutex.unlock ();
-            return v;
+            try {
+                auto_convert = _smart_optimizer_auto_convert;
+            } finally {
+                mutex.unlock ();
+            }
+            return auto_convert;
         }
         set {
             mutex.lock ();
-            _smart_optimizer_auto_convert = value;
-            mutex.unlock ();
+            try {
+                _smart_optimizer_auto_convert = value;
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
     public bool smart_optimizer_strip_audio {
         get {
+            bool strip_audio;
             mutex.lock ();
-            bool v = _smart_optimizer_strip_audio;
-            mutex.unlock ();
-            return v;
+            try {
+                strip_audio = _smart_optimizer_strip_audio;
+            } finally {
+                mutex.unlock ();
+            }
+            return strip_audio;
         }
         set {
             mutex.lock ();
-            _smart_optimizer_strip_audio = value;
-            mutex.unlock ();
+            try {
+                _smart_optimizer_strip_audio = value;
+            } finally {
+                mutex.unlock ();
+            }
         }
     }
 
@@ -240,19 +310,33 @@ public class AppSettings : Object {
             return;
         }
 
-        mutex.lock ();
-        _ffmpeg_path        = read_string (kf, GROUP_PATHS,  "ffmpeg",            "ffmpeg");
-        _ffprobe_path       = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
-        _ffplay_path        = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
-        _default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
-        _output_name_mode   = OutputNameMode.from_string (
+        string ffmpeg_path = read_string (kf, GROUP_PATHS,  "ffmpeg",            "ffmpeg");
+        string ffprobe_path = read_string (kf, GROUP_PATHS,  "ffprobe",           "ffprobe");
+        string ffplay_path = read_string (kf, GROUP_PATHS,  "ffplay",            "ffplay");
+        string default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
+        OutputNameMode output_name_mode = OutputNameMode.from_string (
             read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
-        _output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
-        _overwrite_enabled  = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
-        _smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
-        _smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
-        _smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
-        mutex.unlock ();
+        string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
+        bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
+        int smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
+        bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
+        bool smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
+
+        mutex.lock ();
+        try {
+            _ffmpeg_path = ffmpeg_path;
+            _ffprobe_path = ffprobe_path;
+            _ffplay_path = ffplay_path;
+            _default_output_dir = default_output_dir;
+            _output_name_mode = output_name_mode;
+            _output_custom_name = output_custom_name;
+            _overwrite_enabled = overwrite_enabled;
+            _smart_optimizer_target_mb = smart_optimizer_target_mb;
+            _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
+            _smart_optimizer_strip_audio = smart_optimizer_strip_audio;
+        } finally {
+            mutex.unlock ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -264,18 +348,43 @@ public class AppSettings : Object {
 
         var kf = new KeyFile ();
 
+        string ffmpeg_path;
+        string ffprobe_path;
+        string ffplay_path;
+        string default_output_dir;
+        OutputNameMode output_name_mode;
+        string output_custom_name;
+        bool overwrite_enabled;
+        int smart_optimizer_target_mb;
+        bool smart_optimizer_auto_convert;
+        bool smart_optimizer_strip_audio;
+
         mutex.lock ();
-        kf.set_string (GROUP_PATHS,  "ffmpeg",            _ffmpeg_path);
-        kf.set_string (GROUP_PATHS,  "ffprobe",           _ffprobe_path);
-        kf.set_string (GROUP_PATHS,  "ffplay",            _ffplay_path);
-        kf.set_string (GROUP_OUTPUT, "default_directory",  _default_output_dir);
-        kf.set_string (GROUP_GENERAL, "output_name_mode",  _output_name_mode.to_string ());
-        kf.set_string (GROUP_GENERAL, "output_custom_name", _output_custom_name);
-        kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", _overwrite_enabled);
-        kf.set_integer (GROUP_SMART, "target_mb",          _smart_optimizer_target_mb);
-        kf.set_boolean (GROUP_SMART, "auto_convert",       _smart_optimizer_auto_convert);
-        kf.set_boolean (GROUP_SMART, "strip_audio",        _smart_optimizer_strip_audio);
-        mutex.unlock ();
+        try {
+            ffmpeg_path = _ffmpeg_path;
+            ffprobe_path = _ffprobe_path;
+            ffplay_path = _ffplay_path;
+            default_output_dir = _default_output_dir;
+            output_name_mode = _output_name_mode;
+            output_custom_name = _output_custom_name;
+            overwrite_enabled = _overwrite_enabled;
+            smart_optimizer_target_mb = _smart_optimizer_target_mb;
+            smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
+            smart_optimizer_strip_audio = _smart_optimizer_strip_audio;
+        } finally {
+            mutex.unlock ();
+        }
+
+        kf.set_string (GROUP_PATHS, "ffmpeg", ffmpeg_path);
+        kf.set_string (GROUP_PATHS, "ffprobe", ffprobe_path);
+        kf.set_string (GROUP_PATHS, "ffplay", ffplay_path);
+        kf.set_string (GROUP_OUTPUT, "default_directory", default_output_dir);
+        kf.set_string (GROUP_GENERAL, "output_name_mode", output_name_mode.to_string ());
+        kf.set_string (GROUP_GENERAL, "output_custom_name", output_custom_name);
+        kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", overwrite_enabled);
+        kf.set_integer (GROUP_SMART, "target_mb", smart_optimizer_target_mb);
+        kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
+        kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
 
         try {
             kf.save_to_file (config_file);
@@ -293,17 +402,20 @@ public class AppSettings : Object {
 
     public void reset_to_defaults () {
         mutex.lock ();
-        _ffmpeg_path        = "ffmpeg";
-        _ffprobe_path       = "ffprobe";
-        _ffplay_path        = "ffplay";
-        _default_output_dir = "";
-        _output_name_mode   = OutputNameMode.DEFAULT;
-        _output_custom_name = "";
-        _overwrite_enabled  = false;
-        _smart_optimizer_target_mb = 4;
-        _smart_optimizer_auto_convert = false;
-        _smart_optimizer_strip_audio = false;
-        mutex.unlock ();
+        try {
+            _ffmpeg_path        = "ffmpeg";
+            _ffprobe_path       = "ffprobe";
+            _ffplay_path        = "ffplay";
+            _default_output_dir = "";
+            _output_name_mode   = OutputNameMode.DEFAULT;
+            _output_custom_name = "";
+            _overwrite_enabled  = false;
+            _smart_optimizer_target_mb = 4;
+            _smart_optimizer_auto_convert = false;
+            _smart_optimizer_strip_audio = false;
+        } finally {
+            mutex.unlock ();
+        }
 
         save ();
     }

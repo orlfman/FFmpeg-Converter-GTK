@@ -47,6 +47,8 @@ public class MainWindow : Adw.ApplicationWindow {
 
     // Explicit operation tracking for clean cancel dispatch
     private ActiveOperation current_operation = ActiveOperation.IDLE;
+    private uint64 active_operation_id = 0;
+    private uint64 next_operation_id = 1;
 
     // Queued auto-convert: if Smart Optimizer finishes while another operation
     // is running, remember the codec so we can start conversion when idle.
@@ -88,13 +90,7 @@ public class MainWindow : Adw.ApplicationWindow {
         // concurrently with a conversion/trim/subtitle operation.
         controller.smart_optimizer_running.connect ((running) => {
             smart_optimizer_active = running;
-            // Enable cancel if optimizer is running; only disable if no
-            // other operation is using it.
-            if (running) {
-                cancel_button.set_sensitive (true);
-            } else if (current_operation == ActiveOperation.IDLE) {
-                cancel_button.set_sensitive (false);
-            }
+            update_cancel_button_state ();
         });
 
         // Auto-convert: Smart Optimizer requests conversion start.
@@ -111,23 +107,41 @@ public class MainWindow : Adw.ApplicationWindow {
             }
         });
 
-        // Reset operation state when any operation completes.
-        // (AppController separately handles info_tab, hamburger, and
-        // cancel_button for these same signals — multiple handlers are fine.)
-        converter.conversion_done.connect ((output_path) => {
-            current_operation = ActiveOperation.IDLE;
+        // Reset operation state only for the specific run MainWindow started.
+        // AppController separately handles output-info and hamburger updates
+        // via the legacy success signals.
+        converter.conversion_succeeded.connect ((operation_id, output_path) => {
+            if (!complete_tracked_operation (
+                    ActiveOperation.CONVERTING, operation_id, true)) {
+                return;
+            }
+
             post_success_toast ("Conversion complete", output_path);
-            drain_pending_auto_convert ();
         });
-        trim_tab.trim_done.connect ((output_path) => {
-            current_operation = ActiveOperation.IDLE;
+        converter.conversion_failed.connect ((operation_id) => {
+            complete_tracked_operation (ActiveOperation.CONVERTING, operation_id, true);
+        });
+        trim_tab.trim_succeeded.connect ((operation_id, output_path) => {
+            if (!complete_tracked_operation (
+                    ActiveOperation.TRIMMING, operation_id, true)) {
+                return;
+            }
+
             post_success_toast ("Export complete", output_path);
-            drain_pending_auto_convert ();
         });
-        subtitles_tab.subtitle_done.connect ((output_path) => {
-            current_operation = ActiveOperation.IDLE;
+        trim_tab.trim_failed.connect ((operation_id) => {
+            complete_tracked_operation (ActiveOperation.TRIMMING, operation_id, true);
+        });
+        subtitles_tab.subtitle_apply_succeeded.connect ((operation_id, output_path) => {
+            if (!complete_tracked_operation (
+                    ActiveOperation.SUBTITLE_APPLY, operation_id, true)) {
+                return;
+            }
+
             post_success_toast ("Subtitles applied", output_path);
-            drain_pending_auto_convert ();
+        });
+        subtitles_tab.subtitle_apply_failed.connect ((operation_id) => {
+            complete_tracked_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
         });
 
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
@@ -266,7 +280,17 @@ public class MainWindow : Adw.ApplicationWindow {
         string? page = view_stack.visible_child_name;
         bool active = page == "svt-av1" || page == "x265" || page == "x264"
                    || page == "vp9"     || page == "trim" || page == "subtitles";
-        convert_button.set_sensitive (active);
+        convert_button.set_sensitive (active && current_operation == ActiveOperation.IDLE);
+    }
+
+    private string get_operation_label (ActiveOperation operation,
+                                        string idle_fallback = "operation") {
+        switch (operation) {
+            case ActiveOperation.CONVERTING:     return "conversion";
+            case ActiveOperation.TRIMMING:       return "export";
+            case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
+            default:                             return idle_fallback;
+        }
     }
 
     private void set_general_format_options (DropDown dropdown,
@@ -361,6 +385,13 @@ public class MainWindow : Adw.ApplicationWindow {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_convert_clicked () {
+        if (current_operation != ActiveOperation.IDLE) {
+            status_area.set_status (
+                @"⚠️ A $(get_operation_label (current_operation)) is already running. Cancel it before starting another one."
+            );
+            return;
+        }
+
         string? page = view_stack.visible_child_name;
 
         // ── Subtitles has its own path (remux / burn-in, no codec tab) ────
@@ -552,22 +583,18 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            subtitles_tab.start_apply (true);
-            activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+            launch_subtitle_apply (true);
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, true,
                 () => {
-                    subtitles_tab.start_apply (true);
-                    activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+                    launch_subtitle_apply (true);
                 },
                 () => {
-                    subtitles_tab.start_apply (false);
-                    activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+                    launch_subtitle_apply (false);
                 }
             );
         } else {
-            subtitles_tab.start_apply ();
-            activate_cancel (ActiveOperation.SUBTITLE_APPLY);
+            launch_subtitle_apply ();
         }
     }
 
@@ -599,21 +626,15 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            trim.start_trim_export (
-                input_file, out_folder, status_area, console_tab);
-            activate_cancel (ActiveOperation.TRIMMING);
+            launch_trim_export (trim, input_file, out_folder);
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, false,
                 () => {
-                    trim.start_trim_export (
-                        input_file, out_folder, status_area, console_tab);
-                    activate_cancel (ActiveOperation.TRIMMING);
+                    launch_trim_export (trim, input_file, out_folder);
                 }
             );
         } else {
-            trim.start_trim_export (
-                input_file, out_folder, status_area, console_tab);
-            activate_cancel (ActiveOperation.TRIMMING);
+            launch_trim_export (trim, input_file, out_folder);
         }
     }
 
@@ -664,8 +685,13 @@ public class MainWindow : Adw.ApplicationWindow {
                                    string output_file,
                                    ICodecTab codec_tab,
                                    ICodecBuilder builder) {
-        converter.start_conversion (input_file, output_file, codec_tab, builder);
-        activate_cancel (ActiveOperation.CONVERTING);
+        uint64 operation_id = reserve_operation_id ();
+        if (!converter.start_conversion (
+                input_file, output_file, codec_tab, builder, operation_id)) {
+            return;
+        }
+
+        activate_cancel (ActiveOperation.CONVERTING, operation_id);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -720,10 +746,62 @@ public class MainWindow : Adw.ApplicationWindow {
     //  OPERATION LIFECYCLE HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    /** Record the active operation and enable the Cancel button. */
-    private void activate_cancel (ActiveOperation operation) {
+    private void launch_subtitle_apply (bool allow_overwrite = false) {
+        uint64 operation_id = reserve_operation_id ();
+        if (!subtitles_tab.start_apply (operation_id, allow_overwrite)) {
+            return;
+        }
+
+        activate_cancel (ActiveOperation.SUBTITLE_APPLY, operation_id);
+    }
+
+    private void launch_trim_export (TrimTab trim,
+                                     string input_file,
+                                     string output_folder) {
+        uint64 operation_id = reserve_operation_id ();
+        if (!trim.start_trim_export (
+                input_file, output_folder, status_area, console_tab, operation_id)) {
+            return;
+        }
+
+        activate_cancel (ActiveOperation.TRIMMING, operation_id);
+    }
+
+    private uint64 reserve_operation_id () {
+        return next_operation_id++;
+    }
+
+    /** Record the active operation and update the Cancel button. */
+    private void activate_cancel (ActiveOperation operation, uint64 operation_id) {
         current_operation = operation;
-        cancel_button.set_sensitive (true);
+        active_operation_id = operation_id;
+        update_cancel_button_state ();
+        update_convert_sensitivity ();
+    }
+
+    private bool complete_tracked_operation (ActiveOperation operation,
+                                             uint64 operation_id,
+                                             bool drain_auto_convert_queue) {
+        if (current_operation != operation || active_operation_id != operation_id) {
+            return false;
+        }
+
+        current_operation = ActiveOperation.IDLE;
+        active_operation_id = 0;
+        update_cancel_button_state ();
+        update_convert_sensitivity ();
+
+        if (drain_auto_convert_queue) {
+            drain_pending_auto_convert ();
+        }
+
+        return true;
+    }
+
+    private void update_cancel_button_state () {
+        cancel_button.set_sensitive (
+            smart_optimizer_active || current_operation != ActiveOperation.IDLE
+        );
     }
 
     /** If Smart Optimizer queued an auto-convert while busy, start it now. */
@@ -790,7 +868,9 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         current_operation = ActiveOperation.IDLE;
-        cancel_button.set_sensitive (false);
+        active_operation_id = 0;
+        update_cancel_button_state ();
+        update_convert_sensitivity ();
         pending_auto_convert_codec = null;
         return message;
     }
@@ -812,15 +892,10 @@ public class MainWindow : Adw.ApplicationWindow {
         if (close_dialog_open) return true;
         close_dialog_open = true;
 
-        string operation_label;
-        switch (current_operation) {
-            case ActiveOperation.CONVERTING:     operation_label = "conversion";     break;
-            case ActiveOperation.TRIMMING:        operation_label = "export";         break;
-            case ActiveOperation.SUBTITLE_APPLY:  operation_label = "subtitle apply"; break;
-            default:
-                operation_label = smart_optimizer_active ? "optimization" : "operation";
-                break;
-        }
+        string operation_label = get_operation_label (
+            current_operation,
+            smart_optimizer_active ? "optimization" : "operation"
+        );
 
         var dialog = new Adw.AlertDialog (
             "Operation in Progress",

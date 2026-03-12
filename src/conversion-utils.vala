@@ -6,6 +6,7 @@ using GLib;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace ConversionUtils {
+    private const int ASCII_FORMAT_BUFFER_SIZE = 64;
 
     public class FileSignature : Object {
         public string path { get; construct set; }
@@ -137,6 +138,14 @@ namespace ConversionUtils {
         } catch (Error e) {
             return null;
         }
+    }
+
+    // FFmpeg expressions and encoder params require '.' as the decimal
+    // separator regardless of the user's locale.
+    public string format_ffmpeg_double (double value, string format = "%g") {
+        char[] buffer = new char[ASCII_FORMAT_BUFFER_SIZE];
+        value.format (buffer, format);
+        return (string) buffer;
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -10,6 +10,8 @@ public class SubtitlesTab : Box {
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void subtitle_done (string output_path);
+    public signal void subtitle_apply_succeeded (uint64 operation_id, string output_path);
+    public signal void subtitle_apply_failed (uint64 operation_id);
     public signal void general_tab_context_changed ();
 
     // ── Runner ───────────────────────────────────────────────────────────────
@@ -30,6 +32,7 @@ public class SubtitlesTab : Box {
     private GenericArray<SubtitleStream>   detected_streams = new GenericArray<SubtitleStream> ();
     private GenericArray<ExternalSubtitle> added_subtitles  = new GenericArray<ExternalSubtitle> ();
     private bool _is_busy = false;
+    private uint64 active_apply_operation_id = 0;
     private bool _updating_defaults = false;
 
     // ── Drag-and-drop state ──────────────────────────────────────────────────
@@ -672,6 +675,29 @@ public class SubtitlesTab : Box {
             _is_busy = false;
             update_ui_state ();
         });
+
+        runner.apply_done.connect ((operation_id, path) => {
+            if (active_apply_operation_id != operation_id) {
+                return;
+            }
+
+            _is_busy = false;
+            active_apply_operation_id = 0;
+            update_ui_state ();
+            subtitle_done (path);
+            subtitle_apply_succeeded (operation_id, path);
+        });
+
+        runner.apply_failed.connect ((operation_id, msg) => {
+            if (active_apply_operation_id != operation_id) {
+                return;
+            }
+
+            _is_busy = false;
+            active_apply_operation_id = 0;
+            update_ui_state ();
+            subtitle_apply_failed (operation_id);
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -723,6 +749,7 @@ public class SubtitlesTab : Box {
     public void cancel_operation () {
         runner.cancel ();
         _is_busy = false;
+        active_apply_operation_id = 0;
         update_ui_state ();
     }
 
@@ -1060,19 +1087,26 @@ public class SubtitlesTab : Box {
         return Path.build_filename (dir, name + suffix + ext);
     }
 
-    public void start_apply (bool allow_overwrite = false) {
-        if (current_input_file == "") return;
+    public bool start_apply (uint64 operation_id, bool allow_overwrite = false) {
+        if (current_input_file == "") return false;
 
+        bool started;
         if (is_burn_in_mode ()) {
-            start_burn_in (allow_overwrite);
+            started = start_burn_in (operation_id, allow_overwrite);
         } else {
-            start_remux (allow_overwrite);
+            started = start_remux (operation_id, allow_overwrite);
         }
+
+        if (started) {
+            active_apply_operation_id = operation_id;
+        }
+
+        return started;
     }
 
     // ── Remux path (existing logic) ──────────────────────────────────────────
 
-    private void start_remux (bool allow_overwrite) {
+    private bool start_remux (uint64 operation_id, bool allow_overwrite) {
         string basename = Path.get_basename (current_input_file);
         int dot = basename.last_index_of_char ('.');
         string name = (dot > 0) ? basename.substring (0, dot) : basename;
@@ -1099,12 +1133,15 @@ public class SubtitlesTab : Box {
 
         _is_busy = true;
         update_ui_state ();
-        runner.remux_subtitles (current_input_file, output, detected_streams, added_subtitles, order);
+        runner.remux_subtitles (
+            operation_id, current_input_file, output, detected_streams, added_subtitles, order
+        );
+        return true;
     }
 
     // ── Burn-in path (full re-encode) ────────────────────────────────────────
 
-    private void start_burn_in (bool allow_overwrite) {
+    private bool start_burn_in (uint64 operation_id, bool allow_overwrite) {
         string basename = Path.get_basename (current_input_file);
         int dot = basename.last_index_of_char ('.');
         string name = (dot > 0) ? basename.substring (0, dot) : basename;
@@ -1155,7 +1192,7 @@ public class SubtitlesTab : Box {
 
         if (codec_tab == null) {
             report_burn_in_error ("No codec tab available for the selected codec.");
-            return;
+            return false;
         }
 
         ICodecBuilder builder = codec_tab.get_codec_builder ();
@@ -1167,10 +1204,12 @@ public class SubtitlesTab : Box {
         update_ui_state ();
 
         runner.burn_in_subtitle (
+            operation_id,
             current_input_file, output,
             sub_stream_index, external_sub_path, is_bitmap,
             profile
         );
+        return true;
     }
 
     /** Get the ICodecTab for the burn-in codec selector. */

@@ -29,7 +29,7 @@ public class ConversionConfig : Object {
 //
 //  Responsibilities (after refactoring):
 //   • Coordinates start/cancel of conversions
-//   • Owns the ProcessRunner and ProgressTracker
+//   • Owns the active conversion runner and ProgressTracker
 //   • Snapshots UI state into ConversionConfig for the background thread
 //   • Reports status/errors to the UI via StatusArea
 //
@@ -44,6 +44,8 @@ public class ConversionConfig : Object {
 public class Converter : Object {
     // Emitted on the main thread after a successful conversion
     public signal void conversion_done (string output_file);
+    public signal void conversion_succeeded (uint64 operation_id, string output_file);
+    public signal void conversion_failed (uint64 operation_id);
 
     // ── Stable dependencies ─────────────────────────────────────────────────
     private StatusArea status_area;
@@ -52,7 +54,6 @@ public class Converter : Object {
     public GeneralTab general_tab { get; private set; }
 
     // ── Shared infrastructure ───────────────────────────────────────────────
-    public ProcessRunner process_runner { get; private set; }
     public ProgressTracker progress_tracker { get; private set; }
 
     // ── Per-conversion state (all guarded by state_mutex) ───────────────────
@@ -60,35 +61,51 @@ public class Converter : Object {
     private bool is_converting = false;
     private ConversionPhase current_phase = ConversionPhase.IDLE;
     private double total_duration = 0.0;
+    private uint64 active_operation_id = 0;
+    private ProcessRunner? active_runner = null;
     private string _last_output_file = "";
     private string? _passlog_base = null;
 
     // ── Thread-safe accessors ───────────────────────────────────────────────
     public string last_output_file {
         owned get {
+            string output_file;
             state_mutex.lock ();
-            string v = _last_output_file;
-            state_mutex.unlock ();
-            return v;
+            try {
+                output_file = _last_output_file;
+            } finally {
+                state_mutex.unlock ();
+            }
+            return output_file;
         }
         set {
             state_mutex.lock ();
-            _last_output_file = value;
-            state_mutex.unlock ();
+            try {
+                _last_output_file = value;
+            } finally {
+                state_mutex.unlock ();
+            }
         }
     }
 
     public string? passlog_base {
         owned get {
+            string? passlog;
             state_mutex.lock ();
-            string? v = _passlog_base;
-            state_mutex.unlock ();
-            return v;
+            try {
+                passlog = _passlog_base;
+            } finally {
+                state_mutex.unlock ();
+            }
+            return passlog;
         }
         set {
             state_mutex.lock ();
-            _passlog_base = value;
-            state_mutex.unlock ();
+            try {
+                _passlog_base = value;
+            } finally {
+                state_mutex.unlock ();
+            }
         }
     }
 
@@ -105,7 +122,6 @@ public class Converter : Object {
         this.status_area    = status_area;
         this.console_tab    = console_tab;
         this.general_tab    = general_tab;
-        this.process_runner = new ProcessRunner ();
         this.progress_tracker = new ProgressTracker (status_area.progress_bar);
     }
 
@@ -132,21 +148,56 @@ public class Converter : Object {
      * Begin encoding.  The output_file should already be resolved
      * (including any overwrite / rename decision made in the UI).
      */
-    public void start_conversion (string input_file,
+    private bool try_reserve_conversion_start (uint64 operation_id,
+                                               ProcessRunner runner) {
+        state_mutex.lock ();
+        try {
+            if (is_converting) {
+                return false;
+            }
+
+            is_converting = true;
+            current_phase = ConversionPhase.IDLE;
+            total_duration = 0.0;
+            active_operation_id = operation_id;
+            active_runner = runner;
+            return true;
+        } finally {
+            state_mutex.unlock ();
+        }
+    }
+
+    private void rollback_conversion_start (uint64 operation_id,
+                                           ProcessRunner runner) {
+        state_mutex.lock ();
+        try {
+            if (active_operation_id == operation_id && active_runner == runner) {
+                is_converting = false;
+                current_phase = ConversionPhase.IDLE;
+                total_duration = 0.0;
+                active_operation_id = 0;
+                active_runner = null;
+            }
+        } finally {
+            state_mutex.unlock ();
+        }
+    }
+
+    public bool start_conversion (string input_file,
                                   string output_file,
                                   ICodecTab codec_tab,
-                                  ICodecBuilder builder) {
-        state_mutex.lock ();
-        if (is_converting) {
-            state_mutex.unlock ();
-            status_area.set_status ("⚠️ A conversion is already running!");
-            return;
-        }
-        state_mutex.unlock ();
-
+                                  ICodecBuilder builder,
+                                  uint64 operation_id) {
         if (input_file == "") {
             status_area.set_status ("⚠️ Please select an input file first!");
-            return;
+            return false;
+        }
+
+        var runner = new ProcessRunner ();
+
+        if (!try_reserve_conversion_start (operation_id, runner)) {
+            status_area.set_status ("⚠️ A conversion is already running!");
+            return false;
         }
 
         last_output_file = output_file;
@@ -158,31 +209,48 @@ public class Converter : Object {
         // Snapshot all UI state into a ConversionConfig
         var config = snapshot_config (input_file, output_file, codec_tab, builder);
 
-        state_mutex.lock ();
-        is_converting = true;
-        current_phase = ConversionPhase.IDLE;
-        state_mutex.unlock ();
-
-        process_runner.reset ();
         progress_tracker.reset_throttle ();
         progress_tracker.show_pulse ();
 
-        new Thread<void> ("ffmpeg-thread", () => {
-            // Probe duration on background thread via shared utility
-            double dur = FfprobeUtils.probe_duration (input_file);
-            state_mutex.lock ();
-            total_duration = dur;
-            state_mutex.unlock ();
+        try {
+            new Thread<void>.try ("ffmpeg-thread", () => {
+                // Probe duration on background thread via shared utility
+                double dur = FfprobeUtils.probe_duration (input_file);
+                bool still_active;
 
-            bool pulse = (dur <= 0);
-            progress_tracker.set_pulse_mode (pulse);
+                state_mutex.lock ();
+                try {
+                    still_active = (active_operation_id == operation_id &&
+                                    active_runner == runner);
+                    if (still_active) {
+                        total_duration = dur;
+                    }
+                } finally {
+                    state_mutex.unlock ();
+                }
 
-            if (!pulse) {
-                progress_tracker.switch_to_determinate ();
-            }
+                if (!still_active || runner.is_cancelled ()) {
+                    return;
+                }
 
-            run_conversion (input_file, output_file, two_pass, config);
-        });
+                bool pulse = (dur <= 0);
+                progress_tracker.set_pulse_mode (pulse);
+
+                if (!pulse) {
+                    progress_tracker.switch_to_determinate ();
+                }
+
+                run_conversion (input_file, output_file, two_pass, runner, config, operation_id);
+            });
+        } catch (Error e) {
+            rollback_conversion_start (operation_id, runner);
+            progress_tracker.hide ();
+            cleanup_passlog ();
+            report_error ("Failed to start conversion thread: " + e.message);
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -222,9 +290,11 @@ public class Converter : Object {
     }
 
     private void run_conversion (string input, string output, bool two_pass,
-                                 ConversionConfig config) {
-        var runner = new ConversionRunner (this, config);
-        runner.run (input, output, two_pass);
+                                 ProcessRunner process_runner,
+                                 ConversionConfig config,
+                                 uint64 operation_id) {
+        var runner = new ConversionRunner (this, process_runner, config);
+        runner.run (input, output, two_pass, operation_id);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -238,10 +308,15 @@ public class Converter : Object {
      * @param pass_start  Starting percentage for progress display (default 0)
      * @param pass_range  Percentage range for this pass (default 100)
      */
-    internal int execute_ffmpeg (string[] argv,
+    internal int execute_ffmpeg (ProcessRunner process_runner,
+                                 string[] argv,
                                  double pass_start = 0.0,
                                  double pass_range = 100.0) {
         int exit = process_runner.execute (argv, (clean) => {
+            if (!owns_active_runner (process_runner)) {
+                return;
+            }
+
             // Logging: filter out noisy progress lines
             if (ConversionUtils.should_log_ffmpeg_line (clean)) {
                 console_tab.add_line (clean);
@@ -260,9 +335,13 @@ public class Converter : Object {
                 current_sec = ConversionUtils.parse_ffmpeg_timestamp (time_str);
             }
 
+            double dur;
             state_mutex.lock ();
-            double dur = total_duration;
-            state_mutex.unlock ();
+            try {
+                dur = total_duration;
+            } finally {
+                state_mutex.unlock ();
+            }
 
             if (current_sec >= 0 && dur > 0.0) {
                 progress_tracker.update_from_time (current_sec, dur, pass_start, pass_range);
@@ -270,7 +349,9 @@ public class Converter : Object {
         });
 
         print ("\n=== FFmpeg command ===\n%s\n", string.joinv (" ", argv));
-        console_tab.set_command (string.joinv (" ", argv));
+        if (owns_active_runner (process_runner)) {
+            console_tab.set_command (string.joinv (" ", argv));
+        }
 
         return exit;
     }
@@ -280,15 +361,23 @@ public class Converter : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void cancel () {
+        ProcessRunner? runner_to_cancel = null;
+        ConversionPhase phase = ConversionPhase.IDLE;
+
         state_mutex.lock ();
-        if (!is_converting) {
+        try {
+            if (!is_converting) {
+                return;
+            }
+            phase = current_phase;
+            is_converting = false;
+            current_phase = ConversionPhase.IDLE;
+            active_operation_id = 0;
+            runner_to_cancel = active_runner;
+            active_runner = null;
+        } finally {
             state_mutex.unlock ();
-            return;
         }
-        var phase = current_phase;
-        is_converting = false;
-        current_phase = ConversionPhase.IDLE;
-        state_mutex.unlock ();
 
         string cancel_msg = "⏹️ Cancelling conversion...";
         if (phase == ConversionPhase.PASS1) {
@@ -300,8 +389,9 @@ public class Converter : Object {
         update_status (cancel_msg);
         progress_tracker.hide_cancelled ();
 
-        // Delegate to ProcessRunner (proper kill + SIGKILL escalation)
-        process_runner.cancel ();
+        if (runner_to_cancel != null) {
+            runner_to_cancel.cancel ();
+        }
 
         cleanup_passlog ();
     }
@@ -351,25 +441,66 @@ public class Converter : Object {
 
     internal void set_phase (ConversionPhase phase) {
         state_mutex.lock ();
-        current_phase = phase;
-        state_mutex.unlock ();
+        try {
+            current_phase = phase;
+        } finally {
+            state_mutex.unlock ();
+        }
     }
 
-    internal bool is_cancelled () {
+    internal bool is_cancelled (ProcessRunner process_runner) {
         return process_runner.is_cancelled ();
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  POST-CONVERSION CLEANUP
-    // ═════════════════════════════════════════════════════════════════════════
-
-    public void cleanup_after_conversion () {
+    private bool owns_active_runner (ProcessRunner process_runner) {
+        bool owns_runner;
         state_mutex.lock ();
-        is_converting = false;
-        current_phase = ConversionPhase.IDLE;
-        state_mutex.unlock ();
+        try {
+            owns_runner = (active_runner == process_runner);
+        } finally {
+            state_mutex.unlock ();
+        }
+        return owns_runner;
+    }
 
-        progress_tracker.hide ();
-        cleanup_passlog ();
+    internal void finish_conversion (uint64 operation_id,
+                                     ProcessRunner process_runner,
+                                     bool succeeded,
+                                     string? output_file = null) {
+        string? completed_output = output_file;
+
+        Idle.add (() => {
+            bool should_emit;
+
+            state_mutex.lock ();
+            try {
+                should_emit = (active_operation_id == operation_id &&
+                               active_runner == process_runner);
+                if (should_emit) {
+                    is_converting = false;
+                    current_phase = ConversionPhase.IDLE;
+                    active_operation_id = 0;
+                    active_runner = null;
+                }
+            } finally {
+                state_mutex.unlock ();
+            }
+
+            if (!should_emit) {
+                return Source.REMOVE;
+            }
+
+            progress_tracker.hide ();
+            cleanup_passlog ();
+
+            if (succeeded && completed_output != null) {
+                conversion_done (completed_output);
+                conversion_succeeded (operation_id, completed_output);
+            } else if (!succeeded) {
+                conversion_failed (operation_id);
+            }
+
+            return Source.REMOVE;
+        });
     }
 }

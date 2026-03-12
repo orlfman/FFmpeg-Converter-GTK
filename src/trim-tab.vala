@@ -138,10 +138,13 @@ public class TrimTab : Box, ICodecTab {
 
     // ── Trim runner ──────────────────────────────────────────────────────────
     private TrimRunner? active_runner = null;
+    private uint64 active_operation_id = 0;
     private bool speed_locked = false;  // true when speed filters force re-encode
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void trim_done (string output_path);
+    public signal void trim_succeeded (uint64 operation_id, string output_path);
+    public signal void trim_failed (uint64 operation_id);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -271,10 +274,11 @@ public class TrimTab : Box, ICodecTab {
     /**
      * Launch the trim/crop/export pipeline.
      */
-    public void start_trim_export (string input_file,
+    public bool start_trim_export (string input_file,
                                    string output_folder,
                                    StatusArea status_area,
-                                   ConsoleTab console_tab) {
+                                   ConsoleTab console_tab,
+                                   uint64 operation_id) {
         // Extract child widgets for internal use — TrimRunner still receives
         // them individually, keeping its internals unchanged for now.
         Label status_label = status_area.status_label;
@@ -284,13 +288,13 @@ public class TrimTab : Box, ICodecTab {
         if (current_mode == Mode.CHAPTER_SPLIT) {
             if (input_file == null || input_file.strip () == "") {
                 status_label.set_text ("⚠️ Please select an input file first.");
-                return;
+                return false;
             }
             // Build segments from selected chapters
             rebuild_chapter_segments ();
             if (segments.length == 0) {
                 status_label.set_text ("⚠️ No chapters selected — select at least one chapter to export.");
-                return;
+                return false;
             }
 
             var segs = new GenericArray<TrimSegment> ();
@@ -298,20 +302,21 @@ public class TrimTab : Box, ICodecTab {
                 segs.add (segments[i]);
             }
 
+            active_operation_id = operation_id;
             maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                           progress_bar, console_tab, segs, false);
-            return;
+                           progress_bar, console_tab, segs, false, operation_id);
+            return true;
         }
 
         // For Crop Only mode, create a virtual full-video segment
         if (current_mode == Mode.CROP_ONLY) {
             if (input_file == null || input_file.strip () == "") {
                 status_label.set_text ("⚠️ Please select an input file first.");
-                return;
+                return false;
             }
             if (global_crop_value.strip () == "") {
                 status_label.set_text ("⚠️ Draw a crop rectangle on the video first.");
-                return;
+                return false;
             }
             // Create one segment spanning the whole file
             var full_seg = new TrimSegment (0, player.get_duration_seconds ());
@@ -320,19 +325,20 @@ public class TrimTab : Box, ICodecTab {
             var segs = new GenericArray<TrimSegment> ();
             segs.add (full_seg);
 
+            active_operation_id = operation_id;
             maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                           progress_bar, console_tab, segs, true);
-            return;
+                           progress_bar, console_tab, segs, true, operation_id);
+            return true;
         }
 
         // Trim Only or Crop & Trim
         if (input_file == null || input_file.strip () == "") {
             status_label.set_text ("⚠️ Please select an input file first.");
-            return;
+            return false;
         }
         if (segments.length == 0) {
             status_label.set_text ("⚠️ Add at least one segment before exporting.");
-            return;
+            return false;
         }
 
         var segs = new GenericArray<TrimSegment> ();
@@ -360,8 +366,10 @@ public class TrimTab : Box, ICodecTab {
             if (segs[i].has_crop ()) { any_crop = true; break; }
         }
 
+        active_operation_id = operation_id;
         maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                       progress_bar, console_tab, segs, any_crop);
+                       progress_bar, console_tab, segs, any_crop, operation_id);
+        return true;
     }
 
     private void launch_runner (string input_file,
@@ -371,6 +379,7 @@ public class TrimTab : Box, ICodecTab {
                                 ConsoleTab console_tab,
                                 GenericArray<TrimSegment> segs,
                                 bool force_reencode,
+                                uint64 operation_id,
                                 GenericArray<SegmentCodecArgs>? smart_codec_args = null) {
 
         var runner = new TrimRunner ();
@@ -438,11 +447,23 @@ public class TrimTab : Box, ICodecTab {
         runner.set_segments (segs);
 
         runner.export_done.connect ((path) => {
+            if (active_runner != runner || active_operation_id != operation_id) {
+                return;
+            }
+
             active_runner = null;
+            active_operation_id = 0;
             trim_done (path);
+            trim_succeeded (operation_id, path);
         });
         runner.export_failed.connect ((msg) => {
+            if (active_runner != runner || active_operation_id != operation_id) {
+                return;
+            }
+
             active_runner = null;
+            active_operation_id = 0;
+            trim_failed (operation_id);
         });
 
         active_runner = runner;
@@ -459,6 +480,7 @@ public class TrimTab : Box, ICodecTab {
             active_runner.cancel ();
             active_runner = null;
         }
+        active_operation_id = 0;
     }
 
     public bool is_exporting () {
@@ -476,16 +498,18 @@ public class TrimTab : Box, ICodecTab {
                                                     ProgressBar progress_bar,
                                                     ConsoleTab console_tab,
                                                     GenericArray<TrimSegment> segs,
-                                                    bool force_reencode) {
+                                                    bool force_reencode,
+                                                    uint64 operation_id) {
         if (smart_optimize_switch.active
             && !copy_mode_switch.active
             && export_separate_switch.active) {
             run_smart_then_export.begin (
                 input_file, output_folder, status_label, progress_bar,
-                console_tab, segs, force_reencode);
+                console_tab, segs, force_reencode, operation_id);
         } else {
             launch_runner (input_file, output_folder, status_label,
-                           progress_bar, console_tab, segs, force_reencode);
+                           progress_bar, console_tab, segs, force_reencode,
+                           operation_id);
         }
     }
 
@@ -513,7 +537,8 @@ public class TrimTab : Box, ICodecTab {
                                                ProgressBar progress_bar,
                                                ConsoleTab console_tab,
                                                GenericArray<TrimSegment> segs,
-                                               bool force_reencode) {
+                                               bool force_reencode,
+                                               uint64 operation_id) {
         if (smart_optimizer == null) {
             smart_optimizer = new SmartOptimizer ();
         }
@@ -546,7 +571,8 @@ public class TrimTab : Box, ICodecTab {
             tmp_dir = DirUtils.make_tmp ("smart-opt-XXXXXX");
         } catch (Error e) {
             status_label.set_text ("❌ Failed to create temp directory: " + e.message);
-            smart_cancel = null;
+            release_smart_cancel (cancel);
+            fail_operation (operation_id);
             return;
         }
 
@@ -574,8 +600,8 @@ public class TrimTab : Box, ICodecTab {
             try {
                 string[] copy_cmd = {
                     AppSettings.get_default ().ffmpeg_path, "-y",
-                    "-ss", "%.6f".printf (seg.start_time),
-                    "-t",  "%.6f".printf (seg.get_duration ()),
+                    "-ss", ConversionUtils.format_ffmpeg_double (seg.start_time, "%.6f"),
+                    "-t",  ConversionUtils.format_ffmpeg_double (seg.get_duration (), "%.6f"),
                     "-i",  input_file,
                     "-c",  "copy",
                     "-map_chapters", "-1",
@@ -659,9 +685,12 @@ public class TrimTab : Box, ICodecTab {
 
         // Clean up temp directory
         DirUtils.remove (tmp_dir);
-        smart_cancel = null;
+        release_smart_cancel (cancel);
 
-        if (cancelled) return;
+        if (cancelled) {
+            fail_operation (operation_id);
+            return;
+        }
 
         // ── Report skipped segments ─────────────────────────────────────────
         if (skipped.length > 0) {
@@ -680,6 +709,7 @@ public class TrimTab : Box, ICodecTab {
         if (ok_segs.length == 0) {
             status_label.set_text ("⚠️ Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
                 .printf (target_mb));
+            fail_operation (operation_id);
             return;
         }
 
@@ -693,7 +723,23 @@ public class TrimTab : Box, ICodecTab {
         }
 
         launch_runner (input_file, output_folder, status_label, progress_bar,
-                       console_tab, ok_segs, force_reencode, ok_args);
+                       console_tab, ok_segs, force_reencode, operation_id, ok_args);
+    }
+
+    private void release_smart_cancel (Cancellable cancel) {
+        if (smart_cancel == cancel) {
+            smart_cancel = null;
+        }
+    }
+
+    private void fail_operation (uint64 operation_id) {
+        if (active_operation_id != operation_id) {
+            return;
+        }
+
+        active_runner = null;
+        active_operation_id = 0;
+        trim_failed (operation_id);
     }
 
     /**

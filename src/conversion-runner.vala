@@ -7,67 +7,71 @@ using Gtk;
 public class ConversionRunner {
 
     private Converter converter;
+    private ProcessRunner process_runner;
     private ConversionConfig config;
     private string[]? resolved_codec_args = null;
 
-    public ConversionRunner (Converter converter, ConversionConfig config) {
-        this.converter = converter;
-        this.config    = config;
+    public ConversionRunner (Converter converter,
+                             ProcessRunner process_runner,
+                             ConversionConfig config) {
+        this.converter      = converter;
+        this.process_runner = process_runner;
+        this.config         = config;
     }
 
-    public void run (string input, string output, bool two_pass) {
+    public void run (string input, string output, bool two_pass, uint64 operation_id) {
         string safe_output = ConversionUtils.sanitize_filename (output);
+        bool succeeded = false;
 
         try {
             if (two_pass) {
-                if (converter.is_cancelled ()) return;
+                if (converter.is_cancelled (process_runner)) return;
 
                 converter.set_phase (ConversionPhase.PASS1);
                 converter.update_status ("🔄 Pass 1/2: Analyzing video...");
                 string[] pass1 = build_pass1 (input);
-                if (converter.execute_ffmpeg (pass1, 0.0, 50.0) != 0) {
-                    if (!converter.is_cancelled ())
+                if (converter.execute_ffmpeg (process_runner, pass1, 0.0, 50.0) != 0) {
+                    if (!converter.is_cancelled (process_runner))
                         converter.report_error ("Pass 1 failed.");
                     return;
                 }
 
-                if (converter.is_cancelled ()) return;
+                if (converter.is_cancelled (process_runner)) return;
 
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (
                     @"🔄 Pass 2/2: Encoding final $(config.profile.codec_name) video...");
                 string[] pass2 = build_pass2 (input, safe_output);
-                if (converter.execute_ffmpeg (pass2, 50.0, 50.0) != 0) {
-                    if (!converter.is_cancelled ())
+                if (converter.execute_ffmpeg (process_runner, pass2, 50.0, 50.0) != 0) {
+                    if (!converter.is_cancelled (process_runner))
                         converter.report_error ("Pass 2 failed.");
                     return;
                 }
             } else {
-                if (converter.is_cancelled ()) return;
+                if (converter.is_cancelled (process_runner)) return;
 
                 converter.set_phase (ConversionPhase.PASS2);
                 converter.update_status (
                     @"🔄 Encoding with $(config.profile.codec_name) (single pass...)");
                 string[] cmd = build_single_pass (input, safe_output);
-                if (converter.execute_ffmpeg (cmd) != 0) {
-                    if (!converter.is_cancelled ())
+                if (converter.execute_ffmpeg (process_runner, cmd) != 0) {
+                    if (!converter.is_cancelled (process_runner))
                         converter.report_error ("Encoding failed.");
                     return;
                 }
             }
 
-            if (converter.is_cancelled ()) return;
+            if (converter.is_cancelled (process_runner)) return;
 
             converter.update_status (@"✅ Conversion completed successfully!\n\nSaved to:\n$safe_output");
-
-            // Notify listeners that a new output file is ready
-            string completed_path = safe_output;
-            Idle.add (() => {
-                converter.conversion_done (completed_path);
-                return Source.REMOVE;
-            });
+            succeeded = true;
         } finally {
-            converter.cleanup_after_conversion ();
+            converter.finish_conversion (
+                operation_id,
+                process_runner,
+                succeeded,
+                succeeded ? safe_output : null
+            );
         }
     }
 

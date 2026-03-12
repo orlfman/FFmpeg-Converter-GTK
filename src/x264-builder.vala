@@ -205,7 +205,10 @@ public class X264Builder : Object, ICodecBuilder {
         if (snapshot.psy_rd_enabled) {
             double psy_rd = snapshot.psy_rd;
             double psy_trellis = snapshot.psy_trellis;
-            params += "psy-rd=%.1f,%.2f".printf (psy_rd, psy_trellis);
+            params += "psy-rd=%s,%s".printf (
+                ConversionUtils.format_ffmpeg_double (psy_rd, "%.1f"),
+                ConversionUtils.format_ffmpeg_double (psy_trellis, "%.2f")
+            );
         } else {
             params += "no-psy";
         }
@@ -234,7 +237,8 @@ public class X264Builder : Object, ICodecBuilder {
 
             if (aq_val > 0) {
                 double strength = snapshot.aq_strength;
-                params += "aq-strength=" + "%.1f".printf (strength);
+                params += "aq-strength="
+                    + ConversionUtils.format_ffmpeg_double (strength, "%.1f");
             }
         }
 
