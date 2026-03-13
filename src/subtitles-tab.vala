@@ -44,6 +44,7 @@ public class SubtitlesTab : Box {
     private bool operation_locked = false;
     private uint64 active_extract_operation_id = 0;
     private uint64 active_apply_operation_id = 0;
+    private uint64 probe_generation = 0;
     private bool _updating_defaults = false;
 
     // ── Drag-and-drop state ──────────────────────────────────────────────────
@@ -744,6 +745,7 @@ public class SubtitlesTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void load_video (string file_path) {
+        uint64 request_generation = ++probe_generation;
         current_input_file = file_path;
 
         if (file_path == "") {
@@ -775,6 +777,10 @@ public class SubtitlesTab : Box {
         new Thread<void> ("subtitle-probe", () => {
             GenericArray<SubtitleStream> streams = runner.probe_sync (probe_path);
             Idle.add (() => {
+                if (request_generation != probe_generation || current_input_file != probe_path) {
+                    return Source.REMOVE;
+                }
+
                 detected_streams = streams;
                 rebuild_detected_group ();
                 rebuild_extract_combo ();

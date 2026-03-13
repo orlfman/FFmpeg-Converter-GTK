@@ -303,12 +303,16 @@ public class ProcessRunner : Object {
             var reader = new DataInputStream (process.get_stderr_pipe ());
 
             string line;
+            bool suppress_output = false;
             while ((line = reader.read_line (null)) != null) {
-                // Early exit if cancelled
-                if (is_cancelled ()) break;
+                // Keep draining stderr after cancellation so FFmpeg cannot
+                // block on a full pipe while we're waiting for it to exit.
+                if (!suppress_output && is_cancelled ()) {
+                    suppress_output = true;
+                }
 
                 string clean = line.strip ();
-                if (clean.length == 0) continue;
+                if (suppress_output || clean.length == 0) continue;
 
                 if (on_line != null) {
                     on_line (clean);
