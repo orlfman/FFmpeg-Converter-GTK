@@ -45,6 +45,11 @@ public class SegmentCodecArgs : Object {
     }
 }
 
+public enum TrimOutputConflictPolicy {
+    OVERWRITE,
+    AUTO_RENAME
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  TrimTab — Video trimming, cropping, chapter splitting, and segment management
 //
@@ -143,8 +148,8 @@ public class TrimTab : Box, ICodecTab {
     private bool speed_locked = false;  // true when speed filters force re-encode
 
     // ── Signals ──────────────────────────────────────────────────────────────
-    public signal void trim_done (string output_path);
-    public signal void trim_succeeded (uint64 operation_id, string output_path);
+    public signal void trim_done (OperationOutputResult output_result);
+    public signal void trim_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void trim_failed (uint64 operation_id);
     public signal void trim_cancelled (uint64 operation_id);
 
@@ -294,7 +299,8 @@ public class TrimTab : Box, ICodecTab {
                                    string output_folder,
                                    StatusArea status_area,
                                    ConsoleTab console_tab,
-                                   uint64 operation_id) {
+                                   uint64 operation_id,
+                                   TrimOutputConflictPolicy output_policy = TrimOutputConflictPolicy.OVERWRITE) {
         // Extract child widgets for internal use — TrimRunner still receives
         // them individually, keeping its internals unchanged for now.
         Label status_label = status_area.status_label;
@@ -332,7 +338,8 @@ public class TrimTab : Box, ICodecTab {
             active_operation_id = operation_id;
             cancel_pending = false;
             maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                           progress_bar, console_tab, segs, false, operation_id);
+                           progress_bar, console_tab, segs, false, operation_id,
+                           output_policy);
             return true;
         }
 
@@ -356,7 +363,8 @@ public class TrimTab : Box, ICodecTab {
             active_operation_id = operation_id;
             cancel_pending = false;
             maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                           progress_bar, console_tab, segs, true, operation_id);
+                           progress_bar, console_tab, segs, true, operation_id,
+                           output_policy);
             return true;
         }
 
@@ -398,7 +406,8 @@ public class TrimTab : Box, ICodecTab {
         active_operation_id = operation_id;
         cancel_pending = false;
         maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
-                       progress_bar, console_tab, segs, any_crop, operation_id);
+                       progress_bar, console_tab, segs, any_crop, operation_id,
+                       output_policy);
         return true;
     }
 
@@ -410,6 +419,7 @@ public class TrimTab : Box, ICodecTab {
                                 GenericArray<TrimSegment> segs,
                                 bool force_reencode,
                                 uint64 operation_id,
+                                TrimOutputConflictPolicy output_policy,
                                 GenericArray<SegmentCodecArgs>? smart_codec_args = null,
                                 GeneralSettingsSnapshot? snapped_general_settings = null) {
 
@@ -427,6 +437,15 @@ public class TrimTab : Box, ICodecTab {
         runner.status_label    = status_label;
         runner.progress_bar    = progress_bar;
         runner.console_tab     = console_tab;
+
+        GenericArray<string> resolved_outputs = resolve_output_paths (
+            input_file, output_folder, segs, output_policy);
+        if (resolved_outputs.length > 0) {
+            runner.primary_output_path = resolved_outputs[0];
+        }
+        if (export_separate_switch.active) {
+            runner.set_separate_output_paths (resolved_outputs);
+        }
 
         // Set output suffix and status label based on mode
         if (current_mode == Mode.CHAPTER_SPLIT) {
@@ -483,12 +502,12 @@ public class TrimTab : Box, ICodecTab {
 
         runner.set_segments (segs);
 
-        runner.export_done.connect ((path) => {
+        runner.export_done.connect ((output_result) => {
             if (active_runner != runner || active_operation_id != operation_id) {
                 return;
             }
 
-            complete_active_operation (operation_id, false, path);
+            complete_active_operation (operation_id, false, output_result);
         });
         runner.export_failed.connect ((msg) => {
             if (active_runner != runner || active_operation_id != operation_id) {
@@ -538,17 +557,19 @@ public class TrimTab : Box, ICodecTab {
                                                     ConsoleTab console_tab,
                                                     GenericArray<TrimSegment> segs,
                                                     bool force_reencode,
-                                                    uint64 operation_id) {
+                                                    uint64 operation_id,
+                                                    TrimOutputConflictPolicy output_policy) {
         if (smart_optimize_switch.active
             && !copy_mode_switch.active
             && export_separate_switch.active) {
             run_smart_then_export.begin (
                 input_file, output_folder, status_label, progress_bar,
-                console_tab, segs, force_reencode, operation_id);
+                console_tab, segs, force_reencode, operation_id,
+                output_policy);
         } else {
             launch_runner (input_file, output_folder, status_label,
                            progress_bar, console_tab, segs, force_reencode,
-                           operation_id);
+                           operation_id, output_policy);
         }
     }
 
@@ -577,7 +598,8 @@ public class TrimTab : Box, ICodecTab {
                                                ConsoleTab console_tab,
                                                GenericArray<TrimSegment> segs,
                                                bool force_reencode,
-                                               uint64 operation_id) {
+                                               uint64 operation_id,
+                                               TrimOutputConflictPolicy output_policy) {
         if (smart_optimizer == null) {
             smart_optimizer = new SmartOptimizer ();
         }
@@ -785,6 +807,7 @@ public class TrimTab : Box, ICodecTab {
 
         launch_runner (input_file, output_folder, status_label, progress_bar,
                        console_tab, ok_segs, force_reencode, operation_id,
+                       output_policy,
                        ok_args, general_settings_snapshot);
     }
 
@@ -800,7 +823,7 @@ public class TrimTab : Box, ICodecTab {
 
     private void complete_active_operation (uint64 operation_id,
                                             bool was_cancelled,
-                                            string? output_path = null) {
+                                            OperationOutputResult? output_result = null) {
         active_runner = null;
         active_operation_id = 0;
         cancel_pending = false;
@@ -810,9 +833,9 @@ public class TrimTab : Box, ICodecTab {
             return;
         }
 
-        if (output_path != null) {
-            trim_done (output_path);
-            trim_succeeded (operation_id, output_path);
+        if (output_result != null) {
+            trim_done (output_result);
+            trim_succeeded (operation_id, output_result);
             return;
         }
 
@@ -827,72 +850,134 @@ public class TrimTab : Box, ICodecTab {
         complete_active_operation (operation_id, cancel_pending);
     }
 
+    private string get_output_extension (string input_file) {
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string input_ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+
+        if (copy_mode_switch.active) {
+            return input_ext;
+        }
+
+        int sel = (int) codec_choice.get_selected ();
+        ICodecTab? tab = null;
+        if (sel == 0) tab = svt_tab;
+        else if (sel == 1) tab = x265_tab;
+        else if (sel == 2) tab = x264_tab;
+        else if (sel == 3) tab = vp9_tab;
+
+        if (tab != null) {
+            string container = tab.get_container ();
+            return (container.length > 0) ? "." + container : ".mkv";
+        }
+
+        return ".mkv";
+    }
+
+    private string get_output_suffix () {
+        if (current_mode == Mode.CHAPTER_SPLIT) return "-chapter";
+        if (current_mode == Mode.CROP_ONLY) return "-cropped";
+        if (current_mode == Mode.TRIM_AND_CROP) return "-cropped-trimmed";
+        return "-trimmed";
+    }
+
+    private string build_separate_output_name (string name_no_ext,
+                                               string out_ext,
+                                               TrimSegment? seg,
+                                               int index,
+                                               HashTable<string, bool> used_names) {
+        if (current_mode == Mode.CHAPTER_SPLIT
+            && seg != null
+            && seg.label != null
+            && seg.label.strip ().length > 0) {
+            string safe = sanitize_filename (seg.label);
+            string candidate = @"$name_no_ext-$safe";
+            if (used_names.contains (candidate)) {
+                int dup_count = 2;
+                string deduped = @"$candidate ($dup_count)";
+                while (used_names.contains (deduped)) {
+                    dup_count++;
+                    deduped = @"$candidate ($dup_count)";
+                }
+                candidate = deduped;
+            }
+            used_names.set (candidate, true);
+            return @"$candidate$out_ext";
+        }
+
+        string num = pad_segment_number (index + 1);
+        return @"$name_no_ext-segment-$num$out_ext";
+    }
+
+    private string resolve_output_path_conflict (string path,
+                                                 TrimOutputConflictPolicy output_policy,
+                                                 HashTable<string, bool> reserved_paths) {
+        string resolved = path;
+        if (output_policy == TrimOutputConflictPolicy.AUTO_RENAME) {
+            resolved = ConversionUtils.find_unique_path_with_reserved (path, reserved_paths);
+        }
+
+        reserved_paths.set (resolved, true);
+        return resolved;
+    }
+
+    private GenericArray<string> resolve_output_paths (string input_file,
+                                                       string output_folder,
+                                                       GenericArray<TrimSegment> segs,
+                                                       TrimOutputConflictPolicy output_policy) {
+        var resolved_paths = new GenericArray<string> ();
+
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string out_ext = get_output_extension (input_file);
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        var reserved_paths = new HashTable<string, bool> (str_hash, str_equal);
+
+        if (export_separate_switch.active) {
+            var used_names = new HashTable<string, bool> (str_hash, str_equal);
+            int count = (current_mode == Mode.CROP_ONLY) ? 1 : segs.length;
+            for (int i = 0; i < count; i++) {
+                TrimSegment? seg = (i < segs.length) ? segs[i] : null;
+                string seg_name = build_separate_output_name (
+                    name_no_ext, out_ext, seg, i, used_names);
+                string seg_path = Path.build_filename (out_dir, seg_name);
+                resolved_paths.add (resolve_output_path_conflict (
+                    seg_path, output_policy, reserved_paths));
+            }
+            return resolved_paths;
+        }
+
+        string combined_path = Path.build_filename (
+            out_dir, @"$name_no_ext$(get_output_suffix ())$out_ext");
+        resolved_paths.add (resolve_output_path_conflict (
+            combined_path, output_policy, reserved_paths));
+        return resolved_paths;
+    }
+
     /**
      * Compute the expected output path(s) for the overwrite check.
      * Returns the first path that already exists on disk, or "" if none exist.
      * Handles both combined output and export-separate modes.
      */
     public string get_expected_output_path (string input_file, string output_folder) {
-        string basename = Path.get_basename (input_file);
-        int dot = basename.last_index_of_char ('.');
-        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
-        string input_ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        GenericArray<string> expected_paths = resolve_output_paths (
+            input_file,
+            output_folder,
+            segments,
+            TrimOutputConflictPolicy.OVERWRITE
+        );
 
-        // Determine extension
-        string out_ext;
-        if (copy_mode_switch.active) {
-            out_ext = input_ext;
-        } else {
-            int sel = (int) codec_choice.get_selected ();
-            ICodecTab? tab = null;
-            if (sel == 0) tab = svt_tab;
-            else if (sel == 1) tab = x265_tab;
-            else if (sel == 2) tab = x264_tab;
-            else if (sel == 3) tab = vp9_tab;
-
-            if (tab != null) {
-                string container = tab.get_container ();
-                out_ext = (container.length > 0) ? "." + container : ".mkv";
-            } else {
-                out_ext = ".mkv";
+        for (int i = 0; i < expected_paths.length; i++) {
+            if (FileUtils.test (expected_paths[i], FileTest.EXISTS)) {
+                return expected_paths[i];
             }
         }
 
-        string out_dir = (output_folder != null && output_folder != "")
-            ? output_folder
-            : Path.get_dirname (input_file);
-
-        if (export_separate_switch.active) {
-            // Check each expected segment file
-            int count = (current_mode == Mode.CROP_ONLY) ? 1 : segments.length;
-            for (int i = 0; i < count; i++) {
-                string seg_name;
-                if (current_mode == Mode.CHAPTER_SPLIT
-                    && i < segments.length
-                    && segments[i].label != null
-                    && segments[i].label.strip ().length > 0) {
-                    string safe = sanitize_filename (segments[i].label);
-                    seg_name = @"$name_no_ext-$safe$out_ext";
-                } else {
-                    string num = pad_segment_number (i + 1);
-                    seg_name = @"$name_no_ext-segment-$num$out_ext";
-                }
-                string seg_path = Path.build_filename (out_dir, seg_name);
-                if (FileUtils.test (seg_path, FileTest.EXISTS)) {
-                    return seg_path;
-                }
-            }
-            return "";
-        }
-
-        // Combined output
-        string suffix;
-        if (current_mode == Mode.CHAPTER_SPLIT) suffix = "-chapter";
-        else if (current_mode == Mode.CROP_ONLY) suffix = "-cropped";
-        else if (current_mode == Mode.TRIM_AND_CROP) suffix = "-cropped-trimmed";
-        else suffix = "-trimmed";
-
-        return Path.build_filename (out_dir, @"$name_no_ext$suffix$out_ext");
+        return "";
     }
 
     private static string pad_segment_number (int n) {

@@ -84,10 +84,10 @@ public class SubtitlesRunner : Object {
     public ConsoleTab?  console_tab  { get; set; default = null; }
 
     // Signals
-    public signal void operation_done (string output_path);
+    public signal void operation_done (OperationOutputResult output_result);
     public signal void operation_failed (string message);
     public signal void operation_cancelled ();
-    public signal void apply_done (uint64 operation_id, string output_path);
+    public signal void apply_done (uint64 operation_id, OperationOutputResult output_result);
     public signal void apply_failed (uint64 operation_id, string message);
     public signal void apply_cancelled (uint64 operation_id);
 
@@ -285,7 +285,7 @@ public class SubtitlesRunner : Object {
                 } else {
                     report_status (@"✅ Subtitle extracted!\n\nSaved to:\n$result_path");
                     Idle.add (() => {
-                        operation_done (result_path);
+                        operation_done (new OperationOutputResult.for_file (result_path));
                         return Source.REMOVE;
                     });
                 }
@@ -341,6 +341,7 @@ public class SubtitlesRunner : Object {
         new Thread<void> ("subtitle-extract-all", () => {
             int success = 0;
             int failed = 0;
+            var extracted_paths = new GenericArray<string> ();
 
             for (int i = 0; i < snap.length; i++) {
                 if (runner.is_cancelled ()) {
@@ -381,6 +382,7 @@ public class SubtitlesRunner : Object {
 
                 if (exit == 0) {
                     success++;
+                    extracted_paths.add (out_path);
                 } else {
                     log_line (@"⚠ Track #$(s.sub_index) failed (exit $exit), skipping.");
                     failed++;
@@ -393,13 +395,23 @@ public class SubtitlesRunner : Object {
                 return;
             }
 
+            if (success == 0) {
+                report_error (
+                    @"Failed to extract any subtitle tracks from $(snap.length) attempted track$(snap.length == 1 ? "" : "s")."
+                );
+                return;
+            }
+
             string msg = @"✅ Extracted $success of $(snap.length) subtitle tracks";
             if (failed > 0) msg += @" ($failed failed)";
             msg += @"\n\nSaved to:\n$output_dir";
             report_status (msg);
 
             Idle.add (() => {
-                operation_done (output_dir);
+                operation_done (OperationOutputResult.from_paths (
+                    OperationOutputResult.copy_paths (extracted_paths),
+                    output_dir
+                ));
                 return Source.REMOVE;
             });
         });
@@ -665,7 +677,7 @@ public class SubtitlesRunner : Object {
         if (exit == 0) {
             report_status (@"✅ Subtitle changes applied!\n\nSaved to:\n$result");
             Idle.add (() => {
-                apply_done (operation_id, result);
+                apply_done (operation_id, new OperationOutputResult.for_file (result));
                 return Source.REMOVE;
             });
         } else if (saw_format_mismatch) {
@@ -878,7 +890,7 @@ public class SubtitlesRunner : Object {
                 string result = output_path;
                 report_status (@"✅ Subtitles burned in!\n\nSaved to:\n$result");
                 Idle.add (() => {
-                    apply_done (operation_id, result);
+                    apply_done (operation_id, new OperationOutputResult.for_file (result));
                     return Source.REMOVE;
                 });
             } else if (saw_format_mismatch) {

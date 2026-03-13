@@ -35,6 +35,7 @@ public class TrimRunner : Object {
     public bool keyframe_cut { get; set; default = true; }
     public bool export_separate { get; set; default = false; }
     public string output_suffix { get; set; default = "-trimmed"; }
+    public string primary_output_path { get; set; default = ""; }
     public string operation_label { get; set; default = "Trim export"; }
     public int video_width { get; set; default = 0; }
     public int video_height { get; set; default = 0; }
@@ -49,6 +50,7 @@ public class TrimRunner : Object {
 
     // ── Segments ────────────────────────────────────────────────────────────
     private GenericArray<TrimSegment> segments = new GenericArray<TrimSegment> ();
+    private GenericArray<string> separate_output_paths = new GenericArray<string> ();
 
     // ── Per-segment Smart Optimizer codec overrides ──────────────────────
     // When non-null, per_segment_codec_args[i] contains FFmpeg video codec
@@ -77,7 +79,7 @@ public class TrimRunner : Object {
     }
 
     // ── Signal ──────────────────────────────────────────────────────────────
-    public signal void export_done (string output_path);
+    public signal void export_done (OperationOutputResult output_result);
     public signal void export_failed (string message);
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -86,6 +88,10 @@ public class TrimRunner : Object {
 
     public void set_segments (GenericArray<TrimSegment> segs) {
         segments = segs;
+    }
+
+    public void set_separate_output_paths (GenericArray<string> paths) {
+        separate_output_paths = paths;
     }
 
     /**
@@ -210,6 +216,22 @@ public class TrimRunner : Object {
             }
         }
 
+        string primary_output = primary_output_path;
+        if (primary_output == null || primary_output == "") {
+            primary_output = Path.build_filename (
+                out_dir, @"$name_no_ext$(output_suffix)$out_ext"
+            );
+        }
+
+        // Temp segment files should match the resolved target container, not
+        // just the initially computed extension, so concat paths stay aligned
+        // with the actual output plan after rename/policy resolution.
+        string runtime_out_ext = path_extension_or_fallback (primary_output, out_ext);
+        if (export_separate && separate_output_paths.length > 0) {
+            runtime_out_ext = path_extension_or_fallback (
+                separate_output_paths[0], out_ext);
+        }
+
         // ── PATH A: Concat filter (re-encode + multi-segment + combined) ─────
         // This is the most robust path: a single FFmpeg command that decodes
         // all segments, applies per-segment filters, and encodes once.
@@ -219,9 +241,7 @@ public class TrimRunner : Object {
         bool use_concat_filter = !copy_mode && !export_separate && segments.length > 1;
 
         if (use_concat_filter) {
-            string output_path = Path.build_filename (
-                out_dir, @"$name_no_ext$(output_suffix)$out_ext"
-            );
+            string output_path = primary_output;
 
             report_status (@"🔄 $(operation_label) — encoding $(segments.length) segments…");
             update_progress (10.0);
@@ -238,7 +258,7 @@ public class TrimRunner : Object {
                 report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$output_path");
                 update_progress (100.0);
 
-                string done = output_path;
+                var done = new OperationOutputResult.for_file (output_path);
                 Idle.add (() => {
                     export_done (done);
                     return Source.REMOVE;
@@ -262,9 +282,6 @@ public class TrimRunner : Object {
             // ── Phase 1: Extract each segment ────────────────────────────────
             var segment_files = new GenericArray<string> ();
 
-            // Track used filenames to deduplicate chapters with identical titles
-            var used_names = new HashTable<string, bool> (str_hash, str_equal);
-
             for (int i = 0; i < segments.length; i++) {
                 if (runner.is_cancelled ()) {
                     report_cancelled ();
@@ -286,36 +303,18 @@ public class TrimRunner : Object {
 
                 string seg_output;
                 if (export_separate) {
-                    // Use chapter title for filename when available
-                    string seg_name;
-                    if (seg.label != null && seg.label.strip ().length > 0) {
-                        string safe = sanitize_filename (seg.label);
-                        string candidate = @"$name_no_ext-$safe";
-                        // Deduplicate: append (2), (3)… on collision
-                        if (used_names.contains (candidate)) {
-                            int dup_count = 2;
-                            string deduped = @"$candidate ($dup_count)";
-                            while (used_names.contains (deduped)) {
-                                dup_count++;
-                                deduped = @"$candidate ($dup_count)";
-                            }
-                            candidate = deduped;
-                        }
-                        used_names.set (candidate, true);
-                        seg_name = @"$candidate$out_ext";
-                    } else {
-                        seg_name = @"$name_no_ext-segment-$(pad_number (i + 1))$out_ext";
-                    }
-                    seg_output = Path.build_filename (out_dir, seg_name);
+                    seg_output = (i < separate_output_paths.length)
+                        ? separate_output_paths[i]
+                        : Path.build_filename (
+                            out_dir,
+                            @"$name_no_ext-segment-$(pad_number (i + 1))$out_ext"
+                        );
                 } else if (direct_output) {
-                    seg_output = Path.build_filename (
-                        out_dir,
-                        @"$name_no_ext$(output_suffix)$out_ext"
-                    );
+                    seg_output = primary_output;
                 } else {
                     seg_output = Path.build_filename (
                         tmp_dir,
-                        @"segment_$(pad_number (i + 1))$out_ext"
+                        @"segment_$(pad_number (i + 1))$runtime_out_ext"
                     );
                 }
 
@@ -351,10 +350,7 @@ public class TrimRunner : Object {
                     return;
                 }
 
-                string concat_output = Path.build_filename (
-                    out_dir,
-                    @"$name_no_ext$(output_suffix)$out_ext"
-                );
+                string concat_output = primary_output;
                 last_output = concat_output;
 
                 report_status ("🔄 Concatenating segments…");
@@ -375,9 +371,17 @@ public class TrimRunner : Object {
 
             update_progress (100.0);
 
-            string done_path = last_output;
+            OperationOutputResult done_result;
+            if (export_separate) {
+                done_result = OperationOutputResult.from_paths (
+                    OperationOutputResult.copy_paths (segment_files),
+                    out_dir
+                );
+            } else {
+                done_result = new OperationOutputResult.for_file (last_output);
+            }
             Idle.add (() => {
-                export_done (done_path);
+                export_done (done_result);
                 return Source.REMOVE;
             });
 
@@ -973,7 +977,13 @@ public class TrimRunner : Object {
         }
     }
 
-    private static string sanitize_filename (string name) {
-        return ConversionUtils.sanitize_segment_name (name);
+    private static string path_extension_or_fallback (string path, string fallback_ext) {
+        if (path == null || path == "") {
+            return fallback_ext;
+        }
+
+        string basename = Path.get_basename (path);
+        int dot = basename.last_index_of_char ('.');
+        return (dot > 0) ? basename.substring (dot) : fallback_ext;
     }
 }

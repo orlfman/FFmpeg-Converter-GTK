@@ -9,6 +9,7 @@ public class HamburgerMenu {
     private GLib.SimpleAction open_output_folder_action;
     private FilePickers file_pickers;
     private string last_output_file = "";
+    private string last_output_folder = "";
 
     public HamburgerMenu (Gtk.Window parent_window, FilePickers file_pickers) {
         this.file_pickers = file_pickers;
@@ -95,7 +96,7 @@ public class HamburgerMenu {
             open_output_folder_action = new GLib.SimpleAction ("open-output-folder", null);
             open_output_folder_action.set_enabled (false);
             open_output_folder_action.activate.connect (() => {
-                open_in_file_manager (last_output_file);
+                open_in_file_manager (last_output_folder);
             });
             app.add_action (open_output_folder_action);
         } else {
@@ -110,15 +111,19 @@ public class HamburgerMenu {
         });
     }
 
-    /**
-     * Call this after a successful conversion or trim export so the
-     * "View Output Video" action knows which file to open.
-     */
-    public void set_last_output_file (string path) {
-        last_output_file = path;
-        bool exists = path.length > 0 && FileUtils.test (path, FileTest.EXISTS);
-        view_output_action.set_enabled (exists);
-        open_output_folder_action.set_enabled (exists);
+    public void set_last_output_result (OperationOutputResult output_result) {
+        last_output_file = output_result.prefers_folder_action ()
+            ? ""
+            : output_result.primary_file_path;
+        last_output_folder = output_result.get_open_folder_target ();
+
+        bool file_exists = last_output_file.length > 0
+            && FileUtils.test (last_output_file, FileTest.EXISTS);
+        bool folder_exists = last_output_folder.length > 0
+            && FileUtils.test (last_output_folder, FileTest.IS_DIR);
+
+        view_output_action.set_enabled (file_exists);
+        open_output_folder_action.set_enabled (folder_exists);
     }
 
     public Gtk.MenuButton get_button () {
@@ -139,16 +144,15 @@ public class HamburgerMenu {
         }
     }
 
-    /**
-     * Open the parent directory of @path in the system file manager.
-     */
     private static void open_in_file_manager (string path) {
         if (path.length == 0) return;
-        string parent = Path.get_dirname (path);
-        if (parent.length == 0 || !FileUtils.test (parent, FileTest.IS_DIR)) return;
+        string target = FileUtils.test (path, FileTest.IS_DIR)
+            ? path
+            : Path.get_dirname (path);
+        if (target.length == 0 || !FileUtils.test (target, FileTest.IS_DIR)) return;
 
         try {
-            var folder = File.new_for_path (parent);
+            var folder = File.new_for_path (target);
             AppInfo.launch_default_for_uri (folder.get_uri (), null);
         } catch (Error e) {
             warning ("Failed to open file manager: %s", e.message);

@@ -22,6 +22,7 @@ sources = files(
   'src/app-controller.vala',
   'src/process-runner.vala',
   'src/conversion-utils.vala',
+  'src/operation-output-result.vala',
   'src/progress-tracker.vala',
   'src/constants.vala',
   'src/svt-av1-tab.vala',

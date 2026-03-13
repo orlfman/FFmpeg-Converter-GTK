@@ -247,20 +247,16 @@ public class AppController : Object {
     // ── Conversion done → probe output, update hamburger ────────────────────
 
     private void wire_conversion_done () {
-        converter.conversion_done.connect ((output_path) => {
-            info_tab.load_output_info (output_path);
-            hamburger.set_last_output_file (output_path);
-            file_pickers.output_entry.set_last_output_file (output_path);
+        converter.conversion_done.connect ((output_result) => {
+            handle_operation_output (output_result);
         });
     }
 
     // ── Trim done → same as conversion done ─────────────────────────────────
 
     private void wire_trim_done () {
-        trim_tab.trim_done.connect ((output_path) => {
-            info_tab.load_output_info (output_path);
-            hamburger.set_last_output_file (output_path);
-            file_pickers.output_entry.set_last_output_file (output_path);
+        trim_tab.trim_done.connect ((output_result) => {
+            handle_operation_output (output_result);
         });
     }
 
@@ -315,11 +311,23 @@ public class AppController : Object {
     // ── Subtitle operation done → probe output, update hamburger ────────────
 
     private void wire_subtitle_done () {
-        subtitles_tab.subtitle_done.connect ((output_path) => {
-            info_tab.load_output_info (output_path);
-            hamburger.set_last_output_file (output_path);
-            file_pickers.output_entry.set_last_output_file (output_path);
+        subtitles_tab.subtitle_done.connect ((output_result) => {
+            handle_operation_output (output_result);
         });
+    }
+
+    private void handle_operation_output (OperationOutputResult output_result) {
+        string primary_file = output_result.primary_file_path;
+        if (output_result.kind == OperationOutputKind.FILE
+            && primary_file.length > 0
+            && FileUtils.test (primary_file, FileTest.EXISTS)) {
+            info_tab.load_output_info (primary_file);
+        } else {
+            info_tab.reset_output ();
+        }
+
+        hamburger.set_last_output_result (output_result);
+        file_pickers.output_entry.set_last_output_result (output_result);
     }
 
     // ── Smart Optimizer → analyze video, apply recommendation to codec tab ──

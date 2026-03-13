@@ -27,17 +27,17 @@ private class AddedDefaultBinding : Object {
 public class SubtitlesTab : Box {
 
     // ── Signals ──────────────────────────────────────────────────────────────
-    public signal void subtitle_done (string output_path);
+    public signal void subtitle_done (OperationOutputResult output_result);
     public signal void subtitle_extract_requested (string input_file,
                                                    SubtitleStream stream,
                                                    string output_path);
     public signal void subtitle_extract_all_requested (string input_file,
                                                        string output_dir,
                                                        string base_name);
-    public signal void subtitle_extract_succeeded (uint64 operation_id, string output_path);
+    public signal void subtitle_extract_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void subtitle_extract_failed (uint64 operation_id);
     public signal void subtitle_extract_cancelled (uint64 operation_id);
-    public signal void subtitle_apply_succeeded (uint64 operation_id, string output_path);
+    public signal void subtitle_apply_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void subtitle_apply_failed (uint64 operation_id);
     public signal void subtitle_apply_cancelled (uint64 operation_id);
 
@@ -695,13 +695,13 @@ public class SubtitlesTab : Box {
         extract_button.clicked.connect (on_extract_clicked);
         extract_all_button.clicked.connect (on_extract_all_clicked);
 
-        runner.operation_done.connect ((path) => {
+        runner.operation_done.connect ((output_result) => {
             uint64 operation_id = active_extract_operation_id;
             active_extract_operation_id = 0;
             set_busy (false);
-            subtitle_done (path);
+            subtitle_done (output_result);
             if (operation_id != 0) {
-                subtitle_extract_succeeded (operation_id, path);
+                subtitle_extract_succeeded (operation_id, output_result);
             }
         });
 
@@ -723,15 +723,15 @@ public class SubtitlesTab : Box {
             }
         });
 
-        runner.apply_done.connect ((operation_id, path) => {
+        runner.apply_done.connect ((operation_id, output_result) => {
             if (active_apply_operation_id != operation_id) {
                 return;
             }
 
             active_apply_operation_id = 0;
             set_busy (false);
-            subtitle_done (path);
-            subtitle_apply_succeeded (operation_id, path);
+            subtitle_done (output_result);
+            subtitle_apply_succeeded (operation_id, output_result);
         });
 
         runner.apply_failed.connect ((operation_id, msg) => {

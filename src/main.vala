@@ -113,15 +113,14 @@ public class MainWindow : Adw.ApplicationWindow {
         });
 
         // Reset operation state only for the specific run MainWindow started.
-        // AppController separately handles output-info and hamburger updates
-        // via the legacy success signals.
-        converter.conversion_succeeded.connect ((operation_id, output_path) => {
+        // AppController separately handles output-info and output actions.
+        converter.conversion_succeeded.connect ((operation_id, output_result) => {
             if (!complete_tracked_operation (
                     ActiveOperation.CONVERTING, operation_id, true)) {
                 return;
             }
 
-            post_success_toast ("Conversion complete", output_path);
+            post_success_toast ("Conversion complete", output_result);
             maybe_finish_close_after_cancellation ();
         });
         converter.conversion_failed.connect ((operation_id) => {
@@ -132,13 +131,13 @@ public class MainWindow : Adw.ApplicationWindow {
             complete_tracked_operation_with_close (
                 ActiveOperation.CONVERTING, operation_id, true);
         });
-        trim_tab.trim_succeeded.connect ((operation_id, output_path) => {
+        trim_tab.trim_succeeded.connect ((operation_id, output_result) => {
             if (!complete_tracked_operation (
                     ActiveOperation.TRIMMING, operation_id, true)) {
                 return;
             }
 
-            post_success_toast ("Export complete", output_path);
+            post_success_toast ("Export complete", output_result);
             maybe_finish_close_after_cancellation ();
         });
         trim_tab.trim_failed.connect ((operation_id) => {
@@ -171,13 +170,13 @@ public class MainWindow : Adw.ApplicationWindow {
 
             start_subtitle_extract_all (operation_id, input_file, output_dir, base_name);
         });
-        subtitles_tab.subtitle_extract_succeeded.connect ((operation_id, output_path) => {
+        subtitles_tab.subtitle_extract_succeeded.connect ((operation_id, output_result) => {
             if (!complete_tracked_operation (
                     ActiveOperation.SUBTITLE_EXTRACT, operation_id, true)) {
                 return;
             }
 
-            post_success_toast ("Subtitles extracted", output_path);
+            post_success_toast ("Subtitles extracted", output_result);
             maybe_finish_close_after_cancellation ();
         });
         subtitles_tab.subtitle_extract_failed.connect ((operation_id) => {
@@ -188,13 +187,13 @@ public class MainWindow : Adw.ApplicationWindow {
             complete_tracked_operation_with_close (
                 ActiveOperation.SUBTITLE_EXTRACT, operation_id, true);
         });
-        subtitles_tab.subtitle_apply_succeeded.connect ((operation_id, output_path) => {
+        subtitles_tab.subtitle_apply_succeeded.connect ((operation_id, output_result) => {
             if (!complete_tracked_operation (
                     ActiveOperation.SUBTITLE_APPLY, operation_id, true)) {
                 return;
             }
 
-            post_success_toast ("Subtitles applied", output_path);
+            post_success_toast ("Subtitles applied", output_result);
             maybe_finish_close_after_cancellation ();
         });
         subtitles_tab.subtitle_apply_failed.connect ((operation_id) => {
@@ -798,22 +797,51 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (settings.overwrite_enabled) {
             // Overwrite protection disabled — always proceed directly
-            launch_trim_export (trim, input_file, out_folder, operation_id);
+            launch_trim_export (
+                trim,
+                input_file,
+                out_folder,
+                operation_id,
+                TrimOutputConflictPolicy.OVERWRITE
+            );
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
-            confirm_overwrite (expected, false,
+            confirm_overwrite (expected, true,
                 () => {
                     if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
                         return;
                     }
-                    launch_trim_export (trim, input_file, out_folder, operation_id);
+                    launch_trim_export (
+                        trim,
+                        input_file,
+                        out_folder,
+                        operation_id,
+                        TrimOutputConflictPolicy.OVERWRITE
+                    );
                 },
-                null,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+                        return;
+                    }
+                    launch_trim_export (
+                        trim,
+                        input_file,
+                        out_folder,
+                        operation_id,
+                        TrimOutputConflictPolicy.AUTO_RENAME
+                    );
+                },
                 () => {
                     release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
                 }
             );
         } else {
-            launch_trim_export (trim, input_file, out_folder, operation_id);
+            launch_trim_export (
+                trim,
+                input_file,
+                out_folder,
+                operation_id,
+                TrimOutputConflictPolicy.OVERWRITE
+            );
         }
     }
 
@@ -997,13 +1025,19 @@ public class MainWindow : Adw.ApplicationWindow {
     private void launch_trim_export (TrimTab trim,
                                      string input_file,
                                      string output_folder,
-                                     uint64 operation_id) {
+                                     uint64 operation_id,
+                                     TrimOutputConflictPolicy output_policy) {
         if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
             return;
         }
 
         if (!trim.start_trim_export (
-                input_file, output_folder, status_area, console_tab, operation_id)) {
+                input_file,
+                output_folder,
+                status_area,
+                console_tab,
+                operation_id,
+                output_policy)) {
             release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
             return;
         }
@@ -1327,23 +1361,19 @@ public class MainWindow : Adw.ApplicationWindow {
      * Also sends a system notification so the user is informed when the app
      * is in the background or unfocused.
      */
-    private void post_success_toast (string title, string output_path) {
-        string basename = Path.get_basename (output_path);
+    private void post_success_toast (string title, OperationOutputResult output_result) {
+        string detail = output_result.get_display_label ();
 
         // ── In-app toast ─────────────────────────────────────────────────────
-        var toast = new Adw.Toast (@"$title — $basename");
+        var toast = new Adw.Toast (@"$title — $detail");
         toast.set_timeout (5);
 
-        // "Open Folder" action to reveal the file in the system file manager
-        // If output_path is itself a directory (e.g. extract-all), open it directly
-        string parent_dir = FileUtils.test (output_path, FileTest.IS_DIR)
-            ? output_path
-            : Path.get_dirname (output_path);
-        if (parent_dir.length > 0 && FileUtils.test (parent_dir, FileTest.IS_DIR)) {
+        string folder_path = output_result.get_open_folder_target ();
+        if (folder_path.length > 0 && FileUtils.test (folder_path, FileTest.IS_DIR)) {
             toast.set_button_label ("Open Folder");
             toast.button_clicked.connect (() => {
                 try {
-                    var folder = File.new_for_path (parent_dir);
+                    var folder = File.new_for_path (folder_path);
                     AppInfo.launch_default_for_uri (folder.get_uri (), null);
                 } catch (Error e) {
                     warning ("Failed to open folder: %s", e.message);
@@ -1354,7 +1384,7 @@ public class MainWindow : Adw.ApplicationWindow {
         toast_overlay.add_toast (toast);
 
         // ── System notification (visible when the app is unfocused) ──────────
-        send_system_notification (title, basename, output_path);
+        send_system_notification (title, output_result);
     }
 
     /**
@@ -1362,21 +1392,23 @@ public class MainWindow : Adw.ApplicationWindow {
      *
      * Integrates with the GNOME / freedesktop notification daemon so the
      * user is informed even when the window is minimized or another app
-     * has focus.  The notification's default action brings the window to
-     * the foreground; the "View" button opens the output in the default
-     * video player.
+     * has focus. The action button adapts to the result type: single-file
+     * outputs get "View", while directory or multi-file outputs get
+     * "Open Folder".
      */
-    private void send_system_notification (string title, string basename, string output_path) {
+    private void send_system_notification (string title, OperationOutputResult output_result) {
         var app = (GLib.Application) get_application ();
         if (app == null) return;
 
         var notification = new GLib.Notification (title);
-        notification.set_body (@"$basename is ready.");
+        notification.set_body (output_result.get_notification_body ());
 
-        // "View" button → open the output file with the default video player.
-        // Clicking the notification body itself activates the app (built-in
-        // GApplication behavior — no explicit action needed).
-        notification.add_button ("View", "app.view-output");
+        if (output_result.primary_file_path.length > 0
+            && !output_result.prefers_folder_action ()) {
+            notification.add_button ("View", "app.view-output");
+        } else if (output_result.get_open_folder_target ().length > 0) {
+            notification.add_button ("Open Folder", "app.open-output-folder");
+        }
 
         app.send_notification ("operation-complete", notification);
     }

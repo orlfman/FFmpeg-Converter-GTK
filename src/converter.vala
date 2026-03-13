@@ -44,8 +44,8 @@ public class ConversionConfig : Object {
 
 public class Converter : Object {
     // Emitted on the main thread after a successful conversion
-    public signal void conversion_done (string output_file);
-    public signal void conversion_succeeded (uint64 operation_id, string output_file);
+    public signal void conversion_done (OperationOutputResult output_result);
+    public signal void conversion_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void conversion_failed (uint64 operation_id);
     public signal void conversion_cancelled (uint64 operation_id);
 
@@ -566,8 +566,9 @@ public class Converter : Object {
             progress_tracker.hide ();
 
             if (succeeded && completed_output != null) {
-                conversion_done (completed_output);
-                conversion_succeeded (operation_id, completed_output);
+                var output_result = new OperationOutputResult.for_file (completed_output);
+                conversion_done (output_result);
+                conversion_succeeded (operation_id, output_result);
             } else if (!succeeded) {
                 conversion_failed (operation_id);
             }

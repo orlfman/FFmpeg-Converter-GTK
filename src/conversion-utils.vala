@@ -523,6 +523,31 @@ namespace ConversionUtils {
         return candidate;
     }
 
+    public string find_unique_path_with_reserved (string path,
+                                                  HashTable<string, bool>? reserved_paths = null) {
+        bool reserved_collision = reserved_paths != null && reserved_paths.contains (path);
+        if (!reserved_collision && !FileUtils.test (path, FileTest.EXISTS)) {
+            return path;
+        }
+
+        string dir = Path.get_dirname (path);
+        string basename = Path.get_basename (path);
+
+        int dot_pos = basename.last_index_of_char ('.');
+        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+        string ext  = (dot_pos > 0) ? basename.substring (dot_pos) : "";
+
+        int counter = 1;
+        string candidate = path;
+        do {
+            candidate = Path.build_filename (dir, @"$stem-$counter$ext");
+            counter++;
+        } while (FileUtils.test (candidate, FileTest.EXISTS)
+                 || (reserved_paths != null && reserved_paths.contains (candidate)));
+
+        return candidate;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  FILENAME SANITIZATION
     // ═════════════════════════════════════════════════════════════════════════
