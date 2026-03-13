@@ -469,8 +469,8 @@ public class AppController : Object {
                 general_tab.preserve_metadata.set_active (false);
             }
 
-            status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KB"
-                .printf (rec.crf, rec.preset, rec.estimated_size_kb));
+            status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KiB"
+                .printf (rec.crf, rec.preset, rec.estimated_size_kib));
 
             // Log full details to console
             string details = SmartOptimizer.format_recommendation (rec);

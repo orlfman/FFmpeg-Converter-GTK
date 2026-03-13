@@ -175,11 +175,12 @@ public class ColorCorrectionDialog : Adw.Window {
             set_visible (false);
             return true;   // stop default destroy
         });
-    }
 
-    public new void present () {
-        snapshot_state ();
-        base.present ();
+        notify["visible"].connect (() => {
+            if (get_visible ()) {
+                snapshot_state ();
+            }
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════

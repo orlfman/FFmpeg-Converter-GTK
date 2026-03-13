@@ -81,7 +81,7 @@
 //     encode at the recommended preset measures the REAL preset efficiency
 //     factor instead of relying on hardcoded tables. Eliminates the single
 //     biggest source of estimation error.
-//   - Container overhead: reserves KB for container headers, seek index, and
+//   - Container overhead: reserves KiB for container headers, seek index, and
 //     metadata based on size tier. Prevents "just barely over target" results.
 //   - Metadata stripping for TINY tier: disables preserve_metadata when
 //     targeting ≤25 MB — every byte counts at imageboard sizes.
@@ -190,7 +190,7 @@ public struct OptimizationRecommendation {
     public string preset;
     public bool two_pass;
     public int target_bitrate_kbps;    // for two-pass constrained mode
-    public int estimated_size_kb;
+    public int estimated_size_kib;
     public string notes;
     public bool is_impossible;
     public ContentType content_type;
@@ -334,13 +334,18 @@ public class SmartOptimizer : GLib.Object {
     // physically impossible to produce acceptable-quality output.
     private const int MIN_VIABLE_VIDEO_KBPS = 80;
 
-    // Container overhead (headers, index, seek tables) in KB per tier.
+    private const double BITS_PER_BYTE = 8.0;
+    private const double BITS_PER_KILOBIT = 1000.0;
+    private const double BYTES_PER_KIB = 1024.0;
+    private const double KIB_PER_MIB = 1024.0;
+
+    // Container overhead (headers, index, seek tables) in KiB per tier.
     // Subtracted from the video budget so the final file actually fits.
-    private const double CONTAINER_OVERHEAD_KB_TINY   = 50.0;
-    private const double CONTAINER_OVERHEAD_KB_SMALL  = 80.0;
-    private const double CONTAINER_OVERHEAD_KB_MEDIUM = 120.0;
-    private const double CONTAINER_OVERHEAD_KB_LARGE  = 200.0;
-    private const double CONTAINER_OVERHEAD_KB_XLARGE = 300.0;
+    private const double CONTAINER_OVERHEAD_KIB_TINY   = 50.0;
+    private const double CONTAINER_OVERHEAD_KIB_SMALL  = 80.0;
+    private const double CONTAINER_OVERHEAD_KIB_MEDIUM = 120.0;
+    private const double CONTAINER_OVERHEAD_KIB_LARGE  = 200.0;
+    private const double CONTAINER_OVERHEAD_KIB_XLARGE = 300.0;
 
     // ════════════════════════════════════════════════════════════════════════
     // PUBLIC API
@@ -364,6 +369,13 @@ public class SmartOptimizer : GLib.Object {
         OptimizationContext   ctx             = OptimizationContext (),
         Cancellable?          cancellable     = null
     ) throws Error {
+        int requested_target_mb = target_mb;
+        target_mb = target_mb.clamp (1, 4096);
+        if (target_mb != requested_target_mb) {
+            warning ("Smart Optimizer: target %d MB out of range, clamped to %d MB",
+                requested_target_mb, target_mb);
+        }
+
         // ── 1. Probe ────────────────────────────────────────────────────
         SmartOptimizerVideoInfo info;
         try {
@@ -435,20 +447,21 @@ public class SmartOptimizer : GLib.Object {
         // Before running any encode, check if the target is even physically
         // plausible. This saves the user waiting through two calibration
         // encodes for a result that was never achievable.
-        double target_total_kb = (double) target_mb * 1024.0;
-        double container_overhead_kb = container_overhead_for_tier (tier);
-        double audio_kb = (info.audio_bitrate_kbps > 0)
-            ? info.audio_bitrate_kbps * encode_duration / 8.0
+        double target_total_kib = mib_to_kib ((double) target_mb);
+        double container_overhead_kib = container_overhead_for_tier (tier);
+        double audio_kib = (info.audio_bitrate_kbps > 0)
+            ? kib_from_kbps_for_duration ((double) info.audio_bitrate_kbps, encode_duration)
             : 0.0;
-        double video_target_kb = target_total_kb - audio_kb - container_overhead_kb;
+        double video_target_kib = target_total_kib - audio_kib - container_overhead_kib;
 
-        if (video_target_kb <= 0) {
+        if (video_target_kib <= 0) {
             return make_error_rec (preferred_codec,
-                "Audio track alone (~%.0f KB) exceeds the %d MB target."
-                    .printf (audio_kb, target_mb));
+                "Audio track alone (~%.0f KiB) exceeds the %d MB target."
+                    .printf (audio_kib, target_mb));
         }
 
-        int available_video_kbps = (int) (video_target_kb * 8.0 / encode_duration);
+        int available_video_kbps = (int) kbps_from_kib_for_duration (
+            video_target_kib, encode_duration);
         if (available_video_kbps < MIN_VIABLE_VIDEO_KBPS) {
             var msg = new StringBuilder ();
             msg.append ("Target is physically implausible for this video.\n\n");
@@ -459,7 +472,8 @@ public class SmartOptimizer : GLib.Object {
             // Suggest what duration or scale would be needed
             if (info.width > 0 && info.height > 0) {
                 // At MIN_VIABLE_VIDEO_KBPS, how many seconds can we fit?
-                double max_duration_s = video_target_kb * 8.0 / MIN_VIABLE_VIDEO_KBPS;
+                double max_duration_s = seconds_for_kib_at_kbps (
+                    video_target_kib, MIN_VIABLE_VIDEO_KBPS);
                 msg.append ("Options:\n");
                 msg.append ("  • Trim to ≤%.0f seconds at current resolution\n"
                     .printf (max_duration_s));
@@ -567,7 +581,7 @@ public class SmartOptimizer : GLib.Object {
         if (any_invalid) {
             for (int ci = 0; ci < cal_sizes.length; ci++) {
                 if (cal_sizes[ci] <= 0) {
-                    warning ("Nonsensical calibration: CRF %d → %.0fKB",
+                    warning ("Nonsensical calibration: CRF %d → %.0fKiB",
                         cal_crfs[ci], cal_sizes[ci]);
                     break;
                 }
@@ -580,7 +594,7 @@ public class SmartOptimizer : GLib.Object {
         // least-squares fit handles it — just means unusual content variance)
         for (int ci = 0; ci < cal_sizes.length - 1; ci++) {
             if (cal_sizes[ci] <= cal_sizes[ci + 1]) {
-                warning ("Non-monotonic calibration: CRF %d→%.0fKB, %d→%.0fKB — "
+                warning ("Non-monotonic calibration: CRF %d→%.0fKiB, %d→%.0fKiB — "
                     + "proceeding with least-squares fit",
                     cal_crfs[ci], cal_sizes[ci], cal_crfs[ci + 1], cal_sizes[ci + 1]);
                 break;
@@ -611,11 +625,11 @@ public class SmartOptimizer : GLib.Object {
         // We calibrated at the fastest preset. The recommended (slower) preset
         // produces smaller files at the same CRF, so we inflate the target to
         // compensate:
-        //   effective_target = video_target_kb / preset_factor
+        //   effective_target = video_target_kib / preset_factor
         // Then solve: ln(effective_target) = a + b·crf + c·crf²
         //   → c·crf² + b·crf + (a − ln(target)) = 0
 
-        double effective_target_kb = video_target_kb / preset_factor;
+        double effective_target_kib = video_target_kib / preset_factor;
         int crf_min, crf_max;
         if (preferred_codec == "vp9") {
             crf_min = 12; crf_max = 55;
@@ -626,7 +640,7 @@ public class SmartOptimizer : GLib.Object {
             crf_min = 8; crf_max = 51;
         }
 
-        double ln_target = Math.log (effective_target_kb);
+        double ln_target = Math.log (effective_target_kib);
         double cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
         double crf_raw = solve_crf_from_curve (
             qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
@@ -649,7 +663,7 @@ public class SmartOptimizer : GLib.Object {
                             input_file, preferred_codec, extra_crfs[ci], positions,
                             encode_duration, sample_segment_duration, vf, cancellable);
                         if (extra_size <= 0) {
-                            warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKB",
+                            warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKiB",
                                 extra_crfs[ci], extra_size);
                             continue;
                         }
@@ -672,7 +686,7 @@ public class SmartOptimizer : GLib.Object {
                 adaptive_calibration_refined = true;
                 for (int ci = 0; ci < cal_sizes.length - 1; ci++) {
                     if (cal_sizes[ci] <= cal_sizes[ci + 1]) {
-                        warning ("Non-monotonic adaptive calibration: CRF %d→%.0fKB, %d→%.0fKB — "
+                        warning ("Non-monotonic adaptive calibration: CRF %d→%.0fKiB, %d→%.0fKiB — "
                             + "proceeding with least-squares fit",
                             cal_crfs[ci], cal_sizes[ci], cal_crfs[ci + 1], cal_sizes[ci + 1]);
                         break;
@@ -698,13 +712,13 @@ public class SmartOptimizer : GLib.Object {
         // using the measured factor so the prediction is self-consistent.
         double verified_preset_factor = preset_factor;  // fallback
         bool   verification_done = false;
-        double verify_model_ultrafast_kb = 0.0;
-        double verify_preset_kb = 0.0;
+        double verify_model_ultrafast_kib = 0.0;
+        double verify_preset_kib = 0.0;
 
         if (!crf_at_max) {
             // Model's prediction at this CRF with ultrafast (already known)
-            verify_model_ultrafast_kb = Math.exp (
-                qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
+            bool verify_model_valid = try_evaluate_model_size_kib (
+                qa, qb, qc, predicted_crf, "verification baseline", out verify_model_ultrafast_kib);
 
             // Pick spread positions for verification — using multiple segments
             // catches content variability that a single middle segment misses.
@@ -725,12 +739,12 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
 
                 // Encode at the recommended preset to measure the real ratio
-                verify_preset_kb = yield calibration_encode (
+                verify_preset_kib = yield calibration_encode (
                     input_file, preferred_codec, predicted_crf, verify_pos,
                     encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
 
-                if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
-                    verified_preset_factor = verify_preset_kb / verify_model_ultrafast_kb;
+                if (verify_model_valid && verify_model_ultrafast_kib > 0 && verify_preset_kib > 0) {
+                    verified_preset_factor = verify_preset_kib / verify_model_ultrafast_kib;
                     // Sanity: clamp to reasonable range (0.2–1.0)
                     verified_preset_factor = verified_preset_factor.clamp (0.20, 1.0);
                     verification_done = true;
@@ -741,8 +755,8 @@ public class SmartOptimizer : GLib.Object {
                     if (Math.fabs (verified_preset_factor - preset_factor) / preset_factor > 0.05) {
                         int verify_base_crf = predicted_crf;
                         bool verification_curve_refit = false;
-                        double re_target_kb = video_target_kb / verified_preset_factor;
-                        double re_ln_target = Math.log (re_target_kb);
+                        double re_target_kib = video_target_kib / verified_preset_factor;
+                        double re_ln_target = Math.log (re_target_kib);
                         double re_crf_raw = solve_crf_from_curve (
                             qa, qb, qc, re_ln_target, cal_mid, crf_min, crf_max);
                         int re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
@@ -767,7 +781,7 @@ public class SmartOptimizer : GLib.Object {
                                         input_file, preferred_codec, verify_extra_crfs[ci], positions,
                                         encode_duration, sample_segment_duration, vf, cancellable);
                                     if (extra_size <= 0) {
-                                        warning ("Adaptive verification calibration produced invalid result: CRF %d → %.0fKB",
+                                        warning ("Adaptive verification calibration produced invalid result: CRF %d → %.0fKiB",
                                             verify_extra_crfs[ci], extra_size);
                                         continue;
                                     }
@@ -790,13 +804,15 @@ public class SmartOptimizer : GLib.Object {
                                 fit_quadratic_log_curve (
                                     cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
                                 cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
-                                verify_model_ultrafast_kb = Math.exp (
-                                    qa + qb * verify_base_crf + qc * verify_base_crf * verify_base_crf);
-                                if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
-                                    verified_preset_factor = (verify_preset_kb / verify_model_ultrafast_kb)
+                                verify_model_valid = try_evaluate_model_size_kib (
+                                    qa, qb, qc, verify_base_crf, "verification refit",
+                                    out verify_model_ultrafast_kib);
+                                if (verify_model_valid && verify_model_ultrafast_kib > 0
+                                    && verify_preset_kib > 0) {
+                                    verified_preset_factor = (verify_preset_kib / verify_model_ultrafast_kib)
                                         .clamp (0.20, 1.0);
-                                    re_target_kb = video_target_kb / verified_preset_factor;
-                                    re_ln_target = Math.log (re_target_kb);
+                                    re_target_kib = video_target_kib / verified_preset_factor;
+                                    re_ln_target = Math.log (re_target_kib);
                                 } else {
                                     verification_done = false;
                                     verified_preset_factor = preset_factor;
@@ -808,7 +824,9 @@ public class SmartOptimizer : GLib.Object {
                         }
 
                         if (verification_curve_refit && re_crf == verify_base_crf) {
-                            verification_done = (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0);
+                            verification_done = (
+                                verify_model_valid && verify_model_ultrafast_kib > 0
+                                && verify_preset_kib > 0);
                         }
 
                         if (re_crf != verify_base_crf) {
@@ -827,14 +845,16 @@ public class SmartOptimizer : GLib.Object {
                     }
 
                     if (verification_invalidated && !crf_at_max) {
-                        verify_model_ultrafast_kb = Math.exp (
-                            qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
-                        verify_preset_kb = yield calibration_encode (
+                        verify_model_valid = try_evaluate_model_size_kib (
+                            qa, qb, qc, predicted_crf, "verification retry",
+                            out verify_model_ultrafast_kib);
+                        verify_preset_kib = yield calibration_encode (
                             input_file, preferred_codec, predicted_crf, verify_pos,
                             encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
 
-                        if (verify_model_ultrafast_kb > 0 && verify_preset_kb > 0) {
-                            verified_preset_factor = (verify_preset_kb / verify_model_ultrafast_kb)
+                        if (verify_model_valid && verify_model_ultrafast_kib > 0
+                            && verify_preset_kib > 0) {
+                            verified_preset_factor = (verify_preset_kib / verify_model_ultrafast_kib)
                                 .clamp (0.20, 1.0);
                             verification_done = true;
                         } else {
@@ -854,9 +874,33 @@ public class SmartOptimizer : GLib.Object {
         double final_preset_factor = verification_done ? verified_preset_factor : preset_factor;
 
         // ── 9. Estimate final size ──────────────────────────────────────
-        double raw_estimate_kb = Math.exp (qa + qb * predicted_crf + qc * predicted_crf * predicted_crf);
-        int estimated_video_kb = (int) (raw_estimate_kb * final_preset_factor);
-        int estimated_total_kb = estimated_video_kb + (int) audio_kb + (int) container_overhead_kb;
+        double raw_estimate_kib;
+        if (!try_evaluate_model_size_kib (
+                qa, qb, qc, predicted_crf, "final estimate", out raw_estimate_kib)) {
+            return make_error_rec (preferred_codec,
+                "Smart Optimizer's size model became numerically unstable for this file.\n"
+                + "Try two-pass mode, a different target size, or trimming the input.");
+        }
+
+        double estimated_video_kib_double = raw_estimate_kib * final_preset_factor;
+        double estimated_total_kib_double = estimated_video_kib_double + audio_kib + container_overhead_kib;
+        int estimated_video_kib = 0;
+        int estimated_total_kib = 0;
+        if (!try_cast_nonnegative_int (
+                estimated_video_kib_double, "estimated video size", out estimated_video_kib)
+            || !try_cast_nonnegative_int (
+                estimated_total_kib_double, "estimated total size", out estimated_total_kib)) {
+            return make_error_rec (preferred_codec,
+                "Smart Optimizer produced an out-of-range size estimate for this file.\n"
+                + "Try two-pass mode or a less aggressive target.");
+        }
+        if (estimated_total_kib < estimated_video_kib) {
+            warning ("Smart Optimizer: total estimate %d KiB smaller than video estimate %d KiB",
+                estimated_total_kib, estimated_video_kib);
+            return make_error_rec (preferred_codec,
+                "Smart Optimizer produced an inconsistent size estimate for this file.\n"
+                + "Try two-pass mode or a less aggressive target.");
+        }
 
         // ── 10. Confidence ──────────────────────────────────────────────
         // Calibration is most accurate within [cal_first, cal_last] where
@@ -884,7 +928,7 @@ public class SmartOptimizer : GLib.Object {
 
         // ── 10b. Sample coverage factor ─────────────────────────────────
         // When the sampled duration is a small fraction of the total, the
-        // linear extrapolation (sample_kb × scale) becomes less reliable.
+        // linear extrapolation (sample_kib × scale) becomes less reliable.
         // Flag this in the notes and reduce confidence accordingly.
         double sample_duration = double.min (
             (double) positions.length * sample_segment_duration, encode_duration);
@@ -909,8 +953,8 @@ public class SmartOptimizer : GLib.Object {
         int source_video_kbps = 0;
         double source_total_kbps = 0.0;
         if (info.file_size_bytes > 0 && info.duration > 0) {
-            source_total_kbps = (double) info.file_size_bytes * 8.0
-                / (info.duration * 1024.0);
+            source_total_kbps = kbps_from_bytes_for_duration (
+                info.file_size_bytes, info.duration);
         }
         if (!trim_active && source_total_kbps > 0 && encode_duration > 0) {
             // Rough source video kbps — subtract a conservative audio estimate.
@@ -920,7 +964,8 @@ public class SmartOptimizer : GLib.Object {
             // If the CRF estimate exceeds the source's size while the user
             // asked for a smaller target, the model's prediction is suspect.
             if (source_video_kbps > 0 && available_video_kbps < source_video_kbps) {
-                int estimated_output_kbps = (int) ((double) estimated_total_kb * 8.0 / encode_duration);
+                int estimated_output_kbps = (int) kbps_from_kib_for_duration (
+                    (double) estimated_total_kib, encode_duration);
                 int source_total_kbps_int = (int) source_total_kbps;
                 if (estimated_output_kbps > source_total_kbps_int) {
                     confidence *= 0.6;
@@ -940,11 +985,12 @@ public class SmartOptimizer : GLib.Object {
         // TINY/SMALL still force two-pass via strict_targeting below; for
         // MEDIUM+ a reduction target alone does not override a confident CRF
         // estimate that lands inside the tier's target band.
-        double source_size_mb = (double) info.file_size_bytes / (1024.0 * 1024.0);
+        double source_size_mb = mib_from_bytes (info.file_size_bytes);
         double comparison_source_size_mb = source_size_mb;
         double reduction_confidence = 1.0;
         if (trim_active && source_total_kbps > 0) {
-            comparison_source_size_mb = source_total_kbps * encode_duration / 8.0 / 1024.0;
+            comparison_source_size_mb = mib_from_kbps_for_duration (
+                source_total_kbps, encode_duration);
             reduction_confidence = sample_coverage;
             if (profile.temporal_diff_mean > 0) {
                 double motion_cv = profile.temporal_diff_stddev / profile.temporal_diff_mean;
@@ -959,15 +1005,15 @@ public class SmartOptimizer : GLib.Object {
             && ((double) target_mb < comparison_source_size_mb * reduction_threshold);
 
         bool strict_targeting = tier_uses_strict_targeting (tier);
-        double target_tolerance_kb = strict_targeting
-            ? target_total_kb * 0.05
-            : tier_target_tolerance_kb (tier, target_total_kb);
-        bool within_target_band = Math.fabs (estimated_total_kb - target_total_kb) <= target_tolerance_kb;
+        double target_tolerance_kib = strict_targeting
+            ? target_total_kib * 0.05
+            : tier_target_tolerance_kib (tier, target_total_kib);
+        bool within_target_band = Math.fabs (estimated_total_kib - target_total_kib) <= target_tolerance_kib;
 
         // For TINY/SMALL, even modest overshoot is unacceptable.
         // For MEDIUM+, treat the target as a symmetric landing zone around
         // the requested size, with some leniency above or below target.
-        bool crf_overshoots = estimated_total_kb > (target_total_kb + target_tolerance_kb);
+        bool crf_overshoots = estimated_total_kib > (target_total_kib + target_tolerance_kib);
 
         if (strict_targeting) {
             // TINY and SMALL always prefer strict size targeting.
@@ -1002,7 +1048,7 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // ── 12. Feasibility flags ───────────────────────────────────────
-        bool is_impossible = crf_at_max && (estimated_total_kb > target_total_kb * 1.1);
+        bool is_impossible = crf_at_max && (estimated_total_kib > target_total_kib * 1.1);
 
         // Force two-pass when CRF alone cannot comfortably hit the target,
         // including cases where even max CRF still looks too large.
@@ -1037,7 +1083,7 @@ public class SmartOptimizer : GLib.Object {
             if (info.audio_bitrate_estimated)
                 notes.append (" (estimated %s — stream did not report bitrate)".printf (
                     info.audio_codec));
-            notes.append (" → %d KB reserved\n".printf ((int) audio_kb));
+            notes.append (" → %d KiB reserved\n".printf ((int) audio_kib));
         }
 
         // --- CRF mode ---
@@ -1048,7 +1094,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  ⚠️  CRF mode is at maximum compression — quality will be poor.\n");
             notes.append ("  ✅  Two-pass mode below is the recommended path.\n");
         } else if (!is_impossible) {
-            notes.append ("  Estimated: ~%d KB".printf (estimated_total_kb));
+            notes.append ("  Estimated: ~%d KiB".printf (estimated_total_kib));
             if (confidence < 0.8)
                 notes.append (" (extrapolated — confidence %s)"
                     .printf ("%.0f%%".printf (confidence * 100)));
@@ -1062,8 +1108,8 @@ public class SmartOptimizer : GLib.Object {
                 .printf (target_video_kbps, preset_label));
             if (target_is_size_reduction) {
                 if (!strict_targeting && !within_target_band) {
-                    notes.append ("  CRF estimate (~%d KB) falls outside the ±%.0f MB target band for this tier.\n"
-                        .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
+                    notes.append ("  CRF estimate (~%d KiB) falls outside the ±%.0f MB target band for this tier.\n"
+                        .printf (estimated_total_kib, target_tolerance_kib / 1024.0));
                 } else if (trim_active && comparison_source_size_mb > 0) {
                     notes.append ("  Trimmed source window is ~%.0f MB (estimated) → target %d MB requires size reduction.\n"
                         .printf (comparison_source_size_mb, target_mb));
@@ -1077,15 +1123,15 @@ public class SmartOptimizer : GLib.Object {
                 }
             } else if (crf_overshoots) {
                 if (strict_targeting) {
-                    notes.append ("  CRF estimate (~%d KB) exceeds target (~%.0f KB).\n"
-                        .printf (estimated_total_kb, target_total_kb));
+                    notes.append ("  CRF estimate (~%d KiB) exceeds target (~%.0f KiB).\n"
+                        .printf (estimated_total_kib, target_total_kib));
                 } else {
-                    notes.append ("  CRF estimate (~%d KB) exceeds the ±%.0f MB target band.\n"
-                        .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
+                    notes.append ("  CRF estimate (~%d KiB) exceeds the ±%.0f MB target band.\n"
+                        .printf (estimated_total_kib, target_tolerance_kib / 1024.0));
                 }
             } else if (!strict_targeting && !within_target_band) {
-                notes.append ("  CRF estimate (~%d KB) falls outside the ±%.0f MB target band for this tier.\n"
-                    .printf (estimated_total_kb, target_tolerance_kb / 1024.0));
+                notes.append ("  CRF estimate (~%d KiB) falls outside the ±%.0f MB target band for this tier.\n"
+                    .printf (estimated_total_kib, target_tolerance_kib / 1024.0));
             } else if (confidence < 1.0) {
                 notes.append ("  Prediction confidence is %.0f%% — two-pass ensures accuracy.\n"
                     .printf (confidence * 100.0));
@@ -1097,7 +1143,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("\n── Two-pass: skipped ──\n");
             if (within_target_band) {
                 notes.append ("  CRF confidence is high (%.0f%%) and estimate is within the ±%.0f MB target band.\n"
-                    .printf (confidence * 100.0, target_tolerance_kb / 1024.0));
+                    .printf (confidence * 100.0, target_tolerance_kib / 1024.0));
             } else {
                 notes.append ("  CRF confidence is high (%.0f%%), but the estimate is outside the target band.\n"
                     .printf (confidence * 100.0));
@@ -1126,7 +1172,7 @@ public class SmartOptimizer : GLib.Object {
         notes.append ("\n── Calibration data (%d-point least-squares quadratic) ──\n"
             .printf (cal_crfs.length));
         for (int ci = 0; ci < cal_crfs.length; ci++) {
-            notes.append ("  CRF %d → %.0f KB (full-length estimate)\n"
+            notes.append ("  CRF %d → %.0f KiB (full-length estimate)\n"
                 .printf (cal_crfs[ci], cal_sizes[ci]));
         }
         notes.append ("  Model: ln(size) = %.4f + %.4f·CRF + %.6f·CRF²\n"
@@ -1138,15 +1184,15 @@ public class SmartOptimizer : GLib.Object {
         if (verification_done) {
             notes.append ("  Preset factor = %.2f (verified: %s vs model, table: %.2f)\n"
                 .printf (verified_preset_factor, preset_label, preset_factor));
-            notes.append ("  Verification: model fastest→%.0f KB, %s→%.0f KB (ratio %.2f)\n"
-                .printf (verify_model_ultrafast_kb, preset_label, verify_preset_kb,
+            notes.append ("  Verification: model fastest→%.0f KiB, %s→%.0f KiB (ratio %.2f)\n"
+                .printf (verify_model_ultrafast_kib, preset_label, verify_preset_kib,
                          verified_preset_factor));
         } else {
             notes.append ("  Preset efficiency factor = %.2f (%s vs fastest, from table)\n"
                 .printf (preset_factor, preset_label));
         }
-        notes.append ("  Container overhead: %.0f KB reserved\n"
-            .printf (container_overhead_kb));
+        notes.append ("  Container overhead: %.0f KiB reserved\n"
+            .printf (container_overhead_kib));
         if (source_video_kbps > 0) {
             notes.append ("  Source: ~%.0f MB, ~%d kbps (est. video) | Target: %d kbps video\n"
                 .printf (source_size_mb, source_video_kbps, target_video_kbps));
@@ -1181,7 +1227,7 @@ public class SmartOptimizer : GLib.Object {
             preset                = preset_label,
             two_pass              = recommend_two_pass,
             target_bitrate_kbps   = target_video_kbps,
-            estimated_size_kb     = estimated_total_kb,
+            estimated_size_kib    = estimated_total_kib,
             notes                 = notes.str,
             is_impossible         = is_impossible,
             content_type          = profile.content_type,
@@ -1210,7 +1256,7 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Two-pass:       %s\n".printf (rec.two_pass ? "enabled" : "disabled"));
         if (rec.two_pass)
             sb.append ("  Bitrate cap:  %d kbps\n".printf (rec.target_bitrate_kbps));
-        sb.append ("Est. size:      %d KB\n".printf (rec.estimated_size_kb));
+        sb.append ("Est. size:      %d KiB\n".printf (rec.estimated_size_kib));
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
@@ -1613,18 +1659,101 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /**
-     * Estimated container overhead (headers, index, seek tables) in KB.
+     * Estimated container overhead (headers, index, seek tables) in KiB.
      * Subtracted from the video budget so the final file actually fits.
      */
     private double container_overhead_for_tier (SizeTier tier) {
         switch (tier) {
-            case SizeTier.TINY:   return CONTAINER_OVERHEAD_KB_TINY;
-            case SizeTier.SMALL:  return CONTAINER_OVERHEAD_KB_SMALL;
-            case SizeTier.MEDIUM: return CONTAINER_OVERHEAD_KB_MEDIUM;
-            case SizeTier.LARGE:  return CONTAINER_OVERHEAD_KB_LARGE;
-            case SizeTier.XLARGE: return CONTAINER_OVERHEAD_KB_XLARGE;
-            default:              return CONTAINER_OVERHEAD_KB_SMALL;
+            case SizeTier.TINY:   return CONTAINER_OVERHEAD_KIB_TINY;
+            case SizeTier.SMALL:  return CONTAINER_OVERHEAD_KIB_SMALL;
+            case SizeTier.MEDIUM: return CONTAINER_OVERHEAD_KIB_MEDIUM;
+            case SizeTier.LARGE:  return CONTAINER_OVERHEAD_KIB_LARGE;
+            case SizeTier.XLARGE: return CONTAINER_OVERHEAD_KIB_XLARGE;
+            default:              return CONTAINER_OVERHEAD_KIB_SMALL;
         }
+    }
+
+    private double mib_to_kib (double mib) {
+        return mib * KIB_PER_MIB;
+    }
+
+    private double kib_from_bytes (int64 bytes) {
+        return (double) bytes / BYTES_PER_KIB;
+    }
+
+    private double mib_from_bytes (int64 bytes) {
+        return kib_from_bytes (bytes) / KIB_PER_MIB;
+    }
+
+    private double kib_from_kbps_for_duration (double kbps, double duration_seconds) {
+        if (duration_seconds <= 0.0)
+            return 0.0;
+        return kbps * BITS_PER_KILOBIT * duration_seconds / (BITS_PER_BYTE * BYTES_PER_KIB);
+    }
+
+    private double mib_from_kbps_for_duration (double kbps, double duration_seconds) {
+        return kib_from_kbps_for_duration (kbps, duration_seconds) / KIB_PER_MIB;
+    }
+
+    private double kbps_from_kib_for_duration (double kib, double duration_seconds) {
+        if (duration_seconds <= 0.0)
+            return 0.0;
+        return kib * BYTES_PER_KIB * BITS_PER_BYTE / (duration_seconds * BITS_PER_KILOBIT);
+    }
+
+    private double kbps_from_bytes_for_duration (int64 bytes, double duration_seconds) {
+        if (duration_seconds <= 0.0)
+            return 0.0;
+        return (double) bytes * BITS_PER_BYTE / (duration_seconds * BITS_PER_KILOBIT);
+    }
+
+    private double seconds_for_kib_at_kbps (double kib, int kbps) {
+        if (kbps <= 0)
+            return 0.0;
+        return kib * BYTES_PER_KIB * BITS_PER_BYTE / ((double) kbps * BITS_PER_KILOBIT);
+    }
+
+    private bool try_evaluate_model_size_kib (
+        double      qa,
+        double      qb,
+        double      qc,
+        int         crf,
+        string      context,
+        out double  size_kib
+    ) {
+        size_kib = 0.0;
+
+        double crf_double = (double) crf;
+        double exponent = qa + qb * crf_double + qc * crf_double * crf_double;
+        if (!exponent.is_finite ()) {
+            warning ("Smart Optimizer: %s exponent is not finite at CRF %d", context, crf);
+            return false;
+        }
+
+        size_kib = Math.exp (exponent);
+        if (!size_kib.is_finite () || size_kib <= 0.0) {
+            warning ("Smart Optimizer: %s size is invalid at CRF %d (exp=%.6f)",
+                context, crf, exponent);
+            size_kib = 0.0;
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool try_cast_nonnegative_int (double value, string label, out int cast_value) {
+        cast_value = 0;
+        if (!value.is_finite () || value < 0.0) {
+            warning ("Smart Optimizer: %s is invalid (%.6f)", label, value);
+            return false;
+        }
+        if (value > (double) int.MAX) {
+            warning ("Smart Optimizer: %s exceeds int range (%.6f)", label, value);
+            return false;
+        }
+
+        cast_value = (int) value;
+        return true;
     }
 
     /**
@@ -1661,14 +1790,14 @@ public class SmartOptimizer : GLib.Object {
      * Acceptable distance from the requested size for quality-focused tiers.
      * Medium+ should land near the target, not necessarily under it.
      */
-    private double tier_target_tolerance_kb (SizeTier tier, double target_total_kb) {
+    private double tier_target_tolerance_kib (SizeTier tier, double target_total_kib) {
         switch (tier) {
             case SizeTier.MEDIUM:
-                return double.max (8.0 * 1024.0, target_total_kb * 0.10);
+                return double.max (8.0 * 1024.0, target_total_kib * 0.10);
             case SizeTier.LARGE:
-                return double.max (10.0 * 1024.0, target_total_kb * 0.10);
+                return double.max (10.0 * 1024.0, target_total_kib * 0.10);
             case SizeTier.XLARGE:
-                return double.max (16.0 * 1024.0, target_total_kb * 0.12);
+                return double.max (16.0 * 1024.0, target_total_kib * 0.12);
             default:
                 return 0.0;
         }
@@ -1938,7 +2067,7 @@ public class SmartOptimizer : GLib.Object {
 
     /**
      * Encode sample segments at a given CRF with the fastest preset.
-     * Returns estimated full-video size in KB (extrapolated from sample).
+     * Returns estimated full-video size in KiB (extrapolated from sample).
      */
     private async double calibration_encode (
         string        input_file,
@@ -1982,9 +2111,9 @@ public class SmartOptimizer : GLib.Object {
                 "Calibration encode produced empty file at CRF %d", crf);
         }
 
-        double sample_kb = (double) file_size / 1024.0;
+        double sample_kib = kib_from_bytes (file_size);
         double scale     = full_duration / sample_duration;
-        return sample_kb * scale;
+        return sample_kib * scale;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -2436,7 +2565,7 @@ public class SmartOptimizer : GLib.Object {
             preset                 = "",
             two_pass               = false,
             target_bitrate_kbps    = 0,
-            estimated_size_kb      = 0,
+            estimated_size_kib     = 0,
             notes                  = "❌ " + message,
             is_impossible          = true,
             content_type           = ContentType.LIVE_ACTION,

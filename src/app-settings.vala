@@ -302,7 +302,7 @@ public class AppSettings : Object {
         set {
             mutex.lock ();
             try {
-                _smart_optimizer_target_mb = value.clamp (1, 4096);
+                _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (value);
             } finally {
                 mutex.unlock ();
             }
@@ -379,7 +379,8 @@ public class AppSettings : Object {
             read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
         string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
-        int smart_optimizer_target_mb = read_int (kf, GROUP_SMART, "target_mb", 4);
+        int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
+            read_int (kf, GROUP_SMART, "target_mb", 4));
         bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
         bool smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
 
@@ -481,7 +482,7 @@ public class AppSettings : Object {
             _output_name_mode   = OutputNameMode.DEFAULT;
             _output_custom_name = "";
             _overwrite_enabled  = false;
-            _smart_optimizer_target_mb = 4;
+            _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = false;
             _smart_optimizer_strip_audio = false;
         } finally {
@@ -544,6 +545,10 @@ public class AppSettings : Object {
         } catch (KeyFileError e) {
             return fallback;
         }
+    }
+
+    private static int clamp_smart_optimizer_target_mb (int value) {
+        return value.clamp (1, 4096);
     }
 
     private static bool read_bool (KeyFile kf, string group,

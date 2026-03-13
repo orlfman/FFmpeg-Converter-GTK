@@ -31,7 +31,7 @@ public class SvtAv1BuilderSnapshot : Object {
     public string fast_decode = "Disabled";
     public bool qm_enabled = false;
     public int qm_min = 8;
-    public int qm_max = 15;
+    public int qm_max = 11;
     public string tile_rows = "Auto";
     public string tile_columns = "Auto";
     public string threads = "Auto";
@@ -244,11 +244,11 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         }
 
         if (snapshot.qm_enabled) {
+            int qm_min = int.min (snapshot.qm_min, snapshot.qm_max);
+            int qm_max = int.max (snapshot.qm_min, snapshot.qm_max);
             svt_params += "enable-qm=1";
-            svt_params += "qm-min=%d".printf (
-                snapshot.qm_min);
-            svt_params += "qm-max=%d".printf (
-                snapshot.qm_max);
+            svt_params += "qm-min=%d".printf (qm_min);
+            svt_params += "qm-max=%d".printf (qm_max);
         }
 
         string tile_r = snapshot.tile_rows;

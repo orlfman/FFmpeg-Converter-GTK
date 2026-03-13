@@ -163,6 +163,7 @@ public class X264Builder : Object, ICodecBuilder {
 
         // ── x264-params ──────────────────────────────────────────────────────
         string[] params = {};
+        bool fast_decode = (snapshot.tune == "fastdecode");
 
         string ref_val = snapshot.ref_frames;
         if (ref_val.length > 0)
@@ -181,7 +182,8 @@ public class X264Builder : Object, ICodecBuilder {
         if (!snapshot.weightp)
             params += "weightp=0";
 
-        if (snapshot.deblock_enabled) {
+        bool deblock_enabled = snapshot.deblock_enabled && !fast_decode;
+        if (deblock_enabled) {
             int alpha = snapshot.deblock_alpha;
             int beta  = snapshot.deblock_beta;
             params += @"deblock=$alpha,$beta";
@@ -212,7 +214,7 @@ public class X264Builder : Object, ICodecBuilder {
             params += "no-psy";
         }
 
-        if (profile == "Baseline" || !snapshot.cabac)
+        if (profile == "Baseline" || fast_decode || !snapshot.cabac)
             params += "no-cabac";
 
         if (!snapshot.mbtree)

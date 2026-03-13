@@ -27,6 +27,8 @@ public class CropOverlay : Gtk.DrawingArea {
     private double drag_orig_w;
     private double drag_orig_h;
     private double drag_aspect_ratio;  // w/h ratio captured at drag start for Shift lock
+    private bool   drag_constraint_active = false;
+    private double drag_constraint_ratio  = 1.0;
 
     // Resize handle identifiers
     private const int DRAG_NONE      = 0;
@@ -104,10 +106,8 @@ public class CropOverlay : Gtk.DrawingArea {
      */
     public string get_crop_string () {
         if (!has_crop ()) return "";
-        int w = snap_even ((int) _crop_w);
-        int h = snap_even ((int) _crop_h);
-        int x = snap_even ((int) _crop_x);
-        int y = snap_even ((int) _crop_y);
+        int w, h, x, y;
+        get_even_crop_values (out w, out h, out x, out y);
         return "%d:%d:%d:%d".printf (w, h, x, y);
     }
 
@@ -364,8 +364,8 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     private void draw_dimension_badge (Cairo.Context cr, double rx, double ry, double rw, double rh) {
-        int w = snap_even ((int) _crop_w);
-        int h = snap_even ((int) _crop_h);
+        int w, h;
+        get_even_crop_size (out w, out h);
         string text = "%d × %d".printf (w, h);
 
         cr.select_font_face ("sans-serif", Cairo.FontSlant.NORMAL, Cairo.FontWeight.BOLD);
@@ -473,6 +473,8 @@ public class CropOverlay : Gtk.DrawingArea {
         drag_orig_h = _crop_h;
         drag_aspect_ratio = (_crop_w > 0 && _crop_h > 0)
             ? _crop_w / _crop_h : 1.0;
+        drag_constraint_active = false;
+        drag_constraint_ratio = 1.0;
 
         if (drag_mode == DRAG_CREATE) {
             _crop_x = vx;
@@ -565,6 +567,11 @@ public class CropOverlay : Gtk.DrawingArea {
                     ratio = drag_aspect_ratio;
                 }
                 apply_aspect_constraint (ratio, drag_mode);
+                drag_constraint_active = true;
+                drag_constraint_ratio = ratio;
+            } else {
+                drag_constraint_active = false;
+                drag_constraint_ratio = 1.0;
             }
         }
 
@@ -575,10 +582,18 @@ public class CropOverlay : Gtk.DrawingArea {
     private void on_drag_end (Gtk.GestureDrag gesture, double offset_x, double offset_y) {
         // Snap final values to even and clamp
         if (_has_crop) {
-            _crop_x = snap_even (((int) _crop_x).clamp (0, _video_width));
-            _crop_y = snap_even (((int) _crop_y).clamp (0, _video_height));
-            _crop_w = snap_even (((int) _crop_w).clamp (0, _video_width  - (int) _crop_x));
-            _crop_h = snap_even (((int) _crop_h).clamp (0, _video_height - (int) _crop_y));
+            bool snapped_aspect_locked = drag_constraint_active
+                && drag_constraint_ratio > 0
+                && drag_mode != DRAG_MOVE
+                && drag_mode != DRAG_NONE
+                && snap_aspect_locked_crop_to_even (drag_constraint_ratio, drag_mode);
+
+            if (!snapped_aspect_locked) {
+                _crop_x = snap_even_bounded ((int) _crop_x, _video_width);
+                _crop_y = snap_even_bounded ((int) _crop_y, _video_height);
+                _crop_w = snap_even_bounded ((int) _crop_w, _video_width  - (int) _crop_x);
+                _crop_h = snap_even_bounded ((int) _crop_h, _video_height - (int) _crop_y);
+            }
 
             // Discard tiny accidental clicks
             if (_crop_w < MIN_CROP_PX || _crop_h < MIN_CROP_PX) {
@@ -588,6 +603,8 @@ public class CropOverlay : Gtk.DrawingArea {
 
         int finished_mode = drag_mode;
         drag_mode = DRAG_NONE;
+        drag_constraint_active = false;
+        drag_constraint_ratio = 1.0;
         queue_draw ();
         emit_crop ();
 
@@ -713,11 +730,360 @@ public class CropOverlay : Gtk.DrawingArea {
         }
         }
 
-        // Clamp to video bounds after constraint
-        if (_crop_x < 0) _crop_x = 0;
-        if (_crop_y < 0) _crop_y = 0;
-        if (_crop_x + _crop_w > _video_width)  _crop_w = _video_width  - _crop_x;
-        if (_crop_y + _crop_h > _video_height) _crop_h = _video_height - _crop_y;
+        fit_aspect_locked_rect_to_bounds (mode);
+    }
+
+    private void fit_aspect_locked_rect_to_bounds (int mode) {
+        if (_crop_w <= 0 || _crop_h <= 0 || _video_width <= 0 || _video_height <= 0) {
+            return;
+        }
+
+        double scale = 1.0;
+
+        switch (mode) {
+        case DRAG_CREATE:
+        case DRAG_BR:
+            scale = double.min (scale, (_video_width  - _crop_x) / _crop_w);
+            scale = double.min (scale, (_video_height - _crop_y) / _crop_h);
+            break;
+
+        case DRAG_TL: {
+            double br_x = _crop_x + _crop_w;
+            double br_y = _crop_y + _crop_h;
+            scale = double.min (scale, br_x / _crop_w);
+            scale = double.min (scale, br_y / _crop_h);
+            break;
+        }
+        case DRAG_TR: {
+            double bl_x = _crop_x;
+            double bl_y = _crop_y + _crop_h;
+            scale = double.min (scale, (_video_width - bl_x) / _crop_w);
+            scale = double.min (scale, bl_y / _crop_h);
+            break;
+        }
+        case DRAG_BL: {
+            double tr_x = _crop_x + _crop_w;
+            double tr_y = _crop_y;
+            scale = double.min (scale, tr_x / _crop_w);
+            scale = double.min (scale, (_video_height - tr_y) / _crop_h);
+            break;
+        }
+        case DRAG_T: {
+            double cx = _crop_x + _crop_w / 2.0;
+            double bottom = _crop_y + _crop_h;
+            scale = double.min (scale, (2.0 * cx) / _crop_w);
+            scale = double.min (scale, (2.0 * (_video_width - cx)) / _crop_w);
+            scale = double.min (scale, bottom / _crop_h);
+            break;
+        }
+        case DRAG_B: {
+            double cx = _crop_x + _crop_w / 2.0;
+            scale = double.min (scale, (2.0 * cx) / _crop_w);
+            scale = double.min (scale, (2.0 * (_video_width - cx)) / _crop_w);
+            scale = double.min (scale, (_video_height - _crop_y) / _crop_h);
+            break;
+        }
+        case DRAG_L: {
+            double right = _crop_x + _crop_w;
+            double cy = _crop_y + _crop_h / 2.0;
+            scale = double.min (scale, right / _crop_w);
+            scale = double.min (scale, (2.0 * cy) / _crop_h);
+            scale = double.min (scale, (2.0 * (_video_height - cy)) / _crop_h);
+            break;
+        }
+        case DRAG_R: {
+            double cy = _crop_y + _crop_h / 2.0;
+            scale = double.min (scale, (_video_width - _crop_x) / _crop_w);
+            scale = double.min (scale, (2.0 * cy) / _crop_h);
+            scale = double.min (scale, (2.0 * (_video_height - cy)) / _crop_h);
+            break;
+        }
+        default:
+            break;
+        }
+
+        scale = scale.clamp (0.0, 1.0);
+        if (scale >= 1.0) {
+            return;
+        }
+
+        double fitted_w = _crop_w * scale;
+        double fitted_h = _crop_h * scale;
+
+        switch (mode) {
+        case DRAG_CREATE:
+        case DRAG_BR:
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            break;
+
+        case DRAG_TL: {
+            double br_x = _crop_x + _crop_w;
+            double br_y = _crop_y + _crop_h;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_x = br_x - _crop_w;
+            _crop_y = br_y - _crop_h;
+            break;
+        }
+        case DRAG_TR: {
+            double bl_y = _crop_y + _crop_h;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_y = bl_y - _crop_h;
+            break;
+        }
+        case DRAG_BL: {
+            double tr_x = _crop_x + _crop_w;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_x = tr_x - _crop_w;
+            break;
+        }
+        case DRAG_T: {
+            double cx = _crop_x + _crop_w / 2.0;
+            double bottom = _crop_y + _crop_h;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_x = cx - _crop_w / 2.0;
+            _crop_y = bottom - _crop_h;
+            break;
+        }
+        case DRAG_B: {
+            double cx = _crop_x + _crop_w / 2.0;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_x = cx - _crop_w / 2.0;
+            break;
+        }
+        case DRAG_L: {
+            double right = _crop_x + _crop_w;
+            double cy = _crop_y + _crop_h / 2.0;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_x = right - _crop_w;
+            _crop_y = cy - _crop_h / 2.0;
+            break;
+        }
+        case DRAG_R: {
+            double cy = _crop_y + _crop_h / 2.0;
+            _crop_w = fitted_w;
+            _crop_h = fitted_h;
+            _crop_y = cy - _crop_h / 2.0;
+            break;
+        }
+        default:
+            break;
+        }
+
+        _crop_x = _crop_x.clamp (0.0, _video_width - _crop_w);
+        _crop_y = _crop_y.clamp (0.0, _video_height - _crop_h);
+    }
+
+    // Snap an aspect-locked crop to even coordinates/sizes while preserving
+    // the drag anchor for the active handle (opposite corner/edge or center).
+    private bool snap_aspect_locked_crop_to_even (double ratio, int mode) {
+        if (ratio <= 0 || _video_width <= 0 || _video_height <= 0) {
+            return false;
+        }
+
+        int snapped_w = 0;
+        int snapped_h = 0;
+
+        switch (mode) {
+        case DRAG_CREATE:
+        case DRAG_BR: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int max_w = floor_even (_video_width - anchor_x);
+            int max_h = floor_even (_video_height - anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_x = anchor_x;
+            _crop_y = anchor_y;
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            return true;
+        }
+        case DRAG_TL: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int max_w = floor_even (anchor_x);
+            int max_h = floor_even (anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_x = anchor_x - _crop_w;
+            _crop_y = anchor_y - _crop_h;
+            return true;
+        }
+        case DRAG_TR: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int max_w = floor_even (_video_width - anchor_x);
+            int max_h = floor_even (anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_x = anchor_x;
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_y = anchor_y - _crop_h;
+            return true;
+        }
+        case DRAG_BL: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int max_w = floor_even (anchor_x);
+            int max_h = floor_even (_video_height - anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_x = anchor_x - _crop_w;
+            _crop_y = anchor_y;
+            return true;
+        }
+        case DRAG_T: {
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int center_x = ((int) Math.round (_crop_x + _crop_w / 2.0)).clamp (0, _video_width);
+            int max_w = floor_even (2 * int.min (center_x, _video_width - center_x));
+            int max_h = floor_even (anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_x = snap_even_bounded ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
+            _crop_y = anchor_y - _crop_h;
+            return true;
+        }
+        case DRAG_B: {
+            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int center_x = ((int) Math.round (_crop_x + _crop_w / 2.0)).clamp (0, _video_width);
+            int max_w = floor_even (2 * int.min (center_x, _video_width - center_x));
+            int max_h = floor_even (_video_height - anchor_y);
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_x = snap_even_bounded ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
+            _crop_y = anchor_y;
+            return true;
+        }
+        case DRAG_L: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int center_y = ((int) Math.round (_crop_y + _crop_h / 2.0)).clamp (0, _video_height);
+            int max_w = floor_even (anchor_x);
+            int max_h = floor_even (2 * int.min (center_y, _video_height - center_y));
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_x = anchor_x - _crop_w;
+            _crop_y = snap_even_bounded ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
+            return true;
+        }
+        case DRAG_R: {
+            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
+            int center_y = ((int) Math.round (_crop_y + _crop_h / 2.0)).clamp (0, _video_height);
+            int max_w = floor_even (_video_width - anchor_x);
+            int max_h = floor_even (2 * int.min (center_y, _video_height - center_y));
+
+            if (!choose_even_ratio_size (ratio, _crop_w, _crop_h, max_w, max_h,
+                                         out snapped_w, out snapped_h)) {
+                return false;
+            }
+
+            _crop_x = anchor_x;
+            _crop_w = snapped_w;
+            _crop_h = snapped_h;
+            _crop_y = snap_even_bounded ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+
+    private bool choose_even_ratio_size (double ratio,
+                                         double target_w,
+                                         double target_h,
+                                         int max_w,
+                                         int max_h,
+                                         out int best_w,
+                                         out int best_h) {
+        best_w = 0;
+        best_h = 0;
+
+        if (ratio <= 0 || max_w < 2 || max_h < 2) {
+            return false;
+        }
+
+        double best_score = double.MAX;
+
+        for (int w = 2; w <= max_w; w += 2) {
+            double exact_h = w / ratio;
+            int lower_h = floor_even ((int) Math.floor (exact_h));
+            int upper_h = ceil_even ((int) Math.ceil (exact_h));
+
+            for (int pass = 0; pass < 2; pass++) {
+                int h = (pass == 0) ? lower_h : upper_h;
+                if (pass == 1 && h == lower_h) {
+                    continue;
+                }
+                if (h < 2 || h > max_h) {
+                    continue;
+                }
+
+                double ratio_error = Math.fabs (((double) w / h) - ratio);
+                double size_error = Math.fabs (w - target_w) + Math.fabs (h - target_h);
+                double score = ratio_error * 1000000.0 + size_error;
+
+                if (score < best_score) {
+                    best_score = score;
+                    best_w = w;
+                    best_h = h;
+                }
+            }
+        }
+
+        return best_w > 0 && best_h > 0;
+    }
+
+    private static int floor_even (int val) {
+        return (val / 2) * 2;
+    }
+
+    private static int ceil_even (int val) {
+        return ((val + 1) / 2) * 2;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -756,17 +1122,40 @@ public class CropOverlay : Gtk.DrawingArea {
 
     private void emit_crop () {
         if (_has_crop) {
+            int w, h, x, y;
+            get_even_crop_values (out w, out h, out x, out y);
             crop_changed (
-                snap_even ((int) _crop_w),
-                snap_even ((int) _crop_h),
-                snap_even ((int) _crop_x),
-                snap_even ((int) _crop_y)
+                w,
+                h,
+                x,
+                y
             );
         }
+    }
+
+    private void get_even_crop_values (out int w, out int h, out int x, out int y) {
+        x = snap_even_bounded ((int) _crop_x, _video_width);
+        y = snap_even_bounded ((int) _crop_y, _video_height);
+        w = snap_even_bounded ((int) _crop_w, _video_width - x);
+        h = snap_even_bounded ((int) _crop_h, _video_height - y);
+    }
+
+    private void get_even_crop_size (out int w, out int h) {
+        int x, y;
+        get_even_crop_values (out w, out h, out x, out y);
     }
 
     private static int snap_even (int val) {
         // Round to nearest even number (not truncate)
         return ((val + 1) / 2) * 2;
+    }
+
+    private static int snap_even_bounded (int val, int max) {
+        if (max <= 0) {
+            return 0;
+        }
+
+        int clamped = val.clamp (0, max);
+        return int.min (snap_even (clamped), floor_even (max));
     }
 }

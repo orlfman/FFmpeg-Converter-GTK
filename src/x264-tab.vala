@@ -49,7 +49,6 @@ public class X264Tab : BaseCodecTab {
     public Switch     weightp_switch    { get; private set; }
     public Switch     cabac_switch      { get; private set; }
     public Switch     mbtree_switch     { get; private set; }
-    public Switch     fast_decode_switch { get; private set; }
     public Switch     open_gop_switch   { get; private set; }
 
     // Deblock
@@ -69,9 +68,12 @@ public class X264Tab : BaseCodecTab {
 
     private Adw.ActionRow custom_keyframe_row;
     private bool baseline_profile_override_active = false;
+    private bool fast_decode_override_active = false;
     private double baseline_saved_bframes = 3;
     private uint baseline_saved_b_adapt = 1;
     private bool baseline_saved_cabac = true;
+    private bool fast_decode_saved_cabac = true;
+    private bool fast_decode_saved_deblock = true;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -529,17 +531,6 @@ public class X264Tab : BaseCodecTab {
         mbtree_row.set_activatable_widget (mbtree_switch);
         group.add (mbtree_row);
 
-        // Fast Decode
-        var fd_row = new Adw.ActionRow ();
-        fd_row.set_title ("Fast Decode");
-        fd_row.set_subtitle ("Disables CABAC and loop filter for faster playback on weak devices");
-        fast_decode_switch = new Switch ();
-        fast_decode_switch.set_valign (Align.CENTER);
-        fast_decode_switch.set_active (false);
-        fd_row.add_suffix (fast_decode_switch);
-        fd_row.set_activatable_widget (fast_decode_switch);
-        group.add (fd_row);
-
         // Open GOP
         var ogop_row = new Adw.ActionRow ();
         ogop_row.set_title ("Open GOP");
@@ -659,6 +650,9 @@ public class X264Tab : BaseCodecTab {
             aq_strength_row.set_sensitive (mode != "Automatic" && mode != "Disabled");
         });
 
+        // Tune fastdecode forces CABAC/deblock compatibility constraints.
+        tune_combo.notify["selected"].connect (sync_advanced_constraints);
+
         // Container → update audio codec list
         container_combo.notify["selected"].connect (() => {
             audio_settings.update_for_container (get_container ());
@@ -668,14 +662,6 @@ public class X264Tab : BaseCodecTab {
         keyint_combo.notify["selected"].connect (() => {
             string ki = get_dropdown_text (keyint_combo);
             custom_keyframe_row.set_visible (ki == "Custom");
-        });
-
-        // Fast decode ↔ CABAC mutual exclusion
-        fast_decode_switch.notify["active"].connect (() => {
-            if (fast_decode_switch.active) {
-                cabac_switch.set_active (false);
-                deblock_expander.set_enable_expansion (false);
-            }
         });
     }
 
@@ -707,14 +693,47 @@ public class X264Tab : BaseCodecTab {
     private bool _applying_profile = false;
     private string last_synced_profile = "";
 
-    private void apply_baseline_profile_overrides (string profile) {
+    private bool is_fast_decode_active () {
+        return get_dropdown_text (tune_combo) == "fastdecode";
+    }
+
+    private bool get_preserved_cabac_preference () {
+        if (fast_decode_override_active)
+            return fast_decode_saved_cabac;
+        if (baseline_profile_override_active)
+            return baseline_saved_cabac;
+        return cabac_switch.active;
+    }
+
+    private void sync_advanced_constraints () {
+        string profile = get_dropdown_text (profile_combo);
         bool baseline_selected = (profile == "Baseline");
+        bool fast_decode_selected = is_fast_decode_active ();
+        bool restored_cabac = false;
+        bool cabac_restore_value = cabac_switch.active;
 
         if (baseline_selected && !baseline_profile_override_active) {
             baseline_saved_bframes = bframes_spin.get_value ();
             baseline_saved_b_adapt = b_adapt_combo.get_selected ();
-            baseline_saved_cabac = cabac_switch.active;
+            baseline_saved_cabac = get_preserved_cabac_preference ();
             baseline_profile_override_active = true;
+        } else if (!baseline_selected && baseline_profile_override_active) {
+            bframes_spin.set_value (baseline_saved_bframes);
+            b_adapt_combo.set_selected (baseline_saved_b_adapt);
+            cabac_restore_value = baseline_saved_cabac;
+            restored_cabac = true;
+            baseline_profile_override_active = false;
+        }
+
+        if (fast_decode_selected && !fast_decode_override_active) {
+            fast_decode_saved_cabac = get_preserved_cabac_preference ();
+            fast_decode_saved_deblock = deblock_expander.enable_expansion;
+            fast_decode_override_active = true;
+        } else if (!fast_decode_selected && fast_decode_override_active) {
+            deblock_expander.set_enable_expansion (fast_decode_saved_deblock);
+            cabac_restore_value = fast_decode_saved_cabac;
+            restored_cabac = true;
+            fast_decode_override_active = false;
         }
 
         if (baseline_selected) {
@@ -722,21 +741,22 @@ public class X264Tab : BaseCodecTab {
             bframes_spin.set_sensitive (false);
             b_adapt_combo.set_selected (0);
             b_adapt_combo.set_sensitive (false);
+        } else {
+            bframes_spin.set_sensitive (true);
+            b_adapt_combo.set_sensitive (true);
+        }
+
+        if (restored_cabac && !baseline_selected && !fast_decode_selected)
+            cabac_switch.set_active (cabac_restore_value);
+
+        bool cabac_forced_off = baseline_selected || fast_decode_selected;
+        cabac_switch.set_sensitive (!cabac_forced_off);
+        if (cabac_forced_off)
             cabac_switch.set_active (false);
-            cabac_switch.set_sensitive (false);
-            return;
-        }
 
-        if (baseline_profile_override_active) {
-            bframes_spin.set_value (baseline_saved_bframes);
-            b_adapt_combo.set_selected (baseline_saved_b_adapt);
-            cabac_switch.set_active (baseline_saved_cabac);
-            baseline_profile_override_active = false;
-        }
-
-        bframes_spin.set_sensitive (true);
-        b_adapt_combo.set_sensitive (true);
-        cabac_switch.set_sensitive (true);
+        deblock_expander.set_sensitive (!fast_decode_selected);
+        if (fast_decode_selected)
+            deblock_expander.set_enable_expansion (false);
     }
 
     private void apply_profile_format_requirements () {
@@ -748,7 +768,7 @@ public class X264Tab : BaseCodecTab {
         string previous_profile = last_synced_profile;
 
         _applying_profile = true;
-        apply_baseline_profile_overrides (profile);
+        sync_advanced_constraints ();
 
         if (profile == "Auto") {
             set_dropdown_options (pixel_format_selector.eight_bit_format,
@@ -937,7 +957,6 @@ public class X264Tab : BaseCodecTab {
         psy_trellis_spin.set_value (0.0);
         cabac_switch.set_active (true);
         mbtree_switch.set_active (true);
-        fast_decode_switch.set_active (false);
         open_gop_switch.set_active (false);
 
         // Audio

@@ -67,6 +67,7 @@ public class SvtAv1Tab : BaseCodecTab {
     public DropDown  tile_columns_combo  { get; private set; }
 
     private Adw.ActionRow custom_keyframe_row;
+    private bool syncing_qm_range = false;
 
     public SvtAv1Tab () {
         Object (orientation: Orientation.VERTICAL, spacing: 24);
@@ -676,6 +677,13 @@ public class SvtAv1Tab : BaseCodecTab {
             string ki = CodecUtils.get_dropdown_text (keyint_combo);
             custom_keyframe_row.set_visible (ki == "Custom");
         });
+
+        qm_min_spin.value_changed.connect (() => {
+            sync_qm_range (true);
+        });
+        qm_max_spin.value_changed.connect (() => {
+            sync_qm_range (false);
+        });
     }
 
     private void update_rc_visibility () {
@@ -685,6 +693,23 @@ public class SvtAv1Tab : BaseCodecTab {
         vbr_row.set_visible (mode == RateControl.VBR);
         // Two-pass available for all modes
         two_pass_row.set_visible (true);
+    }
+
+    private void sync_qm_range (bool min_changed) {
+        if (syncing_qm_range)
+            return;
+
+        int qm_min = (int) qm_min_spin.get_value ();
+        int qm_max = (int) qm_max_spin.get_value ();
+        if (qm_min <= qm_max)
+            return;
+
+        syncing_qm_range = true;
+        if (min_changed)
+            qm_max_spin.set_value (qm_min);
+        else
+            qm_min_spin.set_value (qm_max);
+        syncing_qm_range = false;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

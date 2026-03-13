@@ -707,9 +707,9 @@ public class TrimTab : Box, ICodecTab {
                     ok_segs.add (seg);
                     ok_args.add (new SegmentCodecArgs (smart_args));
 
-                    console_tab.add_line ("[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KB, %s)"
+                    console_tab.add_line ("[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KiB, %s)"
                         .printf (seg_name, rec.crf, rec.preset,
-                                 rec.estimated_size_kb,
+                                 rec.estimated_size_kib,
                                  rec.content_type.to_label ()));
 
                     // Log full details to console (same as codec tab path)
