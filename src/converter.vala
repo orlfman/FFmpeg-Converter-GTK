@@ -140,6 +140,15 @@ public class Converter : Object {
         return ConversionUtils.compute_output_path (input_file, output_folder, builder, codec_tab);
     }
 
+    public static async string compute_output_path_async (string input_file,
+                                                          string output_folder,
+                                                          ICodecBuilder builder,
+                                                          ICodecTab codec_tab,
+                                                          Cancellable? cancellable = null) {
+        return yield ConversionUtils.compute_output_path_async (
+            input_file, output_folder, builder, codec_tab, cancellable);
+    }
+
     public static string find_unique_path (string path) {
         return ConversionUtils.find_unique_path (path);
     }
@@ -294,7 +303,11 @@ public class Converter : Object {
         passlog_base = plog;
         config.passlog_base = plog;
 
-        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings ();
+        PixelFormatSettingsSnapshot? pixel_format =
+            (codec_tab is BaseCodecTab)
+            ? ((BaseCodecTab) codec_tab).snapshot_pixel_format_settings ()
+            : null;
+        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings (pixel_format);
         config.profile = CodecUtils.snapshot_encode_profile (builder, codec_tab, general_settings);
 
         // Seek / Duration

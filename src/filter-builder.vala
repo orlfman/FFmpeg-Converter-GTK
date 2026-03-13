@@ -51,10 +51,12 @@ namespace FilterBuilder {
         return filters;
     }
 
-    public string build_video_filter_chain (GeneralTab tab, bool skip_crop = false,
-                                               string codec_name = "") {
+    public string build_video_filter_chain (GeneralTab tab,
+                                            bool skip_crop = false,
+                                            string codec_name = "",
+                                            PixelFormatSettingsSnapshot? pixel_format_settings = null) {
         return build_video_filter_chain_from_snapshot (
-            tab.snapshot_settings (), skip_crop, codec_name);
+            tab.snapshot_settings (pixel_format_settings), skip_crop, codec_name);
     }
 
     public string build_video_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot,
@@ -160,14 +162,16 @@ namespace FilterBuilder {
         // 8. Pixel Format
         string pixfmt = "";
 
-        if (snapshot.ten_bit_selected) {
-            string f = snapshot.ten_bit_format_text;
+        PixelFormatSettingsSnapshot pixel_format = snapshot.pixel_format;
+
+        if (pixel_format.ten_bit_selected) {
+            string f = pixel_format.ten_bit_format_text;
             pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P10LE :
                      f.contains (Chroma.C422) ? PixelFormat.YUV422P10LE :
                                                 PixelFormat.YUV444P10LE;
         }
-        else if (snapshot.eight_bit_selected) {
-            string f = snapshot.eight_bit_format_text;
+        else if (pixel_format.eight_bit_selected) {
+            string f = pixel_format.eight_bit_format_text;
             pixfmt = f.contains (Chroma.C420) ? PixelFormat.YUV420P :
                      f.contains (Chroma.C422) ? PixelFormat.YUV422P :
                                                 PixelFormat.YUV444P;

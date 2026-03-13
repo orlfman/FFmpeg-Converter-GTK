@@ -84,8 +84,7 @@ public class X264Builder : Object, ICodecBuilder {
         snapshot.open_gop = tab.open_gop_switch.active;
         snapshot.threads = CodecUtils.get_dropdown_text (tab.threads_combo);
 
-        snapshot.general_settings = CodecUtils.resolve_general_settings_snapshot (
-            general_settings, tab.general_tab);
+        snapshot.general_settings = general_settings;
 
         return snapshot;
     }

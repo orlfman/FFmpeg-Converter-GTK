@@ -4,13 +4,10 @@ using Adw;
 // ═══════════════════════════════════════════════════════════════════════════════
 //  VideoFilters — Configurable video processing filters
 //
-//  Usage from GeneralTab:
-//      video_filters = new VideoFilters ();
-//      append (video_filters.get_widget ());
-//
-//  From FilterBuilder:
-//      string[] f = tab.video_filters.get_processing_filters ();
-//      string   h = tab.video_filters.get_hdr_filter ();
+//  Embedded in GeneralTab and snapshotted before background work starts.
+//  GeneralTab packages the resulting VideoFilterSettingsSnapshot into
+//  GeneralSettingsSnapshot, and FilterBuilder consumes that snapshot rather
+//  than reading live widget state directly.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class VideoFilters : Object {
@@ -134,18 +131,6 @@ public class VideoFilters : Object {
 
     private Adw.ExpanderRow hdr_expander;
     private Adw.ActionRow   tonemap_desat_row;
-
-    // External reference for pixel format awareness
-    private Switch? ten_bit_ref = null;
-
-    // Called by GeneralTab after construction to allow 10-bit awareness
-    public void set_ten_bit_reference (Switch check) {
-        ten_bit_ref = check;
-    }
-
-    private bool is_ten_bit_selected () {
-        return ten_bit_ref != null && ten_bit_ref.active;
-    }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -757,12 +742,6 @@ public class VideoFilters : Object {
         return snapshot;
     }
 
-    // Returns processing filters (everything except HDR, which needs
-    // special pipeline placement).  Called by FilterBuilder.
-    public string[] get_processing_filters () {
-        return build_processing_filters (is_ten_bit_selected ());
-    }
-
     private string[] build_processing_filters (bool ten_bit_selected) {
         string[] filters = {};
 
@@ -885,13 +864,6 @@ public class VideoFilters : Object {
         }
 
         return filters;
-    }
-
-    // Returns the HDR tonemap filter string (or "" if disabled).
-    // Kept separate because it requires special placement in the pipeline
-    // (after zscale linear conversion, before final output format).
-    public string get_hdr_filter () {
-        return build_hdr_filter ();
     }
 
     private string build_hdr_filter () {

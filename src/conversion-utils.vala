@@ -7,6 +7,203 @@ using GLib;
 
 namespace ConversionUtils {
     private const int ASCII_FORMAT_BUFFER_SIZE = 64;
+    private enum DirectoryStatus {
+        DIRECTORY,
+        MISSING,
+        NOT_DIRECTORY,
+        ERROR,
+        CANCELLED
+    }
+
+    private string describe_file_path (File file) {
+        string? path = file.get_path ();
+        return (path != null) ? path : file.get_uri ();
+    }
+
+    private string resolve_output_folder_path (string input_file, string output_folder) {
+        string out_folder = (output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        // Ensure the output directory exists — handles volatile paths
+        // (e.g. /tmp/work) or directories deleted between sessions.
+        if (!FileUtils.test (out_folder, FileTest.IS_DIR)) {
+            if (DirUtils.create_with_parents (out_folder, 0755) == 0) {
+                message ("ConversionUtils: Created missing output directory: %s", out_folder);
+            } else {
+                warning ("ConversionUtils: Could not create output directory %s: %s",
+                         out_folder, strerror (errno));
+            }
+        }
+
+        return out_folder;
+    }
+
+    private async DirectoryStatus query_directory_status_async (File dir,
+                                                                Cancellable? cancellable = null) {
+        try {
+            FileInfo info = yield dir.query_info_async (
+                FileAttribute.STANDARD_TYPE,
+                FileQueryInfoFlags.NONE,
+                Priority.DEFAULT,
+                cancellable
+            );
+            return (info.get_file_type () == FileType.DIRECTORY)
+                ? DirectoryStatus.DIRECTORY
+                : DirectoryStatus.NOT_DIRECTORY;
+        } catch (Error e) {
+            if (e is IOError.NOT_FOUND)
+                return DirectoryStatus.MISSING;
+            if (e is IOError.CANCELLED)
+                return DirectoryStatus.CANCELLED;
+
+            warning ("ConversionUtils: Could not query output directory %s: %s",
+                     describe_file_path (dir), e.message);
+            return DirectoryStatus.ERROR;
+        }
+    }
+
+    private async bool ensure_directory_tree_async (File dir,
+                                                    Cancellable? cancellable = null) {
+        DirectoryStatus status = yield query_directory_status_async (dir, cancellable);
+        switch (status) {
+            case DirectoryStatus.DIRECTORY:
+                return true;
+
+            case DirectoryStatus.NOT_DIRECTORY:
+                warning ("ConversionUtils: Output path exists but is not a directory: %s",
+                         describe_file_path (dir));
+                return false;
+
+            case DirectoryStatus.ERROR:
+            case DirectoryStatus.CANCELLED:
+                return false;
+
+            case DirectoryStatus.MISSING:
+                break;
+        }
+
+        File? parent = dir.get_parent ();
+        if (parent != null) {
+            if (!(yield ensure_directory_tree_async (parent, cancellable)))
+                return false;
+        }
+
+        try {
+            yield dir.make_directory_async (Priority.DEFAULT, cancellable);
+            return true;
+        } catch (Error e) {
+            if (e is IOError.EXISTS) {
+                DirectoryStatus after_race = yield query_directory_status_async (dir, cancellable);
+                return after_race == DirectoryStatus.DIRECTORY;
+            }
+            if (e is IOError.CANCELLED)
+                return false;
+
+            warning ("ConversionUtils: Could not create output directory %s: %s",
+                     describe_file_path (dir), e.message);
+            return false;
+        }
+    }
+
+    private async string resolve_output_folder_path_async (string input_file,
+                                                           string output_folder,
+                                                           Cancellable? cancellable = null) {
+        string out_folder = (output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        File out_dir = File.new_for_path (out_folder);
+        DirectoryStatus status = yield query_directory_status_async (out_dir, cancellable);
+        switch (status) {
+            case DirectoryStatus.DIRECTORY:
+                return out_folder;
+
+            case DirectoryStatus.NOT_DIRECTORY:
+                warning ("ConversionUtils: Output path exists but is not a directory: %s",
+                         describe_file_path (out_dir));
+                return out_folder;
+
+            case DirectoryStatus.ERROR:
+            case DirectoryStatus.CANCELLED:
+                return out_folder;
+
+            case DirectoryStatus.MISSING:
+                if (yield ensure_directory_tree_async (out_dir, cancellable)) {
+                    message ("ConversionUtils: Created missing output directory: %s", out_folder);
+                }
+                return out_folder;
+        }
+
+        return out_folder;
+    }
+
+    private string resolve_codec_suffix (ICodecBuilder builder) {
+        string codec_name = builder.get_codec_name ().down ();
+        return codec_name.contains ("av1") ? "av1" : codec_name;
+    }
+
+    private string resolve_container_extension (ICodecTab codec_tab) {
+        string container_ext = codec_tab.get_container ();
+        return (container_ext != "") ? container_ext : ContainerExt.MKV;
+    }
+
+    private string build_default_output_stem (string name_no_ext, string codec_suffix) {
+        return @"$name_no_ext-$codec_suffix";
+    }
+
+    private string build_sanitized_named_output_stem (string? raw_name,
+                                                      string codec_suffix,
+                                                      string fallback_stem) {
+        if (raw_name == null || raw_name.length == 0)
+            return fallback_stem;
+
+        string safe_name = sanitize_name_component (raw_name);
+        if (safe_name.length == 0)
+            return fallback_stem;
+
+        return @"$safe_name-$codec_suffix";
+    }
+
+    private string build_output_stem_for_mode (OutputNameMode mode,
+                                               string name_no_ext,
+                                               string codec_suffix,
+                                               string custom_name,
+                                               string? metadata_title = null) {
+        string fallback_stem = build_default_output_stem (name_no_ext, codec_suffix);
+
+        switch (mode) {
+            case OutputNameMode.CUSTOM:
+                return build_sanitized_named_output_stem (
+                    custom_name, codec_suffix, fallback_stem);
+
+            case OutputNameMode.RANDOM:
+                return @"$(generate_random_name (8))-$codec_suffix";
+
+            case OutputNameMode.DATE:
+                return @"$(generate_timestamp_name ())-$codec_suffix";
+
+            case OutputNameMode.METADATA:
+                return build_sanitized_named_output_stem (
+                    metadata_title, codec_suffix, fallback_stem);
+
+            default:
+                return fallback_stem;
+        }
+    }
+
+    private void resolve_output_stem_context (string input_file,
+                                              out OutputNameMode mode,
+                                              out string custom_name,
+                                              out string name_no_ext) {
+        var settings = AppSettings.get_default ();
+        mode = settings.output_name_mode;
+        custom_name = settings.output_custom_name;
+
+        string basename = Path.get_basename (input_file);
+        int dot_pos = basename.last_index_of_char ('.');
+        name_no_ext = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+    }
 
     public class FileSignature : Object {
         public string path { get; construct set; }
@@ -156,28 +353,26 @@ namespace ConversionUtils {
                                        string output_folder,
                                        ICodecBuilder builder,
                                        ICodecTab codec_tab) {
-        string out_folder = (output_folder != "")
-            ? output_folder
-            : Path.get_dirname (input_file);
-
-        // Ensure the output directory exists — handles volatile paths
-        // (e.g. /tmp/work) or directories deleted between sessions.
-        if (!FileUtils.test (out_folder, FileTest.IS_DIR)) {
-            if (DirUtils.create_with_parents (out_folder, 0755) == 0) {
-                message ("ConversionUtils: Created missing output directory: %s", out_folder);
-            } else {
-                warning ("ConversionUtils: Could not create output directory %s: %s",
-                         out_folder, strerror (errno));
-            }
-        }
-
-        string codec_name = builder.get_codec_name ().down ();
-        string codec_suffix = codec_name.contains ("av1") ? "av1" : codec_name;
-
-        string container_ext = codec_tab.get_container ();
-        if (container_ext == "") container_ext = ContainerExt.MKV;
+        string out_folder = resolve_output_folder_path (input_file, output_folder);
+        string codec_suffix = resolve_codec_suffix (builder);
+        string container_ext = resolve_container_extension (codec_tab);
 
         string name_stem = resolve_output_stem (input_file, codec_suffix);
+
+        return @"$out_folder/$name_stem.$container_ext";
+    }
+
+    public async string compute_output_path_async (string input_file,
+                                                   string output_folder,
+                                                   ICodecBuilder builder,
+                                                   ICodecTab codec_tab,
+                                                   Cancellable? cancellable = null) {
+        string out_folder = yield resolve_output_folder_path_async (
+            input_file, output_folder, cancellable);
+        string codec_suffix = resolve_codec_suffix (builder);
+        string container_ext = resolve_container_extension (codec_tab);
+
+        string name_stem = yield resolve_output_stem_async (input_file, codec_suffix, cancellable);
 
         return @"$out_folder/$name_stem.$container_ext";
     }
@@ -194,49 +389,41 @@ namespace ConversionUtils {
      *   METADATA → <metadata_title>-<codec_suffix>  (falls back to DEFAULT)
      */
     public string resolve_output_stem (string input_file, string codec_suffix) {
-        var settings = AppSettings.get_default ();
-        OutputNameMode mode = settings.output_name_mode;
+        OutputNameMode mode;
+        string custom_name;
+        string name_no_ext;
+        resolve_output_stem_context (input_file, out mode, out custom_name, out name_no_ext);
+        string? metadata_title = null;
+        if (mode == OutputNameMode.METADATA)
+            metadata_title = FfprobeUtils.probe_title (input_file);
 
-        string basename = Path.get_basename (input_file);
-        int dot_pos = basename.last_index_of_char ('.');
-        string name_no_ext = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+        return build_output_stem_for_mode (
+            mode,
+            name_no_ext,
+            codec_suffix,
+            custom_name,
+            metadata_title
+        );
+    }
 
-        switch (mode) {
-            case OutputNameMode.CUSTOM:
-                string custom = settings.output_custom_name;
-                if (custom.length > 0) {
-                    // Sanitize to prevent path traversal or broken filenames
-                    string safe_custom = sanitize_name_component (custom);
-                    if (safe_custom.length > 0) {
-                        return @"$safe_custom-$codec_suffix";
-                    }
-                }
-                // Fall through to default if custom name is empty or fully invalid
-                return @"$name_no_ext-$codec_suffix";
+    public async string resolve_output_stem_async (string input_file,
+                                                   string codec_suffix,
+                                                   Cancellable? cancellable = null) {
+        OutputNameMode mode;
+        string custom_name;
+        string name_no_ext;
+        resolve_output_stem_context (input_file, out mode, out custom_name, out name_no_ext);
+        string? metadata_title = null;
+        if (mode == OutputNameMode.METADATA)
+            metadata_title = yield FfprobeUtils.probe_title_async (input_file, cancellable);
 
-            case OutputNameMode.RANDOM:
-                string random_str = generate_random_name (8);
-                return @"$random_str-$codec_suffix";
-
-            case OutputNameMode.DATE:
-                string timestamp = generate_timestamp_name ();
-                return @"$timestamp-$codec_suffix";
-
-            case OutputNameMode.METADATA:
-                string? title = FfprobeUtils.probe_title (input_file);
-                if (title != null && title.length > 0) {
-                    // Sanitize the title for use as a filename
-                    string safe_title = sanitize_name_component (title);
-                    if (safe_title.length > 0) {
-                        return @"$safe_title-$codec_suffix";
-                    }
-                }
-                // Fallback: use original filename
-                return @"$name_no_ext-$codec_suffix";
-
-            default:  // DEFAULT
-                return @"$name_no_ext-$codec_suffix";
-        }
+        return build_output_stem_for_mode (
+            mode,
+            name_no_ext,
+            codec_suffix,
+            custom_name,
+            metadata_title
+        );
     }
 
     /**

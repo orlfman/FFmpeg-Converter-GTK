@@ -88,8 +88,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         snapshot.tile_columns = CodecUtils.get_dropdown_text (tab.tile_columns_combo);
         snapshot.threads = CodecUtils.get_dropdown_text (tab.threads_combo);
 
-        snapshot.general_settings = CodecUtils.resolve_general_settings_snapshot (
-            general_settings, tab.general_tab);
+        snapshot.general_settings = general_settings;
 
         return snapshot;
     }

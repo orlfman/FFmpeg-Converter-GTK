@@ -48,15 +48,6 @@ public class GeneralTab : Box {
     private Adw.ExpanderRow seek_expander;
     private Adw.ExpanderRow time_expander;
 
-    // ── Pixel Format ─────────────────────────────────────────────────────────
-    public Switch   eight_bit_check    { get; private set; }
-    public DropDown eight_bit_format   { get; private set; }
-    public Switch   ten_bit_check      { get; private set; }
-    public DropDown ten_bit_format     { get; private set; }
-
-    private Adw.ActionRow eight_bit_fmt_row;
-    private Adw.ActionRow ten_bit_fmt_row;
-
     // ── Video Filters (separate panel) ───────────────────────────────────────
     public VideoFilters video_filters   { get; private set; }
 
@@ -120,24 +111,20 @@ public class GeneralTab : Box {
         // 2. Seek & duration — right below scaling for quick trim control
         build_timing_group ();
 
-        // 3. Pixel format
-        build_pixel_format_group ();
-
-        // 4. Video processing filters (restoration, noise, sharpen, blur, grain)
+        // 3. Video processing filters (restoration, noise, sharpen, blur, grain)
         video_filters = new VideoFilters ();
-        video_filters.set_ten_bit_reference (ten_bit_check);
         append (video_filters.get_widget ());
 
-        // 5. Color correction + HDR tone mapping
+        // 4. Color correction + HDR tone mapping
         build_color_hdr_group ();
 
-        // 6. Frame rate & speed adjustments
+        // 5. Frame rate & speed adjustments
         build_frame_rate_speed_group ();
 
-        // 7. Audio normalization
+        // 6. Audio normalization
         build_audio_group ();
 
-        // 8. Metadata controls
+        // 7. Metadata controls
         build_metadata_group ();
 
         connect_signals ();
@@ -483,61 +470,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  3. PIXEL FORMAT
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void build_pixel_format_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Pixel Format");
-        group.set_description ("Color depth and chroma subsampling");
-
-        var eight_row = new Adw.ActionRow ();
-        eight_row.set_title ("8-Bit Color");
-        eight_row.set_subtitle ("Standard dynamic range — compatible with all players");
-        eight_bit_check = new Switch ();
-        eight_bit_check.set_valign (Align.CENTER);
-        eight_bit_check.set_active (false);
-        eight_row.add_suffix (eight_bit_check);
-        eight_row.set_activatable_widget (eight_bit_check);
-        group.add (eight_row);
-
-        eight_bit_fmt_row = new Adw.ActionRow ();
-        eight_bit_fmt_row.set_title ("8-Bit Subsampling");
-        eight_bit_format = new DropDown (new StringList (
-            { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" }
-        ), null);
-        eight_bit_format.set_valign (Align.CENTER);
-        eight_bit_format.set_selected (0);
-        eight_bit_fmt_row.add_suffix (eight_bit_format);
-        eight_bit_fmt_row.set_visible (false);
-        group.add (eight_bit_fmt_row);
-
-        var ten_row = new Adw.ActionRow ();
-        ten_row.set_title ("10-Bit Color");
-        ten_row.set_subtitle ("Higher color depth — better gradients, HDR support");
-        ten_bit_check = new Switch ();
-        ten_bit_check.set_valign (Align.CENTER);
-        ten_bit_check.set_active (false);
-        ten_row.add_suffix (ten_bit_check);
-        ten_row.set_activatable_widget (ten_bit_check);
-        group.add (ten_row);
-
-        ten_bit_fmt_row = new Adw.ActionRow ();
-        ten_bit_fmt_row.set_title ("10-Bit Subsampling");
-        ten_bit_format = new DropDown (new StringList (
-            { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" }
-        ), null);
-        ten_bit_format.set_valign (Align.CENTER);
-        ten_bit_format.set_selected (0);
-        ten_bit_fmt_row.add_suffix (ten_bit_format);
-        ten_bit_fmt_row.set_visible (false);
-        group.add (ten_bit_fmt_row);
-
-        append (group);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  5. COLOR & HDR
+    //  4. COLOR & HDR
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_color_hdr_group () {
@@ -563,7 +496,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  6. FRAME RATE & SPEED
+    //  5. FRAME RATE & SPEED
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_frame_rate_speed_group () {
@@ -661,7 +594,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  7. AUDIO
+    //  6. AUDIO
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_audio_group () {
@@ -682,7 +615,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  8. METADATA
+    //  7. METADATA
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_metadata_group () {
@@ -720,15 +653,6 @@ public class GeneralTab : Box {
     private void connect_signals () {
         scale_mode.notify["selected"].connect (() => {
             update_scaling_visibility ();
-        });
-
-        eight_bit_check.notify["active"].connect (() => {
-            eight_bit_fmt_row.set_visible (eight_bit_check.active);
-            if (eight_bit_check.active) ten_bit_check.active = false;
-        });
-        ten_bit_check.notify["active"].connect (() => {
-            ten_bit_fmt_row.set_visible (ten_bit_check.active);
-            if (ten_bit_check.active) eight_bit_check.active = false;
         });
 
         frame_rate_combo.notify["selected"].connect (() => {
@@ -812,7 +736,8 @@ public class GeneralTab : Box {
         return color_dialog != null ? color_dialog.get_filter_string () : "";
     }
 
-    public GeneralSettingsSnapshot snapshot_settings () {
+    public GeneralSettingsSnapshot snapshot_settings (
+        PixelFormatSettingsSnapshot? pixel_format_settings = null) {
         var snapshot = new GeneralSettingsSnapshot ();
         snapshot.scale_mode = get_scale_mode_text ();
         snapshot.resolution_preset_value = get_resolution_preset_value ();
@@ -830,15 +755,15 @@ public class GeneralTab : Box {
         snapshot.video_speed_percent = get_sanitized_speed_percent (video_speed, "video");
         snapshot.audio_speed_enabled = is_audio_speed_enabled ();
         snapshot.audio_speed_percent = get_sanitized_speed_percent (audio_speed, "audio");
-        snapshot.eight_bit_selected = eight_bit_check.active;
-        snapshot.eight_bit_format_text = CodecUtils.get_dropdown_text (eight_bit_format);
-        snapshot.ten_bit_selected = ten_bit_check.active;
-        snapshot.ten_bit_format_text = CodecUtils.get_dropdown_text (ten_bit_format);
+        if (pixel_format_settings != null) {
+            snapshot.pixel_format = pixel_format_settings.copy ();
+        }
         snapshot.color_filter = get_color_filter ();
         snapshot.normalize_audio = normalize_audio.active;
         snapshot.preserve_metadata = preserve_metadata.active;
         snapshot.remove_chapters = remove_chapters.active;
-        snapshot.video_filters = video_filters.snapshot_settings (ten_bit_check.active);
+        snapshot.video_filters = video_filters.snapshot_settings (
+            snapshot.pixel_format.ten_bit_selected);
         return snapshot;
     }
 

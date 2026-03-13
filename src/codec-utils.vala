@@ -5,6 +5,22 @@ public class VideoFilterSettingsSnapshot : Object {
     public string hdr_filter = "";
 }
 
+public class PixelFormatSettingsSnapshot : Object {
+    public bool eight_bit_selected = false;
+    public string eight_bit_format_text = "8-bit 4:2:0";
+    public bool ten_bit_selected = false;
+    public string ten_bit_format_text = "10-bit 4:2:0";
+
+    public PixelFormatSettingsSnapshot copy () {
+        var snapshot = new PixelFormatSettingsSnapshot ();
+        snapshot.eight_bit_selected = eight_bit_selected;
+        snapshot.eight_bit_format_text = eight_bit_format_text;
+        snapshot.ten_bit_selected = ten_bit_selected;
+        snapshot.ten_bit_format_text = ten_bit_format_text;
+        return snapshot;
+    }
+}
+
 public class GeneralSettingsSnapshot : Object {
     public string scale_mode = ScaleMode.ORIGINAL;
     public string resolution_preset_value = "";
@@ -17,16 +33,13 @@ public class GeneralSettingsSnapshot : Object {
     public bool crop_enabled = false;
     public string crop_value = "";
     public VideoFilterSettingsSnapshot video_filters { get; set; default = new VideoFilterSettingsSnapshot (); }
+    public PixelFormatSettingsSnapshot pixel_format { get; set; default = new PixelFormatSettingsSnapshot (); }
     public string frame_rate_text = FrameRateLabel.ORIGINAL;
     public string custom_frame_rate_text = "";
     public bool video_speed_enabled = false;
     public double video_speed_percent = 0.0;
     public bool audio_speed_enabled = false;
     public double audio_speed_percent = 0.0;
-    public bool eight_bit_selected = false;
-    public string eight_bit_format_text = "";
-    public bool ten_bit_selected = false;
-    public string ten_bit_format_text = "";
     public string color_filter = "";
     public bool normalize_audio = false;
     public bool preserve_metadata = false;
@@ -37,6 +50,7 @@ public class CodecTabSettingsSnapshot : Object {
     public string container = ContainerExt.MKV;
     public KeyframeSettingsSnapshot keyframe_settings { get; set; default = new KeyframeSettingsSnapshot (); }
     public AudioSettingsSnapshot audio_settings { get; set; default = new AudioSettingsSnapshot (); }
+    public PixelFormatSettingsSnapshot pixel_format { get; set; default = new PixelFormatSettingsSnapshot (); }
 }
 
 public class KeyframeSettingsSnapshot : Object {
@@ -68,16 +82,6 @@ public class EncodeProfileSnapshot : Object {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace CodecUtils {
-
-    public GeneralSettingsSnapshot? resolve_general_settings_snapshot (
-        GeneralSettingsSnapshot? general_settings,
-        GeneralTab? general_tab) {
-        if (general_settings != null)
-            return general_settings;
-        if (general_tab != null)
-            return general_tab.snapshot_settings ();
-        return null;
-    }
 
     public StringList build_dropdown_string_list (string[] options) {
         var model = new StringList (null);
@@ -188,6 +192,9 @@ namespace CodecUtils {
      */
     public string get_x264_profile_pix_fmt_from_snapshot (string profile,
                                                           GeneralSettingsSnapshot? general_settings) {
+        PixelFormatSettingsSnapshot? pixel_format =
+            (general_settings != null) ? general_settings.pixel_format : null;
+
         switch (profile) {
             case "Baseline":
             case "Main":
@@ -196,22 +203,16 @@ namespace CodecUtils {
             case "High10":
                 return PixelFormat.YUV420P10LE;
             case "High422":
-                if (general_settings != null && general_settings.ten_bit_selected)
+                if (pixel_format != null && pixel_format.ten_bit_selected)
                     return PixelFormat.YUV422P10LE;
                 return PixelFormat.YUV422P;
             case "High444":
-                if (general_settings != null && general_settings.ten_bit_selected)
+                if (pixel_format != null && pixel_format.ten_bit_selected)
                     return PixelFormat.YUV444P10LE;
                 return PixelFormat.YUV444P;
             default:
                 return "";
         }
-    }
-
-    public string get_x264_profile_pix_fmt (string profile, GeneralTab? general_tab) {
-        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
-            null, general_tab);
-        return get_x264_profile_pix_fmt_from_snapshot (profile, general_settings);
     }
 
     /**
@@ -242,22 +243,25 @@ namespace CodecUtils {
      */
     public string get_vp9_profile_pix_fmt_from_snapshot (string profile,
                                                          GeneralSettingsSnapshot? general_settings) {
+        PixelFormatSettingsSnapshot? pixel_format =
+            (general_settings != null) ? general_settings.pixel_format : null;
+
         switch (profile) {
             case "Profile 0 (8-bit 4:2:0)":
                 return PixelFormat.YUV420P;
             case "Profile 1 (8-bit 4:2:2 / 4:4:4)":
-                if (general_settings != null
-                    && general_settings.eight_bit_selected
-                    && general_settings.eight_bit_format_text.contains (Chroma.C444)) {
+                if (pixel_format != null
+                    && pixel_format.eight_bit_selected
+                    && pixel_format.eight_bit_format_text.contains (Chroma.C444)) {
                     return PixelFormat.YUV444P;
                 }
                 return PixelFormat.YUV422P;
             case "Profile 2 (10-bit 4:2:0)":
                 return PixelFormat.YUV420P10LE;
             case "Profile 3 (10-bit 4:2:2 / 4:4:4)":
-                if (general_settings != null
-                    && general_settings.ten_bit_selected
-                    && general_settings.ten_bit_format_text.contains (Chroma.C444)) {
+                if (pixel_format != null
+                    && pixel_format.ten_bit_selected
+                    && pixel_format.ten_bit_format_text.contains (Chroma.C444)) {
                     return PixelFormat.YUV444P10LE;
                 }
                 return PixelFormat.YUV422P10LE;
@@ -266,14 +270,8 @@ namespace CodecUtils {
         }
     }
 
-    public string get_vp9_profile_pix_fmt (string profile, GeneralTab? general_tab) {
-        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
-            null, general_tab);
-        return get_vp9_profile_pix_fmt_from_snapshot (profile, general_settings);
-    }
-
     /**
-     * Map the active General tab depth selection to the SVT-AV1 pixel format
+     * Map the active codec-local depth selection to the SVT-AV1 pixel format
      * this app/runtime supports. Returns "" when no output depth override is
      * currently selected.
      */
@@ -281,19 +279,15 @@ namespace CodecUtils {
         if (general_settings == null)
             return "";
 
-        if (general_settings.ten_bit_selected)
+        PixelFormatSettingsSnapshot pixel_format = general_settings.pixel_format;
+
+        if (pixel_format.ten_bit_selected)
             return PixelFormat.YUV420P10LE;
 
-        if (general_settings.eight_bit_selected)
+        if (pixel_format.eight_bit_selected)
             return PixelFormat.YUV420P;
 
         return "";
-    }
-
-    public string get_svt_av1_pix_fmt (GeneralTab? general_tab) {
-        GeneralSettingsSnapshot? general_settings = resolve_general_settings_snapshot (
-            null, general_tab);
-        return get_svt_av1_pix_fmt_from_snapshot (general_settings);
     }
 
     /**
@@ -367,8 +361,11 @@ namespace CodecUtils {
         ICodecTab codec_tab,
         GeneralSettingsSnapshot? general_settings) {
         var snapshot = new EncodeProfileSnapshot ();
-        Object? builder_snapshot = builder.snapshot_settings (general_settings);
         CodecTabSettingsSnapshot codec_settings = codec_tab.snapshot_settings (general_settings);
+        if (general_settings != null) {
+            general_settings.pixel_format = codec_settings.pixel_format.copy ();
+        }
+        Object? builder_snapshot = builder.snapshot_settings (general_settings);
 
         snapshot.codec_name = builder.get_codec_name ();
         snapshot.codec_args = builder.build_codec_args_from_snapshot (builder_snapshot);

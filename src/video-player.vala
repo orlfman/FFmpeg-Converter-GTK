@@ -19,9 +19,11 @@ public class VideoPlayer : Box {
     private uint update_source = 0;
     private uint prepare_poll  = 0;
     private uint scrub_reset_source = 0;
+    private uint fps_probe_generation = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
     private bool prepared_handled = false;
+    private Cancellable? fps_probe_cancellable = null;
 
     // ── Video intrinsic size ─────────────────────────────────────────────────
     private int _intrinsic_width  = 0;
@@ -154,37 +156,13 @@ public class VideoPlayer : Box {
      * Load and prepare a video file for preview.
      */
     public void load_file (string path) {
-        stop_update_timer ();
-        stop_prepare_poll ();
-
-        if (media != null) {
-            media.set_playing (false);
-        }
-
-        is_playing = false;
-        _intrinsic_width  = 0;
-        _intrinsic_height = 0;
-        _fps = 0.0;
-        prepared_handled = false;
-        play_button.set_icon_name ("media-playback-start-symbolic");
+        reset_player_state ();
 
         var file = GLib.File.new_for_path (path);
         media = Gtk.MediaFile.for_file (file);
         picture.set_paintable (media);
 
-        string probe_path = path;
-        Gtk.MediaFile probe_media = media;  // capture for staleness check
-        new Thread<void> ("fps-probe", () => {
-            double probed = FfprobeUtils.probe_input_fps (probe_path);
-            Idle.add (() => {
-                // Guard: if the user loaded a different file while we were
-                // probing, discard the stale result.
-                if (media == probe_media) {
-                    _fps = probed;
-                }
-                return Source.REMOVE;
-            });
-        });
+        start_fps_probe (path, media);
 
         // Two-pronged approach to detect when GStreamer finishes probing:
         //  1. Property notification (ideal, fires immediately when ready)
@@ -202,6 +180,19 @@ public class VideoPlayer : Box {
             }
             return Source.CONTINUE;
         });
+    }
+
+    /**
+     * Clear the current preview and reset all playback state.
+     */
+    public void clear () {
+        reset_player_state ();
+        media = null;
+        picture.set_paintable (null);
+        scrubber.set_range (0.0, 1.0);
+        scrubber.set_value (0.0);
+        time_label.set_text (format_time (0.0));
+        duration_label.set_text (format_time (0.0));
     }
 
     /**
@@ -247,16 +238,12 @@ public class VideoPlayer : Box {
      * Stop playback and release timer resources.
      */
     public void cleanup () {
-        stop_update_timer ();
-        stop_prepare_poll ();
-        if (scrub_reset_source != 0) {
-            Source.remove (scrub_reset_source);
-            scrub_reset_source = 0;
-        }
-        if (media != null) {
-            media.set_playing (false);
-        }
-        is_playing = false;
+        reset_player_state ();
+    }
+
+    public override void dispose () {
+        cleanup ();
+        base.dispose ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -297,6 +284,61 @@ public class VideoPlayer : Box {
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNAL — Playback control
     // ═════════════════════════════════════════════════════════════════════════
+
+    private void cancel_fps_probe () {
+        if (fps_probe_cancellable != null) {
+            fps_probe_cancellable.cancel ();
+            fps_probe_cancellable = null;
+        }
+    }
+
+    private void cancel_scrub_reset () {
+        if (scrub_reset_source != 0) {
+            Source.remove (scrub_reset_source);
+            scrub_reset_source = 0;
+        }
+    }
+
+    private void reset_player_state () {
+        stop_update_timer ();
+        stop_prepare_poll ();
+        cancel_fps_probe ();
+        cancel_scrub_reset ();
+
+        if (media != null) {
+            media.set_playing (false);
+        }
+
+        user_scrubbing = false;
+        is_playing = false;
+        _intrinsic_width  = 0;
+        _intrinsic_height = 0;
+        _fps = 0.0;
+        prepared_handled = false;
+        play_button.set_icon_name ("media-playback-start-symbolic");
+    }
+
+    private void start_fps_probe (string path, Gtk.MediaFile probe_media) {
+        var cancellable = new Cancellable ();
+        fps_probe_cancellable = cancellable;
+        uint generation = ++fps_probe_generation;
+        FfprobeUtils.probe_input_fps_async.begin (path, cancellable, (obj, res) => {
+            double probed = FfprobeUtils.probe_input_fps_async.end (res);
+
+            if (fps_probe_cancellable == cancellable) {
+                fps_probe_cancellable = null;
+            }
+
+            if (cancellable.is_cancelled ())
+                return;
+
+            // Discard stale results if a newer load replaced the active media.
+            if (generation != fps_probe_generation || media != probe_media)
+                return;
+
+            _fps = probed;
+        });
+    }
 
     private void on_media_prepared () {
         if (media == null || !media.is_prepared ()) return;

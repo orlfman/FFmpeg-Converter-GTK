@@ -115,6 +115,16 @@ public class AppController : Object {
         wire_smart_optimizer ();
     }
 
+    private BaseCodecTab? lookup_base_codec_tab (string codec) {
+        switch (codec) {
+            case "svt-av1": return svt_tab;
+            case "x265":    return x265_tab;
+            case "x264":    return x264_tab;
+            case "vp9":     return vp9_tab;
+            default:         return null;
+        }
+    }
+
     // ── Input file changed → probe info, load trim preview, load subtitles ──
 
     private void wire_file_input_changed () {
@@ -302,11 +312,25 @@ public class AppController : Object {
 
         // Video filter chain — calibration must encode at the same
         // resolution/crop/fps as the actual output
-        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (general_tab, false, codec);
+        BaseCodecTab? codec_tab = lookup_base_codec_tab (codec);
+        PixelFormatSettingsSnapshot? pixel_format = (codec_tab != null)
+            ? codec_tab.snapshot_pixel_format_settings ()
+            : null;
+        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (
+            general_tab, false, codec, pixel_format);
 
         // Effective duration — if seek/time are set, the encode is shorter
         if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {
-            double full_dur = FfprobeUtils.probe_duration (input_file);
+            double full_dur = yield FfprobeUtils.probe_duration_async (
+                input_file, smart_opt_cancel);
+            if (smart_opt_cancel.is_cancelled ()) {
+                if (my_generation == smart_opt_generation) {
+                    status_area.stop_progress ();
+                    smart_optimizer_running (false);
+                    status_area.set_status ("Smart Optimizer cancelled.");
+                }
+                return;
+            }
             double start = 0.0;
             double end   = full_dur;
 

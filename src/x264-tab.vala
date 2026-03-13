@@ -11,12 +11,6 @@ public class X264Tab : BaseCodecTab {
     public DropDown  preset_combo       { get; private set; }
     public DropDown  profile_combo      { get; private set; }
 
-    // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
-    public GeneralTab? general_tab {
-        get { return profile_general_tab; }
-        set { rebind_general_tab (value, apply_profile_format_requirements); }
-    }
-
     // ── Rate Control ─────────────────────────────────────────────────────────
     public DropDown   rc_mode_combo     { get; private set; }
     public SpinButton crf_spin          { get; private set; }
@@ -92,6 +86,7 @@ public class X264Tab : BaseCodecTab {
 
         build_quality_profile_group ();
         build_encoding_group ();
+        add_pixel_format_group ();
         build_rate_control_group ();
         build_quality_group ();
         build_motion_group ();
@@ -655,7 +650,7 @@ public class X264Tab : BaseCodecTab {
         rc_mode_combo.notify["selected"].connect (update_rc_visibility);
         update_rc_visibility ();
 
-        // Profile → auto-configure General tab pixel format for compatibility
+        // Profile → auto-configure local pixel format for compatibility
         profile_combo.notify["selected"].connect (apply_profile_format_requirements);
 
         // AQ Mode → enable/disable strength
@@ -710,6 +705,7 @@ public class X264Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
+    private string last_synced_profile = "";
 
     private void apply_baseline_profile_overrides (string profile) {
         bool baseline_selected = (profile == "Baseline");
@@ -744,124 +740,118 @@ public class X264Tab : BaseCodecTab {
     }
 
     private void apply_profile_format_requirements () {
-        if (_applying_profile || !general_tab_sync_active) return;
+        if (_applying_profile)
+            return;
 
         string profile = get_dropdown_text (profile_combo);
+        bool profile_changed = (profile != last_synced_profile);
+        string previous_profile = last_synced_profile;
 
         _applying_profile = true;
         apply_baseline_profile_overrides (profile);
 
-        if (profile_general_tab == null) {
-            _applying_profile = false;
-            return;
-        }
-
-        bool sync_just_activated = consume_general_tab_sync_activation ();
-
         if (profile == "Auto") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (sync_just_activated && has_saved_auto_profile_general_state ()) {
-                restore_auto_profile_general_state ();
-            } else if (was_last_profile_sync_auto ()) {
-                capture_auto_profile_general_state ();
-            } else {
-                restore_auto_profile_general_state ();
-            }
-            mark_last_profile_sync_auto (true);
+            if (profile_changed && previous_profile.length > 0 && previous_profile != "Auto")
+                reset_pixel_format_selection ();
+            pixel_format_selector.allow_optional_depth_selection ();
+            last_synced_profile = profile;
             _applying_profile = false;
             return;
         }
 
-        if (was_last_profile_sync_auto ())
-            capture_auto_profile_general_state ();
-        mark_last_profile_sync_auto (false);
-
         if (profile == "Baseline" || profile == "Main" || profile == "High") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
         } else if (profile == "High10") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0" },
                                   "10-bit 4:2:0");
         } else if (profile == "High422") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:2" },
                                   "8-bit 4:2:2");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:2" },
                                   "10-bit 4:2:2");
         } else if (profile == "High444") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:4:4" },
                                   "8-bit 4:4:4");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:4:4" },
                                   "10-bit 4:4:4");
         }
 
-        bool has_8bit  = profile_general_tab.eight_bit_check.active;
-        bool has_10bit = profile_general_tab.ten_bit_check.active;
+        bool has_8bit  = pixel_format_selector.eight_bit_check.active;
+        bool has_10bit = pixel_format_selector.ten_bit_check.active;
 
         if (profile == "Baseline") {
             // Exact Constrained Baseline output: 8-bit 4:2:0 with no B-frames
             // and no CABAC so x264 cannot silently rise to Main.
-            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
-            profile_general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+            if (has_10bit) pixel_format_selector.ten_bit_check.set_active (false);
+            if (!has_8bit) pixel_format_selector.eight_bit_check.set_active (true);
+            pixel_format_selector.eight_bit_format.set_selected (0);
+            pixel_format_selector.lock_to_eight_bit ();
         }
         else if (profile == "Main" || profile == "High") {
             // 8-bit only, 4:2:0 only
-            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
-            profile_general_tab.eight_bit_format.set_selected (0);  // 4:2:0
+            if (has_10bit) pixel_format_selector.ten_bit_check.set_active (false);
+            if (!has_8bit) pixel_format_selector.eight_bit_check.set_active (true);
+            pixel_format_selector.eight_bit_format.set_selected (0);
+            pixel_format_selector.lock_to_eight_bit ();
         }
         else if (profile == "High10") {
             // 10-bit, 4:2:0 only
-            if (has_8bit) profile_general_tab.eight_bit_check.set_active (false);
-            if (!has_10bit) profile_general_tab.ten_bit_check.set_active (true);
-            profile_general_tab.ten_bit_format.set_selected (0);  // 4:2:0
+            if (has_8bit) pixel_format_selector.eight_bit_check.set_active (false);
+            if (!has_10bit) pixel_format_selector.ten_bit_check.set_active (true);
+            pixel_format_selector.ten_bit_format.set_selected (0);
+            pixel_format_selector.lock_to_ten_bit ();
         }
         else if (profile == "High422") {
             // Exact High 4:2:2 output: preserve explicit 8/10-bit choice,
             // otherwise default to 8-bit 4:2:2.
             if (!has_8bit && !has_10bit) {
-                profile_general_tab.eight_bit_check.set_active (true);
+                pixel_format_selector.eight_bit_check.set_active (true);
                 has_8bit = true;
             }
 
             if (has_10bit) {
-                profile_general_tab.ten_bit_format.set_selected (1);  // 4:2:2
+                pixel_format_selector.ten_bit_format.set_selected (1);
             } else {
-                profile_general_tab.eight_bit_format.set_selected (1);  // 4:2:2
+                pixel_format_selector.eight_bit_format.set_selected (1);
             }
+            pixel_format_selector.require_depth_selection ();
         }
         else if (profile == "High444") {
             // Exact High 4:4:4 Predictive output: preserve explicit 8/10-bit
             // choice, otherwise default to 8-bit 4:4:4.
             if (!has_8bit && !has_10bit) {
-                profile_general_tab.eight_bit_check.set_active (true);
+                pixel_format_selector.eight_bit_check.set_active (true);
                 has_8bit = true;
             }
 
             if (has_10bit) {
-                profile_general_tab.ten_bit_format.set_selected (2);  // 4:4:4
+                pixel_format_selector.ten_bit_format.set_selected (2);
             } else {
-                profile_general_tab.eight_bit_format.set_selected (2);  // 4:4:4
+                pixel_format_selector.eight_bit_format.set_selected (2);
             }
+            pixel_format_selector.require_depth_selection ();
         }
 
+        last_synced_profile = profile;
         _applying_profile = false;
     }
 
@@ -885,7 +875,7 @@ public class X264Tab : BaseCodecTab {
         return new X264Builder (this);
     }
 
-    public override void sync_general_tab_now () {
+    public override void sync_pixel_format_now () {
         apply_profile_format_requirements ();
     }
 
@@ -910,6 +900,7 @@ public class X264Tab : BaseCodecTab {
         container_combo.set_selected (0);
         preset_combo.set_selected (5);
         profile_combo.set_selected (0);
+        reset_pixel_format_defaults ();
 
         // Rate Control
         rc_mode_combo.set_selected (0);

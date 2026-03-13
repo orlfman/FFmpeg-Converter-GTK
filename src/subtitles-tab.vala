@@ -22,7 +22,6 @@ public class SubtitlesTab : Box {
     public signal void subtitle_apply_succeeded (uint64 operation_id, string output_path);
     public signal void subtitle_apply_failed (uint64 operation_id);
     public signal void subtitle_apply_cancelled (uint64 operation_id);
-    public signal void general_tab_context_changed ();
 
     // ── Runner ───────────────────────────────────────────────────────────────
     private SubtitlesRunner runner = new SubtitlesRunner ();
@@ -651,7 +650,7 @@ public class SubtitlesTab : Box {
         var info_row = new Adw.ActionRow ();
         info_row.set_title ("Re-encode Required");
         info_row.set_subtitle (
-            "This will re-encode the entire video using the codec and General tab settings — " +
+            "This will re-encode the entire video using the selected codec tab plus shared General settings - " +
             "much slower than remux, but produces a single self-contained file"
         );
         info_row.add_prefix (make_icon ("dialog-warning-symbolic"));
@@ -670,12 +669,6 @@ public class SubtitlesTab : Box {
     private void connect_signals () {
         extract_button.clicked.connect (on_extract_clicked);
         extract_all_button.clicked.connect (on_extract_all_clicked);
-        mode_combo.notify["selected"].connect (() => {
-            general_tab_context_changed ();
-        });
-        burn_codec_combo.notify["selected"].connect (() => {
-            general_tab_context_changed ();
-        });
 
         runner.operation_done.connect ((path) => {
             uint64 operation_id = active_extract_operation_id;
@@ -1093,7 +1086,7 @@ public class SubtitlesTab : Box {
         return is_burn_in_mode () && burn_codec_combo.get_selected () == 0;
     }
 
-    public BaseCodecTab? get_general_tab_sync_owner () {
+    public BaseCodecTab? get_selected_reencode_codec_tab () {
         if (!is_burn_in_mode ())
             return null;
 
@@ -1288,7 +1281,11 @@ public class SubtitlesTab : Box {
         }
 
         ICodecBuilder builder = codec_tab.get_codec_builder ();
-        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings ();
+        PixelFormatSettingsSnapshot? pixel_format =
+            (codec_tab is BaseCodecTab)
+            ? ((BaseCodecTab) codec_tab).snapshot_pixel_format_settings ()
+            : null;
+        GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings (pixel_format);
         EncodeProfileSnapshot profile = CodecUtils.snapshot_encode_profile (
             builder, codec_tab, general_settings);
 

@@ -40,7 +40,6 @@ public class MainWindow : Adw.ApplicationWindow {
     private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
     private Adw.ToastOverlay toast_overlay;
-    private BaseCodecTab? general_tab_sync_owner = null;
 
     // Prevent GC from collecting the controller
     private AppController controller;
@@ -52,6 +51,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private bool operation_launch_pending = false;
     private Adw.AlertDialog? active_preflight_dialog = null;
     private Cancellable? active_preflight_dialog_cancellable = null;
+    private Cancellable? active_preflight_probe_cancellable = null;
 
     // Queued auto-convert: if Smart Optimizer finishes while another operation
     // is running, remember the codec so we can start conversion when idle.
@@ -232,13 +232,9 @@ public class MainWindow : Adw.ApplicationWindow {
         file_pickers = new FilePickers ();
         general_tab  = new GeneralTab ();
         svt_tab      = new SvtAv1Tab ();
-        svt_tab.general_tab = general_tab;
         x265_tab     = new X265Tab ();
-        x265_tab.general_tab = general_tab;
         x264_tab     = new X264Tab ();
-        x264_tab.general_tab = general_tab;
         vp9_tab      = new Vp9Tab ();
-        vp9_tab.general_tab = general_tab;
         info_tab     = new InformationTab ();
         console_tab  = new ConsoleTab ();
         status_area  = new StatusArea ();
@@ -249,11 +245,6 @@ public class MainWindow : Adw.ApplicationWindow {
         trim_tab.x265_tab   = x265_tab;
         trim_tab.x264_tab   = x264_tab;
         trim_tab.vp9_tab    = vp9_tab;
-        trim_tab.general_tab_context_changed.connect (() => {
-            if (view_stack != null && view_stack.visible_child_name == "trim") {
-                update_general_tab_sync_owner ();
-            }
-        });
 
         subtitles_tab = new SubtitlesTab ();
         subtitles_tab.file_pickers = file_pickers;
@@ -262,11 +253,6 @@ public class MainWindow : Adw.ApplicationWindow {
         subtitles_tab.x265_tab     = x265_tab;
         subtitles_tab.x264_tab     = x264_tab;
         subtitles_tab.vp9_tab      = vp9_tab;
-        subtitles_tab.general_tab_context_changed.connect (() => {
-            if (view_stack != null && view_stack.visible_child_name == "subtitles") {
-                update_general_tab_sync_owner ();
-            }
-        });
         subtitles_tab.set_ui_refs (status_area, console_tab);
 
         hamburger = new HamburgerMenu (this, file_pickers);
@@ -337,10 +323,8 @@ public class MainWindow : Adw.ApplicationWindow {
         // Disable the Convert button on tabs where it has no function
         view_stack.notify["visible-child-name"].connect (() => {
             update_convert_sensitivity ();
-            update_general_tab_sync_owner ();
         });
         update_convert_sensitivity ();
-        update_general_tab_sync_owner ();
     }
 
     /**
@@ -373,52 +357,6 @@ public class MainWindow : Adw.ApplicationWindow {
 
     private string get_operation_activity_phrase () {
         return operation_launch_pending ? "is already being prepared" : "is already running";
-    }
-
-    private void set_general_format_options (DropDown dropdown,
-                                             string[] options,
-                                             string fallback_option) {
-        CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
-    }
-
-    private void restore_general_tab_format_options () {
-        set_general_format_options (general_tab.eight_bit_format,
-                                    { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
-                                    "8-bit 4:2:0");
-        set_general_format_options (general_tab.ten_bit_format,
-                                    { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
-                                    "10-bit 4:2:0");
-    }
-
-    private void update_general_tab_sync_owner () {
-        string? page = view_stack.visible_child_name;
-
-        if (page == "svt-av1") {
-            general_tab_sync_owner = svt_tab;
-        } else if (page == "x265") {
-            general_tab_sync_owner = x265_tab;
-        } else if (page == "x264") {
-            general_tab_sync_owner = x264_tab;
-        } else if (page == "vp9") {
-            general_tab_sync_owner = vp9_tab;
-        } else if (page == "trim") {
-            general_tab_sync_owner = trim_tab.get_general_tab_sync_owner ();
-        } else if (page == "subtitles") {
-            general_tab_sync_owner = subtitles_tab.get_general_tab_sync_owner ();
-        } else if (page != "general") {
-            general_tab_sync_owner = null;
-        }
-
-        svt_tab.general_tab_sync_active = (general_tab_sync_owner == svt_tab);
-        x265_tab.general_tab_sync_active = (general_tab_sync_owner == x265_tab);
-        x264_tab.general_tab_sync_active = (general_tab_sync_owner == x264_tab);
-        vp9_tab.general_tab_sync_active = (general_tab_sync_owner == vp9_tab);
-
-        if (general_tab_sync_owner != null) {
-            general_tab_sync_owner.sync_general_tab_now ();
-        } else {
-            restore_general_tab_format_options ();
-        }
     }
 
     /** Wrap a widget in a ScrolledWindow and add as a ViewStack page with icon. */
@@ -538,8 +476,20 @@ public class MainWindow : Adw.ApplicationWindow {
 
     private delegate void ProceedCallback ();
     private delegate void DialogResponseCallback (string response);
+    private delegate BaseCodecTab? PixelFormatTabProvider ();
 
-    private int get_cached_input_bit_depth (string input_file) {
+    private bool has_explicit_pixel_format_selection (BaseCodecTab? codec_tab) {
+        if (codec_tab == null) {
+            return false;
+        }
+
+        PixelFormatSettingsSnapshot snapshot =
+            codec_tab.snapshot_pixel_format_settings ();
+        return snapshot.eight_bit_selected || snapshot.ten_bit_selected;
+    }
+
+    private async int get_cached_input_bit_depth_async (string input_file,
+                                                        Cancellable? cancellable = null) {
         if (input_file == "")
             return 0;
 
@@ -552,7 +502,8 @@ public class MainWindow : Adw.ApplicationWindow {
                 return cached_entry.value;
         }
 
-        int probed_bits = FfprobeUtils.probe_video_bit_depth (input_file);
+        int probed_bits = yield FfprobeUtils.probe_video_bit_depth_async (
+            input_file, cancellable);
         if (probed_bits > 0 && current_signature != null) {
             cached_input_bit_depth.store (current_signature, probed_bits);
         }
@@ -560,64 +511,74 @@ public class MainWindow : Adw.ApplicationWindow {
         return probed_bits;
     }
 
-    private bool get_implicit_depth_warning (string input_file,
-                                             out string source_depth,
-                                             out string fallback_depth) {
-        source_depth = "";
-        fallback_depth = "";
-
-        if (general_tab.eight_bit_check.active || general_tab.ten_bit_check.active)
-            return false;
-
-        int source_bits = get_cached_input_bit_depth (input_file);
-        if (source_bits <= 8)
-            return false;
-
-        source_depth = "%d-bit".printf (source_bits);
-        fallback_depth = "8-bit";
-        return true;
-    }
-
     private void maybe_warn_implicit_depth_downgrade (string input_file,
+                                                      owned PixelFormatTabProvider get_codec_tab,
                                                       owned ProceedCallback on_continue,
                                                       owned ProceedCallback? on_cancel = null) {
-        string source_depth;
-        string fallback_depth;
-        if (!get_implicit_depth_warning (input_file, out source_depth, out fallback_depth)) {
+        BaseCodecTab? codec_tab = get_codec_tab ();
+        if (codec_tab == null || has_explicit_pixel_format_selection (codec_tab)) {
             on_continue ();
             return;
         }
 
-        var dialog = new Adw.AlertDialog (
-            "Output Bit Depth Is Unset",
-            @"The source video appears to be $source_depth, but no output bit depth is selected in the General tab.\n\nDepending on the encoder, FFmpeg may fall back to $fallback_depth unless you explicitly enable 10-Bit Color."
-        );
+        var cancellable = begin_preflight_probe ();
+        get_cached_input_bit_depth_async.begin (input_file, cancellable, (obj, res) => {
+            int source_bits = get_cached_input_bit_depth_async.end (res);
+            finish_preflight_probe (cancellable);
 
-        dialog.add_response ("cancel", "Cancel");
-        dialog.add_response ("continue", "Continue");
-        dialog.set_response_appearance ("continue", Adw.ResponseAppearance.SUGGESTED);
-        dialog.set_default_response ("continue");
-        dialog.set_close_response ("cancel");
+            if (cancellable.is_cancelled ())
+                return;
 
-        choose_preflight_dialog (dialog, (response) => {
-            if (response == "continue") {
+            BaseCodecTab? current_codec_tab = get_codec_tab ();
+            if (current_codec_tab == null
+                || has_explicit_pixel_format_selection (current_codec_tab)) {
                 on_continue ();
-            } else if (on_cancel != null) {
-                on_cancel ();
+                return;
             }
+
+            if (source_bits <= 8) {
+                on_continue ();
+                return;
+            }
+
+            string source_depth = "%d-bit".printf (source_bits);
+            string fallback_depth = "8-bit";
+
+            var dialog = new Adw.AlertDialog (
+                "Output Bit Depth Is Unset",
+                @"The source video appears to be $source_depth, but no output bit depth is selected in the active codec tab.\n\nDepending on the encoder, FFmpeg may fall back to $fallback_depth unless you explicitly enable 10-Bit Color."
+            );
+
+            dialog.add_response ("cancel", "Cancel");
+            dialog.add_response ("continue", "Continue");
+            dialog.set_response_appearance ("continue", Adw.ResponseAppearance.SUGGESTED);
+            dialog.set_default_response ("continue");
+            dialog.set_close_response ("cancel");
+
+            choose_preflight_dialog (dialog, (response) => {
+                if (response == "continue") {
+                    on_continue ();
+                } else if (on_cancel != null) {
+                    on_cancel ();
+                }
+            });
         });
     }
 
-    private bool get_svt_av1_chroma_warning (out string requested_format,
+    private bool get_svt_av1_chroma_warning (BaseCodecTab svt_codec_tab,
+                                             out string requested_format,
                                              out string effective_format) {
         requested_format = "";
         effective_format = "";
 
-        if (general_tab.ten_bit_check.active) {
-            requested_format = CodecUtils.get_dropdown_text (general_tab.ten_bit_format);
+        PixelFormatSettingsSnapshot pixel_format =
+            svt_codec_tab.snapshot_pixel_format_settings ();
+
+        if (pixel_format.ten_bit_selected) {
+            requested_format = pixel_format.ten_bit_format_text;
             effective_format = "10-bit 4:2:0";
-        } else if (general_tab.eight_bit_check.active) {
-            requested_format = CodecUtils.get_dropdown_text (general_tab.eight_bit_format);
+        } else if (pixel_format.eight_bit_selected) {
+            requested_format = pixel_format.eight_bit_format_text;
             effective_format = "8-bit 4:2:0";
         } else {
             return false;
@@ -626,18 +587,20 @@ public class MainWindow : Adw.ApplicationWindow {
         return !requested_format.contains (Chroma.C420);
     }
 
-    private void maybe_warn_svt_av1_chroma_downgrade (owned ProceedCallback on_continue,
+    private void maybe_warn_svt_av1_chroma_downgrade (BaseCodecTab svt_codec_tab,
+                                                      owned ProceedCallback on_continue,
                                                       owned ProceedCallback? on_cancel = null) {
         string requested_format;
         string effective_format;
-        if (!get_svt_av1_chroma_warning (out requested_format, out effective_format)) {
+        if (!get_svt_av1_chroma_warning (
+                svt_codec_tab, out requested_format, out effective_format)) {
             on_continue ();
             return;
         }
 
         var dialog = new Adw.AlertDialog (
             "SVT-AV1 Will Encode as 4:2:0",
-            @"The General tab is set to $requested_format, but SVT-AV1 in this app/runtime encodes as $effective_format.\n\nIf you continue, the output will use $effective_format."
+            @"The active codec tab is set to $requested_format, but SVT-AV1 in this app/runtime encodes as $effective_format.\n\nIf you continue, the output will use $effective_format."
         );
 
         dialog.add_response ("cancel", "Cancel");
@@ -705,12 +668,14 @@ public class MainWindow : Adw.ApplicationWindow {
         if (subtitles_tab.is_burn_in_mode ()) {
             string input_file = subtitles_tab.get_input_file ();
             maybe_warn_implicit_depth_downgrade (input_file, () => {
+                return subtitles_tab.get_selected_reencode_codec_tab ();
+            }, () => {
                 if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
                     return;
                 }
 
                 if (subtitles_tab.will_use_svt_av1_burn_in ()) {
-                    maybe_warn_svt_av1_chroma_downgrade (() => {
+                    maybe_warn_svt_av1_chroma_downgrade (svt_tab, () => {
                         if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
                             return;
                         }
@@ -780,12 +745,14 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         maybe_warn_implicit_depth_downgrade (input_file, () => {
+            return trim.get_selected_reencode_codec_tab ();
+        }, () => {
             if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
                 return;
             }
 
             if (trim.will_use_svt_av1_reencode ()) {
-                maybe_warn_svt_av1_chroma_downgrade (() => {
+                maybe_warn_svt_av1_chroma_downgrade (svt_tab, () => {
                     if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
                         return;
                     }
@@ -840,13 +807,16 @@ public class MainWindow : Adw.ApplicationWindow {
     private void start_codec_conversion (string input_file,
                                          ICodecTab codec_tab,
                                          uint64 operation_id) {
+        BaseCodecTab? base_codec_tab = codec_tab as BaseCodecTab;
         maybe_warn_implicit_depth_downgrade (input_file, () => {
+            return base_codec_tab;
+        }, () => {
             if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
                 return;
             }
 
             if (codec_tab is SvtAv1Tab) {
-                maybe_warn_svt_av1_chroma_downgrade (() => {
+                maybe_warn_svt_av1_chroma_downgrade (svt_tab, () => {
                     if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
                         return;
                     }
@@ -866,18 +836,34 @@ public class MainWindow : Adw.ApplicationWindow {
     private void continue_start_codec_conversion (string input_file,
                                                   ICodecTab codec_tab,
                                                   uint64 operation_id) {
+        continue_start_codec_conversion_async.begin (input_file, codec_tab, operation_id);
+    }
+
+    private async void continue_start_codec_conversion_async (string input_file,
+                                                              ICodecTab codec_tab,
+                                                              uint64 operation_id) {
         if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
             return;
         }
 
         ICodecBuilder builder = codec_tab.get_codec_builder ();
-
-        string output_file = Converter.compute_output_path (
+        var cancellable = begin_preflight_probe ();
+        string output_file = yield Converter.compute_output_path_async (
             input_file,
             file_pickers.output_entry.get_text (),
             builder,
-            codec_tab
+            codec_tab,
+            cancellable
         );
+        finish_preflight_probe (cancellable);
+
+        if (cancellable.is_cancelled ()) {
+            return;
+        }
+
+        if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
+            return;
+        }
 
         var settings = AppSettings.get_default ();
 
@@ -1048,6 +1034,28 @@ public class MainWindow : Adw.ApplicationWindow {
         }
     }
 
+    private Cancellable begin_preflight_probe () {
+        cancel_active_preflight_probe ();
+        var cancellable = new Cancellable ();
+        active_preflight_probe_cancellable = cancellable;
+        return cancellable;
+    }
+
+    private void finish_preflight_probe (Cancellable cancellable) {
+        if (active_preflight_probe_cancellable == cancellable) {
+            active_preflight_probe_cancellable = null;
+        }
+    }
+
+    private void cancel_active_preflight_probe () {
+        Cancellable? cancellable = active_preflight_probe_cancellable;
+        active_preflight_probe_cancellable = null;
+
+        if (cancellable != null) {
+            cancellable.cancel ();
+        }
+    }
+
     private bool reserve_pending_operation (ActiveOperation operation,
                                             out uint64 operation_id) {
         operation_id = 0;
@@ -1183,6 +1191,7 @@ public class MainWindow : Adw.ApplicationWindow {
         string? message = null;
         bool should_release_operation = true;
 
+        cancel_active_preflight_probe ();
         dismiss_active_preflight_dialog ();
 
         if (operation_launch_pending) {

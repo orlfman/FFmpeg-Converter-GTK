@@ -70,8 +70,7 @@ public class Vp9Builder : Object, ICodecBuilder {
         snapshot.tile_rows = CodecUtils.get_dropdown_text (tab.tile_rows_combo);
         snapshot.threads = CodecUtils.get_dropdown_text (tab.threads_combo);
 
-        snapshot.general_settings = CodecUtils.resolve_general_settings_snapshot (
-            general_settings, tab.general_tab);
+        snapshot.general_settings = general_settings;
 
         return snapshot;
     }

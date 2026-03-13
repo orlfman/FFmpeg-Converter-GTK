@@ -12,12 +12,6 @@ public class Vp9Tab : BaseCodecTab {
     public DropDown  quality_combo     { get; private set; }
     public DropDown  profile_combo     { get; private set; }
 
-    // ── Cross-tab reference (wired in MainWindow) ────────────────────────────
-    public GeneralTab? general_tab {
-        get { return profile_general_tab; }
-        set { rebind_general_tab (value, apply_profile_format_requirements); }
-    }
-
     // ── Rate Control ─────────────────────────────────────────────────────────
     public DropDown   rc_mode_combo     { get; private set; }
     public SpinButton crf_spin          { get; private set; }
@@ -75,6 +69,7 @@ public class Vp9Tab : BaseCodecTab {
 
         build_quality_profile_group ();
         build_encoding_group ();
+        add_pixel_format_group ();
         build_rate_control_group ();
         build_quality_group ();
         build_altref_group ();
@@ -538,7 +533,7 @@ public class Vp9Tab : BaseCodecTab {
             audio_settings.update_for_container (get_container ());
         });
 
-        // Profile → auto-configure General tab pixel format for compatibility
+        // Profile → auto-configure local pixel format for compatibility
         profile_combo.notify["selected"].connect (apply_profile_format_requirements);
 
         // Custom keyframe mode visibility
@@ -582,80 +577,79 @@ public class Vp9Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool _applying_profile = false;
+    private string last_synced_profile = "";
 
     private void apply_profile_format_requirements () {
-        if (profile_general_tab == null || _applying_profile || !general_tab_sync_active)
+        if (_applying_profile)
             return;
 
         string profile = get_dropdown_text (profile_combo);
+        bool profile_changed = (profile != last_synced_profile);
+        string previous_profile = last_synced_profile;
 
         _applying_profile = true;
-        bool sync_just_activated = consume_general_tab_sync_activation ();
 
-        bool has_8bit = profile_general_tab.eight_bit_check.active;
-        bool has_10bit = profile_general_tab.ten_bit_check.active;
+        bool has_8bit = pixel_format_selector.eight_bit_check.active;
+        bool has_10bit = pixel_format_selector.ten_bit_check.active;
 
         if (profile == "Auto") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (sync_just_activated && has_saved_auto_profile_general_state ()) {
-                restore_auto_profile_general_state ();
-            } else if (was_last_profile_sync_auto ()) {
-                capture_auto_profile_general_state ();
-            } else {
-                restore_auto_profile_general_state ();
-            }
-            mark_last_profile_sync_auto (true);
+            if (profile_changed && previous_profile.length > 0 && previous_profile != "Auto")
+                reset_pixel_format_selection ();
+            pixel_format_selector.allow_optional_depth_selection ();
+            last_synced_profile = profile;
             _applying_profile = false;
             return;
         }
 
-        if (was_last_profile_sync_auto ())
-            capture_auto_profile_general_state ();
-        mark_last_profile_sync_auto (false);
-
         if (profile == "Profile 0 (8-bit 4:2:0)") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
+            if (has_10bit) pixel_format_selector.ten_bit_check.set_active (false);
+            if (!has_8bit) pixel_format_selector.eight_bit_check.set_active (true);
+            pixel_format_selector.lock_to_eight_bit ();
         } else if (profile == "Profile 1 (8-bit 4:2:2 / 4:4:4)") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:2");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:0");
-            if (has_10bit) profile_general_tab.ten_bit_check.set_active (false);
-            if (!has_8bit) profile_general_tab.eight_bit_check.set_active (true);
+            if (has_10bit) pixel_format_selector.ten_bit_check.set_active (false);
+            if (!has_8bit) pixel_format_selector.eight_bit_check.set_active (true);
+            pixel_format_selector.lock_to_eight_bit ();
         } else if (profile == "Profile 2 (10-bit 4:2:0)") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:0" },
                                   "10-bit 4:2:0");
-            if (has_8bit) profile_general_tab.eight_bit_check.set_active (false);
-            if (!has_10bit) profile_general_tab.ten_bit_check.set_active (true);
+            if (has_8bit) pixel_format_selector.eight_bit_check.set_active (false);
+            if (!has_10bit) pixel_format_selector.ten_bit_check.set_active (true);
+            pixel_format_selector.lock_to_ten_bit ();
         } else if (profile == "Profile 3 (10-bit 4:2:2 / 4:4:4)") {
-            set_dropdown_options (profile_general_tab.eight_bit_format,
+            set_dropdown_options (pixel_format_selector.eight_bit_format,
                                   { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" },
                                   "8-bit 4:2:0");
-            set_dropdown_options (profile_general_tab.ten_bit_format,
+            set_dropdown_options (pixel_format_selector.ten_bit_format,
                                   { "10-bit 4:2:2", "10-bit 4:4:4" },
                                   "10-bit 4:2:2");
-            if (has_8bit) profile_general_tab.eight_bit_check.set_active (false);
-            if (!has_10bit) profile_general_tab.ten_bit_check.set_active (true);
+            if (has_8bit) pixel_format_selector.eight_bit_check.set_active (false);
+            if (!has_10bit) pixel_format_selector.ten_bit_check.set_active (true);
+            pixel_format_selector.lock_to_ten_bit ();
         }
 
+        last_synced_profile = profile;
         _applying_profile = false;
     }
 
@@ -675,7 +669,7 @@ public class Vp9Tab : BaseCodecTab {
         return new Vp9Builder (this);
     }
 
-    public override void sync_general_tab_now () {
+    public override void sync_pixel_format_now () {
         apply_profile_format_requirements ();
     }
 
@@ -701,6 +695,7 @@ public class Vp9Tab : BaseCodecTab {
         speed_spin.set_value (4);
         quality_combo.set_selected (0);
         profile_combo.set_selected (0);
+        reset_pixel_format_defaults ();
 
         // Rate Control
         rc_mode_combo.set_selected (0);

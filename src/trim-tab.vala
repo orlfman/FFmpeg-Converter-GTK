@@ -61,8 +61,6 @@ public class SegmentCodecArgs : Object {
 
 public class TrimTab : Box, ICodecTab {
 
-    public signal void general_tab_context_changed ();
-
     // ── Mode ─────────────────────────────────────────────────────────────────
     public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
     private Mode current_mode = Mode.TRIM_ONLY;
@@ -118,6 +116,8 @@ public class TrimTab : Box, ICodecTab {
     private Button chapter_select_none_btn;
     private GenericArray<ChapterInfo> detected_chapters = new GenericArray<ChapterInfo> ();
     private string loaded_video_path = "";     // currently loaded video file
+    private uint chapter_scan_generation = 0;
+    private Cancellable? chapter_scan_cancellable = null;
 
     // ── External references (set by MainWindow) ──────────────────────────────
     private GeneralTab? _general_tab = null;
@@ -171,6 +171,11 @@ public class TrimTab : Box, ICodecTab {
 
         // Apply initial mode visibility
         apply_mode (Mode.TRIM_ONLY);
+    }
+
+    public override void dispose () {
+        cancel_chapter_scan ();
+        base.dispose ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -241,7 +246,7 @@ public class TrimTab : Box, ICodecTab {
         return will_reencode_output ();
     }
 
-    public BaseCodecTab? get_general_tab_sync_owner () {
+    public BaseCodecTab? get_selected_reencode_codec_tab () {
         if (!reencode_codec_row.get_visible ())
             return null;
 
@@ -255,22 +260,26 @@ public class TrimTab : Box, ICodecTab {
     }
 
     public void load_video (string path) {
-        if (path.length > 0) {
-            loaded_video_path = path;
+        cancel_chapter_scan ();
+        loaded_video_path = path;
 
-            // Clear any stale crop from the previous video
-            player.crop_overlay.clear_crop ();
-            global_crop_value = "";
-            update_crop_display ("", 0, 0, 0, 0);
+        // Clear any stale crop from the previous video
+        player.crop_overlay.clear_crop ();
+        global_crop_value = "";
+        update_crop_display ("", 0, 0, 0, 0);
 
-            // Clear any stale trim state from the previous video
-            reset_trim_state ();
+        // Clear any stale trim/chapter state from the previous video
+        reset_trim_state ();
 
-            player.load_file (path);
-
-            // Auto-scan for chapters in the background
-            scan_chapters_async (path);
+        if (path.length == 0) {
+            player.clear ();
+            return;
         }
+
+        player.load_file (path);
+
+        // Auto-scan for chapters in the background
+        scan_chapters_async (path);
     }
 
     /**
@@ -444,9 +453,13 @@ public class TrimTab : Box, ICodecTab {
             }
 
             if (builder != null && codec_tab != null) {
+                PixelFormatSettingsSnapshot? pixel_format =
+                    (codec_tab is BaseCodecTab)
+                    ? ((BaseCodecTab) codec_tab).snapshot_pixel_format_settings ()
+                    : null;
                 GeneralSettingsSnapshot general_settings = (snapped_general_settings != null)
                     ? snapped_general_settings
-                    : general_tab.snapshot_settings ();
+                    : general_tab.snapshot_settings (pixel_format);
                 runner.reencode_profile = CodecUtils.snapshot_encode_profile (
                     builder, codec_tab, general_settings);
             }
@@ -578,7 +591,11 @@ public class TrimTab : Box, ICodecTab {
         GeneralSettingsSnapshot? general_settings_snapshot = null;
         string shared_video_filter_chain = "";
         if (general_tab != null) {
-            general_settings_snapshot = general_tab.snapshot_settings ();
+            BaseCodecTab? codec_tab = get_selected_reencode_codec_tab ();
+            PixelFormatSettingsSnapshot? pixel_format = (codec_tab != null)
+                ? codec_tab.snapshot_pixel_format_settings ()
+                : null;
+            general_settings_snapshot = general_tab.snapshot_settings (pixel_format);
             shared_video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (
                 general_settings_snapshot, false, preferred_codec);
         }
@@ -1089,10 +1106,9 @@ public class TrimTab : Box, ICodecTab {
         if (copy_mode_switch.active && current_mode == Mode.TRIM_AND_CROP) {
             reencode_codec_row.set_subtitle ("Segments with crop will be re-encoded using this codec");
         } else {
-            reencode_codec_row.set_subtitle ("Uses the settings from the selected codec tab + all General tab options");
+            reencode_codec_row.set_subtitle ("Uses the selected codec tab plus shared General filters and timing options");
         }
 
-        general_tab_context_changed ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1386,43 +1402,55 @@ public class TrimTab : Box, ICodecTab {
 
     /**
      * Scan a file for chapters asynchronously (called from load_video).
-     * Runs ffprobe on a background thread to avoid blocking the UI.
+     * Uses cancellable ffprobe async I/O to avoid blocking the UI.
      * Updates the chapter list group description with the result.
      */
     private void scan_chapters_async (string path) {
-        // Capture the path so the Idle callback can verify freshness
-        string scan_path = path;
-        new Thread<void> ("chapter-scan", () => {
-            var chapters = FfprobeUtils.probe_chapters (scan_path);
-            Idle.add (() => {
-                // Guard: if the user loaded a different file while we were
-                // scanning, discard these stale results silently.
-                if (loaded_video_path != scan_path) {
-                    return Source.REMOVE;
-                }
+        var cancellable = new Cancellable ();
+        chapter_scan_cancellable = cancellable;
+        uint generation = ++chapter_scan_generation;
 
-                detected_chapters = chapters;
-                rebuild_chapter_list ();
+        FfprobeUtils.probe_chapters_async.begin (path, cancellable, (obj, res) => {
+            var chapters = FfprobeUtils.probe_chapters_async.end (res);
 
-                // Update the chapter list group description with scan results
-                if (chapters.length > 0) {
-                    chapter_list_group.set_description (
-                        "📖 %d chapter%s found — select which to export".printf (
-                            chapters.length,
-                            chapters.length == 1 ? "" : "s"));
-                } else {
-                    chapter_list_group.set_description (
-                        "No chapters found in this file");
-                }
+            if (chapter_scan_cancellable == cancellable) {
+                chapter_scan_cancellable = null;
+            }
 
-                // If already in Chapter Split mode, update segments
-                if (current_mode == Mode.CHAPTER_SPLIT) {
-                    rebuild_chapter_segments ();
-                }
+            if (cancellable.is_cancelled ())
+                return;
 
-                return Source.REMOVE;
-            });
+            // Discard stale results if a newer load replaced this scan,
+            // including same-path reloads.
+            if (generation != chapter_scan_generation || loaded_video_path != path)
+                return;
+
+            detected_chapters = chapters;
+            rebuild_chapter_list ();
+
+            // Update the chapter list group description with scan results
+            if (chapters.length > 0) {
+                chapter_list_group.set_description (
+                    "📖 %d chapter%s found — select which to export".printf (
+                        chapters.length,
+                        chapters.length == 1 ? "" : "s"));
+            } else {
+                chapter_list_group.set_description (
+                    "No chapters found in this file");
+            }
+
+            // If already in Chapter Split mode, update segments
+            if (current_mode == Mode.CHAPTER_SPLIT) {
+                rebuild_chapter_segments ();
+            }
         });
+    }
+
+    private void cancel_chapter_scan () {
+        if (chapter_scan_cancellable != null) {
+            chapter_scan_cancellable.cancel ();
+            chapter_scan_cancellable = null;
+        }
     }
 
     /**
@@ -1587,7 +1615,7 @@ public class TrimTab : Box, ICodecTab {
         // ── Re-encode Codec selector ─────────────────────────────────────────
         reencode_codec_row = new Adw.ActionRow ();
         reencode_codec_row.set_title ("Re-encode Codec");
-        reencode_codec_row.set_subtitle ("Uses the settings from the selected codec tab + all General tab options");
+        reencode_codec_row.set_subtitle ("Uses the selected codec tab plus shared General filters and timing options");
 
         codec_choice = new DropDown (new StringList ({ "SVT-AV1", "x265", "x264", "VP9" }), null);
         codec_choice.set_valign (Align.CENTER);
@@ -1601,10 +1629,6 @@ public class TrimTab : Box, ICodecTab {
             update_concat_audio_constraint ();
             update_smart_optimize_visibility ();
             keyframe_cut_row.set_visible (copy_mode_switch.active);
-        });
-
-        codec_choice.notify["selected"].connect (() => {
-            general_tab_context_changed ();
         });
 
         // ── Export as separate files ─────────────────────────────────────────

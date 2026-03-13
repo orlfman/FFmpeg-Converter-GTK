@@ -2,6 +2,189 @@ using Gtk;
 using Adw;
 using GLib;
 
+public class PixelFormatSelector : Adw.PreferencesGroup {
+    public Switch   eight_bit_check  { get; private set; }
+    public DropDown eight_bit_format { get; private set; }
+    public Switch   ten_bit_check    { get; private set; }
+    public DropDown ten_bit_format   { get; private set; }
+
+    private enum DepthPolicy {
+        OPTIONAL,
+        REQUIRE_ANY,
+        LOCK_8BIT,
+        LOCK_10BIT
+    }
+
+    private DepthPolicy depth_policy = DepthPolicy.OPTIONAL;
+    private Adw.ActionRow eight_bit_row;
+    private Adw.ActionRow ten_bit_row;
+    private Adw.ActionRow eight_bit_fmt_row;
+    private Adw.ActionRow ten_bit_fmt_row;
+
+    public signal void changed ();
+
+    public PixelFormatSelector () {
+        Object ();
+
+        set_title ("Pixel Format");
+        set_description ("Color depth and chroma subsampling");
+
+        build_widgets ();
+        connect_signals ();
+    }
+
+    private void build_widgets () {
+        eight_bit_row = new Adw.ActionRow ();
+        eight_bit_row.set_title ("8-Bit Color");
+        eight_bit_row.set_subtitle ("Standard dynamic range - compatible with all players");
+        eight_bit_check = new Switch ();
+        eight_bit_check.set_valign (Align.CENTER);
+        eight_bit_check.set_active (false);
+        eight_bit_row.add_suffix (eight_bit_check);
+        eight_bit_row.set_activatable_widget (eight_bit_check);
+        add (eight_bit_row);
+
+        eight_bit_fmt_row = new Adw.ActionRow ();
+        eight_bit_fmt_row.set_title ("8-Bit Subsampling");
+        eight_bit_format = new DropDown (new StringList (
+            { "8-bit 4:2:0", "8-bit 4:2:2", "8-bit 4:4:4" }
+        ), null);
+        eight_bit_format.set_valign (Align.CENTER);
+        eight_bit_format.set_selected (0);
+        eight_bit_fmt_row.add_suffix (eight_bit_format);
+        eight_bit_fmt_row.set_visible (false);
+        add (eight_bit_fmt_row);
+
+        ten_bit_row = new Adw.ActionRow ();
+        ten_bit_row.set_title ("10-Bit Color");
+        ten_bit_row.set_subtitle ("Higher color depth - better gradients, HDR support");
+        ten_bit_check = new Switch ();
+        ten_bit_check.set_valign (Align.CENTER);
+        ten_bit_check.set_active (false);
+        ten_bit_row.add_suffix (ten_bit_check);
+        ten_bit_row.set_activatable_widget (ten_bit_check);
+        add (ten_bit_row);
+
+        ten_bit_fmt_row = new Adw.ActionRow ();
+        ten_bit_fmt_row.set_title ("10-Bit Subsampling");
+        ten_bit_format = new DropDown (new StringList (
+            { "10-bit 4:2:0", "10-bit 4:2:2", "10-bit 4:4:4" }
+        ), null);
+        ten_bit_format.set_valign (Align.CENTER);
+        ten_bit_format.set_selected (0);
+        ten_bit_fmt_row.add_suffix (ten_bit_format);
+        ten_bit_fmt_row.set_visible (false);
+        add (ten_bit_fmt_row);
+    }
+
+    private void connect_signals () {
+        eight_bit_check.notify["active"].connect (() => {
+            eight_bit_fmt_row.set_visible (eight_bit_check.active);
+            if (eight_bit_check.active)
+                ten_bit_check.set_active (false);
+            refresh_depth_policy_controls ();
+            changed ();
+        });
+
+        ten_bit_check.notify["active"].connect (() => {
+            ten_bit_fmt_row.set_visible (ten_bit_check.active);
+            if (ten_bit_check.active)
+                eight_bit_check.set_active (false);
+            refresh_depth_policy_controls ();
+            changed ();
+        });
+
+        eight_bit_format.notify["selected"].connect (() => {
+            changed ();
+        });
+
+        ten_bit_format.notify["selected"].connect (() => {
+            changed ();
+        });
+    }
+
+    public PixelFormatSettingsSnapshot snapshot_settings () {
+        var snapshot = new PixelFormatSettingsSnapshot ();
+        snapshot.eight_bit_selected = eight_bit_check.active;
+        snapshot.eight_bit_format_text = CodecUtils.get_dropdown_text (eight_bit_format);
+        snapshot.ten_bit_selected = ten_bit_check.active;
+        snapshot.ten_bit_format_text = CodecUtils.get_dropdown_text (ten_bit_format);
+        return snapshot;
+    }
+
+    public void apply_snapshot (PixelFormatSettingsSnapshot snapshot) {
+        if (snapshot.ten_bit_selected) {
+            ten_bit_check.set_active (true);
+            CodecUtils.set_dropdown_selection_by_text (
+                ten_bit_format, snapshot.ten_bit_format_text);
+            return;
+        }
+
+        if (snapshot.eight_bit_selected) {
+            eight_bit_check.set_active (true);
+            CodecUtils.set_dropdown_selection_by_text (
+                eight_bit_format, snapshot.eight_bit_format_text);
+            return;
+        }
+
+        if (eight_bit_check.active)
+            eight_bit_check.set_active (false);
+        if (ten_bit_check.active)
+            ten_bit_check.set_active (false);
+    }
+
+    public void allow_optional_depth_selection () {
+        depth_policy = DepthPolicy.OPTIONAL;
+        refresh_depth_policy_controls ();
+    }
+
+    public void require_depth_selection () {
+        depth_policy = DepthPolicy.REQUIRE_ANY;
+        refresh_depth_policy_controls ();
+    }
+
+    public void lock_to_eight_bit () {
+        depth_policy = DepthPolicy.LOCK_8BIT;
+        refresh_depth_policy_controls ();
+    }
+
+    public void lock_to_ten_bit () {
+        depth_policy = DepthPolicy.LOCK_10BIT;
+        refresh_depth_policy_controls ();
+    }
+
+    private void refresh_depth_policy_controls () {
+        bool eight_sensitive = true;
+        bool ten_sensitive = true;
+
+        switch (depth_policy) {
+        case DepthPolicy.LOCK_8BIT:
+            eight_sensitive = false;
+            ten_sensitive = false;
+            break;
+        case DepthPolicy.LOCK_10BIT:
+            eight_sensitive = false;
+            ten_sensitive = false;
+            break;
+        case DepthPolicy.REQUIRE_ANY:
+            if (eight_bit_check.active && !ten_bit_check.active) {
+                eight_sensitive = false;
+            } else if (ten_bit_check.active && !eight_bit_check.active) {
+                ten_sensitive = false;
+            }
+            break;
+        case DepthPolicy.OPTIONAL:
+        default:
+            break;
+        }
+
+        eight_bit_check.set_sensitive (eight_sensitive);
+        ten_bit_check.set_sensitive (ten_sensitive);
+        eight_bit_row.set_sensitive (eight_sensitive);
+        ten_bit_row.set_sensitive (ten_sensitive);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BaseCodecTab — Abstract base class for codec-specific tabs
 //
@@ -23,8 +206,6 @@ using GLib;
 
 public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
 
-    protected delegate void GeneralTabSyncFunc ();
-
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void smart_optimizer_requested ();
 
@@ -38,36 +219,12 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public Switch        two_pass_switch       { get; protected set; }
     public DropDown      keyint_combo          { get; protected set; }
     public DropDown      custom_keyframe_combo { get; protected set; }
+    protected PixelFormatSelector pixel_format_selector;
 
-    // ── Shared GeneralTab binding for codec/profile compatibility logic ─────
-    protected GeneralTab? profile_general_tab = null;
-    private bool _general_tab_sync_active = false;
-    public bool general_tab_sync_active {
-        get { return _general_tab_sync_active; }
-        set {
-            if (_general_tab_sync_active == value) {
-                return;
-            }
-
-            _general_tab_sync_active = value;
-            general_tab_sync_just_activated = value;
-        }
-    }
-    private ulong general_tab_8bit_handler = 0;
-    private ulong general_tab_10bit_handler = 0;
-    private ulong general_tab_8bit_fmt_handler = 0;
-    private ulong general_tab_10bit_fmt_handler = 0;
-    private bool general_tab_sync_just_activated = false;
-    private bool last_profile_sync_was_auto = true;
-    private bool has_auto_profile_general_state = false;
-    private bool auto_profile_8bit_active = false;
-    private string auto_profile_8bit_format = "8-bit 4:2:0";
-    private bool auto_profile_10bit_active = false;
-    private string auto_profile_10bit_format = "10-bit 4:2:0";
+    private uint pixel_format_sync_idle_id = 0;
 
     public override void dispose () {
-        disconnect_general_tab_signals ();
-        profile_general_tab = null;
+        cancel_pending_pixel_format_sync ();
         base.dispose ();
     }
 
@@ -95,6 +252,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             snapshot.container = container;
         snapshot.keyframe_settings = snapshot_keyframe_settings (general_settings);
         snapshot.audio_settings = audio_settings.snapshot_settings ();
+        snapshot.pixel_format = snapshot_pixel_format_settings ();
         return snapshot;
     }
 
@@ -126,58 +284,34 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // Each codec applies recommendations differently
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
 
-    protected void rebind_general_tab (GeneralTab? value, GeneralTabSyncFunc sync_func) {
-        if (value == profile_general_tab) {
-            sync_func ();
-            return;
-        }
-
-        disconnect_general_tab_signals ();
-        profile_general_tab = value;
-        connect_general_tab_signals (sync_func);
-        sync_func ();
+    protected void add_pixel_format_group () {
+        pixel_format_selector = new PixelFormatSelector ();
+        pixel_format_selector.changed.connect (() => {
+            queue_pixel_format_sync ();
+        });
+        append (pixel_format_selector);
     }
 
-    public abstract void sync_general_tab_now ();
+    public PixelFormatSettingsSnapshot snapshot_pixel_format_settings () {
+        return pixel_format_selector.snapshot_settings ();
+    }
 
-    private void disconnect_general_tab_signals () {
-        if (profile_general_tab == null) {
-            general_tab_8bit_handler = 0;
-            general_tab_10bit_handler = 0;
-            general_tab_8bit_fmt_handler = 0;
-            general_tab_10bit_fmt_handler = 0;
-            return;
-        }
+    public abstract void sync_pixel_format_now ();
 
-        if (general_tab_8bit_handler != 0) {
-            SignalHandler.disconnect (profile_general_tab.eight_bit_check, general_tab_8bit_handler);
-            general_tab_8bit_handler = 0;
-        }
-        if (general_tab_10bit_handler != 0) {
-            SignalHandler.disconnect (profile_general_tab.ten_bit_check, general_tab_10bit_handler);
-            general_tab_10bit_handler = 0;
-        }
-        if (general_tab_8bit_fmt_handler != 0) {
-            SignalHandler.disconnect (profile_general_tab.eight_bit_format, general_tab_8bit_fmt_handler);
-            general_tab_8bit_fmt_handler = 0;
-        }
-        if (general_tab_10bit_fmt_handler != 0) {
-            SignalHandler.disconnect (profile_general_tab.ten_bit_format, general_tab_10bit_fmt_handler);
-            general_tab_10bit_fmt_handler = 0;
+    private void cancel_pending_pixel_format_sync () {
+        if (pixel_format_sync_idle_id != 0) {
+            Source.remove (pixel_format_sync_idle_id);
+            pixel_format_sync_idle_id = 0;
         }
     }
 
-    private void connect_general_tab_signals (GeneralTabSyncFunc sync_func) {
-        if (profile_general_tab == null) return;
-
-        general_tab_8bit_handler =
-            profile_general_tab.eight_bit_check.notify["active"].connect (() => sync_func ());
-        general_tab_10bit_handler =
-            profile_general_tab.ten_bit_check.notify["active"].connect (() => sync_func ());
-        general_tab_8bit_fmt_handler =
-            profile_general_tab.eight_bit_format.notify["selected"].connect (() => sync_func ());
-        general_tab_10bit_fmt_handler =
-            profile_general_tab.ten_bit_format.notify["selected"].connect (() => sync_func ());
+    private void queue_pixel_format_sync () {
+        cancel_pending_pixel_format_sync ();
+        pixel_format_sync_idle_id = Idle.add (() => {
+            pixel_format_sync_idle_id = 0;
+            sync_pixel_format_now ();
+            return Source.REMOVE;
+        });
     }
 
     protected void set_dropdown_options (DropDown dropdown,
@@ -186,71 +320,13 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
     }
 
-    protected bool was_last_profile_sync_auto () {
-        return last_profile_sync_was_auto;
+    protected void reset_pixel_format_selection () {
+        pixel_format_selector.apply_snapshot (new PixelFormatSettingsSnapshot ());
     }
 
-    protected void mark_last_profile_sync_auto (bool is_auto) {
-        last_profile_sync_was_auto = is_auto;
-    }
-
-    protected bool consume_general_tab_sync_activation () {
-        bool activated = general_tab_sync_just_activated;
-        general_tab_sync_just_activated = false;
-        return activated;
-    }
-
-    protected bool has_saved_auto_profile_general_state () {
-        return has_auto_profile_general_state;
-    }
-
-    protected void capture_auto_profile_general_state () {
-        if (profile_general_tab == null) {
-            return;
-        }
-
-        has_auto_profile_general_state = true;
-        auto_profile_8bit_active = profile_general_tab.eight_bit_check.active;
-        auto_profile_8bit_format = CodecUtils.get_dropdown_text (
-            profile_general_tab.eight_bit_format);
-        auto_profile_10bit_active = profile_general_tab.ten_bit_check.active;
-        auto_profile_10bit_format = CodecUtils.get_dropdown_text (
-            profile_general_tab.ten_bit_format);
-    }
-
-    protected void restore_auto_profile_general_state () {
-        if (profile_general_tab == null) {
-            return;
-        }
-
-        if (auto_profile_8bit_active) {
-            if (!profile_general_tab.eight_bit_check.active) {
-                profile_general_tab.eight_bit_check.set_active (true);
-            }
-            CodecUtils.set_dropdown_selection_by_text (
-                profile_general_tab.eight_bit_format,
-                auto_profile_8bit_format
-            );
-            return;
-        }
-
-        if (auto_profile_10bit_active) {
-            if (!profile_general_tab.ten_bit_check.active) {
-                profile_general_tab.ten_bit_check.set_active (true);
-            }
-            CodecUtils.set_dropdown_selection_by_text (
-                profile_general_tab.ten_bit_format,
-                auto_profile_10bit_format
-            );
-            return;
-        }
-
-        if (profile_general_tab.eight_bit_check.active) {
-            profile_general_tab.eight_bit_check.set_active (false);
-        }
-        if (profile_general_tab.ten_bit_check.active) {
-            profile_general_tab.ten_bit_check.set_active (false);
-        }
+    protected void reset_pixel_format_defaults () {
+        reset_pixel_format_selection ();
+        sync_pixel_format_now ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════

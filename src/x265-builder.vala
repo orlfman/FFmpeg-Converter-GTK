@@ -73,8 +73,7 @@ public class X265Builder : Object, ICodecBuilder {
         snapshot.abr_vbv = tab.abr_vbv_switch.active;
         snapshot.threads = CodecUtils.get_dropdown_text (tab.threads_combo);
         snapshot.frame_threads = CodecUtils.get_dropdown_text (tab.frame_threads_combo);
-        snapshot.general_settings = CodecUtils.resolve_general_settings_snapshot (
-            general_settings, null);
+        snapshot.general_settings = general_settings;
         return snapshot;
     }
 
