@@ -446,6 +446,43 @@ public class ConsoleTab : Box {
             total_line_count, total_line_count == 1 ? "" : "s"));
     }
 
+    private void recount_buffer_stats () {
+        var buffer = console_view.buffer;
+
+        error_count = 0;
+        warning_count = 0;
+        success_count = 0;
+        total_line_count = 0;
+
+        TextIter iter;
+        buffer.get_start_iter (out iter);
+
+        while (!iter.is_end ()) {
+            TextIter line_start = iter;
+            TextIter line_end = line_start;
+
+            if (!line_end.ends_line ()) {
+                line_end.forward_to_line_end ();
+            }
+
+            if (line_start.get_offset () != line_end.get_offset ()) {
+                total_line_count++;
+
+                if (line_start.has_tag (tag_error)) {
+                    error_count++;
+                } else if (line_start.has_tag (tag_warning)) {
+                    warning_count++;
+                } else if (line_start.has_tag (tag_success)) {
+                    success_count++;
+                }
+            }
+
+            if (!iter.forward_line ()) {
+                break;
+            }
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  UI — Error Click Popover
     // ═════════════════════════════════════════════════════════════════════════
@@ -1024,6 +1061,9 @@ public class ConsoleTab : Box {
 
             // Progress mark may have been pushed — reset collapsing
             has_active_progress = false;
+            nav_error_index = -1;
+            nav_warning_index = -1;
+            recount_buffer_stats ();
         }
 
         // Auto-scroll to the bottom so the latest output is visible

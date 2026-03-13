@@ -62,6 +62,8 @@ public class TrimRunner : Object {
     // ── Progress tracker (fix #3: consistent with Converter) ────────────────
     private ProgressTracker? tracker = null;
     private string[]? resolved_reencode_codec_args = null;
+    private Mutex run_mutex = Mutex ();
+    private bool run_active = false;
 
     private string last_output = "";
 
@@ -108,6 +110,11 @@ public class TrimRunner : Object {
             report_status ("⚠️ Please select an input file first!");
             return;
         }
+        if (!try_begin_run ()) {
+            warning ("TrimRunner.run() ignored while another execution is already active.");
+            log_line ("⚠️ Ignored duplicate trim export request while another export is already running.");
+            return;
+        }
 
         runner.set_event_logger (log_runner_event);
         runner.prepare_for_new_execution ();
@@ -121,9 +128,20 @@ public class TrimRunner : Object {
             tracker.show_determinate ();
         }
 
-        new Thread<void> ("trim-export-thread", () => {
-            run_internal ();
-        });
+        try {
+            new Thread<void>.try ("trim-export-thread", () => {
+                try {
+                    run_internal ();
+                } finally {
+                    finish_progress ();
+                    end_run ();
+                }
+            });
+        } catch (Error e) {
+            reset_progress_display ();
+            end_run ();
+            report_error ("Failed to start trim export thread: " + e.message);
+        }
     }
 
     /**
@@ -137,6 +155,31 @@ public class TrimRunner : Object {
 
     public bool is_cancelled () {
         return runner.is_cancelled ();
+    }
+
+    private bool try_begin_run () {
+        bool can_start = false;
+
+        run_mutex.lock ();
+        try {
+            if (!run_active) {
+                run_active = true;
+                can_start = true;
+            }
+        } finally {
+            run_mutex.unlock ();
+        }
+
+        return can_start;
+    }
+
+    private void end_run () {
+        run_mutex.lock ();
+        try {
+            run_active = false;
+        } finally {
+            run_mutex.unlock ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -202,7 +245,6 @@ public class TrimRunner : Object {
                 });
             }
 
-            finish_progress ();
             return;
         }
 
@@ -346,7 +388,6 @@ public class TrimRunner : Object {
                 DirUtils.remove (tmp_dir);
             }
 
-            finish_progress ();
         }
     }
 
@@ -835,6 +876,17 @@ public class TrimRunner : Object {
         } else {
             tracker.hide ();
         }
+    }
+
+    private void reset_progress_display () {
+        if (progress_bar == null) return;
+
+        Idle.add (() => {
+            progress_bar.set_visible (false);
+            progress_bar.set_fraction (0.0);
+            progress_bar.set_text ("Waiting...");
+            return Source.REMOVE;
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
