@@ -284,7 +284,7 @@ public class Vp9Tab : BaseCodecTab {
         aq_row.set_title ("AQ Mode");
         aq_row.set_subtitle ("Adaptive Quantization distributes bits across the frame");
         aq_mode_combo = new DropDown (new StringList ({
-            "Disabled", "Variance", "Complexity", "Cyclic Refresh", "Equator360"
+            "Automatic", "Variance", "Complexity", "Cyclic Refresh", "Equator360"
         }), null);
         aq_mode_combo.set_valign (Align.CENTER);
         aq_mode_combo.set_selected (0);

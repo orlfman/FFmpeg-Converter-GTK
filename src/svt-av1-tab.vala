@@ -452,7 +452,7 @@ public class SvtAv1Tab : BaseCodecTab {
 
         var sr_denom_row = new Adw.ActionRow ();
         sr_denom_row.set_title ("Denominator");
-        sr_denom_row.set_subtitle ("Higher = more upscaling (8–16)");
+        sr_denom_row.set_subtitle ("Higher = stronger scaling: smaller encoded frame, more upscaling (8–16)");
         superres_denom_spin = new SpinButton.with_range (8, 16, 1);
         superres_denom_spin.set_value (8);
         superres_denom_spin.set_valign (Align.CENTER);

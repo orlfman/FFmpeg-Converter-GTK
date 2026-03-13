@@ -6,6 +6,24 @@ using GLib;
 //  SubtitlesTab — Manage subtitle streams in a video file
 // ═══════════════════════════════════════════════════════════════════════════════
 
+private class DetectedDefaultBinding : Object {
+    public SubtitleStream stream { get; construct; }
+    public Switch sw { get; construct; }
+
+    public DetectedDefaultBinding (SubtitleStream stream, Switch sw) {
+        Object (stream: stream, sw: sw);
+    }
+}
+
+private class AddedDefaultBinding : Object {
+    public ExternalSubtitle subtitle { get; construct; }
+    public Switch sw { get; construct; }
+
+    public AddedDefaultBinding (ExternalSubtitle subtitle, Switch sw) {
+        Object (subtitle: subtitle, sw: sw);
+    }
+}
+
 public class SubtitlesTab : Box {
 
     // ── Signals ──────────────────────────────────────────────────────────────
@@ -46,6 +64,10 @@ public class SubtitlesTab : Box {
     private uint64 active_apply_operation_id = 0;
     private uint64 probe_generation = 0;
     private bool _updating_defaults = false;
+    private GenericArray<DetectedDefaultBinding> detected_default_bindings =
+        new GenericArray<DetectedDefaultBinding> ();
+    private GenericArray<AddedDefaultBinding> added_default_bindings =
+        new GenericArray<AddedDefaultBinding> ();
 
     // ── Drag-and-drop state ──────────────────────────────────────────────────
     private int _drag_from_detected = -1;
@@ -108,6 +130,7 @@ public class SubtitlesTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void rebuild_detected_group () {
+        detected_default_bindings = new GenericArray<DetectedDefaultBinding> ();
         clear_box (detected_section);
 
         var group = new Adw.PreferencesGroup ();
@@ -233,14 +256,14 @@ public class SubtitlesTab : Box {
         var default_sw = new Switch ();
         default_sw.set_active (stream.is_default);
         default_sw.set_valign (Align.CENTER);
+        register_detected_default_switch (stream, default_sw);
         default_sw.notify["active"].connect (() => {
             if (_updating_defaults) return;
             if (default_sw.active) {
                 _updating_defaults = true;
                 clear_all_defaults ();
                 stream.is_default = true;
-                rebuild_detected_group ();
-                rebuild_add_group ();
+                sync_default_switches ();
                 _updating_defaults = false;
             } else {
                 stream.is_default = false;
@@ -352,6 +375,7 @@ public class SubtitlesTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void rebuild_add_group () {
+        added_default_bindings = new GenericArray<AddedDefaultBinding> ();
         clear_box (add_section);
 
         var group = new Adw.PreferencesGroup ();
@@ -476,14 +500,14 @@ public class SubtitlesTab : Box {
         var default_sw = new Switch ();
         default_sw.set_active (ext.is_default);
         default_sw.set_valign (Align.CENTER);
+        register_added_default_switch (ext, default_sw);
         default_sw.notify["active"].connect (() => {
             if (_updating_defaults) return;
             if (default_sw.active) {
                 _updating_defaults = true;
                 clear_all_defaults ();
                 ext.is_default = true;
-                rebuild_detected_group ();
-                rebuild_add_group ();
+                sync_default_switches ();
                 _updating_defaults = false;
             } else {
                 ext.is_default = false;
@@ -1434,6 +1458,26 @@ public class SubtitlesTab : Box {
             detected_streams[i].is_default = false;
         for (int i = 0; i < added_subtitles.length; i++)
             added_subtitles[i].is_default = false;
+    }
+
+    private void register_detected_default_switch (SubtitleStream stream, Switch sw) {
+        detected_default_bindings.add (new DetectedDefaultBinding (stream, sw));
+    }
+
+    private void register_added_default_switch (ExternalSubtitle ext, Switch sw) {
+        added_default_bindings.add (new AddedDefaultBinding (ext, sw));
+    }
+
+    private void sync_default_switches () {
+        for (int i = 0; i < detected_default_bindings.length; i++) {
+            detected_default_bindings[i].sw.set_active (
+                detected_default_bindings[i].stream.is_default);
+        }
+
+        for (int i = 0; i < added_default_bindings.length; i++) {
+            added_default_bindings[i].sw.set_active (
+                added_default_bindings[i].subtitle.is_default);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
