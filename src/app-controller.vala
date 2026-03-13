@@ -152,33 +152,9 @@ public class AppController : Object {
         });
     }
 
-    private void set_codec_audio_probe_unknown () {
+    private void set_codec_audio_probe_state (AudioProbeDisplayState state) {
         foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-            tab.get_audio_settings_ref ().set_audio_probe_unknown ();
-        }
-    }
-
-    private void set_codec_audio_probe_checking () {
-        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-            tab.get_audio_settings_ref ().set_audio_probe_checking ();
-        }
-    }
-
-    private void set_codec_audio_probe_found () {
-        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-            tab.get_audio_settings_ref ().set_audio_probe_found ();
-        }
-    }
-
-    private void set_codec_audio_probe_missing () {
-        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-            tab.get_audio_settings_ref ().set_audio_probe_missing ();
-        }
-    }
-
-    private void set_codec_audio_probe_error () {
-        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-            tab.get_audio_settings_ref ().set_audio_probe_error ();
+            tab.get_audio_settings_ref ().set_audio_probe_state (state);
         }
     }
 
@@ -192,13 +168,13 @@ public class AppController : Object {
         }
 
         if (input_file.strip ().length == 0) {
-            set_codec_audio_probe_unknown ();
+            set_codec_audio_probe_state (AudioProbeDisplayState.UNKNOWN);
             return;
         }
 
         var cancellable = new Cancellable ();
         audio_probe_cancellable = cancellable;
-        set_codec_audio_probe_checking ();
+        set_codec_audio_probe_state (AudioProbeDisplayState.CHECKING);
 
         MediaStreamPresence presence = yield FfprobeUtils.probe_audio_presence_async (
             input_file,
@@ -214,14 +190,14 @@ public class AppController : Object {
 
         switch (presence) {
         case MediaStreamPresence.PRESENT:
-            set_codec_audio_probe_found ();
+            set_codec_audio_probe_state (AudioProbeDisplayState.FOUND);
             break;
         case MediaStreamPresence.ABSENT:
-            set_codec_audio_probe_missing ();
+            set_codec_audio_probe_state (AudioProbeDisplayState.MISSING);
             break;
         case MediaStreamPresence.UNKNOWN:
         default:
-            set_codec_audio_probe_error ();
+            set_codec_audio_probe_state (AudioProbeDisplayState.ERROR);
             break;
         }
     }

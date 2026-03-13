@@ -18,15 +18,15 @@ public class AudioSettingsSnapshot : Object {
     public string vorbis_quality = "Disabled";
 }
 
-public class AudioSettings : Object {
-    private enum AudioProbeUiState {
-        UNKNOWN,
-        CHECKING,
-        FOUND,
-        MISSING,
-        ERROR
-    }
+public enum AudioProbeDisplayState {
+    UNKNOWN,
+    CHECKING,
+    FOUND,
+    MISSING,
+    ERROR
+}
 
+public class AudioSettings : Object {
     // ── Widgets ──────────────────────────────────────────────────────────────
     private Adw.PreferencesGroup group;
     private Box audio_status_header;
@@ -61,7 +61,8 @@ public class AudioSettings : Object {
     private bool   concat_filter_active = false;
     private bool   desired_audio_enabled = true;
     private bool   suppress_audio_enabled_tracking = false;
-    private AudioProbeUiState audio_probe_state = AudioProbeUiState.UNKNOWN;
+    private AudioProbeDisplayState audio_probe_state = AudioProbeDisplayState.UNKNOWN;
+    private string current_status_css_class = "";
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -72,7 +73,7 @@ public class AudioSettings : Object {
         build_ui ();
         connect_signals ();
         update_codec_visibility ();
-        set_audio_probe_unknown ();
+        set_audio_probe_state (AudioProbeDisplayState.UNKNOWN);
     }
 
     public Adw.PreferencesGroup get_widget () {
@@ -92,18 +93,19 @@ public class AudioSettings : Object {
         var css = new CssProvider ();
         css.load_from_string (
             ".audio-status-found {\n" +
-            "    color: #16c464;\n" +
+            "    color: @success_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".audio-status-missing {\n" +
-            "    color: #e74856;\n" +
+            "    color: @error_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".audio-status-checking {\n" +
-            "    color: #e5a50a;\n" +
+            "    color: @warning_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".audio-status-neutral {\n" +
+            "    color: @window_fg_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n"
         );
@@ -326,7 +328,7 @@ public class AudioSettings : Object {
     public void set_audio_enabled (bool enabled) {
         desired_audio_enabled = enabled;
 
-        if (audio_probe_state == AudioProbeUiState.MISSING) {
+        if (audio_probe_state == AudioProbeDisplayState.MISSING) {
             audio_expander.set_sensitive (false);
             set_audio_expander_enabled (false);
             return;
@@ -338,52 +340,50 @@ public class AudioSettings : Object {
 
     public bool is_audio_enabled_for_output () {
         return audio_expander.enable_expansion
-            && audio_probe_state != AudioProbeUiState.MISSING;
+            && audio_probe_state != AudioProbeDisplayState.MISSING;
     }
 
     public bool is_audio_probe_pending () {
-        return audio_probe_state == AudioProbeUiState.CHECKING;
+        return audio_probe_state == AudioProbeDisplayState.CHECKING;
     }
 
-    public void set_audio_probe_unknown () {
-        audio_probe_state = AudioProbeUiState.UNKNOWN;
-        set_audio_status ("dialog-question-symbolic",
-                          "Audio status unavailable",
-                          "audio-status-neutral");
-        restore_user_audio_state ();
-    }
+    public void set_audio_probe_state (AudioProbeDisplayState state) {
+        audio_probe_state = state;
 
-    public void set_audio_probe_checking () {
-        audio_probe_state = AudioProbeUiState.CHECKING;
-        set_audio_status ("view-refresh-symbolic",
-                          "Checking audio stream...",
-                          "audio-status-checking");
-        audio_expander.set_sensitive (false);
-    }
-
-    public void set_audio_probe_found () {
-        audio_probe_state = AudioProbeUiState.FOUND;
-        set_audio_status ("emblem-default-symbolic",
-                          "Audio found",
-                          "audio-status-found");
-        restore_user_audio_state ();
-    }
-
-    public void set_audio_probe_missing () {
-        audio_probe_state = AudioProbeUiState.MISSING;
-        set_audio_status ("window-close-symbolic",
-                          "No audio found",
-                          "audio-status-missing");
-        audio_expander.set_sensitive (false);
-        set_audio_expander_enabled (false);
-    }
-
-    public void set_audio_probe_error () {
-        audio_probe_state = AudioProbeUiState.ERROR;
-        set_audio_status ("dialog-warning-symbolic",
-                          "Unable to inspect audio",
-                          "audio-status-checking");
-        restore_user_audio_state ();
+        switch (state) {
+        case AudioProbeDisplayState.UNKNOWN:
+            set_audio_status ("dialog-question-symbolic",
+                              "Audio status unavailable",
+                              "audio-status-neutral");
+            restore_user_audio_state ();
+            break;
+        case AudioProbeDisplayState.CHECKING:
+            set_audio_status ("view-refresh-symbolic",
+                              "Checking audio stream...",
+                              "audio-status-checking");
+            audio_expander.set_sensitive (false);
+            break;
+        case AudioProbeDisplayState.FOUND:
+            set_audio_status ("emblem-default-symbolic",
+                              "Audio found",
+                              "audio-status-found");
+            restore_user_audio_state ();
+            break;
+        case AudioProbeDisplayState.MISSING:
+            set_audio_status ("window-close-symbolic",
+                              "No audio found",
+                              "audio-status-missing");
+            audio_expander.set_sensitive (false);
+            set_audio_expander_enabled (false);
+            break;
+        case AudioProbeDisplayState.ERROR:
+        default:
+            set_audio_status ("dialog-warning-symbolic",
+                              "Unable to inspect audio",
+                              "audio-status-checking");
+            restore_user_audio_state ();
+            break;
+        }
     }
 
     private void restore_user_audio_state () {
@@ -399,16 +399,15 @@ public class AudioSettings : Object {
     private void set_audio_status (string icon_name, string text, string css_class) {
         audio_status_icon.set_from_icon_name (icon_name);
         audio_status_label.set_text (text);
-        audio_status_icon.remove_css_class ("audio-status-found");
-        audio_status_icon.remove_css_class ("audio-status-missing");
-        audio_status_icon.remove_css_class ("audio-status-checking");
-        audio_status_icon.remove_css_class ("audio-status-neutral");
-        audio_status_label.remove_css_class ("audio-status-found");
-        audio_status_label.remove_css_class ("audio-status-missing");
-        audio_status_label.remove_css_class ("audio-status-checking");
-        audio_status_label.remove_css_class ("audio-status-neutral");
-        audio_status_icon.add_css_class (css_class);
-        audio_status_label.add_css_class (css_class);
+        if (current_status_css_class != css_class) {
+            if (current_status_css_class.length > 0) {
+                audio_status_icon.remove_css_class (current_status_css_class);
+                audio_status_label.remove_css_class (current_status_css_class);
+            }
+            audio_status_icon.add_css_class (css_class);
+            audio_status_label.add_css_class (css_class);
+            current_status_css_class = css_class;
+        }
     }
 
     private void rebuild_codec_list () {
@@ -455,8 +454,11 @@ public class AudioSettings : Object {
 
     public AudioSettingsSnapshot snapshot_settings () {
         var snapshot = new AudioSettingsSnapshot ();
+        // Source-audio detection is authoritative: when the selected input
+        // has no audio stream, force the exported profile to behave as -an
+        // even if some caller previously left the UI toggle enabled.
         snapshot.enabled = audio_expander.enable_expansion
-            && audio_probe_state != AudioProbeUiState.MISSING;
+            && audio_probe_state != AudioProbeDisplayState.MISSING;
         snapshot.codec = get_codec_text ();
 
         string sr_text = get_dropdown_text (sample_rate_combo);
