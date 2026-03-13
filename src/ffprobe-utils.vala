@@ -23,6 +23,12 @@ public class ChapterInfo : Object {
     }
 }
 
+public enum MediaStreamPresence {
+    UNKNOWN,
+    ABSENT,
+    PRESENT
+}
+
 namespace FfprobeUtils {
 
     private string summarize_ffprobe_text (string? text, int max_len = 200) {
@@ -352,6 +358,15 @@ namespace FfprobeUtils {
         return chapters;
     }
 
+    private MediaStreamPresence parse_audio_presence_output (string stdout_text) {
+        if (stdout_text == null)
+            return MediaStreamPresence.UNKNOWN;
+
+        return stdout_text.strip ().length > 0
+            ? MediaStreamPresence.PRESENT
+            : MediaStreamPresence.ABSENT;
+    }
+
     /**
      * Probe the source video stream bit depth. Returns 0 on failure.
      *
@@ -444,6 +459,33 @@ namespace FfprobeUtils {
             return 0.0;
 
         return parse_ffprobe_duration_output (stdout_buf);
+    }
+
+    /**
+     * Probe whether @input_file exposes at least one audio stream.
+     *
+     * Returns PRESENT when ffprobe reports any audio stream, ABSENT when the
+     * probe succeeds but no audio streams are present, and UNKNOWN on probe
+     * failure so callers can avoid treating runtime errors as "no audio".
+     */
+    public async MediaStreamPresence probe_audio_presence_async (
+        string input_file,
+        Cancellable? cancellable = null) {
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "quiet",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text)))
+            return MediaStreamPresence.UNKNOWN;
+
+        return parse_audio_presence_output (stdout_text);
     }
 
     public double probe_duration (string input_file) {

@@ -445,6 +445,12 @@ public class MainWindow : Adw.ApplicationWindow {
             return;
         }
 
+        if (!(codec_tab is TrimTab) && codec_audio_probe_pending (codec_tab)) {
+            status_area.set_status (
+                "⏳ Checking source audio stream. Please wait a moment and try again.");
+            return;
+        }
+
         // ── Dispatch to the appropriate conversion path ───────────────────
         if (codec_tab is TrimTab) {
             uint64 operation_id;
@@ -472,6 +478,15 @@ public class MainWindow : Adw.ApplicationWindow {
             case "trim":    return trim_tab;
             default:         return null;
         }
+    }
+
+    private bool codec_audio_probe_pending (ICodecTab codec_tab) {
+        BaseCodecTab? base_codec_tab = codec_tab as BaseCodecTab;
+        if (base_codec_tab == null) {
+            return false;
+        }
+
+        return base_codec_tab.audio_settings.is_audio_probe_pending ();
     }
 
     private delegate void ProceedCallback ();

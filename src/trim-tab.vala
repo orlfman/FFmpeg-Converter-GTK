@@ -259,6 +259,11 @@ public class TrimTab : Box, ICodecTab {
         }
     }
 
+    public bool selected_reencode_audio_probe_pending () {
+        BaseCodecTab? codec_tab = get_selected_reencode_codec_tab ();
+        return codec_tab != null && codec_tab.audio_settings.is_audio_probe_pending ();
+    }
+
     public void load_video (string path) {
         cancel_chapter_scan ();
         loaded_video_path = path;
@@ -297,6 +302,12 @@ public class TrimTab : Box, ICodecTab {
 
         if (has_pending_or_active_export ()) {
             status_label.set_text ("⚠️ An export is already running or being prepared.");
+            return false;
+        }
+
+        if (will_reencode_output () && selected_reencode_audio_probe_pending ()) {
+            status_label.set_text (
+                "⏳ Checking source audio stream. Please wait a moment and try again.");
             return false;
         }
 
@@ -590,10 +601,11 @@ public class TrimTab : Box, ICodecTab {
 
         GeneralSettingsSnapshot? general_settings_snapshot = null;
         string shared_video_filter_chain = "";
+        BaseCodecTab? selected_codec_tab = null;
         if (general_tab != null) {
-            BaseCodecTab? codec_tab = get_selected_reencode_codec_tab ();
-            PixelFormatSettingsSnapshot? pixel_format = (codec_tab != null)
-                ? codec_tab.snapshot_pixel_format_settings ()
+            selected_codec_tab = get_selected_reencode_codec_tab ();
+            PixelFormatSettingsSnapshot? pixel_format = (selected_codec_tab != null)
+                ? selected_codec_tab.snapshot_pixel_format_settings ()
                 : null;
             general_settings_snapshot = general_tab.snapshot_settings (pixel_format);
             shared_video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (
@@ -669,6 +681,10 @@ public class TrimTab : Box, ICodecTab {
             var ctx = OptimizationContext ();
             if (shared_video_filter_chain.length > 0) {
                 ctx.video_filter_chain = shared_video_filter_chain;
+            }
+            if (selected_codec_tab != null
+                && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
+                ctx.strip_audio = true;
             }
             // Audio budget is determined by the optimizer based on size tier.
 

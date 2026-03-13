@@ -43,6 +43,8 @@ public class AppController : Object {
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
     private int smart_opt_generation = 0;
+    private Cancellable? audio_probe_cancellable = null;
+    private uint audio_probe_generation = 0;
 
     // ── Codec Registry ───────────────────────────────────────────────────────
     //    Maps ViewStack page names to their ISmartCodecTab, eliminating
@@ -94,6 +96,18 @@ public class AppController : Object {
         wire_all ();
     }
 
+    public override void dispose () {
+        if (smart_opt_cancel != null) {
+            smart_opt_cancel.cancel ();
+            smart_opt_cancel = null;
+        }
+        if (audio_probe_cancellable != null) {
+            audio_probe_cancellable.cancel ();
+            audio_probe_cancellable = null;
+        }
+        base.dispose ();
+    }
+
     /** Cancel any in-flight Smart Optimizer analysis. */
     public void cancel_smart_optimizer () {
         if (smart_opt_cancel != null) {
@@ -134,7 +148,82 @@ public class AppController : Object {
             info_tab.reset_output ();
             trim_tab.load_video (path);
             subtitles_tab.load_video (path);
+            sync_codec_audio_presence.begin (path);
         });
+    }
+
+    private void set_codec_audio_probe_unknown () {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.get_audio_settings_ref ().set_audio_probe_unknown ();
+        }
+    }
+
+    private void set_codec_audio_probe_checking () {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.get_audio_settings_ref ().set_audio_probe_checking ();
+        }
+    }
+
+    private void set_codec_audio_probe_found () {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.get_audio_settings_ref ().set_audio_probe_found ();
+        }
+    }
+
+    private void set_codec_audio_probe_missing () {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.get_audio_settings_ref ().set_audio_probe_missing ();
+        }
+    }
+
+    private void set_codec_audio_probe_error () {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.get_audio_settings_ref ().set_audio_probe_error ();
+        }
+    }
+
+    private async void sync_codec_audio_presence (string input_file) {
+        audio_probe_generation++;
+        uint generation = audio_probe_generation;
+
+        if (audio_probe_cancellable != null) {
+            audio_probe_cancellable.cancel ();
+            audio_probe_cancellable = null;
+        }
+
+        if (input_file.strip ().length == 0) {
+            set_codec_audio_probe_unknown ();
+            return;
+        }
+
+        var cancellable = new Cancellable ();
+        audio_probe_cancellable = cancellable;
+        set_codec_audio_probe_checking ();
+
+        MediaStreamPresence presence = yield FfprobeUtils.probe_audio_presence_async (
+            input_file,
+            cancellable
+        );
+
+        if (audio_probe_cancellable == cancellable) {
+            audio_probe_cancellable = null;
+        }
+        if (cancellable.is_cancelled () || generation != audio_probe_generation) {
+            return;
+        }
+
+        switch (presence) {
+        case MediaStreamPresence.PRESENT:
+            set_codec_audio_probe_found ();
+            break;
+        case MediaStreamPresence.ABSENT:
+            set_codec_audio_probe_missing ();
+            break;
+        case MediaStreamPresence.UNKNOWN:
+        default:
+            set_codec_audio_probe_error ();
+            break;
+        }
     }
 
     // ── Crop detection button → uses input file + console ───────────────────
@@ -363,7 +452,18 @@ public class AppController : Object {
 
         // Strip audio — look up from codec registry
         var smart_tab = codec_registry.get (codec);
+        if (smart_tab != null && smart_tab.get_audio_settings_ref ().is_audio_probe_pending ()) {
+            status_area.set_status (
+                "⏳ Checking source audio stream. Please wait a moment and try Smart Optimizer again.");
+            status_area.stop_progress ();
+            smart_optimizer_running (false);
+            return;
+        }
+
         bool strip_audio = (smart_tab != null) ? smart_tab.get_strip_audio_active () : false;
+        if (smart_tab != null && !smart_tab.get_audio_settings_ref ().is_audio_enabled_for_output ()) {
+            strip_audio = true;
+        }
         ctx.strip_audio = strip_audio;
 
         try {
@@ -384,7 +484,7 @@ public class AppController : Object {
             if (smart_tab != null) {
                 smart_tab.apply_smart_recommendation (rec);
                 if (strip_audio) {
-                    smart_tab.get_audio_settings_ref ().audio_expander.set_enable_expansion (false);
+                    smart_tab.get_audio_settings_ref ().set_audio_enabled (false);
                 }
             }
 

@@ -23,7 +23,7 @@ public class CodecPresets : Object {
                                          string codec_name,
                                          int bitrate_idx,
                                          int flac_level = -1) {
-        audio.audio_expander.set_enable_expansion (true);
+        audio.set_audio_enabled (true);
         set_dropdown_by_label (audio.codec_combo, codec_name);
 
         if (codec_name == AudioCodecName.FLAC && flac_level >= 0)

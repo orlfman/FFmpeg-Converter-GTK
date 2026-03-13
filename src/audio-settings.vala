@@ -19,9 +19,19 @@ public class AudioSettingsSnapshot : Object {
 }
 
 public class AudioSettings : Object {
+    private enum AudioProbeUiState {
+        UNKNOWN,
+        CHECKING,
+        FOUND,
+        MISSING,
+        ERROR
+    }
 
     // ── Widgets ──────────────────────────────────────────────────────────────
     private Adw.PreferencesGroup group;
+    private Box audio_status_header;
+    private Image audio_status_icon;
+    private Label audio_status_label;
 
     public Adw.ExpanderRow audio_expander  { get; private set; }
     public DropDown  codec_combo           { get; private set; }
@@ -49,15 +59,20 @@ public class AudioSettings : Object {
     private bool   speed_active = false;
     private bool   normalize_active = false;
     private bool   concat_filter_active = false;
+    private bool   desired_audio_enabled = true;
+    private bool   suppress_audio_enabled_tracking = false;
+    private AudioProbeUiState audio_probe_state = AudioProbeUiState.UNKNOWN;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
 
     public AudioSettings () {
+        inject_audio_status_css ();
         build_ui ();
         connect_signals ();
         update_codec_visibility ();
+        set_audio_probe_unknown ();
     }
 
     public Adw.PreferencesGroup get_widget () {
@@ -68,10 +83,58 @@ public class AudioSettings : Object {
     //  BUILD UI
     // ═════════════════════════════════════════════════════════════════════════
 
+    private static bool css_injected = false;
+
+    private static void inject_audio_status_css () {
+        if (css_injected) return;
+        css_injected = true;
+
+        var css = new CssProvider ();
+        css.load_from_string (
+            ".audio-status-found {\n" +
+            "    color: #16c464;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".audio-status-missing {\n" +
+            "    color: #e74856;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".audio-status-checking {\n" +
+            "    color: #e5a50a;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".audio-status-neutral {\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n"
+        );
+        StyleContext.add_provider_for_display (
+            Gdk.Display.get_default (),
+            css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+
     private void build_ui () {
         group = new Adw.PreferencesGroup ();
         group.set_title ("Audio");
         group.set_description ("Audio stream encoding settings");
+
+        audio_status_header = new Box (Orientation.HORIZONTAL, 6);
+        audio_status_header.set_halign (Align.END);
+        audio_status_header.set_valign (Align.CENTER);
+
+        audio_status_icon = new Image ();
+        audio_status_icon.set_valign (Align.CENTER);
+        audio_status_header.append (audio_status_icon);
+
+        audio_status_label = new Label ("");
+        audio_status_label.set_xalign (0.0f);
+        audio_status_label.set_halign (Align.END);
+        audio_status_label.set_wrap (false);
+        audio_status_label.set_ellipsize (Pango.EllipsizeMode.END);
+        audio_status_header.append (audio_status_label);
+
+        group.set_header_suffix (audio_status_header);
 
         audio_expander = new Adw.ExpanderRow ();
         audio_expander.set_title ("Include Audio");
@@ -205,6 +268,11 @@ public class AudioSettings : Object {
 
     private void connect_signals () {
         codec_combo.notify["selected"].connect (update_codec_visibility);
+        audio_expander.notify["enable-expansion"].connect (() => {
+            if (!suppress_audio_enabled_tracking && audio_expander.sensitive) {
+                desired_audio_enabled = audio_expander.enable_expansion;
+            }
+        });
     }
 
     private void update_codec_visibility () {
@@ -255,6 +323,94 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    public void set_audio_enabled (bool enabled) {
+        desired_audio_enabled = enabled;
+
+        if (audio_probe_state == AudioProbeUiState.MISSING) {
+            audio_expander.set_sensitive (false);
+            set_audio_expander_enabled (false);
+            return;
+        }
+
+        audio_expander.set_sensitive (true);
+        set_audio_expander_enabled (enabled);
+    }
+
+    public bool is_audio_enabled_for_output () {
+        return audio_expander.enable_expansion
+            && audio_probe_state != AudioProbeUiState.MISSING;
+    }
+
+    public bool is_audio_probe_pending () {
+        return audio_probe_state == AudioProbeUiState.CHECKING;
+    }
+
+    public void set_audio_probe_unknown () {
+        audio_probe_state = AudioProbeUiState.UNKNOWN;
+        set_audio_status ("dialog-question-symbolic",
+                          "Audio status unavailable",
+                          "audio-status-neutral");
+        restore_user_audio_state ();
+    }
+
+    public void set_audio_probe_checking () {
+        audio_probe_state = AudioProbeUiState.CHECKING;
+        set_audio_status ("view-refresh-symbolic",
+                          "Checking audio stream...",
+                          "audio-status-checking");
+        audio_expander.set_sensitive (false);
+    }
+
+    public void set_audio_probe_found () {
+        audio_probe_state = AudioProbeUiState.FOUND;
+        set_audio_status ("emblem-default-symbolic",
+                          "Audio found",
+                          "audio-status-found");
+        restore_user_audio_state ();
+    }
+
+    public void set_audio_probe_missing () {
+        audio_probe_state = AudioProbeUiState.MISSING;
+        set_audio_status ("window-close-symbolic",
+                          "No audio found",
+                          "audio-status-missing");
+        audio_expander.set_sensitive (false);
+        set_audio_expander_enabled (false);
+    }
+
+    public void set_audio_probe_error () {
+        audio_probe_state = AudioProbeUiState.ERROR;
+        set_audio_status ("dialog-warning-symbolic",
+                          "Unable to inspect audio",
+                          "audio-status-checking");
+        restore_user_audio_state ();
+    }
+
+    private void restore_user_audio_state () {
+        set_audio_enabled (desired_audio_enabled);
+    }
+
+    private void set_audio_expander_enabled (bool enabled) {
+        suppress_audio_enabled_tracking = true;
+        audio_expander.set_enable_expansion (enabled);
+        suppress_audio_enabled_tracking = false;
+    }
+
+    private void set_audio_status (string icon_name, string text, string css_class) {
+        audio_status_icon.set_from_icon_name (icon_name);
+        audio_status_label.set_text (text);
+        audio_status_icon.remove_css_class ("audio-status-found");
+        audio_status_icon.remove_css_class ("audio-status-missing");
+        audio_status_icon.remove_css_class ("audio-status-checking");
+        audio_status_icon.remove_css_class ("audio-status-neutral");
+        audio_status_label.remove_css_class ("audio-status-found");
+        audio_status_label.remove_css_class ("audio-status-missing");
+        audio_status_label.remove_css_class ("audio-status-checking");
+        audio_status_label.remove_css_class ("audio-status-neutral");
+        audio_status_icon.add_css_class (css_class);
+        audio_status_label.add_css_class (css_class);
+    }
+
     private void rebuild_codec_list () {
         string current = get_codec_text ();
 
@@ -299,7 +455,8 @@ public class AudioSettings : Object {
 
     public AudioSettingsSnapshot snapshot_settings () {
         var snapshot = new AudioSettingsSnapshot ();
-        snapshot.enabled = audio_expander.enable_expansion;
+        snapshot.enabled = audio_expander.enable_expansion
+            && audio_probe_state != AudioProbeUiState.MISSING;
         snapshot.codec = get_codec_text ();
 
         string sr_text = get_dropdown_text (sample_rate_combo);
@@ -407,7 +564,7 @@ public class AudioSettings : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void reset_defaults () {
-        audio_expander.set_enable_expansion (true);
+        set_audio_enabled (true);
         codec_combo.set_selected (0);
         sample_rate_combo.set_selected (4);
         bitrate_combo.set_selected (1);

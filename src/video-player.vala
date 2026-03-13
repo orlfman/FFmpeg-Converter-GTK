@@ -20,6 +20,7 @@ public class VideoPlayer : Box {
     private uint prepare_poll  = 0;
     private uint scrub_reset_source = 0;
     private uint fps_probe_generation = 0;
+    private ulong media_prepared_handler_id = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
     private bool prepared_handled = false;
@@ -167,14 +168,12 @@ public class VideoPlayer : Box {
         // Two-pronged approach to detect when GStreamer finishes probing:
         //  1. Property notification (ideal, fires immediately when ready)
         //  2. Polling fallback (catches cases where notify fires before connects)
-        media.notify["prepared"].connect (() => {
-            on_media_prepared ();
-        });
+        media_prepared_handler_id = media.notify["prepared"].connect (on_media_prepared_notify);
 
         // Poll every 100 ms until prepared
         prepare_poll = Timeout.add (100, () => {
             if (media != null && media.is_prepared ()) {
-                on_media_prepared ();
+                on_media_prepared (media);
                 prepare_poll = 0;
                 return Source.REMOVE;
             }
@@ -299,11 +298,26 @@ public class VideoPlayer : Box {
         }
     }
 
+    private void disconnect_media_prepared_handler () {
+        if (media != null && media_prepared_handler_id != 0) {
+            media.disconnect (media_prepared_handler_id);
+            media_prepared_handler_id = 0;
+        }
+    }
+
+    private void on_media_prepared_notify (Object source_object, ParamSpec pspec) {
+        var source_media = source_object as Gtk.MediaFile;
+        if (source_media != null) {
+            on_media_prepared (source_media);
+        }
+    }
+
     private void reset_player_state () {
         stop_update_timer ();
         stop_prepare_poll ();
         cancel_fps_probe ();
         cancel_scrub_reset ();
+        disconnect_media_prepared_handler ();
 
         if (media != null) {
             media.set_playing (false);
@@ -340,17 +354,18 @@ public class VideoPlayer : Box {
         });
     }
 
-    private void on_media_prepared () {
-        if (media == null || !media.is_prepared ()) return;
+    private void on_media_prepared (Gtk.MediaFile source_media) {
+        if (media == null || source_media != media || !source_media.is_prepared ()) return;
+
+        double dur = (double) source_media.get_duration () / 1000000.0;
+        if (dur <= 0.0) return; // not actually ready yet
 
         // Guard against both the notify signal and the poll timer firing
         if (prepared_handled) return;
         prepared_handled = true;
 
         stop_prepare_poll ();
-
-        double dur = get_duration_seconds ();
-        if (dur <= 0.0) return; // not actually ready yet
+        disconnect_media_prepared_handler ();
 
         scrubber.set_range (0.0, dur);
         scrubber.set_value (0.0);
@@ -358,13 +373,11 @@ public class VideoPlayer : Box {
         time_label.set_text (format_time (0.0));
 
         // Capture intrinsic video dimensions from the paintable
-        if (media != null) {
-            _intrinsic_width  = media.get_intrinsic_width ();
-            _intrinsic_height = media.get_intrinsic_height ();
+        _intrinsic_width  = source_media.get_intrinsic_width ();
+        _intrinsic_height = source_media.get_intrinsic_height ();
 
-            // Keep the crop overlay informed of the video size
-            _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
-        }
+        // Keep the crop overlay informed of the video size
+        _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
 
         start_update_timer ();
         media_ready (dur);

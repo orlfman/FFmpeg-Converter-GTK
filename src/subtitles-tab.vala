@@ -1099,6 +1099,11 @@ public class SubtitlesTab : Box {
         }
     }
 
+    public bool selected_burn_in_audio_probe_pending () {
+        BaseCodecTab? codec_tab = get_selected_reencode_codec_tab ();
+        return codec_tab != null && codec_tab.audio_settings.is_audio_probe_pending ();
+    }
+
     public bool can_apply () {
         if (current_input_file.length == 0) return false;
         if (_is_busy) return false;
@@ -1277,6 +1282,12 @@ public class SubtitlesTab : Box {
 
         if (codec_tab == null) {
             report_burn_in_error ("No codec tab available for the selected codec.");
+            return false;
+        }
+
+        if (selected_burn_in_audio_probe_pending ()) {
+            report_burn_in_error (
+                "Checking source audio stream. Please wait a moment and try again.");
             return false;
         }
 
