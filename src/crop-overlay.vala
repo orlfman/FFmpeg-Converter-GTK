@@ -545,10 +545,10 @@ public class CropOverlay : Gtk.DrawingArea {
                 && snap_aspect_locked_crop_to_even (drag_constraint_ratio, drag_mode);
 
             if (!snapped_aspect_locked) {
-                _crop_x = snap_even_bounded ((int) _crop_x, _video_width);
-                _crop_y = snap_even_bounded ((int) _crop_y, _video_height);
-                _crop_w = snap_even_bounded ((int) _crop_w, _video_width  - (int) _crop_x);
-                _crop_h = snap_even_bounded ((int) _crop_h, _video_height - (int) _crop_y);
+                _crop_x = snap_even_within_bounds ((int) _crop_x, _video_width);
+                _crop_y = snap_even_within_bounds ((int) _crop_y, _video_height);
+                _crop_w = snap_even_within_bounds ((int) _crop_w, _video_width  - (int) _crop_x);
+                _crop_h = snap_even_within_bounds ((int) _crop_h, _video_height - (int) _crop_y);
             }
 
             // Discard tiny accidental clicks
@@ -849,8 +849,8 @@ public class CropOverlay : Gtk.DrawingArea {
         switch (mode) {
         case DRAG_CREATE:
         case DRAG_BR: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x), _video_width);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y), _video_height);
             int max_w = floor_even (_video_width - anchor_x);
             int max_h = floor_even (_video_height - anchor_y);
 
@@ -866,8 +866,8 @@ public class CropOverlay : Gtk.DrawingArea {
             return true;
         }
         case DRAG_TL: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y + _crop_h), _video_height);
             int max_w = floor_even (anchor_x);
             int max_h = floor_even (anchor_y);
 
@@ -883,8 +883,8 @@ public class CropOverlay : Gtk.DrawingArea {
             return true;
         }
         case DRAG_TR: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x), _video_width);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y + _crop_h), _video_height);
             int max_w = floor_even (_video_width - anchor_x);
             int max_h = floor_even (anchor_y);
 
@@ -900,8 +900,8 @@ public class CropOverlay : Gtk.DrawingArea {
             return true;
         }
         case DRAG_BL: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y), _video_height);
             int max_w = floor_even (anchor_x);
             int max_h = floor_even (_video_height - anchor_y);
 
@@ -917,7 +917,7 @@ public class CropOverlay : Gtk.DrawingArea {
             return true;
         }
         case DRAG_T: {
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y + _crop_h), _video_height);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y + _crop_h), _video_height);
             int center_x = ((int) Math.round (_crop_x + _crop_w / 2.0)).clamp (0, _video_width);
             int max_w = floor_even (2 * int.min (center_x, _video_width - center_x));
             int max_h = floor_even (anchor_y);
@@ -929,12 +929,12 @@ public class CropOverlay : Gtk.DrawingArea {
 
             _crop_w = snapped_w;
             _crop_h = snapped_h;
-            _crop_x = snap_even_bounded ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
+            _crop_x = snap_even_within_bounds ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
             _crop_y = anchor_y - _crop_h;
             return true;
         }
         case DRAG_B: {
-            int anchor_y = snap_even_bounded ((int) Math.round (_crop_y), _video_height);
+            int anchor_y = snap_even_within_bounds ((int) Math.round (_crop_y), _video_height);
             int center_x = ((int) Math.round (_crop_x + _crop_w / 2.0)).clamp (0, _video_width);
             int max_w = floor_even (2 * int.min (center_x, _video_width - center_x));
             int max_h = floor_even (_video_height - anchor_y);
@@ -946,12 +946,12 @@ public class CropOverlay : Gtk.DrawingArea {
 
             _crop_w = snapped_w;
             _crop_h = snapped_h;
-            _crop_x = snap_even_bounded ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
+            _crop_x = snap_even_within_bounds ((int) Math.round (center_x - _crop_w / 2.0), _video_width - snapped_w);
             _crop_y = anchor_y;
             return true;
         }
         case DRAG_L: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x + _crop_w), _video_width);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x + _crop_w), _video_width);
             int center_y = ((int) Math.round (_crop_y + _crop_h / 2.0)).clamp (0, _video_height);
             int max_w = floor_even (anchor_x);
             int max_h = floor_even (2 * int.min (center_y, _video_height - center_y));
@@ -964,11 +964,11 @@ public class CropOverlay : Gtk.DrawingArea {
             _crop_w = snapped_w;
             _crop_h = snapped_h;
             _crop_x = anchor_x - _crop_w;
-            _crop_y = snap_even_bounded ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
+            _crop_y = snap_even_within_bounds ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
             return true;
         }
         case DRAG_R: {
-            int anchor_x = snap_even_bounded ((int) Math.round (_crop_x), _video_width);
+            int anchor_x = snap_even_within_bounds ((int) Math.round (_crop_x), _video_width);
             int center_y = ((int) Math.round (_crop_y + _crop_h / 2.0)).clamp (0, _video_height);
             int max_w = floor_even (_video_width - anchor_x);
             int max_h = floor_even (2 * int.min (center_y, _video_height - center_y));
@@ -981,7 +981,7 @@ public class CropOverlay : Gtk.DrawingArea {
             _crop_x = anchor_x;
             _crop_w = snapped_w;
             _crop_h = snapped_h;
-            _crop_y = snap_even_bounded ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
+            _crop_y = snap_even_within_bounds ((int) Math.round (center_y - _crop_h / 2.0), _video_height - snapped_h);
             return true;
         }
         default:
@@ -1089,10 +1089,10 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     private void get_even_crop_values (out int w, out int h, out int x, out int y) {
-        x = snap_even_bounded ((int) _crop_x, _video_width);
-        y = snap_even_bounded ((int) _crop_y, _video_height);
-        w = snap_even_bounded ((int) _crop_w, _video_width - x);
-        h = snap_even_bounded ((int) _crop_h, _video_height - y);
+        x = snap_even_within_bounds ((int) _crop_x, _video_width);
+        y = snap_even_within_bounds ((int) _crop_y, _video_height);
+        w = snap_even_within_bounds ((int) _crop_w, _video_width - x);
+        h = snap_even_within_bounds ((int) _crop_h, _video_height - y);
     }
 
     private bool has_valid_even_crop () {
@@ -1114,22 +1114,21 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     private void get_even_crop_size (out int w, out int h) {
-        int x, y;
-        get_even_crop_values (out w, out h, out x, out y);
+        int x = snap_even_within_bounds ((int) _crop_x, _video_width);
+        int y = snap_even_within_bounds ((int) _crop_y, _video_height);
+        w = snap_even_within_bounds ((int) _crop_w, _video_width - x);
+        h = snap_even_within_bounds ((int) _crop_h, _video_height - y);
     }
 
 
-    private static int snap_even (int val) {
-        // Round to nearest even number (not truncate)
-        return ((val + 1) / 2) * 2;
-    }
-
-    private static int snap_even_bounded (int val, int max) {
+    private static int snap_even_within_bounds (int val, int max) {
         if (max <= 0) {
             return 0;
         }
 
         int clamped = val.clamp (0, max);
-        return int.min (snap_even (clamped), floor_even (max));
+        // Clamp into bounds, round toward the next even value, then cap at
+        // the largest even value that still fits within max.
+        return int.min (ceil_even (clamped), floor_even (max));
     }
 }

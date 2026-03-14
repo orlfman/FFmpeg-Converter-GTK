@@ -8,6 +8,7 @@ using GLib;
 public class ProgressTracker : Object {
 
     private ProgressBar progress_bar;
+    // Source IDs are created/removed only on the GTK main thread via Idle.add().
     private uint pulse_source = 0;
 
     // ── Thread-safe progress state ──────────────────────────────────────────

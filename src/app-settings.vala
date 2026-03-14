@@ -34,12 +34,18 @@ public class AppSettings : Object {
 
     // ── Singleton ─────────────────────────────────────────────────────────────
     private static AppSettings? _instance = null;
+    private static Mutex instance_mutex;
 
     public static AppSettings get_default () {
-        if (_instance == null) {
-            _instance = new AppSettings ();
+        instance_mutex.lock ();
+        try {
+            if (_instance == null) {
+                _instance = new AppSettings ();
+            }
+            return _instance;
+        } finally {
+            instance_mutex.unlock ();
         }
-        return _instance;
     }
 
     // ── Thread safety ─────────────────────────────────────────────────────────
