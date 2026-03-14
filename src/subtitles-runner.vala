@@ -14,6 +14,7 @@ public class SubtitleStream : Object {
     public bool   is_default     { get; set; default = false; }
     public bool   is_forced      { get; set; default = false; }
     public bool   marked_remove  { get; set; default = false; }
+    public bool   details_expanded { get; set; default = false; }
 
     public string display_label () {
         var parts = new GenericArray<string> ();
@@ -38,6 +39,7 @@ public class ExternalSubtitle : Object {
     public bool   is_default { get; set; default = false; }
     public bool   is_forced  { get; set; default = false; }
     public bool   is_bitmap  { get; set; default = false; }
+    public bool   details_expanded { get; set; default = false; }
 
     /**
      * Guess whether a subtitle file is bitmap-based from its extension.

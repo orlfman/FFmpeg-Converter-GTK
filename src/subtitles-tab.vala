@@ -212,10 +212,19 @@ public class SubtitlesTab : Box {
         // ── Include/exclude via enable-switch ────────────────────────────────
         expander.set_show_enable_switch (true);
         expander.set_enable_expansion (!stream.marked_remove);
+        expander.set_expanded (!stream.marked_remove && stream.details_expanded);
 
-        // Bind expansion state → marked_remove
+        // Keep persistent row UI state on the stream so rebuilds can restore it.
+        expander.notify["expanded"].connect (() => {
+            stream.details_expanded = expander.get_expanded ();
+        });
+
+        // Bind inclusion switch state → marked_remove
         expander.notify["enable-expansion"].connect (() => {
             stream.marked_remove = !expander.get_enable_expansion ();
+            if (stream.marked_remove) {
+                stream.details_expanded = false;
+            }
             update_ui_state ();
         });
 
@@ -415,6 +424,12 @@ public class SubtitlesTab : Box {
         expander.set_title (basename);
         expander.set_subtitle (ext.language.length > 0 ? ext.language : "no language set");
         expander.add_prefix (make_icon ("document-new-symbolic"));
+        expander.set_expanded (ext.details_expanded);
+
+        // Keep persistent row UI state on the subtitle so rebuilds can restore it.
+        expander.notify["expanded"].connect (() => {
+            ext.details_expanded = expander.get_expanded ();
+        });
 
         // ── Drag-and-drop reorder ────────────────────────────────────────────
         var drag_source = new DragSource ();

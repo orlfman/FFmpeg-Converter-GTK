@@ -88,8 +88,7 @@ public class TrimTab : Box, ICodecTab {
 
     // ── Crop Controls ────────────────────────────────────────────────────────
     private Adw.PreferencesGroup crop_group;
-    private Label crop_value_label;
-    private Entry crop_entry;
+    private Entry crop_value_display;
     private Switch crop_scope_switch;        // ON = per-segment, OFF = global
     private Adw.ActionRow crop_scope_row;
     private Button crop_reset_btn;
@@ -1231,47 +1230,25 @@ public class TrimTab : Box, ICodecTab {
     private void build_crop_controls () {
         crop_group = new Adw.PreferencesGroup ();
         crop_group.set_title ("Crop");
-        crop_group.set_description ("Draw a rectangle on the video to define the crop area, or type values manually. Hold Shift while dragging to lock aspect ratio");
+        crop_group.set_description ("Draw a rectangle on the video to define the crop area. Hold Shift while dragging to lock aspect ratio");
         crop_group.set_visible (false);
 
         // ── Crop value display ───────────────────────────────────────────────
         var value_row = new Adw.ActionRow ();
         value_row.set_title ("Crop Value");
-        value_row.set_subtitle ("W:H:X:Y — all values snapped to even numbers");
+        value_row.set_subtitle ("W:H:X:Y — drag on the video; all values snap to even numbers");
         value_row.set_icon_name ("image-crop-symbolic");
 
-        crop_value_label = new Label ("No crop defined");
-        crop_value_label.add_css_class ("dim-label");
-        crop_value_label.set_valign (Align.CENTER);
-        value_row.add_suffix (crop_value_label);
+        crop_value_display = new Entry ();
+        crop_value_display.set_editable (false);
+        crop_value_display.set_can_focus (false);
+        crop_value_display.set_placeholder_text ("No crop defined");
+        crop_value_display.set_width_chars (20);
+        crop_value_display.set_valign (Align.CENTER);
+        crop_value_display.add_css_class ("monospace");
+        value_row.add_suffix (crop_value_display);
 
         crop_group.add (value_row);
-
-        // ── Manual entry ─────────────────────────────────────────────────────
-        var entry_row = new Adw.ActionRow ();
-        entry_row.set_title ("Manual Entry");
-        entry_row.set_subtitle ("Type W:H:X:Y and press Enter to apply");
-
-        crop_entry = new Entry ();
-        crop_entry.set_placeholder_text ("w:h:x:y");
-        crop_entry.set_width_chars (20);
-        crop_entry.set_valign (Align.CENTER);
-        crop_entry.add_css_class ("monospace");
-        crop_entry.activate.connect (() => {
-            string val = crop_entry.get_text ().strip ();
-            bool ok = player.crop_overlay.set_crop_string (val);
-            crop_entry.remove_css_class ("segment-valid");
-            crop_entry.remove_css_class ("segment-error");
-            if (ok) {
-                crop_entry.add_css_class ("segment-valid");
-                crop_entry.set_tooltip_text ("Applied");
-            } else {
-                crop_entry.add_css_class ("segment-error");
-                crop_entry.set_tooltip_text ("Invalid format — use W:H:X:Y with positive values");
-            }
-        });
-        entry_row.add_suffix (crop_entry);
-        crop_group.add (entry_row);
 
         // ── Crop scope (global vs per-segment) ──────────────────────────────
         crop_scope_row = new Adw.ActionRow ();
@@ -1300,8 +1277,6 @@ public class TrimTab : Box, ICodecTab {
         crop_reset_btn.set_tooltip_text ("Clear the crop rectangle");
         crop_reset_btn.clicked.connect (() => {
             player.crop_overlay.clear_crop ();
-            global_crop_value = "";
-            update_crop_display ("", 0, 0, 0, 0);
         });
         actions_row.add_suffix (crop_reset_btn);
 
@@ -1337,19 +1312,12 @@ public class TrimTab : Box, ICodecTab {
     }
 
     private void update_crop_display (string val, int w, int h, int x, int y) {
-        // Clear any stale validation feedback from manual entry
-        crop_entry.remove_css_class ("segment-valid");
-        crop_entry.remove_css_class ("segment-error");
-        crop_entry.set_tooltip_text (null);
-
         if (val == "") {
-            crop_value_label.set_text ("No crop defined");
-            crop_value_label.add_css_class ("dim-label");
-            crop_entry.set_text ("");
+            crop_value_display.set_text ("");
+            crop_value_display.set_tooltip_text ("Drag on the video to define a crop area");
         } else {
-            crop_value_label.set_text ("%d × %d  at  (%d, %d)".printf (w, h, x, y));
-            crop_value_label.remove_css_class ("dim-label");
-            crop_entry.set_text (val);
+            crop_value_display.set_text (val);
+            crop_value_display.set_tooltip_text ("%d × %d at (%d, %d)".printf (w, h, x, y));
         }
     }
 

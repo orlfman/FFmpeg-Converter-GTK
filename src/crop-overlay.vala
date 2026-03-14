@@ -98,60 +98,16 @@ public class CropOverlay : Gtk.DrawingArea {
     }
 
     public bool has_crop () {
-        return _has_crop && _crop_w > 0 && _crop_h > 0;
+        return has_valid_even_crop ();
     }
 
     /**
      * Returns the crop in FFmpeg "W:H:X:Y" format, or "" if none.
      */
     public string get_crop_string () {
-        if (!has_crop ()) return "";
         int w, h, x, y;
-        get_even_crop_values (out w, out h, out x, out y);
+        if (!try_get_even_crop_values (out w, out h, out x, out y)) return "";
         return "%d:%d:%d:%d".printf (w, h, x, y);
-    }
-
-    /**
-     * Set crop from an FFmpeg "W:H:X:Y" string.
-     * Returns true if the string was valid and applied, false otherwise.
-     */
-    public bool set_crop_string (string val) {
-        if (val.strip () == "" || val == "w:h:x:y") {
-            clear_crop ();
-            return true;
-        }
-
-        string clean = val.strip ();
-        if (clean.has_prefix ("crop=")) clean = clean.substring (5);
-
-        string[] parts = clean.split (":");
-        if (parts.length != 4) return false;
-
-        double w = double.parse (parts[0]);
-        double h = double.parse (parts[1]);
-        double x = double.parse (parts[2]);
-        double y = double.parse (parts[3]);
-
-        if (w <= 0 || h <= 0 || x < 0 || y < 0) return false;
-
-        _crop_w = w;
-        _crop_h = h;
-        _crop_x = x;
-        _crop_y = y;
-
-        // Clamp to video bounds
-        if (_video_width > 0 && _video_height > 0) {
-            _crop_w = _crop_w.clamp (0, _video_width);
-            _crop_h = _crop_h.clamp (0, _video_height);
-            _crop_x = _crop_x.clamp (0, _video_width  - _crop_w);
-            _crop_y = _crop_y.clamp (0, _video_height - _crop_h);
-        }
-
-        _has_crop = (_crop_w > 0 && _crop_h > 0);
-        queue_draw ();
-        if (_has_crop)
-            crop_changed ((int) _crop_w, (int) _crop_h, (int) _crop_x, (int) _crop_y);
-        return true;
     }
 
     public void clear_crop () {
@@ -1121,16 +1077,15 @@ public class CropOverlay : Gtk.DrawingArea {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void emit_crop () {
-        if (_has_crop) {
-            int w, h, x, y;
-            get_even_crop_values (out w, out h, out x, out y);
-            crop_changed (
-                w,
-                h,
-                x,
-                y
-            );
-        }
+        int w, h, x, y;
+        if (!try_get_even_crop_values (out w, out h, out x, out y)) return;
+
+        crop_changed (
+            w,
+            h,
+            x,
+            y
+        );
     }
 
     private void get_even_crop_values (out int w, out int h, out int x, out int y) {
@@ -1140,10 +1095,29 @@ public class CropOverlay : Gtk.DrawingArea {
         h = snap_even_bounded ((int) _crop_h, _video_height - y);
     }
 
+    private bool has_valid_even_crop () {
+        if (!_has_crop) return false;
+
+        int w, h;
+        get_even_crop_size (out w, out h);
+        return w > 0 && h > 0;
+    }
+
+    private bool try_get_even_crop_values (out int w, out int h, out int x, out int y) {
+        if (!_has_crop) {
+            w = h = x = y = 0;
+            return false;
+        }
+
+        get_even_crop_values (out w, out h, out x, out y);
+        return w > 0 && h > 0;
+    }
+
     private void get_even_crop_size (out int w, out int h) {
         int x, y;
         get_even_crop_values (out w, out h, out x, out y);
     }
+
 
     private static int snap_even (int val) {
         // Round to nearest even number (not truncate)
