@@ -270,6 +270,9 @@ public class AudioSettings : Object {
 
     private void connect_signals () {
         codec_combo.notify["selected"].connect (update_codec_visibility);
+        aac_quality_combo.notify["selected"].connect (update_codec_visibility);
+        mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
+        vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
         audio_expander.notify["enable-expansion"].connect (() => {
             if (!suppress_audio_enabled_tracking && audio_expander.sensitive) {
                 desired_audio_enabled = audio_expander.enable_expansion;
@@ -277,12 +280,41 @@ public class AudioSettings : Object {
         });
     }
 
+    private static bool codec_uses_quality_scale (string codec,
+                                                  string aac_quality,
+                                                  string mp3_vbr_quality,
+                                                  string vorbis_quality) {
+        if (codec == AudioCodecName.AAC)
+            return aac_quality != "Disabled";
+        if (codec == AudioCodecName.MP3)
+            return mp3_vbr_quality != "Disabled";
+        if (codec == AudioCodecName.VORBIS)
+            return vorbis_quality != "Disabled";
+        return false;
+    }
+
+    private bool active_codec_uses_quality_scale (string codec) {
+        return codec_uses_quality_scale (
+            codec,
+            get_dropdown_text (aac_quality_combo),
+            get_dropdown_text (mp3_vbr_combo),
+            get_dropdown_text (vorbis_quality_combo)
+        );
+    }
+
     private void update_codec_visibility () {
         string codec = get_codec_text ();
         bool is_copy = (codec == AudioCodecName.COPY);
+        bool use_quality_scale = active_codec_uses_quality_scale (codec);
 
         sample_rate_row.set_visible (!is_copy);
         bitrate_row.set_visible (!is_copy && codec != AudioCodecName.FLAC);
+        bitrate_row.set_sensitive (!use_quality_scale);
+        bitrate_row.set_subtitle (
+            use_quality_scale
+            ? "Ignored while quality scale is enabled"
+            : "Higher = better quality, larger file"
+        );
 
         opus_vbr_row.set_visible (codec == AudioCodecName.OPUS);
         opus_surround_row.set_visible (codec == AudioCodecName.OPUS);
@@ -512,8 +544,16 @@ public class AudioSettings : Object {
         args += "-ar";
         args += snapshot.sample_rate_hz.to_string ();
 
-        // Bitrate (not applicable for lossless FLAC)
-        if (codec != AudioCodecName.FLAC) {
+        bool use_quality_scale = codec_uses_quality_scale (
+            codec,
+            snapshot.aac_quality,
+            snapshot.mp3_vbr_quality,
+            snapshot.vorbis_quality
+        );
+
+        // Bitrate applies only when the selected codec is not lossless and
+        // no codec-specific quality scale is active.
+        if (codec != AudioCodecName.FLAC && !use_quality_scale) {
             args += "-b:a";
             args += snapshot.bitrate_kbps.to_string () + "k";
         }

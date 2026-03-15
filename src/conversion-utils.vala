@@ -243,7 +243,8 @@ namespace ConversionUtils {
 
     public class CachedFileProbe<G> : Object {
         public const int DEFAULT_MAX_ENTRIES = 32;
-        // MainWindow owns this cache and only touches it from the main context.
+        // Current use is main-context only: MainWindow owns this cache and does
+        // not share it with worker threads.
         private HashTable<string, CachedFileProbeEntry<G>> entries =
             new HashTable<string, CachedFileProbeEntry<G>> (str_hash, str_equal);
         private string[] lru_paths = {};
