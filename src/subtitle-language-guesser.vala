@@ -1,91 +1,108 @@
 using GLib;
 
 namespace SubtitleLanguageGuesser {
+    private struct GuessToken {
+        public string raw;
+        public string normalized;
+        public char separator_before;
+
+        public GuessToken (string raw, string normalized, char separator_before) {
+            this.raw = raw;
+            this.normalized = normalized;
+            this.separator_before = separator_before;
+        }
+    }
+
     private enum TokenKind {
         LANGUAGE,
         AMBIGUOUS_LANGUAGE,
+        SCRIPT,
         REGION,
         SUBTITLE_TAG,
         BLOCKED_CODE,
         UNKNOWN
     }
 
+    private enum LookupMode {
+        DEFAULT,
+        FORCE_FALLBACK
+    }
+
     private HashTable<string, bool>? known_language_codes = null;
     private HashTable<string, bool>? fallback_language_codes = null;
+    private HashTable<string, bool>? known_script_codes = null;
+    private HashTable<string, bool>? fallback_script_codes = null;
     private HashTable<string, bool>? known_region_codes = null;
     private HashTable<string, bool>? fallback_region_codes = null;
 
     public string guess_from_path (string path) {
-        return guess_from_path_internal (path, false, false);
+        return guess_from_path_internal (path, LookupMode.DEFAULT);
     }
 
 #if SUBTITLE_LANGUAGE_GUESSER_TEST_BUILD
-    internal string guess_from_path_for_tests (string path,
-                                               bool force_language_fallback,
-                                               bool force_region_fallback) {
-        return guess_from_path_internal (path, force_language_fallback, force_region_fallback);
+    internal string guess_from_path_for_tests (string path) {
+        return guess_from_path_internal (path, LookupMode.FORCE_FALLBACK);
     }
 #endif
 
     private string guess_from_path_internal (string path,
-                                            bool force_language_fallback,
-                                            bool force_region_fallback) {
+                                            LookupMode lookup_mode) {
         string bn = Path.get_basename (path);
         int dot = bn.last_index_of_char ('.');
         if (dot <= 0)
             return "und";
 
         string stem = bn.substring (0, dot);
-        string? locale_guess = guess_language_from_locale_suffix (
-            stem, force_language_fallback, force_region_fallback);
+        string? locale_guess = guess_language_from_locale_suffix (stem, lookup_mode);
         if (locale_guess != null)
             return locale_guess;
 
-        string[] tokens = split_language_guess_tokens (stem);
+        GuessToken[] tokens = split_language_guess_tokens (stem);
         if (tokens.length == 0)
             return "und";
 
-        string? guessed = guess_language_from_tokens (
-            tokens, force_language_fallback, force_region_fallback);
+        string? guessed = guess_language_from_tokens (tokens, lookup_mode);
         return guessed ?? "und";
     }
 
-    private string? guess_language_from_tokens (string[] tokens,
-                                                bool force_language_fallback,
-                                                bool force_region_fallback) {
+    private string? guess_language_from_tokens (GuessToken[] tokens,
+                                                LookupMode lookup_mode) {
         int last_index = tokens.length - 1;
-        string last_raw = tokens[last_index];
-        string last = normalize_language_guess_token (last_raw);
+        GuessToken last_token = tokens[last_index];
 
         switch (classify_token (
-            last_raw, last, force_language_fallback, force_region_fallback)) {
+            last_token.raw,
+            last_token.normalized,
+            lookup_mode)) {
             case TokenKind.LANGUAGE:
-                return last;
+                return last_token.normalized;
             case TokenKind.AMBIGUOUS_LANGUAGE:
                 string? previous_language = find_previous_language_token (
-                    tokens, last_index - 1, force_language_fallback, force_region_fallback);
+                    tokens, last_index - 1, lookup_mode);
                 if (previous_language != null)
                     return previous_language;
-                return last;
+                return last_token.normalized;
+            case TokenKind.SCRIPT:
+                return try_resolve_script_pair (tokens, last_index, lookup_mode);
             case TokenKind.SUBTITLE_TAG:
             case TokenKind.BLOCKED_CODE:
+                return find_previous_language_token (tokens, last_index - 1, lookup_mode);
             case TokenKind.REGION:
+                return try_resolve_region_suffix (tokens, last_index, lookup_mode);
             case TokenKind.UNKNOWN:
             default:
-                return find_previous_language_token (
-                    tokens, last_index - 1, force_language_fallback, force_region_fallback);
+                return null;
         }
     }
 
     private string? guess_language_from_locale_suffix (string stem,
-                                                       bool force_language_fallback,
-                                                       bool force_region_fallback) {
+                                                       LookupMode lookup_mode) {
         int region_sep = int.max (stem.last_index_of_char ('-'), stem.last_index_of_char ('_'));
         if (region_sep <= 0 || region_sep >= stem.length - 1)
             return null;
 
         string region = normalize_language_guess_token (stem.substring (region_sep + 1));
-        if (!is_known_region_code (region, force_region_fallback))
+        if (!is_known_region_code (region, lookup_mode))
             return null;
 
         string prefix = stem.substring (0, region_sep);
@@ -96,31 +113,40 @@ namespace SubtitleLanguageGuesser {
 
         string language = normalize_language_guess_token (
             language_sep >= 0 ? prefix.substring (language_sep + 1) : prefix);
-        if (language.length != 2 || !is_known_language_code (language, force_language_fallback))
+        if (language.length != 2 || !is_known_language_code (language, lookup_mode))
             return null;
 
         return language;
     }
 
-    private string? find_previous_language_token (string[] tokens,
+    private string? find_previous_language_token (GuessToken[] tokens,
                                                   int start_index,
-                                                  bool force_language_fallback,
-                                                  bool force_region_fallback) {
+                                                  LookupMode lookup_mode) {
         for (int i = start_index; i >= 0; i--) {
-            string raw = tokens[i];
-            string normalized = normalize_language_guess_token (raw);
-            if (normalized.length == 0)
+            GuessToken token = tokens[i];
+            if (token.normalized.length == 0)
                 continue;
 
+            string? region_language = try_resolve_region_suffix (tokens, i, lookup_mode);
+            if (region_language != null)
+                return region_language;
+
+            string? script_language = try_resolve_script_pair (tokens, i, lookup_mode);
+            if (script_language != null)
+                return script_language;
+
             switch (classify_token (
-                raw, normalized, force_language_fallback, force_region_fallback)) {
+                token.raw,
+                token.normalized,
+                lookup_mode)) {
                 case TokenKind.LANGUAGE:
                 case TokenKind.AMBIGUOUS_LANGUAGE:
-                    return normalized;
-                case TokenKind.REGION:
+                    return token.normalized;
+                case TokenKind.SCRIPT:
                 case TokenKind.SUBTITLE_TAG:
                 case TokenKind.BLOCKED_CODE:
                     continue;
+                case TokenKind.REGION:
                 case TokenKind.UNKNOWN:
                 default:
                     break;
@@ -132,21 +158,91 @@ namespace SubtitleLanguageGuesser {
         return null;
     }
 
-    private string[] split_language_guess_tokens (string stem) {
-        string[] tokens = {};
+    private string? try_resolve_region_suffix (GuessToken[] tokens,
+                                               int region_index,
+                                               LookupMode lookup_mode) {
+        string? locale_language = try_resolve_locale_pair (tokens, region_index, lookup_mode);
+        if (locale_language != null)
+            return locale_language;
+
+        if (region_index <= 1)
+            return null;
+
+        GuessToken region_token = tokens[region_index];
+        if ((region_token.separator_before != '-' && region_token.separator_before != '_')
+            || !is_known_region_code (region_token.normalized, lookup_mode)) {
+            return null;
+        }
+
+        return try_resolve_script_pair (tokens, region_index - 1, lookup_mode);
+    }
+
+    private string? try_resolve_locale_pair (GuessToken[] tokens,
+                                             int region_index,
+                                             LookupMode lookup_mode) {
+        if (region_index <= 0)
+            return null;
+
+        GuessToken region_token = tokens[region_index];
+        if ((region_token.separator_before != '-' && region_token.separator_before != '_')
+            || !is_known_region_code (region_token.normalized, lookup_mode)) {
+            return null;
+        }
+
+        GuessToken language_token = tokens[region_index - 1];
+        if (language_token.normalized.length != 2
+            || !is_known_language_code (language_token.normalized, lookup_mode)) {
+            return null;
+        }
+
+        return language_token.normalized;
+    }
+
+    private string? try_resolve_script_pair (GuessToken[] tokens,
+                                             int script_index,
+                                             LookupMode lookup_mode) {
+        if (script_index <= 0)
+            return null;
+
+        GuessToken script_token = tokens[script_index];
+        if ((script_token.separator_before != '-' && script_token.separator_before != '_')
+            || !is_known_script_code (script_token.normalized, lookup_mode)) {
+            return null;
+        }
+
+        GuessToken language_token = tokens[script_index - 1];
+        if (language_token.normalized.length != 2
+            || !is_known_language_code (language_token.normalized, lookup_mode)) {
+            return null;
+        }
+
+        return language_token.normalized;
+    }
+
+    private GuessToken[] split_language_guess_tokens (string stem) {
+        GuessToken[] tokens = {};
         int token_start = 0;
+        char separator_before = '\0';
 
         for (int i = 0; i <= stem.length; i++) {
             bool at_end = (i == stem.length);
+            char current_char = at_end ? '\0' : stem[i];
             bool is_separator = !at_end
-                && (stem[i] == '.' || stem[i] == '_' || stem[i] == '-');
+                && (current_char == '.' || current_char == '_' || current_char == '-');
             if (!at_end && !is_separator)
                 continue;
 
-            if (i > token_start)
-                tokens += stem.substring (token_start, i - token_start);
+            if (i > token_start) {
+                string raw = stem.substring (token_start, i - token_start);
+                tokens += GuessToken (
+                    raw,
+                    normalize_language_guess_token (raw),
+                    separator_before
+                );
+            }
 
             token_start = i + 1;
+            separator_before = current_char;
         }
 
         return tokens;
@@ -156,7 +252,7 @@ namespace SubtitleLanguageGuesser {
         return token.strip ().down ();
     }
 
-    private bool is_known_language_code (string code, bool force_fallback) {
+    private bool is_known_language_code (string code, LookupMode lookup_mode) {
         string normalized = normalize_language_guess_token (code);
         if (normalized.length < 2 || normalized.length > 3)
             return false;
@@ -167,12 +263,20 @@ namespace SubtitleLanguageGuesser {
                 return false;
         }
 
-        return get_known_language_codes (force_fallback).contains (normalized);
+        return get_known_language_codes (lookup_mode).contains (normalized);
     }
 
-    private bool is_known_region_code (string code, bool force_fallback) {
+    private bool is_known_region_code (string code, LookupMode lookup_mode) {
         string normalized = normalize_language_guess_token (code);
-        if (normalized.length != 2)
+        if (!is_region_code_format (normalized))
+            return false;
+
+        return get_known_region_codes (lookup_mode).contains (normalized);
+    }
+
+    private bool is_known_script_code (string code, LookupMode lookup_mode) {
+        string normalized = normalize_language_guess_token (code);
+        if (normalized.length != 4)
             return false;
 
         for (int i = 0; i < normalized.length; i++) {
@@ -181,13 +285,12 @@ namespace SubtitleLanguageGuesser {
                 return false;
         }
 
-        return get_known_region_codes (force_fallback).contains (normalized);
+        return get_known_script_codes (lookup_mode).contains (normalized);
     }
 
     private TokenKind classify_token (string raw_token,
                                       string normalized_token,
-                                      bool force_language_fallback,
-                                      bool force_region_fallback) {
+                                      LookupMode lookup_mode) {
         if (normalized_token.length == 0)
             return TokenKind.UNKNOWN;
         if (is_non_language_subtitle_tag (normalized_token))
@@ -195,12 +298,15 @@ namespace SubtitleLanguageGuesser {
         if (is_blocked_language_code (normalized_token))
             return TokenKind.BLOCKED_CODE;
         if (is_ambiguous_language_tag (normalized_token)
-            && is_known_language_code (normalized_token, force_language_fallback))
+            && is_known_language_code (normalized_token, lookup_mode))
             return TokenKind.AMBIGUOUS_LANGUAGE;
-        if (is_known_language_code (normalized_token, force_language_fallback))
+        if (is_known_language_code (normalized_token, lookup_mode))
             return TokenKind.LANGUAGE;
+        if ((raw_token.length == 4 || normalized_token.length == 4)
+            && is_known_script_code (normalized_token, lookup_mode))
+            return TokenKind.SCRIPT;
         if (is_region_suffix_token (raw_token)
-            && is_known_region_code (normalized_token, force_region_fallback))
+            && is_known_region_code (normalized_token, lookup_mode))
             return TokenKind.REGION;
         return TokenKind.UNKNOWN;
     }
@@ -260,20 +366,35 @@ namespace SubtitleLanguageGuesser {
     }
 
     private bool is_region_suffix_token (string token) {
-        if (token.length != 2)
-            return false;
-
-        for (int i = 0; i < token.length; i++) {
-            char c = token[i];
-            if ((c < 'A' || c > 'Z') && (c < 'a' || c > 'z'))
-                return false;
-        }
-
-        return true;
+        return is_region_code_format (token);
     }
 
-    private HashTable<string, bool> get_known_language_codes (bool force_fallback) {
-        if (force_fallback) {
+    private bool is_region_code_format (string token) {
+        if (token.length == 2) {
+            for (int i = 0; i < token.length; i++) {
+                char c = token[i];
+                if ((c < 'A' || c > 'Z') && (c < 'a' || c > 'z'))
+                    return false;
+            }
+
+            return true;
+        }
+
+        if (token.length == 3) {
+            for (int i = 0; i < token.length; i++) {
+                char c = token[i];
+                if (c < '0' || c > '9')
+                    return false;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private HashTable<string, bool> get_known_language_codes (LookupMode lookup_mode) {
+        if (lookup_mode == LookupMode.FORCE_FALLBACK) {
             if (fallback_language_codes == null) {
                 fallback_language_codes = new HashTable<string, bool> (str_hash, str_equal);
                 seed_fallback_language_codes (fallback_language_codes);
@@ -294,8 +415,30 @@ namespace SubtitleLanguageGuesser {
         return known_language_codes;
     }
 
-    private HashTable<string, bool> get_known_region_codes (bool force_fallback) {
-        if (force_fallback) {
+    private HashTable<string, bool> get_known_script_codes (LookupMode lookup_mode) {
+        if (lookup_mode == LookupMode.FORCE_FALLBACK) {
+            if (fallback_script_codes == null) {
+                fallback_script_codes = new HashTable<string, bool> (str_hash, str_equal);
+                seed_fallback_script_codes (fallback_script_codes);
+            }
+            return fallback_script_codes;
+        }
+
+        if (known_script_codes == null) {
+            known_script_codes = new HashTable<string, bool> (str_hash, str_equal);
+
+            bool loaded = load_script_codes_from_json (
+                "/usr/share/iso-codes/json/iso_15924.json", "15924", known_script_codes);
+
+            if (!loaded)
+                seed_fallback_script_codes (known_script_codes);
+        }
+
+        return known_script_codes;
+    }
+
+    private HashTable<string, bool> get_known_region_codes (LookupMode lookup_mode) {
+        if (lookup_mode == LookupMode.FORCE_FALLBACK) {
             if (fallback_region_codes == null) {
                 fallback_region_codes = new HashTable<string, bool> (str_hash, str_equal);
                 seed_fallback_region_codes (fallback_region_codes);
@@ -354,6 +497,45 @@ namespace SubtitleLanguageGuesser {
         }
     }
 
+    private bool load_script_codes_from_json (string path,
+                                              string array_name,
+                                              HashTable<string, bool> table) {
+        try {
+            string json_text;
+            size_t json_length;
+            FileUtils.get_contents (path, out json_text, out json_length);
+
+            var parser = new Json.Parser ();
+            parser.load_from_data (json_text);
+
+            Json.Node? root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT)
+                return false;
+
+            Json.Object root_obj = root.get_object ();
+            if (!root_obj.has_member (array_name))
+                return false;
+
+            Json.Array codes = root_obj.get_array_member (array_name);
+            for (uint i = 0; i < codes.get_length (); i++) {
+                Json.Object? entry = codes.get_object_element (i);
+                if (entry == null)
+                    continue;
+
+                string alpha_4 = normalize_language_guess_token (
+                    entry.get_string_member_with_default ("alpha_4", ""));
+                if (alpha_4.length == 4)
+                    table.insert (alpha_4, true);
+            }
+
+            return table.size () > 0;
+        } catch (Error e) {
+            warning ("SubtitleLanguageGuesser: Failed to load ISO 15924 codes from %s: %s",
+                path, e.message);
+            return false;
+        }
+    }
+
     private bool load_region_codes_from_json (string path,
                                               string array_name,
                                               HashTable<string, bool> table) {
@@ -383,8 +565,13 @@ namespace SubtitleLanguageGuesser {
                     entry.get_string_member_with_default ("alpha_2", ""));
                 if (alpha_2.length == 2)
                     table.insert (alpha_2, true);
+
+                string numeric = entry.get_string_member_with_default ("numeric", "").strip ();
+                if (numeric.length == 3 && is_region_code_format (numeric))
+                    table.insert (numeric, true);
             }
 
+            seed_common_numeric_region_codes (table);
             return table.size () > 0;
         } catch (Error e) {
             warning ("SubtitleLanguageGuesser: Failed to load ISO 3166 codes from %s: %s",
@@ -514,6 +701,30 @@ namespace SubtitleLanguageGuesser {
             "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tv", "tw",
             "tz", "ua", "ug", "um", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi",
             "vn", "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw"
+        };
+
+        foreach (unowned string fallback_code in fallback_codes)
+            table.insert (fallback_code, true);
+
+        seed_common_numeric_region_codes (table);
+    }
+
+    private void seed_common_numeric_region_codes (HashTable<string, bool> table) {
+        string[] fallback_codes = {
+            "001", "002", "003", "005", "009", "011", "013", "014", "015", "017",
+            "018", "019", "021", "029", "030", "034", "035", "039", "053", "054",
+            "057", "061", "142", "143", "145", "150", "151", "154", "155", "202",
+            "419"
+        };
+
+        foreach (unowned string fallback_code in fallback_codes)
+            table.insert (fallback_code, true);
+    }
+
+    private void seed_fallback_script_codes (HashTable<string, bool> table) {
+        string[] fallback_codes = {
+            "arab", "beng", "cyrl", "deva", "grek", "gujr", "guru",
+            "hans", "hant", "hebr", "jpan", "kore", "latn", "taml", "thai"
         };
 
         foreach (unowned string fallback_code in fallback_codes)
