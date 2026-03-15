@@ -72,6 +72,8 @@ public class SubtitlesTab : Box {
     // ── Drag-and-drop state ──────────────────────────────────────────────────
     private int _drag_from_detected = -1;
     private int _drag_from_added    = -1;
+    private const string DRAG_ORIGIN_DETECTED = "detected";
+    private const string DRAG_ORIGIN_ADDED    = "added";
 
     // ── Dynamic sections (rebuilt when data changes) ─────────────────────────
     private Box detected_section;
@@ -190,21 +192,33 @@ public class SubtitlesTab : Box {
             _drag_from_detected = drag_idx;
             _drag_from_added = -1;
             var val = Value (typeof (string));
-            val.set_string ("detected");
+            val.set_string (DRAG_ORIGIN_DETECTED);
             return new Gdk.ContentProvider.for_value (val);
         });
         drag_source.drag_begin.connect ((source, drag) => {
             var paintable = new WidgetPaintable (expander);
             source.set_icon (paintable, 0, 0);
         });
+        drag_source.drag_cancel.connect ((source, drag, reason) => {
+            clear_drag_state ();
+            return false;
+        });
+        drag_source.drag_end.connect ((source, drag, delete_data) => {
+            clear_drag_state ();
+        });
         expander.add_controller (drag_source);
 
         var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
         drop_target.drop.connect ((value, x, y) => {
+            string? drag_origin = value.get_string ();
+            if (drag_origin != DRAG_ORIGIN_DETECTED) {
+                clear_drag_state ();
+                return false;
+            }
             if (_drag_from_detected >= 0 && _drag_from_detected != drag_idx) {
                 reorder_detected (_drag_from_detected, drag_idx);
             }
-            _drag_from_detected = -1;
+            clear_drag_state ();
             return true;
         });
         expander.add_controller (drop_target);
@@ -439,21 +453,33 @@ public class SubtitlesTab : Box {
             _drag_from_added = drag_idx;
             _drag_from_detected = -1;
             var val = Value (typeof (string));
-            val.set_string ("added");
+            val.set_string (DRAG_ORIGIN_ADDED);
             return new Gdk.ContentProvider.for_value (val);
         });
         drag_source.drag_begin.connect ((source, drag) => {
             var paintable = new WidgetPaintable (expander);
             source.set_icon (paintable, 0, 0);
         });
+        drag_source.drag_cancel.connect ((source, drag, reason) => {
+            clear_drag_state ();
+            return false;
+        });
+        drag_source.drag_end.connect ((source, drag, delete_data) => {
+            clear_drag_state ();
+        });
         expander.add_controller (drag_source);
 
         var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
         drop_target.drop.connect ((value, x, y) => {
+            string? drag_origin = value.get_string ();
+            if (drag_origin != DRAG_ORIGIN_ADDED) {
+                clear_drag_state ();
+                return false;
+            }
             if (_drag_from_added >= 0 && _drag_from_added != drag_idx) {
                 reorder_added (_drag_from_added, drag_idx);
             }
-            _drag_from_added = -1;
+            clear_drag_state ();
             return true;
         });
         expander.add_controller (drop_target);
@@ -1094,7 +1120,7 @@ public class SubtitlesTab : Box {
 
                     var s = new ExternalSubtitle ();
                     s.file_path  = path;
-                    s.language   = guess_language (path);
+                    s.language   = SubtitleLanguageGuesser.guess_from_path (path);
                     s.title      = "";
                     s.is_default = false;
                     s.is_forced  = false;
@@ -1605,34 +1631,17 @@ public class SubtitlesTab : Box {
         }
     }
 
+    private void clear_drag_state () {
+        _drag_from_detected = -1;
+        _drag_from_added = -1;
+    }
+
     /**
      * Guess language from filename patterns:
      *   movie.eng.srt → eng
      *   movie_en.srt  → en
      *   movie-jpn.srt → jpn
      */
-    private string guess_language (string path) {
-        string bn = Path.get_basename (path);
-        int dot = bn.last_index_of_char ('.');
-        if (dot <= 0) return "und";
-        string stem = bn.substring (0, dot);
-
-        // Dot-separated: movie.eng.srt
-        int pd = stem.last_index_of_char ('.');
-        if (pd >= 0 && pd < stem.length - 1) {
-            string m = stem.substring (pd + 1).down ();
-            if (m.length >= 2 && m.length <= 3) return m;
-        }
-
-        // Underscore/hyphen: movie_eng.srt
-        int sep = int.max (stem.last_index_of_char ('_'), stem.last_index_of_char ('-'));
-        if (sep >= 0 && sep < stem.length - 1) {
-            string m = stem.substring (sep + 1).down ();
-            if (m.length >= 2 && m.length <= 3) return m;
-        }
-
-        return "und";
-    }
 
     private static string find_unique (string path) {
         if (!FileUtils.test (path, FileTest.EXISTS)) return path;

@@ -8,7 +8,7 @@ using Adw;
 public class AudioSettingsSnapshot : Object {
     public bool enabled = true;
     public string codec = AudioCodecName.COPY;
-    public int sample_rate_hz = 48000;
+    public int sample_rate_hz = 0;
     public int bitrate_kbps = 128;
     public string opus_vbr_mode = "Default";
     public bool opus_surround_fix = true;
@@ -27,6 +27,8 @@ public enum AudioProbeDisplayState {
 }
 
 public class AudioSettings : Object {
+    private const string SAMPLE_RATE_SOURCE = "Source";
+
     // ── Widgets ──────────────────────────────────────────────────────────────
     private Adw.PreferencesGroup group;
     private Box audio_status_header;
@@ -160,12 +162,18 @@ public class AudioSettings : Object {
         // ── Sample Rate ──────────────────────────────────────────────────────
         sample_rate_row = new Adw.ActionRow ();
         sample_rate_row.set_title ("Sample Rate");
-        sample_rate_row.set_subtitle ("48 kHz is standard for most content");
+        sample_rate_row.set_subtitle (
+            "Source preserves the input rate; choose a target only when resampling intentionally");
         sample_rate_combo = new DropDown (new StringList (
-            { "8 kHz", "12 kHz", "16 kHz", "24 kHz", "48 kHz" }
+            {
+                SAMPLE_RATE_SOURCE,
+                "8 kHz", "12 kHz", "16 kHz", "22.05 kHz", "24 kHz",
+                "32 kHz", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz",
+                "176.4 kHz", "192 kHz"
+            }
         ), null);
         sample_rate_combo.set_valign (Align.CENTER);
-        sample_rate_combo.set_selected (4);
+        sample_rate_combo.set_selected (0);
         sample_rate_row.add_suffix (sample_rate_combo);
         sample_rate_row.set_visible (false);
         audio_expander.add_row (sample_rate_row);
@@ -494,9 +502,7 @@ public class AudioSettings : Object {
         snapshot.codec = get_codec_text ();
 
         string sr_text = get_dropdown_text (sample_rate_combo);
-        string sr_num = sr_text.replace (" kHz", "");
-        if (sr_num.length > 0)
-            snapshot.sample_rate_hz = int.parse (sr_num) * 1000;
+        snapshot.sample_rate_hz = parse_sample_rate_selection (sr_text);
 
         string br_text = get_dropdown_text (bitrate_combo);
         string br_num = br_text.replace (" kbps", "");
@@ -540,9 +546,11 @@ public class AudioSettings : Object {
         args += "-c:a";
         args += ffmpeg_codec;
 
-        // Sample rate
-        args += "-ar";
-        args += snapshot.sample_rate_hz.to_string ();
+        // Keep the source sample rate unless the user explicitly requested resampling.
+        if (snapshot.sample_rate_hz > 0) {
+            args += "-ar";
+            args += snapshot.sample_rate_hz.to_string ();
+        }
 
         bool use_quality_scale = codec_uses_quality_scale (
             codec,
@@ -608,7 +616,7 @@ public class AudioSettings : Object {
     public void reset_defaults () {
         set_audio_enabled (true);
         codec_combo.set_selected (0);
-        sample_rate_combo.set_selected (4);
+        sample_rate_combo.set_selected (0);
         bitrate_combo.set_selected (1);
         opus_vbr_combo.set_selected (0);
         opus_surround_fix.set_active (true);
@@ -631,5 +639,24 @@ public class AudioSettings : Object {
     private string get_dropdown_text (DropDown dropdown) {
         var item = dropdown.selected_item as StringObject;
         return item != null ? item.string : "";
+    }
+
+    private int parse_sample_rate_selection (string selection) {
+        switch (selection) {
+            case SAMPLE_RATE_SOURCE: return 0;
+            case "8 kHz": return 8000;
+            case "12 kHz": return 12000;
+            case "16 kHz": return 16000;
+            case "22.05 kHz": return 22050;
+            case "24 kHz": return 24000;
+            case "32 kHz": return 32000;
+            case "44.1 kHz": return 44100;
+            case "48 kHz": return 48000;
+            case "88.2 kHz": return 88200;
+            case "96 kHz": return 96000;
+            case "176.4 kHz": return 176400;
+            case "192 kHz": return 192000;
+            default: return 0;
+        }
     }
 }

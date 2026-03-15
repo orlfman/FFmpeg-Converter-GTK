@@ -594,17 +594,62 @@ namespace ConversionUtils {
      * Returns -1.0 for unparseable values.
      */
     public double parse_ffmpeg_timestamp (string time_str) {
-        if (time_str == "N/A" || time_str.length == 0) {
+        string cleaned = time_str.strip ();
+        if (cleaned == "N/A" || cleaned.length == 0) {
             return -1.0;
         }
-        string[] parts = time_str.split (":");
-        if (parts.length < 3) return -1.0;
 
-        int hours   = int.parse (parts[0]);
+        string[] parts = cleaned.split (":");
+        if (parts.length != 3) return -1.0;
+        if (!is_ascii_digits (parts[0]) || parts[1].length != 2 || !is_ascii_digits (parts[1]))
+            return -1.0;
+
+        string seconds_part = parts[2];
+        int frac_sep = seconds_part.index_of_char ('.');
+        string whole_seconds = (frac_sep >= 0) ? seconds_part.substring (0, frac_sep) : seconds_part;
+        string fraction = (frac_sep >= 0) ? seconds_part.substring (frac_sep + 1) : "";
+
+        if (whole_seconds.length != 2 || !is_ascii_digits (whole_seconds))
+            return -1.0;
+        if (frac_sep >= 0 && (fraction.length == 0 || !is_ascii_digits (fraction)))
+            return -1.0;
+
+        int hours = int.parse (parts[0]);
         int minutes = int.parse (parts[1]);
-        double seconds = double.parse (parts[2]);
+        int seconds_whole = int.parse (whole_seconds);
+        if (minutes >= 60 || seconds_whole >= 60)
+            return -1.0;
+
+        double seconds = (double) seconds_whole;
+        if (fraction.length > 0)
+            seconds += parse_fractional_seconds (fraction);
 
         return hours * 3600.0 + minutes * 60.0 + seconds;
+    }
+
+    private double parse_fractional_seconds (string fraction) {
+        double scale = 0.1;
+        double result = 0.0;
+
+        for (int i = 0; i < fraction.length; i++) {
+            int digit = fraction[i] - '0';
+            result += (double) digit * scale;
+            scale /= 10.0;
+        }
+
+        return result;
+    }
+
+    private bool is_ascii_digits (string text) {
+        if (text.length == 0)
+            return false;
+
+        for (int i = 0; i < text.length; i++) {
+            char c = text[i];
+            if (c < '0' || c > '9')
+                return false;
+        }
+        return true;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
