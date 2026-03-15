@@ -74,6 +74,9 @@ private void test_guess_language_non_language_suffixes () {
 
 private void test_guess_language_locale_suffix_hyphen_uppercase () {
     assert_guess ("movie.en-US.srt", "en");
+    assert_guess ("movie.en-GB.srt", "en");
+    assert_guess ("movie.en-CA.srt", "en");
+    assert_guess ("movie.en-AU.srt", "en");
     assert_guess ("movie-en-US.srt", "en");
     assert_guess ("movie.pt-BR.srt", "pt");
     assert_guess ("movie.en-001.srt", "en");
@@ -102,6 +105,9 @@ private void test_guess_language_trailing_language_token_wins () {
 private void test_guess_language_fallback_mode_matches_primary () {
     assert_guess_with_fallback ("movie.eng.srt", "eng");
     assert_guess_with_fallback ("movie.en-US.srt", "en");
+    assert_guess_with_fallback ("movie.en-GB.srt", "en");
+    assert_guess_with_fallback ("movie.en-CA.srt", "en");
+    assert_guess_with_fallback ("movie.en-AU.srt", "en");
     assert_guess_with_fallback ("movie-en-US.srt", "en");
     assert_guess_with_fallback ("movie.pt-BR.forced.srt", "pt");
     assert_guess_with_fallback ("movie.en-US.hi.srt", "en");
