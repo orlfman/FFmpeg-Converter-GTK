@@ -811,7 +811,22 @@ public class SubtitlesTab : Box {
 
     public void load_video (string file_path) {
         uint64 request_generation = ++probe_generation;
+        string previous_input_file = current_input_file;
+        bool input_changed = previous_input_file != file_path;
         current_input_file = file_path;
+
+        if (input_changed) {
+            detected_streams = new GenericArray<SubtitleStream> ();
+
+            if (added_subtitles.length > 0) {
+                added_subtitles = new GenericArray<ExternalSubtitle> ();
+                rebuild_add_group ();
+            }
+
+            rebuild_extract_combo ();
+            rebuild_burn_track_combo ();
+            update_ui_state ();
+        }
 
         if (file_path == "") {
             detected_streams = new GenericArray<SubtitleStream> ();
@@ -1014,6 +1029,8 @@ public class SubtitlesTab : Box {
      * Update the compatibility info row based on the selected container.
      */
     private void update_container_compat_info () {
+        bool editable = !_is_busy && !operation_locked;
+
         // In burn-in mode, show re-encode info instead of subtitle compat
         if (is_burn_in_mode ()) {
             container_compat_row.set_title ("Burn-In — Container from codec tab");
@@ -1025,7 +1042,7 @@ public class SubtitlesTab : Box {
             return;
         }
 
-        container_combo.set_sensitive (true);
+        container_combo.set_sensitive (editable);
         string ext = get_output_extension ();
         string title;
         string subtitle;
@@ -1596,14 +1613,31 @@ public class SubtitlesTab : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void update_ui_state () {
-        bool has_file    = (current_input_file.length > 0);
+        bool has_file = (current_input_file.length > 0);
         bool has_streams = (detected_streams.length > 0);
+        bool editable = !_is_busy && !operation_locked;
+        bool has_burn_tracks = (added_subtitles.length > 0);
 
-        extract_button.set_sensitive (has_file && has_streams && !_is_busy && !operation_locked);
-        extract_all_button.set_sensitive (has_file && has_streams && !_is_busy && !operation_locked);
+        if (!has_burn_tracks) {
+            for (int i = 0; i < detected_streams.length; i++) {
+                if (!detected_streams[i].marked_remove) {
+                    has_burn_tracks = true;
+                    break;
+                }
+            }
+        }
 
-        // Burn-in widgets
-        burn_codec_combo.set_sensitive (!_is_busy);
+        detected_section.set_sensitive (editable);
+        add_section.set_sensitive (editable);
+        extract_track_combo.set_sensitive (has_streams && editable);
+        extract_format_combo.set_sensitive (has_streams && editable);
+        extract_button.set_sensitive (has_file && has_streams && editable);
+        extract_all_button.set_sensitive (has_file && has_streams && editable);
+        mode_combo.set_sensitive (editable);
+        container_combo.set_sensitive (!is_burn_in_mode () && editable);
+        burn_in_group.set_sensitive (editable);
+        burn_track_combo.set_sensitive (has_burn_tracks && editable);
+        burn_codec_combo.set_sensitive (editable);
 
         // Refresh compat info in case the input file changed (affects "Source")
         if (container_compat_row != null)

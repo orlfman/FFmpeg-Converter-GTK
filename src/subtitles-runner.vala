@@ -26,6 +26,20 @@ public class SubtitleStream : Object {
         if (is_forced) parts.add ("[forced]");
         return string.joinv ("  ·  ", parts.data);
     }
+
+    public SubtitleStream snapshot () {
+        var copy = new SubtitleStream ();
+        copy.stream_index = stream_index;
+        copy.sub_index = sub_index;
+        copy.codec_name = codec_name;
+        copy.language = language;
+        copy.title = title;
+        copy.is_default = is_default;
+        copy.is_forced = is_forced;
+        copy.marked_remove = marked_remove;
+        copy.details_expanded = details_expanded;
+        return copy;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -61,6 +75,18 @@ public class ExternalSubtitle : Object {
         if (is_default) parts.add ("[default]");
         if (is_forced) parts.add ("[forced]");
         return string.joinv ("  ·  ", parts.data);
+    }
+
+    public ExternalSubtitle snapshot () {
+        var copy = new ExternalSubtitle ();
+        copy.file_path = file_path;
+        copy.language = language;
+        copy.title = title;
+        copy.is_default = is_default;
+        copy.is_forced = is_forced;
+        copy.is_bitmap = is_bitmap;
+        copy.details_expanded = details_expanded;
+        return copy;
     }
 }
 
@@ -338,7 +364,7 @@ public class SubtitlesRunner : Object {
         // Snapshot streams for background thread
         var snap = new GenericArray<SubtitleStream> ();
         for (int i = 0; i < streams.length; i++)
-            snap.add (streams[i]);
+            snap.add (streams[i].snapshot ());
 
         new Thread<void> ("subtitle-extract-all", () => {
             int success = 0;
@@ -474,11 +500,11 @@ public class SubtitlesRunner : Object {
         // Snapshot all data for the background thread
         var snap_existing = new GenericArray<SubtitleStream> ();
         for (int i = 0; i < existing_streams.length; i++)
-            snap_existing.add (existing_streams[i]);
+            snap_existing.add (existing_streams[i].snapshot ());
 
         var snap_added = new GenericArray<ExternalSubtitle> ();
         for (int i = 0; i < added_subs.length; i++)
-            snap_added.add (added_subs[i]);
+            snap_added.add (added_subs[i].snapshot ());
 
         var snap_order = new GenericArray<int> ();
         for (int i = 0; i < final_order.length; i++)

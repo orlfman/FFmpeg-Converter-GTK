@@ -40,10 +40,12 @@ private void test_guess_language_subtitle_tags () {
 private void test_guess_language_script_suffixes () {
     assert_guess ("movie.zh-Hant.srt", "zh");
     assert_guess ("movie.zh_Hant.srt", "zh");
+    assert_guess ("movie.zho-Hant.srt", "zho");
     assert_guess ("movie.sr-Latn.srt", "sr");
     assert_guess ("movie.sr_Latn.srt", "sr");
     assert_guess ("movie.zh-Hant-001.srt", "zh");
     assert_guess ("movie.zh-Hant-US.srt", "zh");
+    assert_guess ("movie.zho-Hant-US.srt", "zho");
     assert_guess ("movie.zh_Hant_US.srt", "zh");
     assert_guess ("movie.zh-Hans-419.srt", "zh");
     assert_guess ("movie.zh_Hans_419.srt", "zh");
@@ -74,11 +76,13 @@ private void test_guess_language_non_language_suffixes () {
 
 private void test_guess_language_locale_suffix_hyphen_uppercase () {
     assert_guess ("movie.en-US.srt", "en");
+    assert_guess ("movie.eng-US.srt", "eng");
     assert_guess ("movie.en-GB.srt", "en");
     assert_guess ("movie.en-CA.srt", "en");
     assert_guess ("movie.en-AU.srt", "en");
     assert_guess ("movie-en-US.srt", "en");
     assert_guess ("movie.pt-BR.srt", "pt");
+    assert_guess ("movie.por-BR.srt", "por");
     assert_guess ("movie.en-001.srt", "en");
     assert_guess ("movie.es-419.srt", "es");
 }
@@ -105,11 +109,13 @@ private void test_guess_language_trailing_language_token_wins () {
 private void test_guess_language_fallback_mode_matches_primary () {
     assert_guess_with_fallback ("movie.eng.srt", "eng");
     assert_guess_with_fallback ("movie.en-US.srt", "en");
+    assert_guess_with_fallback ("movie.eng-US.srt", "eng");
     assert_guess_with_fallback ("movie.en-GB.srt", "en");
     assert_guess_with_fallback ("movie.en-CA.srt", "en");
     assert_guess_with_fallback ("movie.en-AU.srt", "en");
     assert_guess_with_fallback ("movie-en-US.srt", "en");
     assert_guess_with_fallback ("movie.pt-BR.forced.srt", "pt");
+    assert_guess_with_fallback ("movie.por-BR.srt", "por");
     assert_guess_with_fallback ("movie.en-US.hi.srt", "en");
     assert_guess_with_fallback ("movie.en-001.srt", "en");
     assert_guess_with_fallback ("movie_en_001.srt", "en");
@@ -117,8 +123,10 @@ private void test_guess_language_fallback_mode_matches_primary () {
     assert_guess_with_fallback ("movie_es_419.srt", "es");
     assert_guess_with_fallback ("movie.zh-Hant.srt", "zh");
     assert_guess_with_fallback ("movie.zh_Hant.srt", "zh");
+    assert_guess_with_fallback ("movie.zho-Hant.srt", "zho");
     assert_guess_with_fallback ("movie.zh-Hant-001.srt", "zh");
     assert_guess_with_fallback ("movie.zh-Hant-US.srt", "zh");
+    assert_guess_with_fallback ("movie.zho-Hant-US.srt", "zho");
     assert_guess_with_fallback ("movie.zh_Hant_US.srt", "zh");
     assert_guess_with_fallback ("movie.zh-Hans-419.srt", "zh");
     assert_guess_with_fallback ("movie.zh_Hans_419.srt", "zh");

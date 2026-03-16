@@ -69,6 +69,10 @@ namespace SubtitleLanguageGuesser {
                                                 LookupMode lookup_mode) {
         int last_index = tokens.length - 1;
         GuessToken last_token = tokens[last_index];
+        string? hinted_region_language = try_resolve_hinted_region_suffix (
+            tokens, last_index, lookup_mode);
+        if (hinted_region_language != null)
+            return hinted_region_language;
 
         switch (classify_token (
             last_token.raw,
@@ -158,6 +162,19 @@ namespace SubtitleLanguageGuesser {
         return null;
     }
 
+    private string? try_resolve_hinted_region_suffix (GuessToken[] tokens,
+                                                      int region_index,
+                                                      LookupMode lookup_mode) {
+        if (region_index < 0 || region_index >= tokens.length)
+            return null;
+
+        GuessToken token = tokens[region_index];
+        if (!has_region_hint (token.raw))
+            return null;
+
+        return try_resolve_region_suffix (tokens, region_index, lookup_mode);
+    }
+
     private string? try_resolve_region_suffix (GuessToken[] tokens,
                                                int region_index,
                                                LookupMode lookup_mode) {
@@ -190,8 +207,7 @@ namespace SubtitleLanguageGuesser {
         }
 
         GuessToken language_token = tokens[region_index - 1];
-        if (language_token.normalized.length != 2
-            || !is_known_language_code (language_token.normalized, lookup_mode)) {
+        if (!is_known_language_code (language_token.normalized, lookup_mode)) {
             return null;
         }
 
@@ -211,8 +227,7 @@ namespace SubtitleLanguageGuesser {
         }
 
         GuessToken language_token = tokens[script_index - 1];
-        if (language_token.normalized.length != 2
-            || !is_known_language_code (language_token.normalized, lookup_mode)) {
+        if (!is_known_language_code (language_token.normalized, lookup_mode)) {
             return null;
         }
 
@@ -391,6 +406,22 @@ namespace SubtitleLanguageGuesser {
         }
 
         return false;
+    }
+
+    private bool has_region_hint (string token) {
+        bool saw_upper = false;
+
+        for (int i = 0; i < token.length; i++) {
+            char c = token[i];
+            if (c >= 'A' && c <= 'Z')
+                saw_upper = true;
+            else if (c < '0' || c > '9') {
+                if (c < 'a' || c > 'z')
+                    return false;
+            }
+        }
+
+        return saw_upper || is_region_code_format (token) && token.length == 3;
     }
 
     private HashTable<string, bool> get_known_language_codes (LookupMode lookup_mode) {
