@@ -149,7 +149,7 @@ public class Converter : Object {
             input_file, output_folder, builder, codec_tab, cancellable);
     }
 
-    public static string find_unique_path (string path) {
+    public static string? find_unique_path (string path) {
         return ConversionUtils.find_unique_path (path);
     }
 

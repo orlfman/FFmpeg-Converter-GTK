@@ -7,6 +7,8 @@ using GLib;
 
 namespace ConversionUtils {
     private const int ASCII_FORMAT_BUFFER_SIZE = 64;
+    private const int MAX_UNIQUE_PATH_ATTEMPTS = 10000;
+    private const int MAX_RANDOM_UNIQUE_PATH_ATTEMPTS = 256;
     private enum DirectoryStatus {
         DIRECTORY,
         MISSING,
@@ -482,8 +484,9 @@ namespace ConversionUtils {
 
         string result = sb.str;
 
-        // Strip leading dots — prevent hidden files on Linux
-        while (result.has_prefix (".")) {
+        // Strip leading dots and hyphens — prevent hidden files on Linux
+        // and avoid option-like filenames.
+        while (result.has_prefix (".") || result.has_prefix ("-")) {
             result = result.substring (1);
         }
 
@@ -504,50 +507,13 @@ namespace ConversionUtils {
         return result;
     }
 
-    public string find_unique_path (string path) {
-        if (!FileUtils.test (path, FileTest.EXISTS))
-            return path;
-
-        string dir = Path.get_dirname (path);
-        string basename = Path.get_basename (path);
-
-        int dot_pos = basename.last_index_of_char ('.');
-        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
-        string ext  = (dot_pos > 0) ? basename.substring (dot_pos) : "";
-
-        int counter = 1;
-        string candidate = path;
-        do {
-            candidate = Path.build_filename (dir, @"$stem-$counter$ext");
-            counter++;
-        } while (FileUtils.test (candidate, FileTest.EXISTS));
-
-        return candidate;
+    public string? find_unique_path (string path) {
+        return find_unique_path_internal (path, null);
     }
 
-    public string find_unique_path_with_reserved (string path,
-                                                  HashTable<string, bool>? reserved_paths = null) {
-        bool reserved_collision = reserved_paths != null && reserved_paths.contains (path);
-        if (!reserved_collision && !FileUtils.test (path, FileTest.EXISTS)) {
-            return path;
-        }
-
-        string dir = Path.get_dirname (path);
-        string basename = Path.get_basename (path);
-
-        int dot_pos = basename.last_index_of_char ('.');
-        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
-        string ext  = (dot_pos > 0) ? basename.substring (dot_pos) : "";
-
-        int counter = 1;
-        string candidate = path;
-        do {
-            candidate = Path.build_filename (dir, @"$stem-$counter$ext");
-            counter++;
-        } while (FileUtils.test (candidate, FileTest.EXISTS)
-                 || (reserved_paths != null && reserved_paths.contains (candidate)));
-
-        return candidate;
+    public string? find_unique_path_with_reserved (string path,
+                                                   HashTable<string, bool>? reserved_paths = null) {
+        return find_unique_path_internal (path, reserved_paths);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -558,21 +524,31 @@ namespace ConversionUtils {
         string dir = Path.get_dirname (path);
         string name = Path.get_basename (path);
 
-        string safe = name
-            .replace ("：", "_")
-            .replace ("？", "_")
-            .replace ("*", "_")
-            .replace ("\"", "_")
-            .replace ("<", "_")
-            .replace (">", "_")
-            .replace ("|", "_")
-            .replace ("/", "_")
-            .replace ("\\", "_")
-            .replace (":", "_");
-
-        safe = safe.strip ().replace (". ", ".").replace (" .", ".");
+        string safe = sanitize_file_component (name);
+        safe = safe.replace (". ", ".").replace (" .", ".");
+        if (safe.length == 0)
+            safe = "untitled";
 
         return Path.build_filename (dir, safe);
+    }
+
+    public bool try_parse_non_negative_int_strict (string text, out int value) {
+        value = 0;
+        if (text.length == 0)
+            return false;
+
+        for (int i = 0; i < text.length; i++) {
+            char c = text[i];
+            if (c < '0' || c > '9')
+                return false;
+
+            int digit = c - '0';
+            if (value > (int.MAX - digit) / 10)
+                return false;
+            value = (value * 10) + digit;
+        }
+
+        return true;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -601,7 +577,12 @@ namespace ConversionUtils {
 
         string[] parts = cleaned.split (":");
         if (parts.length != 3) return -1.0;
-        if (!is_ascii_digits (parts[0]) || parts[1].length != 2 || !is_ascii_digits (parts[1]))
+        int hours = 0;
+        int minutes = 0;
+        int seconds_whole = 0;
+        if (!try_parse_non_negative_int_strict (parts[0], out hours))
+            return -1.0;
+        if (parts[1].length != 2 || !try_parse_non_negative_int_strict (parts[1], out minutes))
             return -1.0;
 
         string seconds_part = parts[2];
@@ -609,14 +590,12 @@ namespace ConversionUtils {
         string whole_seconds = (frac_sep >= 0) ? seconds_part.substring (0, frac_sep) : seconds_part;
         string fraction = (frac_sep >= 0) ? seconds_part.substring (frac_sep + 1) : "";
 
-        if (whole_seconds.length != 2 || !is_ascii_digits (whole_seconds))
+        if (whole_seconds.length != 2
+            || !try_parse_non_negative_int_strict (whole_seconds, out seconds_whole))
             return -1.0;
         if (frac_sep >= 0 && (fraction.length == 0 || !is_ascii_digits (fraction)))
             return -1.0;
 
-        int hours = int.parse (parts[0]);
-        int minutes = int.parse (parts[1]);
-        int seconds_whole = int.parse (whole_seconds);
         if (minutes >= 60 || seconds_whole >= 60)
             return -1.0;
 
@@ -696,19 +675,7 @@ namespace ConversionUtils {
      * Replaces filesystem-unsafe characters with underscores.
      */
     public string sanitize_segment_name (string name) {
-        var sb = new StringBuilder ();
-        unichar c;
-        int i = 0;
-        while (name.get_next_char (ref i, out c)) {
-            if (c == '/' || c == '\\' || c == ':' || c == '*'
-                || c == '?' || c == '"' || c == '<' || c == '>'
-                || c == '|' || c == '\0') {
-                sb.append_c ('_');
-            } else {
-                sb.append_unichar (c);
-            }
-        }
-        string result = sb.str.strip ();
+        string result = sanitize_file_component (name);
         while (result.has_suffix (".")) {
             result = result.substring (0, result.length - 1);
         }
@@ -719,8 +686,84 @@ namespace ConversionUtils {
      * Zero-pad a segment number to 3 digits (001, 012, 123).
      */
     public string pad_segment_number (int n) {
+        if (n <= 0)
+            return "000";
         if (n < 10) return "00" + n.to_string ();
         if (n < 100) return "0" + n.to_string ();
         return n.to_string ();
+    }
+
+    private string? find_unique_path_internal (string path,
+                                               HashTable<string, bool>? reserved_paths) {
+        if (!path_conflicts (path, reserved_paths))
+            return path;
+
+        string dir = Path.get_dirname (path);
+        string basename = Path.get_basename (path);
+
+        int dot_pos = basename.last_index_of_char ('.');
+        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+        string ext  = (dot_pos > 0) ? basename.substring (dot_pos) : "";
+
+        for (int counter = 1; counter <= MAX_UNIQUE_PATH_ATTEMPTS; counter++) {
+            string candidate = build_unique_path_candidate (
+                dir, stem, ext, counter.to_string ());
+            if (!path_conflicts (candidate, reserved_paths))
+                return candidate;
+        }
+
+        warning ("ConversionUtils: Exhausted %d numeric suffixes for %s; falling back to randomized path",
+                 MAX_UNIQUE_PATH_ATTEMPTS, path);
+
+        string seed = Uuid.string_random ();
+        for (uint64 attempt = 0; attempt < MAX_RANDOM_UNIQUE_PATH_ATTEMPTS; attempt++) {
+            string suffix = (attempt == 0) ? seed : @"$seed-$attempt";
+            string candidate = build_unique_path_candidate (dir, stem, ext, suffix);
+            if (!path_conflicts (candidate, reserved_paths))
+                return candidate;
+        }
+
+        warning ("ConversionUtils: Could not derive a unique output path for %s after %d randomized attempts",
+                 path, MAX_RANDOM_UNIQUE_PATH_ATTEMPTS);
+        return null;
+    }
+
+    private bool path_conflicts (string path,
+                                 HashTable<string, bool>? reserved_paths = null) {
+        return FileUtils.test (path, FileTest.EXISTS)
+            || (reserved_paths != null && reserved_paths.contains (path));
+    }
+
+    private string build_unique_path_candidate (string dir,
+                                                string stem,
+                                                string ext,
+                                                string suffix) {
+        return Path.build_filename (dir, @"$stem-$suffix$ext");
+    }
+
+    private string sanitize_file_component (string name) {
+        var sb = new StringBuilder ();
+        unichar c;
+        int i = 0;
+        while (name.get_next_char (ref i, out c)) {
+            if (is_disallowed_filename_char (c)) {
+                sb.append_c ('_');
+            } else {
+                sb.append_unichar (c);
+            }
+        }
+        string result = sb.str.strip ();
+        while (result.has_prefix (".") || result.has_prefix ("-")) {
+            result = result.substring (1);
+        }
+        return result;
+    }
+
+    private bool is_disallowed_filename_char (unichar c) {
+        return c == '\0' || c == '\n' || c == '\r' || c == '\t'
+            || c == '/' || c == '\\' || c == ':' || c == '*'
+            || c == '?' || c == '"' || c == '<' || c == '>'
+            || c == '|' || c == '：' || c == '？'
+            || c < 0x20 || c == 0x7f;
     }
 }

@@ -437,8 +437,13 @@ public class TrimTab : Box, ICodecTab {
         runner.progress_bar    = progress_bar;
         runner.console_tab     = console_tab;
 
-        GenericArray<string> resolved_outputs = resolve_output_paths (
+        GenericArray<string>? resolved_outputs = resolve_output_paths (
             input_file, output_folder, segs, output_policy);
+        if (resolved_outputs == null) {
+            status_label.set_text ("Could not derive unique output path(s).");
+            fail_operation (operation_id);
+            return;
+        }
         if (resolved_outputs.length > 0) {
             runner.primary_output_path = resolved_outputs[0];
         }
@@ -908,22 +913,25 @@ public class TrimTab : Box, ICodecTab {
         return @"$name_no_ext-segment-$num$out_ext";
     }
 
-    private string resolve_output_path_conflict (string path,
-                                                 TrimOutputConflictPolicy output_policy,
-                                                 HashTable<string, bool> reserved_paths) {
+    private string? resolve_output_path_conflict (string path,
+                                                  TrimOutputConflictPolicy output_policy,
+                                                  HashTable<string, bool> reserved_paths) {
         string resolved = path;
         if (output_policy == TrimOutputConflictPolicy.AUTO_RENAME) {
-            resolved = ConversionUtils.find_unique_path_with_reserved (path, reserved_paths);
+            string? unique = ConversionUtils.find_unique_path_with_reserved (path, reserved_paths);
+            if (unique == null || unique.length == 0)
+                return null;
+            resolved = unique;
         }
 
         reserved_paths.set (resolved, true);
         return resolved;
     }
 
-    private GenericArray<string> resolve_output_paths (string input_file,
-                                                       string output_folder,
-                                                       GenericArray<TrimSegment> segs,
-                                                       TrimOutputConflictPolicy output_policy) {
+    private GenericArray<string>? resolve_output_paths (string input_file,
+                                                        string output_folder,
+                                                        GenericArray<TrimSegment> segs,
+                                                        TrimOutputConflictPolicy output_policy) {
         var resolved_paths = new GenericArray<string> ();
 
         string basename = Path.get_basename (input_file);
@@ -944,16 +952,22 @@ public class TrimTab : Box, ICodecTab {
                 string seg_name = build_separate_output_name (
                     name_no_ext, out_ext, seg, i, used_names);
                 string seg_path = Path.build_filename (out_dir, seg_name);
-                resolved_paths.add (resolve_output_path_conflict (
-                    seg_path, output_policy, reserved_paths));
+                string? resolved = resolve_output_path_conflict (
+                    seg_path, output_policy, reserved_paths);
+                if (resolved == null || resolved.length == 0)
+                    return null;
+                resolved_paths.add (resolved);
             }
             return resolved_paths;
         }
 
         string combined_path = Path.build_filename (
             out_dir, @"$name_no_ext$(get_output_suffix ())$out_ext");
-        resolved_paths.add (resolve_output_path_conflict (
-            combined_path, output_policy, reserved_paths));
+        string? resolved = resolve_output_path_conflict (
+            combined_path, output_policy, reserved_paths);
+        if (resolved == null || resolved.length == 0)
+            return null;
+        resolved_paths.add (resolved);
         return resolved_paths;
     }
 
@@ -963,12 +977,14 @@ public class TrimTab : Box, ICodecTab {
      * Handles both combined output and export-separate modes.
      */
     public string get_expected_output_path (string input_file, string output_folder) {
-        GenericArray<string> expected_paths = resolve_output_paths (
+        GenericArray<string>? expected_paths = resolve_output_paths (
             input_file,
             output_folder,
             segments,
             TrimOutputConflictPolicy.OVERWRITE
         );
+        if (expected_paths == null)
+            return "";
 
         for (int i = 0; i < expected_paths.length; i++) {
             if (FileUtils.test (expected_paths[i], FileTest.EXISTS)) {

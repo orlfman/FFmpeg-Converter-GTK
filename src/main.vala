@@ -925,7 +925,12 @@ public class MainWindow : Adw.ApplicationWindow {
                     if (!is_pending_operation (ActiveOperation.CONVERTING, operation_id)) {
                         return;
                     }
-                    string unique = Converter.find_unique_path (output_file);
+                    string? unique = Converter.find_unique_path (output_file);
+                    if (unique == null || unique.length == 0) {
+                        status_area.set_status ("⚠️ Could not derive a unique output filename.");
+                        release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
+                        return;
+                    }
                     begin_conversion (input_file, unique, codec_tab, builder, operation_id);
                 },
                 () => {

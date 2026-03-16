@@ -959,15 +959,27 @@ public class GeneralTab : Box {
     }
 
     /**
-     * Validates a crop string in the format "w:h:x:y" where w and h must be
-     * positive integers.
+     * Validates a crop string in the format "w:h:x:y".
+     * Width/height must be positive integers and x/y must be non-negative
+     * integers with no trailing junk accepted.
      */
     private bool is_valid_crop_value (string crop) {
         string[] parts = crop.split (":");
-        if (parts.length != 4) return false;
-        int w = int.parse (parts[0]);
-        int h = int.parse (parts[1]);
-        return w > 0 && h > 0;
+        if (parts.length != 4)
+            return false;
+
+        int w = 0;
+        int h = 0;
+        int x = 0;
+        int y = 0;
+        if (!ConversionUtils.try_parse_non_negative_int_strict (parts[0], out w)
+            || !ConversionUtils.try_parse_non_negative_int_strict (parts[1], out h)
+            || !ConversionUtils.try_parse_non_negative_int_strict (parts[2], out x)
+            || !ConversionUtils.try_parse_non_negative_int_strict (parts[3], out y)) {
+            return false;
+        }
+
+        return w > 0 && h > 0 && x >= 0 && y >= 0;
     }
 
     private string extract_crop_value (string line) {
