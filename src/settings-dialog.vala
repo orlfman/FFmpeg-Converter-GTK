@@ -40,6 +40,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.ComboRow name_mode_combo;
     private Adw.EntryRow custom_name_entry;
     private Adw.SwitchRow overwrite_switch;
+    private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
 
@@ -218,6 +219,23 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_group.add (overwrite_switch);
         overwrite_group.add (overwrite_warning_row);
         page.add (overwrite_group);
+
+        var compatibility_group = new Adw.PreferencesGroup ();
+        compatibility_group.set_title ("Audio Copy Verification");
+        compatibility_group.set_description (
+            "Optional compatibility checks for MP4 and WebM audio stream copy."
+        );
+
+        verify_unknown_audio_copy_switch = new Adw.SwitchRow ();
+        verify_unknown_audio_copy_switch.set_title (
+            "Verify Unknown Audio Copy Compatibility"
+        );
+        verify_unknown_audio_copy_switch.set_subtitle (
+            "When audio copy compatibility is unknown, run one final check before conversion. " +
+            "If incompatible, switch from Copy to a compatible encoder; if still unknown, stop instead of failing later."
+        );
+        compatibility_group.add (verify_unknown_audio_copy_switch);
+        page.add (compatibility_group);
 
         return page;
     }
@@ -1068,6 +1086,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
         custom_name_entry.set_text (s.output_custom_name);
         custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
         overwrite_switch.set_active (s.overwrite_enabled);
+        verify_unknown_audio_copy_switch.set_active (
+            s.verify_unknown_audio_copy_preflight
+        );
 
         // Explicitly initialize state that relies on notify signals,
         // because set_selected(0) on a fresh combo (already at 0) won't
@@ -1104,6 +1125,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.output_name_mode = index_to_mode (name_mode_combo.get_selected ());
         s.output_custom_name = custom_name_entry.get_text ().strip ();
         s.overwrite_enabled = overwrite_switch.get_active ();
+        s.verify_unknown_audio_copy_preflight =
+            verify_unknown_audio_copy_switch.get_active ();
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
         s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();

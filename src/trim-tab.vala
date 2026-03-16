@@ -300,18 +300,15 @@ public class TrimTab : Box, ICodecTab {
                                    ConsoleTab console_tab,
                                    uint64 operation_id,
                                    TrimOutputConflictPolicy output_policy = TrimOutputConflictPolicy.OVERWRITE) {
-        // Extract child widgets for internal use — TrimRunner still receives
-        // them individually, keeping its internals unchanged for now.
-        Label status_label = status_area.status_label;
         ProgressBar progress_bar = status_area.progress_bar;
 
         if (has_pending_or_active_export ()) {
-            status_label.set_text ("⚠️ An export is already running or being prepared.");
+            status_area.set_status ("⚠️ An export is already running or being prepared.");
             return false;
         }
 
         if (will_reencode_output () && selected_reencode_audio_probe_pending ()) {
-            status_label.set_text (
+            status_area.set_status (
                 "⏳ Checking source audio stream. Please wait a moment and try again.");
             return false;
         }
@@ -319,13 +316,13 @@ public class TrimTab : Box, ICodecTab {
         // For Chapter Split mode, build segments from selected chapters
         if (current_mode == Mode.CHAPTER_SPLIT) {
             if (input_file == null || input_file.strip () == "") {
-                status_label.set_text ("⚠️ Please select an input file first.");
+                status_area.set_status ("⚠️ Please select an input file first.");
                 return false;
             }
             // Build segments from selected chapters
             rebuild_chapter_segments ();
             if (segments.length == 0) {
-                status_label.set_text ("⚠️ No chapters selected — select at least one chapter to export.");
+                status_area.set_status ("⚠️ No chapters selected — select at least one chapter to export.");
                 return false;
             }
 
@@ -336,7 +333,7 @@ public class TrimTab : Box, ICodecTab {
 
             active_operation_id = operation_id;
             cancel_pending = false;
-            maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
+            maybe_smart_optimize_then_launch (input_file, output_folder, status_area,
                            progress_bar, console_tab, segs, false, operation_id,
                            output_policy);
             return true;
@@ -345,11 +342,11 @@ public class TrimTab : Box, ICodecTab {
         // For Crop Only mode, create a virtual full-video segment
         if (current_mode == Mode.CROP_ONLY) {
             if (input_file == null || input_file.strip () == "") {
-                status_label.set_text ("⚠️ Please select an input file first.");
+                status_area.set_status ("⚠️ Please select an input file first.");
                 return false;
             }
             if (global_crop_value.strip () == "") {
-                status_label.set_text ("⚠️ Draw a crop rectangle on the video first.");
+                status_area.set_status ("⚠️ Draw a crop rectangle on the video first.");
                 return false;
             }
             // Create one segment spanning the whole file
@@ -361,7 +358,7 @@ public class TrimTab : Box, ICodecTab {
 
             active_operation_id = operation_id;
             cancel_pending = false;
-            maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
+            maybe_smart_optimize_then_launch (input_file, output_folder, status_area,
                            progress_bar, console_tab, segs, true, operation_id,
                            output_policy);
             return true;
@@ -369,11 +366,11 @@ public class TrimTab : Box, ICodecTab {
 
         // Trim Only or Crop & Trim
         if (input_file == null || input_file.strip () == "") {
-            status_label.set_text ("⚠️ Please select an input file first.");
+            status_area.set_status ("⚠️ Please select an input file first.");
             return false;
         }
         if (segments.length == 0) {
-            status_label.set_text ("⚠️ Add at least one segment before exporting.");
+            status_area.set_status ("⚠️ Add at least one segment before exporting.");
             return false;
         }
 
@@ -404,7 +401,7 @@ public class TrimTab : Box, ICodecTab {
 
         active_operation_id = operation_id;
         cancel_pending = false;
-        maybe_smart_optimize_then_launch (input_file, output_folder, status_label,
+        maybe_smart_optimize_then_launch (input_file, output_folder, status_area,
                        progress_bar, console_tab, segs, any_crop, operation_id,
                        output_policy);
         return true;
@@ -412,7 +409,7 @@ public class TrimTab : Box, ICodecTab {
 
     private void launch_runner (string input_file,
                                 string output_folder,
-                                Label status_label,
+                                StatusArea status_area,
                                 ProgressBar progress_bar,
                                 ConsoleTab console_tab,
                                 GenericArray<TrimSegment> segs,
@@ -433,14 +430,14 @@ public class TrimTab : Box, ICodecTab {
         runner.export_separate = export_separate_switch.active;
         runner.video_width     = player.intrinsic_width;
         runner.video_height    = player.intrinsic_height;
-        runner.status_label    = status_label;
+        runner.status_area     = status_area;
         runner.progress_bar    = progress_bar;
         runner.console_tab     = console_tab;
 
         GenericArray<string>? resolved_outputs = resolve_output_paths (
             input_file, output_folder, segs, output_policy);
         if (resolved_outputs == null) {
-            status_label.set_text ("Could not derive unique output path(s).");
+            status_area.set_status ("Could not derive unique output path(s).");
             fail_operation (operation_id);
             return;
         }
@@ -556,7 +553,7 @@ public class TrimTab : Box, ICodecTab {
      */
     private void maybe_smart_optimize_then_launch (string input_file,
                                                     string output_folder,
-                                                    Label status_label,
+                                                    StatusArea status_area,
                                                     ProgressBar progress_bar,
                                                     ConsoleTab console_tab,
                                                     GenericArray<TrimSegment> segs,
@@ -567,11 +564,11 @@ public class TrimTab : Box, ICodecTab {
             && !copy_mode_switch.active
             && export_separate_switch.active) {
             run_smart_then_export.begin (
-                input_file, output_folder, status_label, progress_bar,
+                input_file, output_folder, status_area, progress_bar,
                 console_tab, segs, force_reencode, operation_id,
                 output_policy);
         } else {
-            launch_runner (input_file, output_folder, status_label,
+            launch_runner (input_file, output_folder, status_area,
                            progress_bar, console_tab, segs, force_reencode,
                            operation_id, output_policy);
         }
@@ -597,7 +594,7 @@ public class TrimTab : Box, ICodecTab {
      */
     private async void run_smart_then_export (string input_file,
                                                string output_folder,
-                                               Label status_label,
+                                               StatusArea status_area,
                                                ProgressBar progress_bar,
                                                ConsoleTab console_tab,
                                                GenericArray<TrimSegment> segs,
@@ -648,7 +645,7 @@ public class TrimTab : Box, ICodecTab {
         try {
             tmp_dir = DirUtils.make_tmp ("smart-opt-XXXXXX");
         } catch (Error e) {
-            status_label.set_text ("❌ Failed to create temp directory: " + e.message);
+            status_area.set_status ("❌ Failed to create temp directory: " + e.message);
             release_smart_cancel (cancel);
             fail_operation (operation_id);
             return;
@@ -658,7 +655,7 @@ public class TrimTab : Box, ICodecTab {
 
         for (int i = 0; i < segs.length; i++) {
             if (cancel.is_cancelled ()) {
-                status_label.set_text ("⏹️ Smart Optimizer cancelled.");
+                status_area.set_status ("⏹️ Smart Optimizer cancelled.");
                 cancelled = true;
                 break;
             }
@@ -668,7 +665,7 @@ public class TrimTab : Box, ICodecTab {
                 ? "\"%s\"".printf (seg.label)
                 : "Segment %d".printf (i + 1);
 
-            status_label.set_text ("🧠 Smart Optimizer: analyzing %s (%d/%d)…".printf (
+            status_area.set_status ("🧠 Smart Optimizer: analyzing %s (%d/%d)…".printf (
                 seg_name, i + 1, segs.length));
 
             // ── 1. Stream-copy segment to temp file ────────────────────────
@@ -747,7 +744,7 @@ public class TrimTab : Box, ICodecTab {
 
             } catch (IOError e) {
                 if (e is IOError.CANCELLED) {
-                    status_label.set_text ("⏹️ Smart Optimizer cancelled.");
+                    status_area.set_status ("⏹️ Smart Optimizer cancelled.");
                     cancelled = true;
                     FileUtils.unlink (tmp_seg);
                     break;
@@ -794,7 +791,7 @@ public class TrimTab : Box, ICodecTab {
 
         // ── Check if anything survived ──────────────────────────────────────
         if (ok_segs.length == 0) {
-            status_label.set_text ("⚠️ Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
+            status_area.set_status ("⚠️ Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
                 .printf (target_mb));
             fail_operation (operation_id);
             return;
@@ -802,14 +799,14 @@ public class TrimTab : Box, ICodecTab {
 
         // ── Launch TrimRunner with only the segments that passed ────────────
         if (skipped.length > 0) {
-            status_label.set_text ("🧠 Analysis complete — exporting %d of %d segments (%d skipped)…"
+            status_area.set_status ("🧠 Analysis complete — exporting %d of %d segments (%d skipped)…"
                 .printf (ok_segs.length, segs.length, skipped.length));
         } else {
-            status_label.set_text ("🧠 Analysis complete — exporting %d segments…"
+            status_area.set_status ("🧠 Analysis complete — exporting %d segments…"
                 .printf (ok_segs.length));
         }
 
-        launch_runner (input_file, output_folder, status_label, progress_bar,
+        launch_runner (input_file, output_folder, status_area, progress_bar,
                        console_tab, ok_segs, force_reencode, operation_id,
                        output_policy,
                        ok_args, general_settings_snapshot);

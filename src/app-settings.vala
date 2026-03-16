@@ -17,10 +17,13 @@ using GLib;
 //    [output]
 //    default_directory = /home/user/Videos   (default: "" → same as input)
 //
-//    [general]
-//    output_name_mode  = default             (default|custom|random|date|metadata)
-//    output_custom_name = my_video           (default: "" → used when mode=custom)
-//    overwrite_enabled = false               (default: false → prompt before overwriting)
+    //    [general]
+    //    output_name_mode  = default             (default|custom|random|date|metadata)
+    //    output_custom_name = my_video           (default: "" → used when mode=custom)
+    //    overwrite_enabled = false               (default: false → prompt before overwriting)
+    //    verify_unknown_audio_copy_preflight = false
+    //                                           (default: false → only retry MP4/WebM copy
+    //                                            compatibility checks before conversion when enabled)
 //
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
@@ -59,6 +62,7 @@ public class AppSettings : Object {
     private OutputNameMode _output_name_mode = OutputNameMode.DEFAULT;
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
+    private bool   _verify_unknown_audio_copy_preflight = false;
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
     private bool   _smart_optimizer_strip_audio = false;
@@ -315,6 +319,27 @@ public class AppSettings : Object {
         }
     }
 
+    public bool verify_unknown_audio_copy_preflight {
+        get {
+            bool verify_unknown_audio_copy_preflight;
+            mutex.lock ();
+            try {
+                verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
+            } finally {
+                mutex.unlock ();
+            }
+            return verify_unknown_audio_copy_preflight;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _verify_unknown_audio_copy_preflight = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public bool smart_optimizer_auto_convert {
         get {
             bool auto_convert;
@@ -385,6 +410,8 @@ public class AppSettings : Object {
             read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
         string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
+        bool verify_unknown_audio_copy_preflight = read_bool (
+            kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", false);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
             read_int (kf, GROUP_SMART, "target_mb", 4));
         bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
@@ -399,6 +426,7 @@ public class AppSettings : Object {
             _output_name_mode = output_name_mode;
             _output_custom_name = output_custom_name;
             _overwrite_enabled = overwrite_enabled;
+            _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
             _smart_optimizer_strip_audio = smart_optimizer_strip_audio;
@@ -431,6 +459,7 @@ public class AppSettings : Object {
         OutputNameMode output_name_mode;
         string output_custom_name;
         bool overwrite_enabled;
+        bool verify_unknown_audio_copy_preflight;
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
         bool smart_optimizer_strip_audio;
@@ -444,6 +473,7 @@ public class AppSettings : Object {
             output_name_mode = _output_name_mode;
             output_custom_name = _output_custom_name;
             overwrite_enabled = _overwrite_enabled;
+            verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
             smart_optimizer_strip_audio = _smart_optimizer_strip_audio;
@@ -458,6 +488,11 @@ public class AppSettings : Object {
         kf.set_string (GROUP_GENERAL, "output_name_mode", output_name_mode.to_string ());
         kf.set_string (GROUP_GENERAL, "output_custom_name", output_custom_name);
         kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", overwrite_enabled);
+        kf.set_boolean (
+            GROUP_GENERAL,
+            "verify_unknown_audio_copy_preflight",
+            verify_unknown_audio_copy_preflight
+        );
         kf.set_integer (GROUP_SMART, "target_mb", smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
@@ -488,6 +523,7 @@ public class AppSettings : Object {
             _output_name_mode   = OutputNameMode.DEFAULT;
             _output_custom_name = "";
             _overwrite_enabled  = false;
+            _verify_unknown_audio_copy_preflight = false;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = false;
             _smart_optimizer_strip_audio = false;

@@ -8,6 +8,7 @@ using Adw;
 public class AudioSettingsSnapshot : Object {
     public bool enabled = true;
     public string codec = AudioCodecName.COPY;
+    public string source_codec_name = "";
     public int sample_rate_hz = 0;
     public int bitrate_kbps = 128;
     public string opus_vbr_mode = "Default";
@@ -24,6 +25,12 @@ public enum AudioProbeDisplayState {
     FOUND,
     MISSING,
     ERROR
+}
+
+private class ContainerAudioPolicy : Object {
+    public string[] selectable_codecs { get; construct set; default = {}; }
+    public string[] copy_compatible_source_codecs { get; construct set; default = {}; }
+    public string fallback_codec { get; construct set; default = ""; }
 }
 
 public class AudioSettings : Object {
@@ -47,6 +54,7 @@ public class AudioSettings : Object {
     public DropDown  vorbis_quality_combo  { get; private set; }
 
     // Rows (for visibility control)
+    private Adw.ActionRow codec_row;
     private Adw.ActionRow sample_rate_row;
     private Adw.ActionRow bitrate_row;
     private Adw.ActionRow opus_vbr_row;
@@ -65,6 +73,7 @@ public class AudioSettings : Object {
     private bool   suppress_audio_enabled_tracking = false;
     private AudioProbeDisplayState audio_probe_state = AudioProbeDisplayState.UNKNOWN;
     private string current_status_css_class = "";
+    private string source_audio_codec_name = "";
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -147,7 +156,7 @@ public class AudioSettings : Object {
         audio_expander.set_enable_expansion (true);
 
         // ── Codec ────────────────────────────────────────────────────────────
-        var codec_row = new Adw.ActionRow ();
+        codec_row = new Adw.ActionRow ();
         codec_row.set_title ("Codec");
         codec_row.set_subtitle ("Copy passes audio through without re-encoding");
         codec_combo = new DropDown (new StringList (
@@ -341,6 +350,27 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    public void apply_source_audio_state (string codec_name, AudioProbeDisplayState state) {
+        source_audio_codec_name = normalize_source_audio_codec_name (codec_name);
+        apply_audio_probe_state (state, false);
+        rebuild_codec_list ();
+    }
+
+    public void apply_source_audio_probe_result (AudioStreamProbeResult audio_probe) {
+        switch (audio_probe.presence) {
+        case MediaStreamPresence.PRESENT:
+            apply_source_audio_state (audio_probe.codec_name, AudioProbeDisplayState.FOUND);
+            break;
+        case MediaStreamPresence.ABSENT:
+            apply_source_audio_state ("", AudioProbeDisplayState.MISSING);
+            break;
+        case MediaStreamPresence.UNKNOWN:
+        default:
+            apply_source_audio_state ("", AudioProbeDisplayState.ERROR);
+            break;
+        }
+    }
+
     public void update_for_audio_speed (bool active) {
         speed_active = active;
         rebuild_codec_list ();
@@ -387,7 +417,28 @@ public class AudioSettings : Object {
         return audio_probe_state == AudioProbeDisplayState.CHECKING;
     }
 
+    public bool is_audio_probe_uncertain () {
+        return audio_probe_state == AudioProbeDisplayState.UNKNOWN
+            || audio_probe_state == AudioProbeDisplayState.ERROR;
+    }
+
+    public bool should_verify_unknown_audio_copy_compatibility (string container) {
+        if (!is_audio_probe_uncertain ())
+            return false;
+
+        if (!container_requires_audio_copy_verification (container))
+            return false;
+
+        AudioSettingsSnapshot snapshot = snapshot_settings ();
+        return snapshot.enabled && snapshot.codec == AudioCodecName.COPY;
+    }
+
     public void set_audio_probe_state (AudioProbeDisplayState state) {
+        apply_audio_probe_state (state, true);
+    }
+
+    private void apply_audio_probe_state (AudioProbeDisplayState state,
+                                          bool rebuild_after) {
         audio_probe_state = state;
 
         switch (state) {
@@ -424,6 +475,10 @@ public class AudioSettings : Object {
             restore_user_audio_state ();
             break;
         }
+
+        if (rebuild_after) {
+            rebuild_codec_list ();
+        }
     }
 
     private void restore_user_audio_state () {
@@ -452,18 +507,18 @@ public class AudioSettings : Object {
 
     private void rebuild_codec_list () {
         string current = get_codec_text ();
-
-        string[] codecs;
-        if (current_container == ContainerExt.WEBM) {
-            codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.VORBIS };
-        } else if (current_container == ContainerExt.MP4) {
-            codecs = { AudioCodecName.COPY, AudioCodecName.AAC, AudioCodecName.MP3, AudioCodecName.OPUS };
-        } else {
-            codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.AAC,
-                       AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS };
-        }
+        ContainerAudioPolicy policy = get_container_audio_policy (current_container);
+        string[] codecs = policy.selectable_codecs;
 
         if (speed_active || normalize_active || concat_filter_active) {
+            string[] filtered = {};
+            foreach (string c in codecs) {
+                if (c != AudioCodecName.COPY) filtered += c;
+            }
+            codecs = filtered;
+        }
+
+        if (!is_copy_available_for_current_source ()) {
             string[] filtered = {};
             foreach (string c in codecs) {
                 if (c != AudioCodecName.COPY) filtered += c;
@@ -485,6 +540,7 @@ public class AudioSettings : Object {
         if (!found)
             codec_combo.set_selected (0);
 
+        update_codec_row_subtitle ();
         update_codec_visibility ();
     }
 
@@ -500,6 +556,7 @@ public class AudioSettings : Object {
         snapshot.enabled = audio_expander.enable_expansion
             && audio_probe_state != AudioProbeDisplayState.MISSING;
         snapshot.codec = get_codec_text ();
+        snapshot.source_codec_name = source_audio_codec_name;
 
         string sr_text = get_dropdown_text (sample_rate_combo);
         snapshot.sample_rate_hz = parse_sample_rate_selection (sr_text);
@@ -609,6 +666,20 @@ public class AudioSettings : Object {
         return args;
     }
 
+    public static void coerce_copy_selection_for_container (AudioSettingsSnapshot snapshot,
+                                                            string container) {
+        if (snapshot.codec != AudioCodecName.COPY)
+            return;
+
+        if (container_supports_audio_copy (container, snapshot.source_codec_name))
+            return;
+
+        string fallback_codec = get_copy_fallback_codec_for_container (container);
+        if (fallback_codec.length > 0) {
+            snapshot.codec = fallback_codec;
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  RESET
     // ═════════════════════════════════════════════════════════════════════════
@@ -639,6 +710,134 @@ public class AudioSettings : Object {
     private string get_dropdown_text (DropDown dropdown) {
         var item = dropdown.selected_item as StringObject;
         return item != null ? item.string : "";
+    }
+
+    private bool is_copy_available_for_current_source () {
+        if (audio_probe_state != AudioProbeDisplayState.FOUND)
+            return true;
+
+        return container_supports_audio_copy (current_container, source_audio_codec_name);
+    }
+
+    private void update_codec_row_subtitle () {
+        if (audio_probe_state == AudioProbeDisplayState.FOUND
+            && !container_supports_audio_copy (current_container, source_audio_codec_name)) {
+            codec_row.set_subtitle (
+                "Copy unavailable: source %s audio is not supported in %s, so audio will be re-encoded"
+                .printf (
+                    format_audio_codec_label (source_audio_codec_name),
+                    format_container_label (current_container)
+                )
+            );
+            return;
+        }
+
+        codec_row.set_subtitle ("Copy passes audio through without re-encoding");
+    }
+
+    public static bool container_supports_audio_copy (string container,
+                                                      string source_codec_name) {
+        string normalized_codec = normalize_source_audio_codec_name (source_codec_name);
+        ContainerAudioPolicy policy = get_container_audio_policy (container);
+
+        if (normalized_codec.length == 0)
+            return true;
+
+        foreach (string codec in policy.copy_compatible_source_codecs) {
+            if (codec == normalized_codec) {
+                return true;
+            }
+        }
+
+        return policy.copy_compatible_source_codecs.length == 0;
+    }
+
+    public static string get_copy_fallback_codec_for_container (string container) {
+        return get_container_audio_policy (container).fallback_codec;
+    }
+
+    public static bool container_requires_audio_copy_verification (string container) {
+        ContainerAudioPolicy policy = get_container_audio_policy (container);
+        return policy.copy_compatible_source_codecs.length > 0
+            && policy.fallback_codec.length > 0;
+    }
+
+    private static string normalize_source_audio_codec_name (string codec_name) {
+        string normalized = codec_name.down ().strip ();
+        switch (normalized) {
+            case "libopus":
+                return "opus";
+            case "libvorbis":
+                return "vorbis";
+            case "mp4a":
+                return "aac";
+            default:
+                return normalized;
+        }
+    }
+
+    private static string format_audio_codec_label (string codec_name) {
+        switch (normalize_source_audio_codec_name (codec_name)) {
+            case "aac":
+                return "AAC";
+            case "ac3":
+                return "AC-3";
+            case "alac":
+                return "ALAC";
+            case "eac3":
+                return "E-AC-3";
+            case "mp3":
+                return "MP3";
+            case "opus":
+                return "Opus";
+            case "vorbis":
+                return "Vorbis";
+            default:
+                return codec_name.up ();
+        }
+    }
+
+    private static string format_container_label (string container) {
+        switch (container.down ().strip ()) {
+            case ContainerExt.MP4:
+                return "MP4";
+            case ContainerExt.WEBM:
+                return "WebM";
+            case ContainerExt.MKV:
+                return "MKV";
+            default:
+                return container.up ();
+        }
+    }
+
+    private static ContainerAudioPolicy get_container_audio_policy (string container) {
+        switch (container.down ().strip ()) {
+            case ContainerExt.WEBM:
+                return new ContainerAudioPolicy () {
+                    selectable_codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.VORBIS },
+                    copy_compatible_source_codecs = { "opus", "vorbis" },
+                    fallback_codec = AudioCodecName.OPUS
+                };
+            case ContainerExt.MP4:
+                return new ContainerAudioPolicy () {
+                    selectable_codecs = { AudioCodecName.COPY, AudioCodecName.AAC, AudioCodecName.MP3, AudioCodecName.OPUS },
+                    copy_compatible_source_codecs = { "aac", "mp3", "opus", "alac", "ac3", "eac3" },
+                    fallback_codec = AudioCodecName.AAC
+                };
+            default:
+                return new ContainerAudioPolicy () {
+                    selectable_codecs = {
+                        AudioCodecName.COPY,
+                        AudioCodecName.OPUS,
+                        AudioCodecName.AAC,
+                        AudioCodecName.MP3,
+                        AudioCodecName.FLAC,
+                        AudioCodecName.VORBIS
+                    },
+                    copy_compatible_source_codecs = {},
+                    fallback_codec = ""
+                };
+        }
     }
 
     private int parse_sample_rate_selection (string selection) {

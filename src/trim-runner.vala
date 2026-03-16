@@ -44,7 +44,7 @@ public class TrimRunner : Object {
     public EncodeProfileSnapshot? reencode_profile { get; set; default = null; }
 
     // UI references
-    public Label? status_label { get; set; default = null; }
+    public StatusArea? status_area { get; set; default = null; }
     public ProgressBar? progress_bar { get; set; default = null; }
     public ConsoleTab? console_tab { get; set; default = null; }
 
@@ -897,22 +897,21 @@ public class TrimRunner : Object {
     //  INTERNAL — Status reporting (always Idle.add for thread safety)
     // ═════════════════════════════════════════════════════════════════════════
 
+    private void update_status (string message) {
+        if (status_area != null) {
+            status_area.set_status (message);
+        }
+    }
+
     private void report_status (string message) {
-        Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (message);
-            return Source.REMOVE;
-        });
+        update_status (message);
         log_line (message);
     }
 
     private void report_cancelled () {
         string msg = @"$(operation_label) cancelled.";
-        Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (@"⏹️ $msg");
-            return Source.REMOVE;
-        });
+        string status_message = @"⏹️ $msg";
+        update_status (status_message);
         log_line (@"⏹️ $msg");
 
         Idle.add (() => {
@@ -922,11 +921,8 @@ public class TrimRunner : Object {
     }
 
     private void report_error (string message) {
-        Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (@"❌ $message\nCheck the console for details.");
-            return Source.REMOVE;
-        });
+        string status_message = @"❌ $message\nCheck the console for details.";
+        update_status (status_message);
         log_line ("❌ " + message);
 
         string err = message;

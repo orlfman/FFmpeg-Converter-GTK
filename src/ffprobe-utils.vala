@@ -29,6 +29,11 @@ public enum MediaStreamPresence {
     PRESENT
 }
 
+public class AudioStreamProbeResult : Object {
+    public MediaStreamPresence presence { get; set; default = MediaStreamPresence.UNKNOWN; }
+    public string codec_name { get; set; default = ""; }
+}
+
 namespace FfprobeUtils {
 
     private string summarize_ffprobe_text (string? text, int max_len = 200) {
@@ -358,13 +363,32 @@ namespace FfprobeUtils {
         return chapters;
     }
 
-    private MediaStreamPresence parse_audio_presence_output (string stdout_text) {
-        if (stdout_text == null)
-            return MediaStreamPresence.UNKNOWN;
+    private AudioStreamProbeResult parse_primary_audio_stream_output (string stdout_text) {
+        var result = new AudioStreamProbeResult ();
+        if (stdout_text == null) {
+            return result;
+        }
 
-        return stdout_text.strip ().length > 0
-            ? MediaStreamPresence.PRESENT
-            : MediaStreamPresence.ABSENT;
+        string cleaned = stdout_text.strip ();
+        if (cleaned.length == 0) {
+            result.presence = MediaStreamPresence.ABSENT;
+            return result;
+        }
+
+        string[] lines = cleaned.split ("\n");
+        foreach (unowned string line in lines) {
+            string codec = line.strip ();
+            if (codec.length == 0) {
+                continue;
+            }
+
+            result.presence = MediaStreamPresence.PRESENT;
+            result.codec_name = codec.down ();
+            return result;
+        }
+
+        result.presence = MediaStreamPresence.ABSENT;
+        return result;
     }
 
     /**
@@ -461,21 +485,14 @@ namespace FfprobeUtils {
         return parse_ffprobe_duration_output (stdout_buf);
     }
 
-    /**
-     * Probe whether @input_file exposes at least one audio stream.
-     *
-     * Returns PRESENT when ffprobe reports any audio stream, ABSENT when the
-     * probe succeeds but no audio streams are present, and UNKNOWN on probe
-     * failure so callers can avoid treating runtime errors as "no audio".
-     */
-    public async MediaStreamPresence probe_audio_presence_async (
+    public async AudioStreamProbeResult probe_primary_audio_stream_async (
         string input_file,
         Cancellable? cancellable = null) {
         string[] cmd = {
             AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
-            "-select_streams", "a",
-            "-show_entries", "stream=index",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name",
             "-of", "csv=p=0",
             input_file
         };
@@ -483,9 +500,9 @@ namespace FfprobeUtils {
         string stderr_text;
 
         if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text)))
-            return MediaStreamPresence.UNKNOWN;
+            return new AudioStreamProbeResult ();
 
-        return parse_audio_presence_output (stdout_text);
+        return parse_primary_audio_stream_output (stdout_text);
     }
 
     public double probe_duration (string input_file) {

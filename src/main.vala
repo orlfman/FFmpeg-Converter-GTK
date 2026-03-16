@@ -18,6 +18,12 @@ private enum ActiveOperation {
     SUBTITLE_APPLY
 }
 
+private enum AudioCopyUnknownPreflightResult {
+    PROCEED,
+    BLOCK,
+    CANCELLED
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MainWindow — Application window layout and user action handlers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -711,6 +717,35 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     private void continue_start_subtitle_apply (uint64 operation_id) {
+        continue_start_subtitle_apply_async.begin (operation_id);
+    }
+
+    private async void continue_start_subtitle_apply_async (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
+            return;
+        }
+
+        var cancellable = begin_preflight_probe ();
+        AudioCopyUnknownPreflightResult preflight_result =
+            yield maybe_verify_unknown_audio_copy_compatibility (
+                subtitles_tab.get_input_file (),
+                subtitles_tab.get_selected_reencode_codec_tab (),
+                cancellable
+            );
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.CANCELLED) {
+            finish_preflight_probe (cancellable);
+            return;
+        }
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.BLOCK) {
+            finish_preflight_probe (cancellable);
+            release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
+            return;
+        }
+
+        finish_preflight_probe (cancellable);
+
         if (!is_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id)) {
             return;
         }
@@ -786,6 +821,37 @@ public class MainWindow : Adw.ApplicationWindow {
     private void continue_start_trim_operation (TrimTab trim,
                                                 string input_file,
                                                 uint64 operation_id) {
+        continue_start_trim_operation_async.begin (trim, input_file, operation_id);
+    }
+
+    private async void continue_start_trim_operation_async (TrimTab trim,
+                                                            string input_file,
+                                                            uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
+            return;
+        }
+
+        var cancellable = begin_preflight_probe ();
+        AudioCopyUnknownPreflightResult preflight_result =
+            yield maybe_verify_unknown_audio_copy_compatibility (
+                input_file,
+                trim.get_selected_reencode_codec_tab (),
+                cancellable
+            );
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.CANCELLED) {
+            finish_preflight_probe (cancellable);
+            return;
+        }
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.BLOCK) {
+            finish_preflight_probe (cancellable);
+            release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
+            return;
+        }
+
+        finish_preflight_probe (cancellable);
+
         if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
             return;
         }
@@ -891,6 +957,21 @@ public class MainWindow : Adw.ApplicationWindow {
 
         ICodecBuilder builder = codec_tab.get_codec_builder ();
         var cancellable = begin_preflight_probe ();
+        AudioCopyUnknownPreflightResult preflight_result =
+            yield maybe_verify_unknown_audio_copy_compatibility (
+                input_file, codec_tab as BaseCodecTab, cancellable);
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.CANCELLED) {
+            finish_preflight_probe (cancellable);
+            return;
+        }
+
+        if (preflight_result == AudioCopyUnknownPreflightResult.BLOCK) {
+            finish_preflight_probe (cancellable);
+            release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
+            return;
+        }
+
         string output_file = yield Converter.compute_output_path_async (
             input_file,
             file_pickers.output_entry.get_text (),
@@ -958,6 +1039,79 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         activate_cancel (ActiveOperation.CONVERTING, operation_id);
+    }
+
+    private async AudioCopyUnknownPreflightResult maybe_verify_unknown_audio_copy_compatibility (
+        string input_file,
+        BaseCodecTab? codec_tab,
+        Cancellable cancellable) {
+        if (!AppSettings.get_default ().verify_unknown_audio_copy_preflight) {
+            return AudioCopyUnknownPreflightResult.PROCEED;
+        }
+
+        if (codec_tab == null) {
+            return AudioCopyUnknownPreflightResult.PROCEED;
+        }
+
+        string container = codec_tab.get_container ();
+        AudioSettings audio_settings = codec_tab.audio_settings;
+        if (!audio_settings.should_verify_unknown_audio_copy_compatibility (container)) {
+            return AudioCopyUnknownPreflightResult.PROCEED;
+        }
+
+        string previous_status = status_area.get_status_snapshot ();
+        string verification_status = "⏳ Verifying audio copy compatibility before conversion...";
+        status_area.set_status (verification_status);
+
+        AudioStreamProbeResult audio_probe =
+            yield FfprobeUtils.probe_primary_audio_stream_async (input_file, cancellable);
+
+        if (cancellable.is_cancelled ()) {
+            return AudioCopyUnknownPreflightResult.CANCELLED;
+        }
+
+        controller.apply_codec_audio_probe_result (audio_probe);
+
+        switch (audio_probe.presence) {
+            case MediaStreamPresence.PRESENT:
+                if (!AudioSettings.container_supports_audio_copy (container, audio_probe.codec_name)) {
+                    string fallback_codec =
+                        AudioSettings.get_copy_fallback_codec_for_container (container);
+                    string container_label = container.up ();
+                    status_area.set_status (
+                        "ℹ️ Source audio cannot be copied into %s. Switched audio to %s."
+                        .printf (container_label, fallback_codec)
+                    );
+                    console_tab.add_line (
+                        "[Audio] Verified source audio is incompatible with %s copy; switched to %s."
+                        .printf (container_label, fallback_codec)
+                    );
+                } else {
+                    status_area.replace_status_if_current (verification_status, previous_status);
+                }
+                return AudioCopyUnknownPreflightResult.PROCEED;
+            case MediaStreamPresence.ABSENT:
+                status_area.set_status (
+                    "ℹ️ No audio stream was found during final verification. Continuing without audio."
+                );
+                console_tab.add_line (
+                    "[Audio] Final compatibility check found no audio stream; conversion will continue without audio."
+                );
+                return AudioCopyUnknownPreflightResult.PROCEED;
+            case MediaStreamPresence.UNKNOWN:
+            default:
+                string fallback_codec =
+                    AudioSettings.get_copy_fallback_codec_for_container (container);
+                status_area.set_status (
+                    "⚠️ Unable to verify whether source audio can be copied into %s. Select %s manually or try again."
+                    .printf (container.up (), fallback_codec)
+                );
+                console_tab.add_line (
+                    "[Audio] Final compatibility check could not verify whether source audio can be copied into %s."
+                    .printf (container.up ())
+                );
+                return AudioCopyUnknownPreflightResult.BLOCK;
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -107,7 +107,7 @@ public class SubtitlesRunner : Object {
     private ProcessRunner runner = new ProcessRunner ();
 
     // UI references (nullable — set before run)
-    public Label?       status_label { get; set; default = null; }
+    public StatusArea?  status_area  { get; set; default = null; }
     public ProgressBar? progress_bar { get; set; default = null; }
     public ConsoleTab?  console_tab  { get; set; default = null; }
 
@@ -958,12 +958,14 @@ public class SubtitlesRunner : Object {
             || codec == "xsub";
     }
 
+    private void update_status (string message) {
+        if (status_area != null) {
+            status_area.set_status (message);
+        }
+    }
+
     private void report_status (string message) {
-        Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (message);
-            return Source.REMOVE;
-        });
+        update_status (message);
         log_line (message);
     }
 
@@ -971,9 +973,9 @@ public class SubtitlesRunner : Object {
         log_line ("❌ " + message);
 
         string err = message;
+        string status_message = @"❌ $err\nCheck the console for details.";
+        update_status (status_message);
         Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (@"❌ $err\nCheck the console for details.");
             operation_failed (err);
             return Source.REMOVE;
         });
@@ -992,9 +994,9 @@ public class SubtitlesRunner : Object {
         log_line ("❌ " + message);
 
         string err = message;
+        string status_message = @"❌ $err\nCheck the console for details.";
+        update_status (status_message);
         Idle.add (() => {
-            if (status_label != null)
-                status_label.set_text (@"❌ $err\nCheck the console for details.");
             apply_failed (operation_id, err);
             return Source.REMOVE;
         });

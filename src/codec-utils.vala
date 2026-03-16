@@ -370,13 +370,18 @@ namespace CodecUtils {
         snapshot.codec_name = builder.get_codec_name ();
         snapshot.codec_args = builder.build_codec_args_from_snapshot (builder_snapshot);
         snapshot.keyframe_settings = codec_settings.keyframe_settings;
-        snapshot.audio_args = AudioSettings.build_audio_args_from_snapshot (
-            codec_settings.audio_settings);
 
         string container = codec_settings.container;
         if (container.length > 0) {
             snapshot.container = container;
         }
+
+        AudioSettings.coerce_copy_selection_for_container (
+            codec_settings.audio_settings,
+            snapshot.container
+        );
+        snapshot.audio_args = AudioSettings.build_audio_args_from_snapshot (
+            codec_settings.audio_settings);
 
         if (general_settings != null) {
             snapshot.video_filters = FilterBuilder.build_video_filter_chain_from_snapshot (

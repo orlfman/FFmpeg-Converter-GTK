@@ -892,13 +892,13 @@ public class SubtitlesTab : Box {
     }
 
     public void set_ui_refs (StatusArea status_area, ConsoleTab console) {
-        runner.status_label = status_area.status_label;
+        runner.status_area = status_area;
         runner.progress_bar = status_area.progress_bar;
         runner.console_tab  = console;
-        _status_label = status_area.status_label;
+        _status_area = status_area;
     }
 
-    private Label? _status_label = null;
+    private StatusArea? _status_area = null;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  EXTRACT HANDLER
@@ -1421,13 +1421,13 @@ public class SubtitlesTab : Box {
     }
 
     private void report_burn_in_error (string message) {
-        if (_status_label != null)
-            _status_label.set_text (@"⚠️ $message");
+        if (_status_area != null)
+            _status_area.set_status (@"⚠️ $message");
     }
 
     private void report_local_warning (string message) {
-        if (_status_label != null) {
-            _status_label.set_text (@"⚠️ $message");
+        if (_status_area != null) {
+            _status_area.set_status (@"⚠️ $message");
         }
     }
 
