@@ -21,9 +21,9 @@ using GLib;
     //    output_name_mode  = default             (default|custom|random|date|metadata)
     //    output_custom_name = my_video           (default: "" → used when mode=custom)
     //    overwrite_enabled = false               (default: false → prompt before overwriting)
-    //    verify_unknown_audio_copy_preflight = false
-    //                                           (default: false → only retry MP4/WebM copy
-    //                                            compatibility checks before conversion when enabled)
+    //    verify_unknown_audio_copy_preflight = true
+    //                                           (default: true → verify audio copy compatibility
+    //                                            for MP4/WebM before conversion starts)
 //
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
@@ -62,7 +62,7 @@ public class AppSettings : Object {
     private OutputNameMode _output_name_mode = OutputNameMode.DEFAULT;
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
-    private bool   _verify_unknown_audio_copy_preflight = false;
+    private bool   _verify_unknown_audio_copy_preflight = true;
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
     private bool   _smart_optimizer_strip_audio = false;
@@ -411,7 +411,7 @@ public class AppSettings : Object {
         string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
         bool verify_unknown_audio_copy_preflight = read_bool (
-            kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", false);
+            kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
             read_int (kf, GROUP_SMART, "target_mb", 4));
         bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
@@ -523,7 +523,7 @@ public class AppSettings : Object {
             _output_name_mode   = OutputNameMode.DEFAULT;
             _output_custom_name = "";
             _overwrite_enabled  = false;
-            _verify_unknown_audio_copy_preflight = false;
+            _verify_unknown_audio_copy_preflight = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = false;
             _smart_optimizer_strip_audio = false;

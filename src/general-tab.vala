@@ -31,6 +31,7 @@ public class GeneralTab : Box {
     public Switch   crop_check         { get; private set; }
     public Button   detect_crop_button { get; private set; }
     public Entry    crop_value         { get; private set; }
+    private uint    crop_detect_gen    = 0;
 
     public Adw.ExpanderRow crop_expander;
 
@@ -890,12 +891,13 @@ public class GeneralTab : Box {
         console_tab.add_line ("=== Crop Detection Started ===");
         console_tab.add_line ("Filter chain: " + FilterBuilder.get_crop_detection_chain (this));
 
+        uint gen = crop_detect_gen;
         new Thread<void> ("crop-detect-thread", () => {
-            perform_crop_detection (input_file, console_tab);
+            perform_crop_detection (input_file, console_tab, gen);
         });
     }
 
-    private void perform_crop_detection (string input_file, ConsoleTab console_tab) {
+    private void perform_crop_detection (string input_file, ConsoleTab console_tab, uint gen) {
         string vf = FilterBuilder.get_crop_detection_chain (this);
 
         string[] cmd = {
@@ -936,6 +938,7 @@ public class GeneralTab : Box {
 
             string result_crop = last_crop;
             Idle.add (() => {
+                if (gen != crop_detect_gen) return Source.REMOVE;
                 if (is_valid_crop_value (result_crop)) {
                     crop_value.set_text (result_crop);
                     console_tab.add_line (@"✅ Detected stable crop: $result_crop");
@@ -950,6 +953,7 @@ public class GeneralTab : Box {
         } catch (GLib.Error e) {
             string err_msg = e.message;
             Idle.add (() => {
+                if (gen != crop_detect_gen) return Source.REMOVE;
                 crop_value.set_text ("❌ Detection error");
                 console_tab.add_line ("Crop detection failed: " + err_msg);
                 detect_crop_button.sensitive = true;
@@ -1052,6 +1056,13 @@ public class GeneralTab : Box {
 
     public bool is_crop_enabled ()         { return crop_check.active; }
     public string get_crop_value_text ()   { return crop_value.text.strip (); }
+
+    public void reset_crop () {
+        crop_detect_gen++;
+        crop_check.active = false;
+        crop_value.text = "";
+        detect_crop_button.sensitive = true;
+    }
 
     // ── Frame Rate ───────────────────────────────────────────────────────────
 

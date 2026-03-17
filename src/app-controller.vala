@@ -146,6 +146,7 @@ public class AppController : Object {
             string path = file_pickers.input_entry.get_text ();
             info_tab.load_input_info (path);
             info_tab.reset_output ();
+            general_tab.reset_crop ();
             trim_tab.load_video (path);
             subtitles_tab.load_video (path);
             sync_codec_audio_presence.begin (path);

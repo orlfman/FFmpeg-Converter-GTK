@@ -223,16 +223,17 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var compatibility_group = new Adw.PreferencesGroup ();
         compatibility_group.set_title ("Audio Copy Verification");
         compatibility_group.set_description (
-            "Optional compatibility checks for MP4 and WebM audio stream copy."
+            "Check that the source audio can actually be copied into MP4 or WebM before starting."
         );
 
         verify_unknown_audio_copy_switch = new Adw.SwitchRow ();
         verify_unknown_audio_copy_switch.set_title (
-            "Verify Unknown Audio Copy Compatibility"
+            "Check Audio Before Converting"
         );
         verify_unknown_audio_copy_switch.set_subtitle (
-            "When audio copy compatibility is unknown, run one final check before conversion. " +
-            "If incompatible, switch from Copy to a compatible encoder; if still unknown, stop instead of failing later."
+            "When it's unclear whether the source audio can be copied as-is, " +
+            "quickly inspect the file first. If the audio isn't compatible, " +
+            "it will be re-encoded automatically instead of failing mid-conversion."
         );
         compatibility_group.add (verify_unknown_audio_copy_switch);
         page.add (compatibility_group);
