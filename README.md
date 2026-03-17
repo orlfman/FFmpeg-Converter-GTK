@@ -103,6 +103,12 @@ Just pick the mode and go.
 meson, ninja, valac, pkg-config, GTK4, libadwaita
 ```
 
+#### On Fedora Linux
+
+```bash
+sudo dnf install -y meson ninja-build vala gtk4-devel libadwaita-devel json-glib-devel
+```
+
 ### Build & Install
 
 ```bash
@@ -110,6 +116,26 @@ git clone https://github.com/orlfman/FFmpeg-Converter-GTK.git
 cd FFmpeg-Converter-GTK
 chmod +x build.sh
 ./build.sh
+```
+
+Alternatively, if you prefer make:
+
+```
+Usage: make [target]
+
+Targets:
+  all              Build the project (default)
+  setup            Run meson setup
+  build            Compile the project
+  test             Build and run tests
+  install          Install binary, icon, and desktop file
+  install-binary   Install only the binary to /usr/local/bin
+  install-icon     Install the application icon
+  install-desktop  Install the desktop entry
+  uninstall        Remove installed files
+  clean            Remove the build directory
+  rebuild          Clean and rebuild
+  help             Show this help message
 ```
 
 ### Uninstall
