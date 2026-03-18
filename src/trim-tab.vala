@@ -704,6 +704,7 @@ public class TrimTab : Box, ICodecTab {
             var ctx = OptimizationContext ();
             if (shared_video_filter_chain.length > 0) {
                 ctx.video_filter_chain = shared_video_filter_chain;
+                ctx.tone_mapping_active = shared_video_filter_chain.contains ("tonemap=");
             }
             if (selected_codec_tab != null
                 && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
@@ -711,6 +712,7 @@ public class TrimTab : Box, ICodecTab {
             }
             if (selected_codec_tab != null) {
                 ctx.audio_requires_reencode = selected_codec_tab.audio_settings.requires_audio_reencode ();
+                ctx.output_container = selected_codec_tab.get_container ();
             }
             // Audio budget is determined by the optimizer based on size tier.
 

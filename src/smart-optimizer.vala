@@ -122,8 +122,9 @@
 //   - Adaptive segment expansion: if content analysis detects high motion
 //     variance (CV > 0.60), calibration segments expand up to 16 for
 //     better size prediction on variable-content videos.
-//   - Three-tier duration scaling: <10 min (4 segments), 10–45 min (8),
-//     45+ min (12 base, up to 16 adaptive).
+//   - Coverage-based duration scaling: segment count targets 15% minimum
+//     coverage, capped per tier: <10 min (6), 10–45 min (10),
+//     45+ min (14 base, up to 16 adaptive).
 //
 // v8 improvements:
 //   - Calibrate at target preset: calibration encodes now use the
@@ -225,6 +226,7 @@ public struct OptimizationRecommendation {
     public int recommended_audio_kbps; // audio bitrate the preset should use
     public bool stream_copy_audio;     // true when source audio should be copied, not re-encoded
     public bool strip_metadata;        // true for TINY tier — save every byte
+    public string recommended_pix_fmt; // "yuv420p10le", "yuv420p", or "" (codec default)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -240,6 +242,9 @@ internal struct SmartOptimizerVideoInfo {
     public bool   audio_bitrate_estimated;   // true when we fell back to a default
     public string audio_codec;               // e.g. "opus", "aac", "vorbis"
     public int64  file_size_bytes;            // source file size from format.size or stat
+    public int    source_bit_depth;           // 8, 10, 12… (0 = unknown)
+    public string color_transfer;             // "smpte2084", "arib-std-b67", ""
+    public string color_primaries;            // "bt2020", "bt709", ""
 }
 
 internal struct ContentProfile {
@@ -251,6 +256,9 @@ internal struct ContentProfile {
     public double      temporal_diff_stddev;
     public ContentType content_type;
     public double      type_confidence;
+    public double      banding_risk;         // 0.0–1.0 composite score
+    public double      low_luma_ratio;       // fraction of frames with high dark pixel count
+    public double      dark_scene_ratio;     // fraction of frames where avg luma < 60
 }
 
 /**
@@ -282,9 +290,17 @@ public struct OptimizationContext {
      *  goes to video. Overrides audio_bitrate_kbps_override. */
     public bool strip_audio;
 
+    /** true when HDR→SDR tonemap filter is in the chain */
+    public bool tone_mapping_active;
+
     /** When true, audio filters (speed change, normalization, concat)
      *  are active — stream-copy is not possible, audio must be re-encoded. */
     public bool audio_requires_reencode;
+
+    /** Output container format (e.g. "mkv", "mp4", "webm").
+     *  Used for audio stream-copy compatibility checks.
+     *  Empty string means infer from codec (conservative fallback). */
+    public string output_container;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -313,11 +329,21 @@ public class SmartOptimizer : GLib.Object {
 
     // Analysis segment config
     private const int    SEGMENT_DURATION   = 8;        // seconds per sample
-    private const int    BASE_MAX_SEGMENTS  = 4;        // cap for videos < 10 min
-    private const int    LONG_MAX_SEGMENTS  = 8;        // cap for videos 10–45 min
-    private const int    VLONG_MAX_SEGMENTS = 12;       // cap for videos > 45 min
+    private const int    MIN_SEGMENTS       = 2;        // absolute minimum
     private const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
     private const int    ADAPTIVE_CALIBRATION_BASE_MAX_POINTS = 6; // 4 base + up to 2 follow-up CRFs
+
+    // Minimum sample coverage target (15%). The segment count is computed
+    // from this so that short and medium videos get enough coverage to
+    // avoid the "representative samples" problem where 4 fixed segments
+    // miss entire complexity regions.
+    //   278s video → ceil(278 × 0.15 / 8) = 6 segments (17% coverage)
+    //   600s video → ceil(600 × 0.15 / 8) = 12 segments (16% coverage)
+    // Hard caps still apply per duration tier to bound encode time.
+    private const double MIN_COVERAGE_TARGET = 0.15;
+    private const int    BASE_MAX_SEGMENTS   = 6;       // cap for videos < 10 min
+    private const int    LONG_MAX_SEGMENTS   = 10;      // cap for videos 10–45 min
+    private const int    VLONG_MAX_SEGMENTS  = 14;      // cap for videos > 45 min
 
     private const double LONG_VIDEO_THRESHOLD  = 600.0; // 10 minutes
     private const double VLONG_VIDEO_THRESHOLD = 2700.0; // 45 minutes
@@ -447,9 +473,12 @@ public class SmartOptimizer : GLib.Object {
         //      This gives an *exact* audio size rather than a budget estimate.
         //   3. Otherwise, use the tier-based audio budget (re-encode).
         if (!ctx.strip_audio && ctx.audio_bitrate_kbps_override <= 0) {
-            bool container_is_webm = (preferred_codec == "vp9" || preferred_codec == "svt-av1");
+            // Use the actual container when provided; otherwise infer from codec
+            string container_for_audio = (ctx.output_container != null && ctx.output_container.length > 0)
+                ? ctx.output_container
+                : codec_default_container (preferred_codec);
             bool codec_compatible = audio_codec_compatible_with_container (
-                probed_audio_codec, container_is_webm);
+                probed_audio_codec, container_for_audio);
 
             if (codec_compatible
                     && !ctx.audio_requires_reencode
@@ -532,7 +561,7 @@ public class SmartOptimizer : GLib.Object {
         try {
             cancellable_check (cancellable);
             profile = yield analyze_content (
-                input_file, positions, sample_segment_duration, vf, cancellable);
+                input_file, positions, sample_segment_duration, info, vf, cancellable);
         } catch (IOError.CANCELLED e) {
             throw e;
         } catch (Error e) {
@@ -568,6 +597,11 @@ public class SmartOptimizer : GLib.Object {
                 }
             }
         }
+
+        // ── 4c. Bit depth decision ──────────────────────────────────────
+        var bit_depth = decide_bit_depth (info, profile, tier, preferred_codec,
+            ctx.tone_mapping_active);
+        string calibration_pix_fmt = bit_depth.pix_fmt;
 
         // ── 5. Content-aware, tier-scaled preset selection ────────────
         // Moved before calibration so we can calibrate at the target preset
@@ -606,7 +640,8 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 cal_sizes[ci] = yield calibration_encode (
                     input_file, preferred_codec, cal_crfs[ci], positions,
-                    encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
+                    encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
+                    calibration_pix_fmt);
             }
         } catch (IOError.CANCELLED e) {
             throw e;
@@ -643,7 +678,7 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 6. Fit CRF↔size curve (least-squares quadratic in log-space) ─
+        // ── 6b. Fit CRF↔size curve (least-squares quadratic in log-space) ─
         double qa = 0, qb = 0, qc = 0;  // quadratic coefficients
         bool degenerate = false;
         fit_quadratic_log_curve (cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
@@ -685,7 +720,8 @@ public class SmartOptimizer : GLib.Object {
                         cancellable_check (cancellable);
                         double extra_size = yield calibration_encode (
                             input_file, preferred_codec, extra_crfs[ci], positions,
-                            encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
+                            encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
+                            calibration_pix_fmt);
                         if (extra_size <= 0) {
                             warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKiB",
                                 extra_crfs[ci], extra_size);
@@ -750,7 +786,8 @@ public class SmartOptimizer : GLib.Object {
 
                     verify_actual_kib = yield calibration_encode (
                         input_file, preferred_codec, predicted_crf, positions,
-                        encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
+                        encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
+                        calibration_pix_fmt);
 
                     if (verify_actual_kib > 0) {
                         model_correction = verify_actual_kib / verify_model_kib;
@@ -866,7 +903,7 @@ public class SmartOptimizer : GLib.Object {
                 + "Try two-pass mode or a less aggressive target.");
         }
 
-        // ── 10. Confidence ──────────────────────────────────────────────
+        // ── 9. Confidence ──────────────────────────────────────────────
         // Calibration is most accurate within [cal_first, cal_last] where
         // the quadratic interpolates rather than extrapolates. Outside that
         // range, confidence degrades proportionally to distance.
@@ -890,22 +927,39 @@ public class SmartOptimizer : GLib.Object {
         // Within [cal_first, cal_last]: confidence stays at 1.0 — the quadratic
         // model is interpolating between measured points, not extrapolating.
 
-        // ── 10b. Sample coverage factor ─────────────────────────────────
+        // ── 9b. Sample coverage factor ─────────────────────────────────
         // When the sampled duration is a small fraction of the total, the
         // linear extrapolation (sample_kib × scale) becomes less reliable.
-        // Flag this in the notes and reduce confidence accordingly.
+        // Scale confidence proportionally so that thin coverage pushes
+        // MEDIUM+ tiers toward two-pass instead of trusting the CRF
+        // estimate blindly.
+        //
+        // Coverage ≥ 30%: no penalty (enough content sampled)
+        // Coverage 10–30%: linear ramp from 0.65 to 1.0
+        // Coverage < 10%: floor at 0.65
+        //
+        // Examples:
+        //   12% → confidence *= 0.69
+        //   17% → confidence *= 0.77
+        //   20% → confidence *= 0.83
+        //   25% → confidence *= 0.91
+        //   30% → confidence *= 1.0   (no penalty)
         double sample_duration = double.min (
             (double) positions.length * sample_segment_duration, encode_duration);
         double sample_coverage = sample_duration / encode_duration;
-        if (sample_coverage < 0.10) {
-            // Less than 10% sampled — meaningful uncertainty
-            confidence *= 0.85;
-            warning ("Smart Optimizer: sample covers only %.1f%% of video duration — "
-                + "size estimate may be less accurate for long videos",
-                sample_coverage * 100.0);
+        if (sample_coverage < 0.30) {
+            // Linear ramp: 0.65 at ≤10% → 1.0 at 30%
+            double coverage_factor = (0.65 + 0.35 * ((sample_coverage - 0.10) / 0.20))
+                .clamp (0.65, 1.0);
+            confidence *= coverage_factor;
+            if (sample_coverage < 0.15) {
+                warning ("Smart Optimizer: sample covers only %.1f%% of video duration — "
+                    + "size estimate may be less accurate (confidence factor: %.2f)",
+                    sample_coverage * 100.0, coverage_factor);
+            }
         }
 
-        // ── 10c. Source bitrate sanity check ─────────────────────────
+        // ── 9c. Source bitrate sanity check ─────────────────────────
         // Compare the estimated output size against the source file size.
         // If the CRF model predicts a LARGER output while the user wants a
         // SMALLER file, the prediction is unreliable — reduce confidence
@@ -940,7 +994,27 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 11. Tier-aware two-pass recommendation ────────────────────
+        // ── 9d. Codec-specific confidence adjustment ─────────────────
+        // x265's psychovisual rate-distortion optimization (psy-rd)
+        // aggressively allocates extra bits to visually complex regions.
+        // This makes CRF output inherently less predictable than other
+        // codecs: the same CRF produces wildly different bitrates across
+        // scenes depending on texture complexity.  Calibration samples
+        // capture average complexity but cannot anticipate how psy-rd
+        // will inflate specific unsampled scenes.
+        //
+        // Empirically, x265 CRF encodes overshoot sample-based estimates
+        // by 20–40% on variable-content videos, while SVT-AV1, x264,
+        // and VP9 land within 5–10% on the same content.
+        //
+        // A targeted confidence penalty nudges x265 toward two-pass
+        // (which gives the rate controller a global complexity map)
+        // without affecting codecs that don't need it.
+        if (preferred_codec == "x265") {
+            confidence *= 0.85;
+        }
+
+        // ── 10. Tier-aware two-pass recommendation ────────────────────
         // For strict tiers (TINY/SMALL), shave 3% off the video bitrate
         // to absorb encoder overshoot, audio bitrate variance, and
         // container overhead inaccuracy.  This small headroom is far
@@ -1018,7 +1092,7 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 12. Feasibility flags ───────────────────────────────────────
+        // ── 11. Feasibility flags ───────────────────────────────────────
         bool is_impossible = crf_at_max && (estimated_total_kib > target_total_kib * 1.1);
 
         // Force two-pass when CRF alone cannot comfortably hit the target,
@@ -1027,7 +1101,7 @@ public class SmartOptimizer : GLib.Object {
             recommend_two_pass = true;
         }
 
-        // ── 13. Build the recommendation ────────────────────────────────
+        // ── 12. Build the recommendation ────────────────────────────────
         string preset_label = format_preset_label (preferred_codec, preset_idx);
 
         var notes = new StringBuilder ();
@@ -1051,7 +1125,41 @@ public class SmartOptimizer : GLib.Object {
                 .printf (content_factor * 100.0));
         }
 
+        // --- Bit Depth ---
+        bool is_hdr_source = (info.color_transfer == "smpte2084"
+                           || info.color_transfer == "arib-std-b67");
+        bool is_wide_gamut_source = (info.color_primaries == "bt2020");
+
+        notes.append ("\n── Bit Depth ──\n");
+        notes.append ("  Source: %s\n".printf (
+            info.source_bit_depth > 0 ? "%d-bit".printf (info.source_bit_depth) : "unknown"));
+
+        // Color space info
+        if (is_hdr_source && is_wide_gamut_source) {
+            notes.append ("  Color: HDR (%s) + BT.2020 wide gamut — confirmed HDR\n"
+                .printf (info.color_transfer));
+        } else if (is_hdr_source && !is_wide_gamut_source) {
+            string primaries_label = (info.color_primaries.length > 0)
+                ? info.color_primaries : "unknown";
+            notes.append ("  Color: HDR (%s) but primaries are %s (unusual — expected BT.2020)\n"
+                .printf (info.color_transfer, primaries_label));
+        } else if (!is_hdr_source && is_wide_gamut_source) {
+            notes.append ("  Color: BT.2020 wide gamut without HDR transfer — SDR wide-gamut content\n");
+        }
+
+        // Tone mapping validation
+        if (ctx.tone_mapping_active && !is_hdr_source && !is_wide_gamut_source) {
+            notes.append ("  Note: Tone mapping is enabled but source is not HDR or wide-gamut — it may be unnecessary\n");
+        }
+
+        notes.append ("  Banding risk: %.0f%%\n".printf (profile.banding_risk * 100.0));
+        notes.append ("  Dark scenes: %.0f%% of frames\n".printf (profile.dark_scene_ratio * 100.0));
+        notes.append ("  Decision: %s (%s)\n".printf (
+            bit_depth.is_10bit ? "10-bit" : "8-bit", bit_depth.reason));
+        notes.append ("  Output pixel format: %s\n".printf (bit_depth.pix_fmt));
+
         // --- Audio ---
+        notes.append ("\n── Audio ──\n");
         if (info.audio_bitrate_kbps > 0) {
             if (use_stream_copy_audio) {
                 notes.append ("  Audio: stream copy (%s @ %d kbps) → %d KiB exact\n"
@@ -1144,10 +1252,14 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // --- Sample coverage ---
-        if (sample_coverage < 0.10) {
-            notes.append ("\nℹ️  Only %.0f%% of the video was sampled for calibration.\n"
+        if (sample_coverage < 0.30) {
+            notes.append ("\nℹ️  %.0f%% of the video was sampled for calibration"
                 .printf (sample_coverage * 100.0));
-            notes.append ("    Estimates may be less accurate for long or variable-content videos.\n");
+            if (sample_coverage < 0.15) {
+                notes.append (" (low coverage — estimate may be less accurate).\n");
+            } else {
+                notes.append (".\n");
+            }
         }
 
         // --- Calibration data ---
@@ -1164,6 +1276,9 @@ public class SmartOptimizer : GLib.Object {
                 .printf (adaptive_points_added, adaptive_points_added == 1 ? "" : "s"));
         }
         notes.append ("  Calibrated at preset: %s\n".printf (preset_label));
+        if (preferred_codec == "x265") {
+            notes.append ("  x265 psy-rd penalty: confidence × 0.85 (psy-rd inflates complex scenes unpredictably)\n");
+        }
         if (verification_done) {
             notes.append ("  Verification: model predicted %.0f KiB at CRF %d, measured %.0f KiB (error: %+.1f%%)\n"
                 .printf (verify_model_kib, verified_crf, verify_actual_kib,
@@ -1217,7 +1332,8 @@ public class SmartOptimizer : GLib.Object {
             size_tier             = tier,
             recommended_audio_kbps = info.audio_bitrate_kbps,
             stream_copy_audio     = use_stream_copy_audio,
-            strip_metadata        = (tier == SizeTier.TINY)
+            strip_metadata        = (tier == SizeTier.TINY),
+            recommended_pix_fmt   = bit_depth.pix_fmt
         };
     }
 
@@ -1244,6 +1360,8 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
         sb.append ("Audio budget:   %d kbps\n".printf (rec.recommended_audio_kbps));
+        if (rec.recommended_pix_fmt != null && rec.recommended_pix_fmt.length > 0)
+            sb.append ("Pixel format:   %s\n".printf (rec.recommended_pix_fmt));
         if (rec.strip_metadata)
             sb.append ("Metadata:       stripped (tiny target)\n");
         sb.append ("\n");
@@ -1307,7 +1425,10 @@ public class SmartOptimizer : GLib.Object {
             audio_bitrate_kbps      = 0,
             audio_bitrate_estimated = false,
             audio_codec             = "",
-            file_size_bytes         = source_size_bytes
+            file_size_bytes         = source_size_bytes,
+            source_bit_depth        = 0,
+            color_transfer          = "",
+            color_primaries         = ""
         };
 
         Json.Array? streams = root.has_member ("streams")
@@ -1323,6 +1444,23 @@ public class SmartOptimizer : GLib.Object {
                     info.height = (int) s.get_int_member ("height");
                     var rfr     = s.get_string_member_with_default ("r_frame_rate", "24/1");
                     info.fps    = parse_fraction (rfr);
+
+                    // ── Bit depth & HDR metadata ──────────────────────────
+                    string bits_raw = s.get_string_member_with_default ("bits_per_raw_sample", "");
+                    if (bits_raw != null && bits_raw.strip ().length > 0) {
+                        int64 parsed_bits = 0;
+                        if (try_parse_int64 (bits_raw, out parsed_bits) && parsed_bits > 0) {
+                            info.source_bit_depth = (int) parsed_bits;
+                        }
+                    }
+                    if (info.source_bit_depth <= 0) {
+                        string pix_fmt = s.get_string_member_with_default ("pix_fmt", "");
+                        if (pix_fmt.length > 0) {
+                            info.source_bit_depth = FfprobeUtils.infer_bit_depth_from_pix_fmt (pix_fmt);
+                        }
+                    }
+                    info.color_transfer = s.get_string_member_with_default ("color_transfer", "");
+                    info.color_primaries = s.get_string_member_with_default ("color_primaries", "");
 
                     // ── Duration fallback: video stream level ────────────
                     if (info.duration <= 0) {
@@ -1393,8 +1531,15 @@ public class SmartOptimizer : GLib.Object {
             return { 0 };
         }
 
-        // Scale segment cap with duration — long videos need more coverage
-        // to capture content variability across scenes.
+        // Compute coverage-based minimum: enough segments to hit the
+        // minimum coverage target (e.g. 15%).  This ensures medium-length
+        // videos like a 5-minute clip get 6 segments instead of 4,
+        // reducing the chance that fixed-position samples miss complex
+        // regions entirely.
+        int coverage_segs = (int) Math.ceil (
+            duration * MIN_COVERAGE_TARGET / segment_duration);
+
+        // Hard cap by duration tier to bound total calibration encode time
         int max_segs;
         if (duration >= VLONG_VIDEO_THRESHOLD) {
             max_segs = VLONG_MAX_SEGMENTS;
@@ -1403,8 +1548,12 @@ public class SmartOptimizer : GLib.Object {
         } else {
             max_segs = BASE_MAX_SEGMENTS;
         }
-        int n = int.min (max_segs, (int) (duration / segment_duration));
-        n = int.max (n, 2);
+
+        // Take the coverage-based count but respect both the tier cap
+        // and how many segments physically fit in the duration
+        int n = int.min (coverage_segs, max_segs);
+        n = int.min (n, (int) (duration / segment_duration));
+        n = int.max (n, MIN_SEGMENTS);
 
         return spread_positions (duration, n, segment_duration);
     }
@@ -1475,6 +1624,7 @@ public class SmartOptimizer : GLib.Object {
         string        path,
         double[]      positions,
         double        segment_duration,
+        SmartOptimizerVideoInfo info,
         string        video_filter_chain = "",
         Cancellable?  cancellable = null
     ) throws Error {
@@ -1487,7 +1637,10 @@ public class SmartOptimizer : GLib.Object {
         string sig_output = yield run_subprocess_stderr (sig_cmd, cancellable);
         double[] all_satavg = {};
         double[] all_ydif   = {};
-        parse_signalstats (sig_output, ref all_satavg, ref all_ydif);
+        double[] all_ylow   = {};
+        double[] all_yavg   = {};
+        parse_signalstats (sig_output, ref all_satavg, ref all_ydif,
+            ref all_ylow, ref all_yavg);
 
         // ── Edge detection ──────────────────────────────────────────────
         string[] edge_cmd = build_concat_analysis_cmd (
@@ -1505,8 +1658,173 @@ public class SmartOptimizer : GLib.Object {
         compute_stats (all_satavg, out profile.saturation_mean,     out profile.saturation_stddev);
         compute_stats (all_ydif,   out profile.temporal_diff_mean,  out profile.temporal_diff_stddev);
 
+        // ── Banding / dark-scene metrics ────────────────────────────────
+        // Dark scene ratio: fraction of frames where avg luma < 60 (of 235 range)
+        if (all_yavg.length > 0) {
+            int dark_count = 0;
+            for (int i = 0; i < all_yavg.length; i++) {
+                if (all_yavg[i] < 60.0) dark_count++;
+            }
+            profile.dark_scene_ratio = (double) dark_count / all_yavg.length;
+        }
+
+        // Low luma ratio: fraction of frames with significant dark pixel area.
+        // YLOW counts pixels with luma ≤ 16 — normalize by resolution to make
+        // the threshold resolution-adaptive.
+        if (all_ylow.length > 0) {
+            double resolution_scale = (info.width > 0 && info.height > 0)
+                ? (double) (info.width * info.height) / 100000.0
+                : 1.0;
+            int ylow_count = 0;
+            for (int i = 0; i < all_ylow.length; i++) {
+                double normalized = all_ylow[i] / resolution_scale;
+                if (normalized > 5000.0) ylow_count++;
+            }
+            profile.low_luma_ratio = (double) ylow_count / all_ylow.length;
+        }
+
+        // Composite banding risk: weighted combination of dark/luma/smoothness
+        double dark_factor = profile.dark_scene_ratio;
+        double ylow_factor = profile.low_luma_ratio;
+        double smooth_factor = (1.0 - (profile.saturation_stddev / 40.0)).clamp (0.0, 1.0);
+        profile.banding_risk = (dark_factor * 0.35 + ylow_factor * 0.30 + smooth_factor * 0.35)
+            .clamp (0.0, 1.0);
+
         classify_content (ref profile);
         return profile;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // BIT DEPTH DECISION ENGINE
+    // ════════════════════════════════════════════════════════════════════════
+
+    private struct BitDepthDecision {
+        public string pix_fmt;    // "yuv420p10le", "yuv420p", or ""
+        public bool   is_10bit;
+        public string reason;     // for notes
+    }
+
+    private BitDepthDecision decide_bit_depth (
+        SmartOptimizerVideoInfo info,
+        ContentProfile profile,
+        SizeTier tier,
+        string codec,
+        bool tone_mapping_active
+    ) {
+        bool is_hdr = (info.color_transfer == "smpte2084"
+                    || info.color_transfer == "arib-std-b67");
+        bool is_wide_gamut = (info.color_primaries == "bt2020");
+
+        // Rule 1: x264 has limited 10-bit support — hard constraint
+        // checked before HDR so we don't recommend 10-bit to a codec
+        // that can't handle it reliably.
+        if (codec == "x264") {
+            string reason = (is_hdr || is_wide_gamut) && !tone_mapping_active
+                ? "x264 has limited 10-bit support; staying 8-bit (consider enabling tone mapping or switching codec for HDR/wide-gamut content)"
+                : "x264 has limited 10-bit support; staying 8-bit";
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P,
+                is_10bit = false,
+                reason   = reason
+            };
+        }
+
+        // Rule 2: HDR content without tone mapping → must stay 10-bit
+        if (is_hdr && !tone_mapping_active) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "HDR content requires 10-bit to preserve dynamic range"
+            };
+        }
+
+        // Rule 3: HDR content with tone mapping → 8-bit sufficient
+        // Explicit rule so HDR sources with unknown bit depth don't
+        // fall through to banding heuristics.
+        if (is_hdr && tone_mapping_active) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P,
+                is_10bit = false,
+                reason   = "HDR tone-mapped to SDR; 8-bit sufficient"
+            };
+        }
+
+        // Rule 4: Source ≥ 10-bit without tone mapping → preserve depth
+        if (info.source_bit_depth >= 10 && !tone_mapping_active) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "Source is %d-bit; preserving depth to avoid quantization".printf (
+                    info.source_bit_depth)
+            };
+        }
+
+        // Rule 5: Source ≥ 10-bit with tone mapping → 8-bit sufficient
+        if (info.source_bit_depth >= 10 && tone_mapping_active) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P,
+                is_10bit = false,
+                reason   = "Tone mapping to SDR; 8-bit sufficient"
+            };
+        }
+
+        // Rule 6: Small target with low banding risk → 8-bit for speed
+        if (tier <= SizeTier.SMALL && profile.banding_risk < 0.5) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P,
+                is_10bit = false,
+                reason   = "8-bit for speed at small target size"
+            };
+        }
+
+        // Rule 7: Wide color gamut (BT.2020) without tone mapping → 10-bit
+        // BT.2020 primaries span a much wider color space than BT.709.
+        // 10-bit output preserves color precision across that wider gamut,
+        // even when the source bit depth is 8 or unknown.
+        // Tone mapping converts to BT.709 so 8-bit is fine in that case.
+        if (is_wide_gamut && !tone_mapping_active) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "BT.2020 wide color gamut — 10-bit preserves color precision"
+            };
+        }
+
+        // Rule 8: Anime with moderate banding risk → 10-bit
+        if (profile.content_type == ContentType.ANIME && profile.banding_risk >= 0.3) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "Anime with banding risk %.0f%% — 10-bit reduces banding".printf (
+                    profile.banding_risk * 100.0)
+            };
+        }
+
+        // Rule 9: High banding risk for any content → 10-bit
+        if (profile.banding_risk >= 0.6) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "High banding risk (%.0f%%) — 10-bit improves gradients".printf (
+                    profile.banding_risk * 100.0)
+            };
+        }
+
+        // Rule 10: Dark content with banding risk → 10-bit
+        if (profile.dark_scene_ratio >= 0.5 && profile.banding_risk >= 0.4) {
+            return BitDepthDecision () {
+                pix_fmt  = PixelFormat.YUV420P10LE,
+                is_10bit = true,
+                reason   = "Dark content with banding risk — 10-bit reduces artifacts"
+            };
+        }
+
+        // Rule 11: Default → 8-bit
+        return BitDepthDecision () {
+            pix_fmt  = PixelFormat.YUV420P,
+            is_10bit = false,
+            reason   = "Standard 8-bit — no banding risk detected"
+        };
     }
 
     /**
@@ -1601,16 +1919,34 @@ public class SmartOptimizer : GLib.Object {
 
     /**
      * Check if a source audio codec can be stream-copied into the target container.
-     * mp4 → AAC, MP3;  webm → Opus, Vorbis.
+     *
+     * Container support:
+     *   webm  → Opus, Vorbis only
+     *   mkv   → virtually all codecs (AAC, MP3, Opus, Vorbis, FLAC, AC3, EAC3, DTS)
+     *   mp4   → AAC, MP3, AC3, EAC3
+     *   other → fall back to AAC, MP3 (safe baseline)
      */
-    private static bool audio_codec_compatible_with_container (string audio_codec, bool is_webm) {
+    private static bool audio_codec_compatible_with_container (string audio_codec, string container) {
         if (audio_codec.length == 0) return false;
         string lc = audio_codec.down ();
-        if (is_webm) {
+        string ct = container.down ();
+
+        if (ct == "webm") {
             return (lc == "opus" || lc == "vorbis");
-        } else {
-            return (lc == "aac" || lc == "mp3");
         }
+
+        if (ct == "mkv" || ct == "matroska") {
+            // MKV accepts virtually all audio codecs
+            return (lc == "aac" || lc == "mp3" || lc == "opus" || lc == "vorbis"
+                 || lc == "flac" || lc == "ac3" || lc == "eac3" || lc == "dts");
+        }
+
+        if (ct == "mp4") {
+            return (lc == "aac" || lc == "mp3" || lc == "ac3" || lc == "eac3");
+        }
+
+        // Unknown container — conservative baseline
+        return (lc == "aac" || lc == "mp3");
     }
 
     /**
@@ -2123,7 +2459,8 @@ public class SmartOptimizer : GLib.Object {
         double        segment_duration,
         string        video_filter_chain = "",
         Cancellable?  cancellable = null,
-        int           preset_idx = -1
+        int           preset_idx = -1,
+        string        pix_fmt = ""
     ) throws Error {
         double sample_duration = double.min (
             (double) positions.length * segment_duration, full_duration);
@@ -2132,7 +2469,7 @@ public class SmartOptimizer : GLib.Object {
 
         string[] cmd = build_concat_encode_cmd (
             input_file, codec, crf, positions, segment_duration, tmp,
-            video_filter_chain, preset_idx);
+            video_filter_chain, preset_idx, pix_fmt);
 
         try {
             yield run_subprocess_wait (cmd, cancellable);
@@ -2216,15 +2553,13 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /**
-     * Build a command that encodes concat'd segments to a file at a given CRF
-     * using the fastest preset (for calibration speed).
+     * Build a command that encodes concat'd segments to a file at a given CRF.
      *
      * When video_filter_chain is non-empty, each segment is pre-filtered
      * before concat so the calibration output reflects the actual encode size.
-     */
-    /**
+     *
      * @param preset_idx  When >= 0, use this preset index instead of the
-     *                    fastest preset. Used by verification encodes.
+     *                    fastest preset.
      */
     private string[] build_concat_encode_cmd (
         string   path,
@@ -2234,7 +2569,8 @@ public class SmartOptimizer : GLib.Object {
         double   seg_dur,
         string   output,
         string   video_filter_chain = "",
-        int      preset_idx = -1
+        int      preset_idx = -1,
+        string   pix_fmt = ""
     ) {
         string ffmpeg = AppSettings.get_default ().ffmpeg_path;
         var cmd = new GenericArray<string> ();
@@ -2291,6 +2627,10 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");    cmd.add (crf.to_string ());
         }
 
+        if (pix_fmt.length > 0) {
+            cmd.add ("-pix_fmt"); cmd.add (pix_fmt);
+        }
+
         cmd.add ("-f");    cmd.add ("matroska");
         cmd.add (output);
 
@@ -2312,10 +2652,14 @@ public class SmartOptimizer : GLib.Object {
     private void parse_signalstats (
         string      text,
         ref double[] satavg_out,
-        ref double[] ydif_out
+        ref double[] ydif_out,
+        ref double[] ylow_out,
+        ref double[] yavg_out
     ) {
         var sat_list  = new GenericArray<double?> ();
         var ydif_list = new GenericArray<double?> ();
+        var ylow_list = new GenericArray<double?> ();
+        var yavg_list = new GenericArray<double?> ();
 
         foreach (unowned string line in text.split ("\n")) {
             bool is_stats_line = line.contains ("Parsed_signalstats")
@@ -2324,8 +2668,12 @@ public class SmartOptimizer : GLib.Object {
 
             double? sat  = parse_field_value (line, "SATAVG:");
             double? ydif = parse_field_value (line, "YDIF:");
+            double? ylow = parse_field_value (line, "YLOW:");
+            double? yavg = parse_field_value (line, "YAVG:");
             if (sat  != null) sat_list.add (sat);
             if (ydif != null) ydif_list.add (ydif);
+            if (ylow != null) ylow_list.add (ylow);
+            if (yavg != null) yavg_list.add (yavg);
         }
 
         satavg_out = new double[sat_list.length];
@@ -2333,6 +2681,12 @@ public class SmartOptimizer : GLib.Object {
 
         ydif_out = new double[ydif_list.length];
         for (int i = 0; i < ydif_list.length; i++) ydif_out[i] = ydif_list[i];
+
+        ylow_out = new double[ylow_list.length];
+        for (int i = 0; i < ylow_list.length; i++) ylow_out[i] = ylow_list[i];
+
+        yavg_out = new double[yavg_list.length];
+        for (int i = 0; i < yavg_list.length; i++) yavg_out[i] = yavg_list[i];
     }
 
     /**
@@ -2597,6 +2951,15 @@ public class SmartOptimizer : GLib.Object {
             "smart_opt_%s_%lld.mkv".printf (label, get_real_time ()));
     }
 
+    /**
+     * Default container for a codec when the caller doesn't provide one.
+     * VP9/SVT-AV1 → webm, x264/x265 → mp4.
+     */
+    private static string codec_default_container (string codec) {
+        if (codec == "vp9" || codec == "svt-av1") return "webm";
+        return "mp4";
+    }
+
     private void cleanup_file (string path) {
         if (FileUtils.test (path, FileTest.EXISTS) && FileUtils.unlink (path) != 0) {
             warning ("Failed to clean up temp file %s: %s", path, strerror (errno));
@@ -2617,7 +2980,8 @@ public class SmartOptimizer : GLib.Object {
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,
-            strip_metadata         = false
+            strip_metadata         = false,
+            recommended_pix_fmt    = ""
         };
     }
 }

@@ -463,6 +463,14 @@ namespace CodecUtils {
             // rec.preset for VP9 is "cpu-used N" — extract the number
             string speed_str = rec.preset.replace ("cpu-used ", "");
 
+            // VP9 requires profile 2 for 10-bit
+            bool vp9_10bit = (rec.recommended_pix_fmt != null
+                && rec.recommended_pix_fmt.contains ("10"));
+            if (vp9_10bit) {
+                args += "-profile:v";
+                args += "2";
+            }
+
             if (rec.two_pass && rec.target_bitrate_kbps > 0) {
                 // Pure VBR two-pass for size-targeted encodes — no CRF floor
                 // so the encoder can allocate bits strictly to hit the
@@ -492,6 +500,14 @@ namespace CodecUtils {
             args += "-c:v";
             args += "libx265";
 
+            // x265 requires main10 profile for 10-bit
+            bool x265_10bit = (rec.recommended_pix_fmt != null
+                && rec.recommended_pix_fmt.contains ("10"));
+            if (x265_10bit) {
+                args += "-profile:v";
+                args += "main10";
+            }
+
             if (rec.two_pass && rec.target_bitrate_kbps > 0) {
                 args += "-b:v";
                 args += "%dk".printf (rec.target_bitrate_kbps);
@@ -516,11 +532,17 @@ namespace CodecUtils {
             // rec.preset for SVT-AV1 is "preset N" — extract the number
             string preset_str = rec.preset.replace ("preset ", "");
 
-            string svt_pix_fmt = CodecUtils.get_svt_av1_pix_fmt_from_snapshot (
-                general_settings);
-            if (svt_pix_fmt.length > 0) {
+            // Prefer smart optimizer's recommended pixel format over snapshot
+            if (rec.recommended_pix_fmt != null && rec.recommended_pix_fmt.length > 0) {
                 args += "-pix_fmt";
-                args += svt_pix_fmt;
+                args += rec.recommended_pix_fmt;
+            } else {
+                string svt_pix_fmt = CodecUtils.get_svt_av1_pix_fmt_from_snapshot (
+                    general_settings);
+                if (svt_pix_fmt.length > 0) {
+                    args += "-pix_fmt";
+                    args += svt_pix_fmt;
+                }
             }
 
             if (rec.two_pass && rec.target_bitrate_kbps > 0) {
@@ -533,6 +555,15 @@ namespace CodecUtils {
 
             args += "-preset";
             args += preset_str;
+        }
+
+        // Emit -pix_fmt for non-SVT-AV1 codecs when recommended and not
+        // already emitted by the codec-specific block above.
+        if (rec.codec != "svt-av1"
+                && rec.recommended_pix_fmt != null
+                && rec.recommended_pix_fmt.length > 0) {
+            args += "-pix_fmt";
+            args += rec.recommended_pix_fmt;
         }
 
         // VBV peak-rate constraint for two-pass encodes.

@@ -388,6 +388,10 @@ public class AppController : Object {
             : null;
         ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (
             general_tab, false, codec, pixel_format);
+        ctx.tone_mapping_active = ctx.video_filter_chain.contains ("tonemap=");
+        if (codec_tab != null) {
+            ctx.output_container = codec_tab.get_container ();
+        }
 
         // Effective duration — if seek/time are set, the encode is shorter
         if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {

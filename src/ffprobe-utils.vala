@@ -143,7 +143,7 @@ namespace FfprobeUtils {
         }
     }
 
-    private int infer_bit_depth_from_pix_fmt (string pix_fmt) {
+    internal int infer_bit_depth_from_pix_fmt (string pix_fmt) {
         string pix = pix_fmt.down ().strip ();
 
         if (pix.contains ("p16") || pix.contains ("16le") || pix.contains ("16be"))
