@@ -73,7 +73,7 @@ executable('ffmpeg-converter-gtk',
   install_dir : get_option('bindir')
 )
 
-import('fs')
+fs = import('fs')
 if fs.exists('tests/subtitle-language-guesser-test.vala')
   subtitle_language_guesser_test = executable(
     'subtitle-language-guesser-test',
