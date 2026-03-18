@@ -2,7 +2,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/builddir"
 BINARY_NAME="ffmpeg-converter-gtk"
 INSTALL_DIR="/usr/local/bin"
@@ -87,6 +87,28 @@ check_dependency pkg-config
 echo "✅ All dependencies found"
 echo
 
+# --- Version bump prompt ---
+MESON_FILE="$PROJECT_DIR/meson.build"
+CONSTANTS_FILE="$PROJECT_DIR/src/constants.vala"
+DESKTOP_FILE="$PROJECT_DIR/Resources/FFmpegConverterGTK.desktop"
+
+CURRENT_VERSION=$(grep -oP "^\s*version\s*:\s*'\K[^']+" "$MESON_FILE")
+echo "Current version: $CURRENT_VERSION"
+read -p "Enter new version (or press Enter to keep $CURRENT_VERSION): " NEW_VERSION
+
+if [ -n "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+    # Update meson.build
+    sed -i "s/version : '$CURRENT_VERSION'/version : '$NEW_VERSION'/" "$MESON_FILE"
+    # Update constants.vala
+    sed -i "s/public const string VERSION = \"$CURRENT_VERSION\"/public const string VERSION = \"$NEW_VERSION\"/" "$CONSTANTS_FILE"
+    # Update desktop file
+    sed -i "s/^Version=$CURRENT_VERSION/Version=$NEW_VERSION/" "$DESKTOP_FILE"
+    echo "✅ Version updated: $CURRENT_VERSION → $NEW_VERSION"
+else
+    echo "→ Keeping version $CURRENT_VERSION"
+fi
+echo
+
 # --- Clean build ---
 if [ -d "$BUILD_DIR" ]; then
     echo "🧹 Removing old build directory..."
@@ -94,7 +116,7 @@ if [ -d "$BUILD_DIR" ]; then
 fi
 
 echo "🔧 Running meson setup..."
-if ! meson setup "$BUILD_DIR"; then
+if ! meson setup "$BUILD_DIR" "$PROJECT_DIR"; then
     echo "❌ Meson setup failed"
     exit 1
 fi
