@@ -124,6 +124,19 @@
 //     better size prediction on variable-content videos.
 //   - Three-tier duration scaling: <10 min (4 segments), 10–45 min (8),
 //     45+ min (12 base, up to 16 adaptive).
+//
+// v8 improvements:
+//   - Calibrate at target preset: calibration encodes now use the
+//     recommended preset instead of always using the fastest (ultrafast).
+//     This eliminates the preset efficiency factor tables and the complex
+//     verification correction loop — the model directly predicts what
+//     the actual encode will produce.  Fixes a bug where x265's psy-rd
+//     at slower presets could produce LARGER files than ultrafast at the
+//     same CRF, causing the old factor (clamped to ≤1.0) to severely
+//     underestimate output size.
+//   - Lightweight model accuracy verification: a single encode at the
+//     solved CRF (same preset, same samples) checks the quadratic
+//     interpolation accuracy and corrects if off by >5%.
 
 using GLib;
 using Json;
@@ -280,38 +293,6 @@ public class SmartOptimizer : GLib.Object {
     // Users who want 10+ can disable auto-convert and set it manually.
     private const int[] SVT_AV1_PRESETS = { 9, 8, 7, 6, 5, 4, 3, 2, 0 };
 
-    // ── Content-aware preset efficiency tables ───────────────────────────────
-    //
-    // Each table answers: compared to the fastest preset in the array,
-    // what fraction of that file size does a given preset produce at the
-    // same CRF?  Index 0 = fastest (1.0 by definition), index 8 = slowest.
-    //
-    // These are initial estimates — the verification encode (step 8b)
-    // measures the real ratio at runtime and corrects if >5% off.
-    //
-    // Live-action: diminishing returns past medium/slow.
-    private const double[] PRESET_FACTORS_LIVE_ACTION = {
-        1.00, 0.95, 0.90, 0.85, 0.82,
-        0.78, 0.72, 0.65, 0.60
-    };
-    // Anime: flat fills + sharp ink lines respond strongly to encoder effort.
-    // Slower presets can cut file size nearly in half versus ultrafast.
-    private const double[] PRESET_FACTORS_ANIME = {
-        1.00, 0.92, 0.85, 0.78, 0.73,
-        0.66, 0.58, 0.50, 0.45
-    };
-    // Screencast: highly compressible even at ultrafast; slower presets help
-    // more than live-action but the absolute savings are large either way.
-    private const double[] PRESET_FACTORS_SCREENCAST = {
-        1.00, 0.90, 0.82, 0.74, 0.68,
-        0.60, 0.52, 0.44, 0.40
-    };
-    // Mixed: interpolated roughly between live-action and anime.
-    private const double[] PRESET_FACTORS_MIXED = {
-        1.00, 0.93, 0.87, 0.81, 0.77,
-        0.72, 0.65, 0.57, 0.52
-    };
-
     // Analysis segment config
     private const int    SEGMENT_DURATION   = 8;        // seconds per sample
     private const int    BASE_MAX_SEGMENTS  = 4;        // cap for videos < 10 min
@@ -319,7 +300,7 @@ public class SmartOptimizer : GLib.Object {
     private const int    VLONG_MAX_SEGMENTS = 12;       // cap for videos > 45 min
     private const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
     private const int    ADAPTIVE_CALIBRATION_BASE_MAX_POINTS = 6; // 4 base + up to 2 follow-up CRFs
-    private const int    ADAPTIVE_CALIBRATION_HARD_MAX_POINTS = 8; // one bounded second pass after verification
+
     private const double LONG_VIDEO_THRESHOLD  = 600.0; // 10 minutes
     private const double VLONG_VIDEO_THRESHOLD = 2700.0; // 45 minutes
     private const double SEGMENT_SPREAD    = 0.15;      // start at 15%, end at 85%
@@ -328,7 +309,6 @@ public class SmartOptimizer : GLib.Object {
     // across the video and more samples improve prediction accuracy.
     private const double ADAPTIVE_CV_THRESHOLD = 0.60;
     private const int    ADAPTIVE_CALIBRATION_EDGE_MARGIN = 1;
-    private const int    ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD = 2;
 
     // If the required video bitrate would fall below this threshold it is
     // physically impossible to produce acceptable-quality output.
@@ -546,13 +526,32 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 5. Base CRF calibration ────────────────────────────────────
-        // Encode sample segments at four CRFs with the fastest preset,
+        // ── 5. Content-aware, tier-scaled preset selection ────────────
+        // Moved before calibration so we can calibrate at the target preset
+        // directly, eliminating the need for preset efficiency factor tables
+        // and the verification correction loop.
+        // At larger targets, slower presets have diminishing returns because
+        // the encoder already has plenty of bits. The "safe" baseline shifts
+        // faster, and content-type influence is dampened.
+        int ideal_preset_idx = choose_ideal_preset_index (profile);
+        int safe_preset_idx  = tier_safe_preset_index (tier, preferred_codec);
+        double content_factor = tier_content_influence (tier);
+
+        int preset_idx = safe_preset_idx + (int) Math.round (
+            (ideal_preset_idx - safe_preset_idx) * profile.type_confidence * content_factor);
+        preset_idx = preset_idx.clamp (0, X264_PRESETS.length - 1);
+
+        // ── 6. Base CRF calibration ────────────────────────────────────
+        // Encode sample segments at four CRFs with the TARGET preset,
         // measure sizes, then fit a quadratic curve in log-space via least-
         // squares. This base window can be adaptively extended later when
         // the predicted answer falls outside or right at the edge.
         // Video filters are included so calibration reflects the actual
         // output resolution and processing.
+        //
+        // By calibrating at the target preset, the model directly predicts
+        // what the actual encode will produce — no preset efficiency factor
+        // correction is needed.
 
         int[] cal_crfs = new int[4];
         pick_calibration_crfs (preferred_codec, tier,
@@ -564,7 +563,7 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 cal_sizes[ci] = yield calibration_encode (
                     input_file, preferred_codec, cal_crfs[ci], positions,
-                    encode_duration, sample_segment_duration, vf, cancellable);
+                    encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
             }
         } catch (IOError.CANCELLED e) {
             throw e;
@@ -606,30 +605,12 @@ public class SmartOptimizer : GLib.Object {
         bool degenerate = false;
         fit_quadratic_log_curve (cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
 
-        // ── 7. Content-aware, tier-scaled preset selection ────────────
-        // At larger targets, slower presets have diminishing returns because
-        // the encoder already has plenty of bits. The "safe" baseline shifts
-        // faster, and content-type influence is dampened.
-        int ideal_preset_idx = choose_ideal_preset_index (profile);
-        int safe_preset_idx  = tier_safe_preset_index (tier, preferred_codec);
-        double content_factor = tier_content_influence (tier);
-
-        int preset_idx = safe_preset_idx + (int) Math.round (
-            (ideal_preset_idx - safe_preset_idx) * profile.type_confidence * content_factor);
-        preset_idx = preset_idx.clamp (0, X264_PRESETS.length - 1);
-
-        double[] preset_factors = preset_factors_for_content (profile.content_type);
-        double preset_factor = preset_factors[preset_idx];
-
-        // ── 8. Solve for CRF ───────────────────────────────────────────
-        // We calibrated at the fastest preset. The recommended (slower) preset
-        // produces smaller files at the same CRF, so we inflate the target to
-        // compensate:
-        //   effective_target = video_target_kib / preset_factor
-        // Then solve: ln(effective_target) = a + b·crf + c·crf²
+        // ── 7. Solve for CRF ───────────────────────────────────────────
+        // Calibration was done at the target preset, so the model directly
+        // predicts the output size — no preset factor correction needed.
+        // Solve: ln(target) = a + b·crf + c·crf²
         //   → c·crf² + b·crf + (a − ln(target)) = 0
 
-        double effective_target_kib = video_target_kib / preset_factor;
         int crf_min, crf_max;
         if (preferred_codec == "vp9") {
             crf_min = 12; crf_max = 55;
@@ -640,7 +621,7 @@ public class SmartOptimizer : GLib.Object {
             crf_min = 8; crf_max = 51;
         }
 
-        double ln_target = Math.log (effective_target_kib);
+        double ln_target = Math.log (video_target_kib);
         double cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
         double crf_raw = solve_crf_from_curve (
             qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
@@ -661,7 +642,7 @@ public class SmartOptimizer : GLib.Object {
                         cancellable_check (cancellable);
                         double extra_size = yield calibration_encode (
                             input_file, preferred_codec, extra_crfs[ci], positions,
-                            encode_duration, sample_segment_duration, vf, cancellable);
+                            encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
                         if (extra_size <= 0) {
                             warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKiB",
                                 extra_crfs[ci], extra_size);
@@ -702,178 +683,66 @@ public class SmartOptimizer : GLib.Object {
             }
         }
 
-        // ── 8b. Verification encode ─────────────────────────────────────
-        // Encode spread segments at the predicted CRF + recommended preset
-        // to measure the real preset factor instead of relying on the
-        // hardcoded table.  Compare against the quadratic model's fastest
-        // prediction at the same CRF (no need for a second fastest-preset encode).
+        // ── 7b. Verification encode ───────────────────────────────────
+        // Encode the same sample segments at the solved CRF to check the
+        // model's interpolation accuracy.  Since calibration already used
+        // the target preset, this is a direct apples-to-apples comparison
+        // — no preset factor involved.
         //
-        // If the verified factor differs significantly, re-solve for CRF
-        // using the measured factor so the prediction is self-consistent.
-        double verified_preset_factor = preset_factor;  // fallback
+        // If the model's prediction is off by >5%, apply the measured
+        // error ratio to correct the CRF and estimate.
         bool   verification_done = false;
-        double verify_model_ultrafast_kib = 0.0;
-        double verify_preset_kib = 0.0;
+        int    verified_crf = predicted_crf;
+        double verify_model_kib = 0.0;
+        double verify_actual_kib = 0.0;
+        double model_correction = 1.0;  // ratio: actual / model
 
         if (!crf_at_max) {
-            // Model's prediction at this CRF with ultrafast (already known)
             bool verify_model_valid = try_evaluate_model_size_kib (
-                qa, qb, qc, predicted_crf, "verification baseline", out verify_model_ultrafast_kib);
+                qa, qb, qc, predicted_crf, "verification", out verify_model_kib);
 
-            // Pick spread positions for verification — using multiple segments
-            // catches content variability that a single middle segment misses.
-            double[] verify_pos;
-            if (positions.length >= 4) {
-                // Use 3 spread positions: ~25%, ~50%, ~75% through the samples
-                int q1 = positions.length / 4;
-                int q2 = positions.length / 2;
-                int q3 = positions.length * 3 / 4;
-                verify_pos = { positions[q1], positions[q2], positions[q3] };
-            } else if (positions.length >= 2) {
-                // Use first and last
-                verify_pos = { positions[0], positions[positions.length - 1] };
-            } else {
-                verify_pos = { positions[0] };
-            }
-            try {
-                cancellable_check (cancellable);
+            if (verify_model_valid && verify_model_kib > 0) {
+                try {
+                    cancellable_check (cancellable);
 
-                // Encode at the recommended preset to measure the real ratio
-                verify_preset_kib = yield calibration_encode (
-                    input_file, preferred_codec, predicted_crf, verify_pos,
-                    encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
+                    verify_actual_kib = yield calibration_encode (
+                        input_file, preferred_codec, predicted_crf, positions,
+                        encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
 
-                if (verify_model_valid && verify_model_ultrafast_kib > 0 && verify_preset_kib > 0) {
-                    verified_preset_factor = verify_preset_kib / verify_model_ultrafast_kib;
-                    // Sanity: clamp to reasonable range (0.2–1.0)
-                    verified_preset_factor = verified_preset_factor.clamp (0.20, 1.0);
-                    verification_done = true;
-                    bool verification_invalidated = false;
+                    if (verify_actual_kib > 0) {
+                        model_correction = verify_actual_kib / verify_model_kib;
+                        verified_crf = predicted_crf;
+                        verification_done = true;
 
-                    // Re-solve CRF if the verified factor differs significantly
-                    // from the table factor (>5% difference)
-                    if (Math.fabs (verified_preset_factor - preset_factor) / preset_factor > 0.05) {
-                        int verify_base_crf = predicted_crf;
-                        bool verification_curve_refit = false;
-                        double re_target_kib = video_target_kib / verified_preset_factor;
-                        double re_ln_target = Math.log (re_target_kib);
-                        double re_crf_raw = solve_crf_from_curve (
-                            qa, qb, qc, re_ln_target, cal_mid, crf_min, crf_max);
-                        int re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
+                        // If model is off by >5%, re-solve with a corrected target
+                        if (Math.fabs (model_correction - 1.0) > 0.05) {
+                            // Adjust the target to compensate for the model's bias:
+                            // if model underestimates (correction > 1), we need a
+                            // smaller model-space target to hit the real target.
+                            double corrected_target = video_target_kib / model_correction;
+                            double corrected_ln = Math.log (corrected_target);
+                            double re_crf_raw = solve_crf_from_curve (
+                                qa, qb, qc, corrected_ln, cal_mid, crf_min, crf_max);
+                            int re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
 
-                        int cal_first_now = cal_crfs[0];
-                        int cal_last_now = cal_crfs[cal_crfs.length - 1];
-                        bool needs_second_refinement =
-                            Math.fabs ((double) (re_crf - verify_base_crf))
-                                >= ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD
-                            && (re_crf < cal_first_now - ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD
-                                || re_crf > cal_last_now + ADAPTIVE_CALIBRATION_VERIFY_SHIFT_THRESHOLD);
-
-                        if (needs_second_refinement) {
-                            int[] verify_extra_crfs = pick_adaptive_calibration_crfs (
-                                re_crf, cal_crfs, crf_min, crf_max,
-                                ADAPTIVE_CALIBRATION_HARD_MAX_POINTS);
-                            int second_points_added = 0;
-                            for (int ci = 0; ci < verify_extra_crfs.length; ci++) {
-                                try {
-                                    cancellable_check (cancellable);
-                                    double extra_size = yield calibration_encode (
-                                        input_file, preferred_codec, verify_extra_crfs[ci], positions,
-                                        encode_duration, sample_segment_duration, vf, cancellable);
-                                    if (extra_size <= 0) {
-                                        warning ("Adaptive verification calibration produced invalid result: CRF %d → %.0fKiB",
-                                            verify_extra_crfs[ci], extra_size);
-                                        continue;
-                                    }
-                                    append_calibration_sample (
-                                        ref cal_crfs, ref cal_sizes, verify_extra_crfs[ci], extra_size);
-                                    second_points_added++;
-                                } catch (IOError.CANCELLED e) {
-                                    throw e;
-                                } catch (Error e) {
-                                    warning ("Adaptive verification calibration encode failed at CRF %d: %s",
-                                        verify_extra_crfs[ci], e.message);
-                                    continue;
-                                }
-                            }
-
-                            if (second_points_added > 0) {
-                                adaptive_calibration_refined = true;
-                                adaptive_points_added += second_points_added;
-                                verification_curve_refit = true;
-                                fit_quadratic_log_curve (
-                                    cal_crfs, cal_sizes, out qa, out qb, out qc, out degenerate);
-                                cal_mid = (double) (cal_crfs[0] + cal_crfs[cal_crfs.length - 1]) / 2.0;
-                                verify_model_valid = try_evaluate_model_size_kib (
-                                    qa, qb, qc, verify_base_crf, "verification refit",
-                                    out verify_model_ultrafast_kib);
-                                if (verify_model_valid && verify_model_ultrafast_kib > 0
-                                    && verify_preset_kib > 0) {
-                                    verified_preset_factor = (verify_preset_kib / verify_model_ultrafast_kib)
-                                        .clamp (0.20, 1.0);
-                                    re_target_kib = video_target_kib / verified_preset_factor;
-                                    re_ln_target = Math.log (re_target_kib);
-                                } else {
-                                    verification_done = false;
-                                    verified_preset_factor = preset_factor;
-                                }
-                                re_crf_raw = solve_crf_from_curve (
-                                    qa, qb, qc, re_ln_target, cal_mid, crf_min, crf_max);
-                                re_crf = ((int) Math.round (re_crf_raw)).clamp (crf_min, crf_max);
+                            if (re_crf != predicted_crf) {
+                                warning ("Smart Optimizer: verification shifted CRF %d → %d "
+                                    + "(model error: %+.1f%%)",
+                                    predicted_crf, re_crf, (model_correction - 1.0) * 100.0);
+                                predicted_crf = re_crf;
+                                crf_at_max = (predicted_crf >= crf_max);
                             }
                         }
-
-                        if (verification_curve_refit && re_crf == verify_base_crf) {
-                            verification_done = (
-                                verify_model_valid && verify_model_ultrafast_kib > 0
-                                && verify_preset_kib > 0);
-                        }
-
-                        if (re_crf != verify_base_crf) {
-                            warning ("Smart Optimizer: verification shifted CRF %d → %d "
-                                + "(table factor %.2f, measured %.2f)",
-                                verify_base_crf, re_crf, preset_factor, verified_preset_factor);
-                            predicted_crf = re_crf;
-                            crf_at_max = (predicted_crf >= crf_max);
-                            verification_invalidated = true;
-                        }
                     }
-
-                    if (verification_invalidated) {
-                        verification_done = false;
-                        verified_preset_factor = preset_factor;
-                    }
-
-                    if (verification_invalidated && !crf_at_max) {
-                        verify_model_valid = try_evaluate_model_size_kib (
-                            qa, qb, qc, predicted_crf, "verification retry",
-                            out verify_model_ultrafast_kib);
-                        verify_preset_kib = yield calibration_encode (
-                            input_file, preferred_codec, predicted_crf, verify_pos,
-                            encode_duration, sample_segment_duration, vf, cancellable, preset_idx);
-
-                        if (verify_model_valid && verify_model_ultrafast_kib > 0
-                            && verify_preset_kib > 0) {
-                            verified_preset_factor = (verify_preset_kib / verify_model_ultrafast_kib)
-                                .clamp (0.20, 1.0);
-                            verification_done = true;
-                        } else {
-                            warning ("Final verification at CRF %d produced invalid results; using table preset factor",
-                                predicted_crf);
-                        }
-                    }
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    warning ("Verification encode failed, using model estimate: %s", e.message);
                 }
-            } catch (IOError.CANCELLED e) {
-                throw e;
-            } catch (Error e) {
-                // Verification failed before a usable measured factor was applied.
-                warning ("Verification encode failed, using table preset factor: %s", e.message);
             }
         }
 
-        double final_preset_factor = verification_done ? verified_preset_factor : preset_factor;
-
-        // ── 9. Estimate final size ──────────────────────────────────────
+        // ── 8. Estimate final size ──────────────────────────────────────
         double raw_estimate_kib;
         if (!try_evaluate_model_size_kib (
                 qa, qb, qc, predicted_crf, "final estimate", out raw_estimate_kib)) {
@@ -882,7 +751,12 @@ public class SmartOptimizer : GLib.Object {
                 + "Try two-pass mode, a different target size, or trimming the input.");
         }
 
-        double estimated_video_kib_double = raw_estimate_kib * final_preset_factor;
+        // Apply model correction from verification if available.
+        // If CRF didn't shift, this effectively uses the verified size.
+        // If CRF shifted, it applies the measured error ratio to the new
+        // model prediction — a reasonable first-order correction.
+        double estimated_video_kib_double = raw_estimate_kib
+            * (verification_done ? model_correction : 1.0);
         double estimated_total_kib_double = estimated_video_kib_double + audio_kib + container_overhead_kib;
         int estimated_video_kib = 0;
         int estimated_total_kib = 0;
@@ -1181,15 +1055,15 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  Adaptive refinement: +%d follow-up point%s around the solved CRF path\n"
                 .printf (adaptive_points_added, adaptive_points_added == 1 ? "" : "s"));
         }
+        notes.append ("  Calibrated at preset: %s\n".printf (preset_label));
         if (verification_done) {
-            notes.append ("  Preset factor = %.2f (verified: %s vs model, table: %.2f)\n"
-                .printf (verified_preset_factor, preset_label, preset_factor));
-            notes.append ("  Verification: model fastest→%.0f KiB, %s→%.0f KiB (ratio %.2f)\n"
-                .printf (verify_model_ultrafast_kib, preset_label, verify_preset_kib,
-                         verified_preset_factor));
-        } else {
-            notes.append ("  Preset efficiency factor = %.2f (%s vs fastest, from table)\n"
-                .printf (preset_factor, preset_label));
+            notes.append ("  Verification: model predicted %.0f KiB at CRF %d, measured %.0f KiB (error: %+.1f%%)\n"
+                .printf (verify_model_kib, verified_crf, verify_actual_kib,
+                         (model_correction - 1.0) * 100.0));
+            if (predicted_crf != verified_crf) {
+                notes.append ("  CRF adjusted %d → %d to compensate for model error\n"
+                    .printf (verified_crf, predicted_crf));
+            }
         }
         notes.append ("  Container overhead: %.0f KiB reserved\n"
             .printf (container_overhead_kib));
@@ -1594,18 +1468,6 @@ public class SmartOptimizer : GLib.Object {
             default:
                 // Live-action: diminishing returns past medium/slow.
                 return 6;  // "slow" / cpu-used 2
-        }
-    }
-
-    /**
-     * Return the correct preset-efficiency table for a given content type.
-     */
-    private unowned double[] preset_factors_for_content (ContentType ct) {
-        switch (ct) {
-            case ContentType.ANIME:      return PRESET_FACTORS_ANIME;
-            case ContentType.SCREENCAST: return PRESET_FACTORS_SCREENCAST;
-            case ContentType.MIXED:      return PRESET_FACTORS_MIXED;
-            default:                     return PRESET_FACTORS_LIVE_ACTION;
         }
     }
 
