@@ -73,18 +73,21 @@ executable('ffmpeg-converter-gtk',
   install_dir : get_option('bindir')
 )
 
-subtitle_language_guesser_test = executable(
-  'subtitle-language-guesser-test',
-  files(
-    'src/subtitle-language-guesser.vala',
-    'tests/subtitle-language-guesser-test.vala',
-  ),
-  vala_args : ['--define=SUBTITLE_LANGUAGE_GUESSER_TEST_BUILD'],
-  dependencies : [
-    dependency('glib-2.0'),
-    dependency('gio-2.0'),
-    dependency('json-glib-1.0'),
-  ],
-)
+import('fs')
+if fs.exists('tests/subtitle-language-guesser-test.vala')
+  subtitle_language_guesser_test = executable(
+    'subtitle-language-guesser-test',
+    files(
+      'src/subtitle-language-guesser.vala',
+      'tests/subtitle-language-guesser-test.vala',
+    ),
+    vala_args : ['--define=SUBTITLE_LANGUAGE_GUESSER_TEST_BUILD'],
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gio-2.0'),
+      dependency('json-glib-1.0'),
+    ],
+  )
 
-test('subtitle-language-guesser', subtitle_language_guesser_test)
+  test('subtitle-language-guesser', subtitle_language_guesser_test)
+endif
