@@ -103,6 +103,16 @@ Just pick the mode and go.
 meson, ninja, valac, pkg-config, GTK4, libadwaita
 ```
 
+### Install
+
+Download the latest source release from [Releases](https://github.com/orlfman/FFmpeg-Converter-GTK/releases), extract it, then:
+
+```bash
+  cd FFmpeg-Converter-GTK-<version>
+  make
+  sudo make install
+```
+
 ### Build & Install
 
 ```bash
