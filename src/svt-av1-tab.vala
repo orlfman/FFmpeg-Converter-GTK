@@ -15,6 +15,8 @@ public class SvtAv1Tab : BaseCodecTab {
     public SpinButton crf_spin           { get; private set; }
     public SpinButton qp_spin            { get; private set; }
     public SpinButton vbr_bitrate_spin   { get; private set; }
+    public Adw.ExpanderRow mbr_expander   { get; private set; }
+    public SpinButton mbr_bitrate_spin    { get; private set; }
 
     private Adw.ActionRow crf_row;
     private Adw.ActionRow qp_row;
@@ -214,6 +216,23 @@ public class SvtAv1Tab : BaseCodecTab {
         vbr_row.add_suffix (vbr_bitrate_spin);
         vbr_row.set_visible (false);
         group.add (vbr_row);
+
+        // Max Bitrate (CRF mode only — SVT-AV1 mbr param)
+        mbr_expander = new Adw.ExpanderRow ();
+        mbr_expander.set_title ("Max Bitrate");
+        mbr_expander.set_subtitle ("Caps peak bitrate in CRF mode to prevent spikes");
+        mbr_expander.set_show_enable_switch (true);
+        mbr_expander.set_enable_expansion (false);
+
+        var mbr_bitrate_row = new Adw.ActionRow ();
+        mbr_bitrate_row.set_title ("Max Bitrate (kbps)");
+        mbr_bitrate_row.set_subtitle ("Peak bitrate ceiling — encoder stays at or below this");
+        mbr_bitrate_spin = new SpinButton.with_range (100, 50000, 100);
+        mbr_bitrate_spin.set_value (4000);
+        mbr_bitrate_spin.set_valign (Align.CENTER);
+        mbr_bitrate_row.add_suffix (mbr_bitrate_spin);
+        mbr_expander.add_row (mbr_bitrate_row);
+        group.add (mbr_expander);
 
         // Two-Pass (#2: simplified — no hidden CheckButton)
         two_pass_row = new Adw.ActionRow ();
@@ -691,6 +710,7 @@ public class SvtAv1Tab : BaseCodecTab {
         crf_row.set_visible (mode == RateControl.CRF);
         qp_row.set_visible (mode == RateControl.QP);
         vbr_row.set_visible (mode == RateControl.VBR);
+        mbr_expander.set_visible (mode == RateControl.CRF);
         // Two-pass available for all modes
         two_pass_row.set_visible (true);
     }
@@ -831,6 +851,8 @@ public class SvtAv1Tab : BaseCodecTab {
         crf_spin.set_value (28);
         qp_spin.set_value (28);
         vbr_bitrate_spin.set_value (2000);
+        mbr_expander.set_enable_expansion (false);
+        mbr_bitrate_spin.set_value (4000);
         two_pass_switch.set_active (false);
 
         // Quality & Tuning

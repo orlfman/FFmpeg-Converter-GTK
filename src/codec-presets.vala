@@ -588,11 +588,28 @@ public class CodecPresets : Object {
      * Bitrate combo indices: 0=64, 1=128, 2=192, 3=256, 4=320 kbps.
      */
     private static void configure_smart_audio (AudioSettings audio,
-                                                SizeTier tier,
+                                                OptimizationRecommendation rec,
                                                 string container) {
+        // When the optimizer determined source audio can be stream-copied,
+        // try to set Copy.  If Copy is not available in the dropdown
+        // (e.g. speed change or normalization is active), fall through
+        // to the tier-based re-encode below.
+        if (rec.stream_copy_audio) {
+            var model = audio.codec_combo.get_model () as StringList;
+            if (model != null) {
+                for (uint i = 0; i < model.get_n_items (); i++) {
+                    if (model.get_string (i) == AudioCodecName.COPY) {
+                        configure_audio (audio, AudioCodecName.COPY, -1);
+                        return;
+                    }
+                }
+            }
+            // Copy not available — fall through to tier-based re-encode
+        }
+
         bool is_webm = (container == "webm");
         string codec = is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC;
-        switch (tier) {
+        switch (rec.size_tier) {
             case SizeTier.TINY:
                 configure_audio (audio, codec, 0);    // 64 kbps
                 break;
@@ -631,6 +648,7 @@ public class CodecPresets : Object {
             tab.rc_mode_combo.set_selected (2);   // ABR
             tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
             tab.two_pass_switch.set_active (true);
+            tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
         } else {
             tab.rc_mode_combo.set_selected (0);   // CRF
             tab.crf_spin.set_value (rec.crf);
@@ -739,7 +757,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "mp4");
+        configure_smart_audio (tab.audio_settings, rec, "mp4");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -827,7 +845,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "webm");
+        configure_smart_audio (tab.audio_settings, rec, "webm");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -849,6 +867,7 @@ public class CodecPresets : Object {
             tab.rc_mode_combo.set_selected (2);   // ABR
             tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
             tab.two_pass_switch.set_active (true);
+            tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
         } else {
             tab.rc_mode_combo.set_selected (0);   // CRF
             tab.crf_spin.set_value (rec.crf);
@@ -927,7 +946,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "mp4");
+        configure_smart_audio (tab.audio_settings, rec, "mp4");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1041,6 +1060,6 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, tier, "webm");
+        configure_smart_audio (tab.audio_settings, rec, "webm");
     }
 }

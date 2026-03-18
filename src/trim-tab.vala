@@ -709,6 +709,9 @@ public class TrimTab : Box, ICodecTab {
                 && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
                 ctx.strip_audio = true;
             }
+            if (selected_codec_tab != null) {
+                ctx.audio_requires_reencode = selected_codec_tab.audio_settings.requires_audio_reencode ();
+            }
             // Audio budget is determined by the optimizer based on size tier.
 
             try {

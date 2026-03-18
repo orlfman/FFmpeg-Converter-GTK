@@ -395,6 +395,14 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    /**
+     * True when audio filters (speed change, normalization, concat) are
+     * active and stream-copy is not possible — audio must be re-encoded.
+     */
+    public bool requires_audio_reencode () {
+        return speed_active || normalize_active || concat_filter_active;
+    }
+
     public void set_audio_enabled (bool enabled) {
         desired_audio_enabled = enabled;
 

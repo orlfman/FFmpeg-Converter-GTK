@@ -447,6 +447,11 @@ public class AppController : Object {
         }
         ctx.strip_audio = strip_audio;
 
+        // Audio filters (speed, normalize, concat) prevent stream-copy
+        if (smart_tab != null) {
+            ctx.audio_requires_reencode = smart_tab.get_audio_settings_ref ().requires_audio_reencode ();
+        }
+
         try {
             var rec = yield smart_optimizer.optimize_for_target_size (
                 input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);

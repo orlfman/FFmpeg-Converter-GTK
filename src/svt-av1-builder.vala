@@ -6,6 +6,8 @@ public class SvtAv1BuilderSnapshot : Object {
     public int crf = 28;
     public int qp = 28;
     public int vbr_bitrate_kbps = 2000;
+    public bool mbr_enabled = false;
+    public int mbr_bitrate_kbps = 4000;
     public string level = "Auto";
     public string keyint_text = "Auto";
     public int tune_selected = 0;
@@ -58,6 +60,8 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         snapshot.crf = (int) tab.crf_spin.get_value ();
         snapshot.qp = (int) tab.qp_spin.get_value ();
         snapshot.vbr_bitrate_kbps = (int) tab.vbr_bitrate_spin.get_value ();
+        snapshot.mbr_enabled = tab.mbr_expander.enable_expansion;
+        snapshot.mbr_bitrate_kbps = (int) tab.mbr_bitrate_spin.get_value ();
         snapshot.level = CodecUtils.get_dropdown_text (tab.level_combo);
         snapshot.keyint_text = CodecUtils.get_dropdown_text (tab.keyint_combo);
         snapshot.tune_selected = (int) tab.tune_combo.get_selected ();
@@ -270,6 +274,13 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         string threads = snapshot.threads;
         if (threads != "Auto")
             svt_params += "lp=%s".printf (threads);
+
+        // Max Bitrate (CRF mode only — SVT-AV1's mbr param caps peak
+        // bitrate to prevent complex scenes from spiking).
+        if (rc_mode == RateControl.CRF && snapshot.mbr_enabled) {
+            svt_params += "mbr=%d".printf (snapshot.mbr_bitrate_kbps);
+            svt_params += "buf-sz=1000";
+        }
 
         if (svt_params.length > 0) {
             args += "-svtav1-params";

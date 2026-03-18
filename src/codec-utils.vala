@@ -535,6 +535,22 @@ namespace CodecUtils {
             args += preset_str;
         }
 
+        // VBV peak-rate constraint for two-pass encodes.
+        // Prevents complex scenes from consuming a disproportionate share
+        // of the bitrate budget, which can push the final file size above
+        // the target.  Bufsize = maxrate gives one second of peak-rate
+        // buffer, standard for file-based encoding.
+        // Note: SVT-AV1 does not support VBV (mbr) in VBR/bitrate mode —
+        // only in CRF mode — so it is excluded here.
+        if (rec.two_pass && rec.target_bitrate_kbps > 0
+                && rec.codec != "svt-av1") {
+            int maxrate = (int) (rec.target_bitrate_kbps * 1.5);
+            args += "-maxrate";
+            args += "%dk".printf (maxrate);
+            args += "-bufsize";
+            args += "%dk".printf (maxrate);
+        }
+
         return args;
     }
 }
