@@ -107,17 +107,23 @@ meson, ninja, valac, pkg-config, GTK4, libadwaita
 
 ```bash
 git clone https://github.com/orlfman/FFmpeg-Converter-GTK.git
-cd FFmpeg-Converter-GTK
-chmod +x build.sh
-./build.sh
+cd FFmpeg-Converter-GTK                                                                                                                                                                                                    
+make                                                      
+sudo make install     
 ```
 
 ### Uninstall
 
 ```bash
 cd FFmpeg-Converter-GTK
-chmod +x uninstall.sh
-./uninstall.sh
+make uninstall   
+```
+
+### Rebuild
+
+```bash
+cd FFmpeg-Converter-GTK
+make rebuild   
 ```
 
 ### Acknowledgments
