@@ -1,5 +1,5 @@
-# FFmpeg Converter GTK - Build System
-# Thin wrapper around Meson for convenient building from source
+# FFmpeg Converter GTK - Makefile
+# Wrapper around Meson for building from source with make
 
 BUILDDIR    := builddir
 BINARY      := ffmpeg-converter-gtk
