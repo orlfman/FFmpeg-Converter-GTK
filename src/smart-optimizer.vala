@@ -227,6 +227,8 @@ public struct OptimizationRecommendation {
     public bool stream_copy_audio;     // true when source audio should be copied, not re-encoded
     public bool strip_metadata;        // true for TINY tier — save every byte
     public string recommended_pix_fmt; // "yuv420p10le", "yuv420p", or "" (codec default)
+    public string resolved_container;  // effective container after tier policy (e.g. "webm", "mp4", "mkv")
+    public int target_size_kib;        // user-requested target size in KiB
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -466,6 +468,12 @@ public class SmartOptimizer : GLib.Object {
         int tier_audio = tier_audio_kbps (tier);
         bool use_stream_copy_audio = false;
 
+        // Resolve the effective container once:
+        //   Tiny/Small → forced to codec default (webm/mp4) for imageboard compat
+        //   Medium+    → respect the user's container selection
+        string resolved_container = resolve_effective_container (
+            preferred_codec, tier, ctx.output_container);
+
         // Determine the actual audio budget:
         //   1. If the caller stripped audio or set an explicit override, honour that.
         //   2. Otherwise, try to stream-copy the source audio when it is compatible
@@ -473,12 +481,8 @@ public class SmartOptimizer : GLib.Object {
         //      This gives an *exact* audio size rather than a budget estimate.
         //   3. Otherwise, use the tier-based audio budget (re-encode).
         if (!ctx.strip_audio && ctx.audio_bitrate_kbps_override <= 0) {
-            // Use the actual container when provided; otherwise infer from codec
-            string container_for_audio = (ctx.output_container != null && ctx.output_container.length > 0)
-                ? ctx.output_container
-                : codec_default_container (preferred_codec);
             bool codec_compatible = audio_codec_compatible_with_container (
-                probed_audio_codec, container_for_audio);
+                probed_audio_codec, resolved_container);
 
             if (codec_compatible
                     && !ctx.audio_requires_reencode
@@ -705,6 +709,7 @@ public class SmartOptimizer : GLib.Object {
             qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
         int predicted_crf = ((int) Math.round (crf_raw)).clamp (crf_min, crf_max);
         bool crf_at_max = (predicted_crf >= crf_max);
+        bool crf_at_min = (predicted_crf <= crf_min);
         bool adaptive_calibration_refined = false;
         int adaptive_points_added = 0;
 
@@ -759,6 +764,7 @@ public class SmartOptimizer : GLib.Object {
                     qa, qb, qc, ln_target, cal_mid, crf_min, crf_max);
                 predicted_crf = ((int) Math.round (crf_raw)).clamp (crf_min, crf_max);
                 crf_at_max = (predicted_crf >= crf_max);
+                crf_at_min = (predicted_crf <= crf_min);
             }
         }
 
@@ -811,6 +817,7 @@ public class SmartOptimizer : GLib.Object {
                                     predicted_crf, re_crf, (model_correction - 1.0) * 100.0);
                                 predicted_crf = re_crf;
                                 crf_at_max = (predicted_crf >= crf_max);
+                                crf_at_min = (predicted_crf <= crf_min);
                             }
                         }
                     }
@@ -838,7 +845,7 @@ public class SmartOptimizer : GLib.Object {
             try {
                 cancellable_check (cancellable);
                 measured_audio_kbps = yield measure_audio_bitrate (
-                    input_file, preferred_codec, positions[0],
+                    input_file, resolved_container, positions[0],
                     sample_segment_duration, tier_audio, cancellable);
                 if (measured_audio_kbps > 0) {
                     // Sanity check: measured bitrate should not exceed
@@ -1183,6 +1190,10 @@ public class SmartOptimizer : GLib.Object {
         if (crf_at_max && !is_impossible) {
             notes.append ("  ⚠️  CRF mode is at maximum compression — quality will be poor.\n");
             notes.append ("  ✅  Two-pass mode below is the recommended path.\n");
+        } else if (crf_at_min && recommend_two_pass) {
+            notes.append ("  CRF floor reached — even maximum quality only produces ~%d KiB.\n"
+                .printf (estimated_total_kib));
+            notes.append ("  Two-pass VBR below will allocate the full bitrate budget.\n");
         } else if (!is_impossible) {
             notes.append ("  Estimated: ~%d KiB".printf (estimated_total_kib));
             if (confidence < 0.8)
@@ -1211,6 +1222,10 @@ public class SmartOptimizer : GLib.Object {
                     notes.append ("  Source is ~%.0f MB → target %d MB requires size reduction.\n"
                         .printf (source_size_mb, target_mb));
                 }
+            } else if (crf_at_min) {
+                notes.append ("  CRF mode tops out at ~%d KiB (CRF %d) — maximum quality can't fill the %d MB target.\n"
+                    .printf (estimated_total_kib, predicted_crf, target_mb));
+                notes.append ("  Two-pass VBR allocates the full bitrate budget to get closer to the requested size.\n");
             } else if (crf_overshoots) {
                 if (strict_targeting) {
                     notes.append ("  CRF estimate (~%d KiB) exceeds target (~%.0f KiB).\n"
@@ -1333,7 +1348,9 @@ public class SmartOptimizer : GLib.Object {
             recommended_audio_kbps = info.audio_bitrate_kbps,
             stream_copy_audio     = use_stream_copy_audio,
             strip_metadata        = (tier == SizeTier.TINY),
-            recommended_pix_fmt   = bit_depth.pix_fmt
+            recommended_pix_fmt   = bit_depth.pix_fmt,
+            resolved_container    = resolved_container,
+            target_size_kib       = (int) target_total_kib
         };
     }
 
@@ -1353,9 +1370,20 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("CRF:            %d\n".printf (rec.crf));
         sb.append ("Preset:         %s\n".printf (rec.preset));
         sb.append ("Two-pass:       %s\n".printf (rec.two_pass ? "enabled" : "disabled"));
-        if (rec.two_pass)
+        if (rec.two_pass) {
             sb.append ("  Bitrate cap:  %d kbps\n".printf (rec.target_bitrate_kbps));
-        sb.append ("Est. size:      %d KiB\n".printf (rec.estimated_size_kib));
+            sb.append ("Est. size:      ~%d KiB (via two-pass @ %d kbps)\n"
+                .printf (rec.target_size_kib, rec.target_bitrate_kbps));
+            if (rec.estimated_size_kib < rec.target_size_kib) {
+                sb.append ("CRF ceiling:    %d KiB (CRF %d — max quality undershoots target)\n"
+                    .printf (rec.estimated_size_kib, rec.crf));
+            } else {
+                sb.append ("CRF estimate:   %d KiB (CRF %d — exceeds target band)\n"
+                    .printf (rec.estimated_size_kib, rec.crf));
+            }
+        } else {
+            sb.append ("Est. size:      %d KiB\n".printf (rec.estimated_size_kib));
+        }
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
@@ -2392,7 +2420,7 @@ public class SmartOptimizer : GLib.Object {
      */
     private async int measure_audio_bitrate (
         string        input_file,
-        string        preferred_codec,
+        string        resolved_container,
         double        seek_pos,
         double        segment_duration,
         int           target_audio_kbps,
@@ -2400,15 +2428,15 @@ public class SmartOptimizer : GLib.Object {
     ) throws Error {
         string ffmpeg = AppSettings.get_default ().ffmpeg_path;
         string tmp = tmp_path ("audio_measure");
-        bool is_webm = (preferred_codec == "vp9" || preferred_codec == "svt-av1");
 
-        string audio_codec = is_webm ? "libopus" : "aac";
+        // Pick audio codec and raw container based on the resolved output container
+        string audio_codec = (resolved_container == "webm") ? "libopus" : "aac";
         string audio_bitrate = "%dk".printf (target_audio_kbps);
 
         // Use raw container formats to avoid container overhead inflating
         // the measured bitrate.  ADTS is raw AAC frames; OGG is minimal
         // for Opus and much lighter than WebM.
-        string container_fmt = is_webm ? "ogg" : "adts";
+        string container_fmt = (resolved_container == "webm") ? "ogg" : "adts";
 
         string[] cmd = {
             ffmpeg, "-y", "-v", "warning",
@@ -2960,6 +2988,26 @@ public class SmartOptimizer : GLib.Object {
         return "mp4";
     }
 
+    /**
+     * Resolve the effective output container based on tier policy.
+     *
+     * Tiny/Small: forced to the codec-default container (webm/mp4)
+     *             for imageboard and web compatibility.
+     * Medium+:    respect the user's container selection from the UI;
+     *             fall back to codec default if unset.
+     */
+    private static string resolve_effective_container (
+        string preferred_codec, SizeTier tier, string? user_container
+    ) {
+        if (tier <= SizeTier.SMALL) {
+            return codec_default_container (preferred_codec);
+        }
+        if (user_container != null && user_container.length > 0) {
+            return user_container;
+        }
+        return codec_default_container (preferred_codec);
+    }
+
     private void cleanup_file (string path) {
         if (FileUtils.test (path, FileTest.EXISTS) && FileUtils.unlink (path) != 0) {
             warning ("Failed to clean up temp file %s: %s", path, strerror (errno));
@@ -2980,8 +3028,11 @@ public class SmartOptimizer : GLib.Object {
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,
+            stream_copy_audio      = false,
             strip_metadata         = false,
-            recommended_pix_fmt    = ""
+            recommended_pix_fmt    = "",
+            resolved_container     = codec_default_container (codec),
+            target_size_kib        = 0
         };
     }
 }

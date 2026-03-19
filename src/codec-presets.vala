@@ -633,11 +633,16 @@ public class CodecPresets : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public static void apply_smart_x264 (X264Tab tab, OptimizationRecommendation rec) {
+        uint saved_container = tab.container_combo.get_selected ();
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always mp4 for x264 (broadly compatible)
-        tab.container_combo.set_selected (1);   // mp4
+        // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
+        if (tier <= SizeTier.SMALL) {
+            tab.container_combo.set_selected (1);   // mp4
+        } else {
+            tab.container_combo.set_selected (saved_container);
+        }
         set_dropdown_by_label (tab.profile_combo, "High");
 
         // Preset
@@ -757,7 +762,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, rec, "mp4");
+        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -765,11 +770,16 @@ public class CodecPresets : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public static void apply_smart_vp9 (Vp9Tab tab, OptimizationRecommendation rec) {
+        uint saved_container = tab.container_combo.get_selected ();
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always webm for VP9 (native, broadly compatible)
-        tab.container_combo.set_selected (0);   // webm
+        // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
+        if (tier <= SizeTier.SMALL) {
+            tab.container_combo.set_selected (0);   // webm
+        } else {
+            tab.container_combo.set_selected (saved_container);
+        }
 
         // Speed
         string speed_str = rec.preset.replace ("cpu-used ", "");
@@ -845,7 +855,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, rec, "webm");
+        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -853,11 +863,16 @@ public class CodecPresets : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public static void apply_smart_x265 (X265Tab tab, OptimizationRecommendation rec) {
+        uint saved_container = tab.container_combo.get_selected ();
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always mp4 for x265 (broadly compatible)
-        tab.container_combo.set_selected (1);   // mp4
+        // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
+        if (tier <= SizeTier.SMALL) {
+            tab.container_combo.set_selected (1);   // mp4
+        } else {
+            tab.container_combo.set_selected (saved_container);
+        }
 
         // Preset
         set_dropdown_by_label (tab.preset_combo, rec.preset);
@@ -946,7 +961,7 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, rec, "mp4");
+        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -954,11 +969,16 @@ public class CodecPresets : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public static void apply_smart_svt_av1 (SvtAv1Tab tab, OptimizationRecommendation rec) {
+        uint saved_container = tab.container_combo.get_selected ();
         tab.reset_defaults ();
         SizeTier tier = rec.size_tier;
 
-        // Container — always webm for AV1 (native web container)
-        tab.container_combo.set_selected (1);   // webm
+        // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
+        if (tier <= SizeTier.SMALL) {
+            tab.container_combo.set_selected (1);   // webm
+        } else {
+            tab.container_combo.set_selected (saved_container);
+        }
 
         // Preset
         string preset_str = rec.preset.replace ("preset ", "");
@@ -1060,6 +1080,6 @@ public class CodecPresets : Object {
         }
 
         // Audio
-        configure_smart_audio (tab.audio_settings, rec, "webm");
+        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 }
