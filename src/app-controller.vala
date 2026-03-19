@@ -358,7 +358,8 @@ public class AppController : Object {
     private async void run_smart_optimizer (string codec) {
         string input_file = file_pickers.input_entry.get_text ();
         if (input_file.length == 0) {
-            status_area.set_status ("⚠️  Smart Optimizer: select an input file first.");
+            status_area.set_status ("Smart Optimizer: select an input file first.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return;
         }
 
@@ -370,8 +371,9 @@ public class AppController : Object {
         int my_generation = ++smart_opt_generation;
 
         int target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
-        status_area.set_status ("🔍 Smart Optimizer: analyzing video for %d MB %s target…"
-            .printf (target_mb, codec.up ()));
+        status_area.set_status ("Smart Optimizer: analyzing video for %d MB %s target…"
+            .printf (target_mb, codec.up ()),
+            StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
         status_area.start_progress ();
         smart_optimizer_running (true);
 
@@ -401,7 +403,8 @@ public class AppController : Object {
                 if (my_generation == smart_opt_generation) {
                     status_area.stop_progress ();
                     smart_optimizer_running (false);
-                    status_area.set_status ("Smart Optimizer cancelled.");
+                    status_area.set_status ("Smart Optimizer cancelled.",
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
                 }
                 return;
             }
@@ -439,7 +442,8 @@ public class AppController : Object {
         var smart_tab = codec_registry.get (codec);
         if (smart_tab != null && smart_tab.get_audio_settings_ref ().is_audio_probe_pending ()) {
             status_area.set_status (
-                "⏳ Checking source audio stream. Please wait a moment and try Smart Optimizer again.");
+                "Checking source audio stream. Please wait a moment and try Smart Optimizer again.",
+                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
             status_area.stop_progress ();
             smart_optimizer_running (false);
             return;
@@ -463,7 +467,8 @@ public class AppController : Object {
             status_area.stop_progress ();
 
             if (rec.is_impossible) {
-                status_area.set_status ("⚠️  Smart Optimizer: target may be unreachable.");
+                status_area.set_status ("Smart Optimizer: target may be unreachable.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 console_tab.add_line ("[Smart Optimizer] " + rec.notes);
                 if (my_generation == smart_opt_generation)
                     smart_optimizer_running (false);
@@ -483,8 +488,9 @@ public class AppController : Object {
                 general_tab.preserve_metadata.set_active (false);
             }
 
-            status_area.set_status ("✅ Smart Optimizer: CRF %d / %s — est. %d KiB"
-                .printf (rec.crf, rec.preset, rec.estimated_size_kib));
+            status_area.set_status ("Smart Optimizer: CRF %d / %s — est. %d KiB"
+                .printf (rec.crf, rec.preset, rec.estimated_size_kib),
+                StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
 
             // Log full details to console
             string details = SmartOptimizer.format_recommendation (rec);
@@ -510,9 +516,11 @@ public class AppController : Object {
                 status_area.stop_progress ();
                 smart_optimizer_running (false);
                 if (e is IOError.CANCELLED) {
-                    status_area.set_status ("Smart Optimizer cancelled.");
+                    status_area.set_status ("Smart Optimizer cancelled.",
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
                 } else {
-                    status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
+                    status_area.set_status ("Smart Optimizer error: %s".printf (e.message),
+                        StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
                     console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
                 }
             }
@@ -520,7 +528,8 @@ public class AppController : Object {
             if (my_generation == smart_opt_generation) {
                 status_area.stop_progress ();
                 smart_optimizer_running (false);
-                status_area.set_status ("❌ Smart Optimizer error: %s".printf (e.message));
+                status_area.set_status ("Smart Optimizer error: %s".printf (e.message),
+                    StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
                 console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
             }
         }

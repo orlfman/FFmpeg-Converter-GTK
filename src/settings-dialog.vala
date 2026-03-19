@@ -53,6 +53,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Label ffmpeg_status;
     private Label ffprobe_status;
     private Label ffplay_status;
+    private HashTable<unowned Label, Image> status_icons =
+        new HashTable<unowned Label, Image> (direct_hash, direct_equal);
     private BinaryValidationState ffmpeg_validation = new BinaryValidationState ();
     private BinaryValidationState ffprobe_validation = new BinaryValidationState ();
     private BinaryValidationState ffplay_validation = new BinaryValidationState ();
@@ -207,7 +209,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         // horizontally across the full width instead of stacking in a box.
         // The entire row hides/shows so no empty gap remains when disabled.
         overwrite_warning_row = new Adw.ActionRow ();
-        overwrite_warning_row.set_title ("⚠ Existing files will be silently replaced — data may be lost");
+        overwrite_warning_row.set_title ("Existing files will be silently replaced — data may be lost");
+        overwrite_warning_row.add_prefix (new Gtk.Image.from_icon_name ("dialog-warning-symbolic"));
         overwrite_warning_row.add_css_class ("settings-overwrite-warning");
         overwrite_warning_row.set_activatable (false);
         overwrite_warning_row.set_visible (false);
@@ -414,6 +417,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
         // Status line below the row
         var status_row = new Adw.ActionRow ();
         status_row.set_activatable (false);
+
+        var status_icon = new Image ();
+        status_icon.set_pixel_size (16);
+        status_icon.set_valign (Align.CENTER);
+        status_row.add_prefix (status_icon);
+        status_icons.insert (status, status_icon);
+
         status.set_halign (Align.FILL);
         status.set_valign (Align.CENTER);
         status.set_hexpand (true);
@@ -467,14 +477,14 @@ public class SettingsDialog : Adw.PreferencesDialog {
                     validation_state,
                     generation,
                     found,
-                    "⟳ Checking system %s → %s".printf (default_name, display_path),
-                    "✓ Using system %s → %s".printf (default_name, display_path),
-                    "✗ System %s at %s failed to run".printf (default_name, display_path),
+                    "Checking system %s → %s".printf (default_name, display_path),
+                    "Using system %s → %s".printf (default_name, display_path),
+                    "System %s at %s failed to run".printf (default_name, display_path),
                     check_codec_support
                 );
             } else {
                 set_status (status,
-                    "⚠ %s not found in PATH".printf (default_name),
+                    "%s not found in PATH".printf (default_name),
                     "settings-path-missing");
             }
             return;
@@ -488,7 +498,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             if (is_executable_file (normalized)) {
                 if (is_runtime_probe_exempt (normalized)) {
                     set_status (status,
-                        "✓ Ready: %s\nRuntime probe skipped for the fake hang test helper."
+                        "Ready: %s\nRuntime probe skipped for the fake hang test helper."
                             .printf (display_path),
                         "settings-path-found");
                 } else {
@@ -497,19 +507,19 @@ public class SettingsDialog : Adw.PreferencesDialog {
                         validation_state,
                         generation,
                         normalized,
-                        "⟳ Checking: %s".printf (display_path),
-                        "✓ Ready: %s".printf (display_path),
-                        "✗ Cannot run on this system: %s".printf (display_path),
+                        "Checking: %s".printf (display_path),
+                        "Ready: %s".printf (display_path),
+                        "Cannot run on this system: %s".printf (display_path),
                         check_codec_support
                     );
                 }
             } else if (FileUtils.test (normalized, FileTest.EXISTS)) {
                 set_status (status,
-                    "✗ Not executable: %s".printf (display_path),
+                    "Not executable: %s".printf (display_path),
                     "settings-path-missing");
             } else {
                 set_status (status,
-                    "✗ File not found: %s".printf (display_path),
+                    "File not found: %s".printf (display_path),
                     "settings-path-missing");
             }
             return;
@@ -521,7 +531,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             string display_found = AppSettings.collapse_home_path (found);
             if (is_runtime_probe_exempt (found)) {
                 set_status (status,
-                    "✓ Found in PATH → %s\nRuntime probe skipped for the fake hang test helper."
+                    "Found in PATH → %s\nRuntime probe skipped for the fake hang test helper."
                         .printf (display_found),
                     "settings-path-found");
             } else {
@@ -530,15 +540,15 @@ public class SettingsDialog : Adw.PreferencesDialog {
                     validation_state,
                     generation,
                     found,
-                    "⟳ Checking PATH entry \"%s\" → %s".printf (path, display_found),
-                    "✓ Found in PATH → %s".printf (display_found),
-                    "✗ \"%s\" resolves to %s but failed to run".printf (path, display_found),
+                    "Checking PATH entry \"%s\" → %s".printf (path, display_found),
+                    "Found in PATH → %s".printf (display_found),
+                    "\"%s\" resolves to %s but failed to run".printf (path, display_found),
                     check_codec_support
                 );
             }
         } else {
             set_status (status,
-                "⚠ \"%s\" not found in PATH".printf (path),
+                "\"%s\" not found in PATH".printf (path),
                 "settings-path-missing");
         }
     }
@@ -848,6 +858,25 @@ public class SettingsDialog : Adw.PreferencesDialog {
         status.remove_css_class ("settings-path-warning");
         status.set_text (text);
         status.add_css_class (css_class);
+
+        Image? icon = status_icons.lookup (status);
+        if (icon != null) {
+            string icon_name;
+            switch (css_class) {
+                case "settings-path-found":    icon_name = "emblem-default-symbolic"; break;
+                case "settings-path-missing":  icon_name = "dialog-error-symbolic";   break;
+                case "settings-path-checking": icon_name = "content-loading-symbolic"; break;
+                case "settings-path-warning":  icon_name = "dialog-warning-symbolic";  break;
+                default:                       icon_name = "dialog-information-symbolic"; break;
+            }
+            icon.set_from_icon_name (icon_name);
+
+            icon.remove_css_class ("settings-path-found");
+            icon.remove_css_class ("settings-path-missing");
+            icon.remove_css_class ("settings-path-checking");
+            icon.remove_css_class ("settings-path-warning");
+            icon.add_css_class (css_class);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -206,7 +206,8 @@ public class Converter : Object {
                                   ICodecBuilder builder,
                                   uint64 operation_id) {
         if (input_file == "") {
-            status_area.set_status ("⚠️ Please select an input file first!");
+            status_area.set_status ("Please select an input file first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
 
@@ -219,13 +220,15 @@ public class Converter : Object {
         });
 
         if (!try_reserve_conversion_start (operation_id, runner)) {
-            status_area.set_status ("⚠️ A conversion is already running!");
+            status_area.set_status ("A conversion is already running!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
 
         last_output_file = output_file;
 
-        status_area.set_status (@"🚀 Starting conversion...\nOutput will be:\n$output_file");
+        status_area.set_status (@"Starting conversion...\nOutput will be:\n$output_file",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
         bool two_pass = codec_tab.get_two_pass ();
 
@@ -414,16 +417,16 @@ public class Converter : Object {
             state_mutex.unlock ();
         }
 
-        string cancel_msg = "⏹️ Cancelling conversion...";
+        string cancel_msg = "Cancelling conversion...";
         if (phase == ConversionPhase.ENCODING) {
-            cancel_msg = "⏹️ Cancelling encoding...";
+            cancel_msg = "Cancelling encoding...";
         } else if (phase == ConversionPhase.PASS1) {
-            cancel_msg = "⏹️ Cancelling Pass 1 (analysis)...";
+            cancel_msg = "Cancelling Pass 1 (analysis)...";
         } else if (phase == ConversionPhase.PASS2) {
-            cancel_msg = "⏹️ Cancelling Pass 2 (encoding)...";
+            cancel_msg = "Cancelling Pass 2 (encoding)...";
         }
 
-        update_status (cancel_msg);
+        update_status (cancel_msg, StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
         if (hide_cancelled_progress) {
             progress_tracker.hide_cancelled ();
         }
@@ -438,7 +441,8 @@ public class Converter : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     internal void report_error (string message) {
-        status_area.set_status (@"❌ $message\nCheck the console for details.");
+        status_area.set_status (@"$message\nCheck the console for details.",
+            StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
         console_tab.add_line ("❌ " + message);
     }
 
@@ -450,17 +454,22 @@ public class Converter : Object {
         report_error (message);
     }
 
-    internal void update_status (string message) {
-        status_area.set_status (message);
+    internal void update_status (string message,
+                                 string icon_name = StatusIcon.INFO_ICON,
+                                 string css_class = StatusIcon.INFO_CSS) {
+        status_area.set_status (message, icon_name, css_class);
         console_tab.add_line (message);
     }
 
-    internal void update_status_if_active (ProcessRunner process_runner, string message) {
+    internal void update_status_if_active (ProcessRunner process_runner,
+                                           string message,
+                                           string icon_name = StatusIcon.INFO_ICON,
+                                           string css_class = StatusIcon.INFO_CSS) {
         if (!accepts_runner_updates (process_runner)) {
             return;
         }
 
-        update_status (message);
+        update_status (message, icon_name, css_class);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

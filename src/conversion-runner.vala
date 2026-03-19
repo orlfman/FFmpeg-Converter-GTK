@@ -28,7 +28,8 @@ public class ConversionRunner {
                 if (converter.is_cancelled (process_runner)) return;
 
                 converter.set_phase_if_active (process_runner, ConversionPhase.PASS1);
-                converter.update_status_if_active (process_runner, "🔄 Pass 1/2: Analyzing video...");
+                converter.update_status_if_active (process_runner, "Pass 1/2: Analyzing video...",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 string[] pass1 = build_pass1 (input);
                 if (converter.execute_ffmpeg (process_runner, pass1, 0.0, 50.0) != 0) {
                     if (!converter.is_cancelled (process_runner))
@@ -41,7 +42,8 @@ public class ConversionRunner {
                 converter.set_phase_if_active (process_runner, ConversionPhase.PASS2);
                 converter.update_status_if_active (
                     process_runner,
-                    @"🔄 Pass 2/2: Encoding final $(config.profile.codec_name) video...");
+                    @"Pass 2/2: Encoding final $(config.profile.codec_name) video...",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 string[] pass2 = build_pass2 (input, safe_output);
                 if (converter.execute_ffmpeg (process_runner, pass2, 50.0, 50.0) != 0) {
                     if (!converter.is_cancelled (process_runner))
@@ -54,7 +56,8 @@ public class ConversionRunner {
                 converter.set_phase_if_active (process_runner, ConversionPhase.ENCODING);
                 converter.update_status_if_active (
                     process_runner,
-                    @"🔄 Encoding with $(config.profile.codec_name) (single pass...)");
+                    @"Encoding with $(config.profile.codec_name) (single pass...)",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 string[] cmd = build_single_pass (input, safe_output);
                 if (converter.execute_ffmpeg (process_runner, cmd) != 0) {
                     if (!converter.is_cancelled (process_runner))
@@ -67,7 +70,8 @@ public class ConversionRunner {
 
             converter.update_status_if_active (
                 process_runner,
-                @"✅ Conversion completed successfully!\n\nSaved to:\n$safe_output");
+                @"Conversion completed successfully!\n\nSaved to:\n$safe_output",
+                StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
             succeeded = true;
         } finally {
             converter.finish_conversion (

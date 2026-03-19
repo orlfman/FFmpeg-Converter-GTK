@@ -225,7 +225,8 @@ public class SubtitlesRunner : Object {
 
         runner.set_event_logger (log_runner_event);
         runner.prepare_for_new_execution ();
-        report_status (@"🔄 Extracting subtitle track #$(stream.sub_index)…");
+        report_status (@"Extracting subtitle track #$(stream.sub_index)…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
         new Thread<void> ("subtitle-extract", () => {
             string[] cmd = {
@@ -244,7 +245,7 @@ public class SubtitlesRunner : Object {
             });
 
             if (runner.is_cancelled ()) {
-                report_operation_cancelled ("⏹️ Extraction cancelled.");
+                report_operation_cancelled ("Extraction cancelled.");
                 return;
             }
 
@@ -269,7 +270,8 @@ public class SubtitlesRunner : Object {
                 }
 
                 // Retry without -c:s copy for codec mismatches (e.g. mov_text → srt)
-                report_status (@"🔄 Retrying extraction with codec conversion…");
+                report_status (@"Retrying extraction with codec conversion…",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 string[] retry_cmd = {
                     AppSettings.get_default ().ffmpeg_path, "-y",
                     "-i", input_file,
@@ -281,7 +283,7 @@ public class SubtitlesRunner : Object {
                 });
 
                 if (runner.is_cancelled ()) {
-                    report_operation_cancelled ("⏹️ Extraction cancelled.");
+                    report_operation_cancelled ("Extraction cancelled.");
                     return;
                 }
             }
@@ -311,7 +313,8 @@ public class SubtitlesRunner : Object {
                         "Try extracting with \"Copy Original\" to preserve the original format."
                     );
                 } else {
-                    report_status (@"✅ Subtitle extracted!\n\nSaved to:\n$result_path");
+                    report_status (@"Subtitle extracted!\n\nSaved to:\n$result_path",
+                        StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
                     Idle.add (() => {
                         operation_done (new OperationOutputResult.for_file (result_path));
                         return Source.REMOVE;
@@ -359,7 +362,8 @@ public class SubtitlesRunner : Object {
 
         runner.set_event_logger (log_runner_event);
         runner.prepare_for_new_execution ();
-        report_status (@"🔄 Extracting all $(streams.length) subtitle tracks…");
+        report_status (@"Extracting all $(streams.length) subtitle tracks…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
         // Snapshot streams for background thread
         var snap = new GenericArray<SubtitleStream> ();
@@ -374,7 +378,7 @@ public class SubtitlesRunner : Object {
             for (int i = 0; i < snap.length; i++) {
                 if (runner.is_cancelled ()) {
                     report_operation_cancelled (
-                        @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                        @"Extraction cancelled after $success of $(snap.length) tracks.");
                     return;
                 }
 
@@ -385,7 +389,8 @@ public class SubtitlesRunner : Object {
                 string out_path = Path.build_filename (
                     output_dir, @"$(base_name)$(lang_part).track$(s.sub_index)$(ext)");
 
-                report_status (@"🔄 Extracting track #$(s.sub_index) ($(i + 1)/$(snap.length))…");
+                report_status (@"Extracting track #$(s.sub_index) ($(i + 1)/$(snap.length))…",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
                 string[] cmd = {
                     AppSettings.get_default ().ffmpeg_path, "-y",
@@ -404,7 +409,7 @@ public class SubtitlesRunner : Object {
 
                 if (runner.is_cancelled ()) {
                     report_operation_cancelled (
-                        @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                        @"Extraction cancelled after $success of $(snap.length) tracks.");
                     return;
                 }
 
@@ -419,7 +424,7 @@ public class SubtitlesRunner : Object {
 
             if (runner.is_cancelled ()) {
                 report_operation_cancelled (
-                    @"⏹️ Extraction cancelled after $success of $(snap.length) tracks.");
+                    @"Extraction cancelled after $success of $(snap.length) tracks.");
                 return;
             }
 
@@ -430,10 +435,10 @@ public class SubtitlesRunner : Object {
                 return;
             }
 
-            string msg = @"✅ Extracted $success of $(snap.length) subtitle tracks";
+            string msg = @"Extracted $success of $(snap.length) subtitle tracks";
             if (failed > 0) msg += @" ($failed failed)";
             msg += @"\n\nSaved to:\n$output_dir";
-            report_status (msg);
+            report_status (msg, StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
 
             Idle.add (() => {
                 operation_done (OperationOutputResult.from_paths (
@@ -487,7 +492,8 @@ public class SubtitlesRunner : Object {
 
         runner.set_event_logger (log_runner_event);
         runner.prepare_for_new_execution ();
-        report_status ("🔄 Applying subtitle changes…");
+        report_status ("Applying subtitle changes…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
         // Create tracker on main thread (GTK widgets must not be touched from bg)
         ProgressTracker? tracker = null;
@@ -693,7 +699,8 @@ public class SubtitlesRunner : Object {
         }
 
         if (runner.is_cancelled ()) {
-            report_status ("⏹️ Remux cancelled.");
+            report_status ("Remux cancelled.",
+                StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
             Idle.add (() => {
                 apply_cancelled (operation_id);
                 return Source.REMOVE;
@@ -703,7 +710,8 @@ public class SubtitlesRunner : Object {
 
         string result = output_path;
         if (exit == 0) {
-            report_status (@"✅ Subtitle changes applied!\n\nSaved to:\n$result");
+            report_status (@"Subtitle changes applied!\n\nSaved to:\n$result",
+                StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
             Idle.add (() => {
                 apply_done (operation_id, new OperationOutputResult.for_file (result));
                 return Source.REMOVE;
@@ -754,7 +762,8 @@ public class SubtitlesRunner : Object {
 
         runner.set_event_logger (log_runner_event);
         runner.prepare_for_new_execution ();
-        report_status ("🔄 Burning in subtitles (full re-encode)…");
+        report_status ("Burning in subtitles (full re-encode)…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
         // Create tracker on main thread (GTK widgets must not be touched from bg)
         ProgressTracker? tracker = null;
@@ -906,7 +915,8 @@ public class SubtitlesRunner : Object {
             }
 
             if (runner.is_cancelled ()) {
-                report_status ("⏹️ Burn-in cancelled.");
+                report_status ("Burn-in cancelled.",
+                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
                 Idle.add (() => {
                     apply_cancelled (operation_id);
                     return Source.REMOVE;
@@ -916,7 +926,8 @@ public class SubtitlesRunner : Object {
 
             if (exit == 0) {
                 string result = output_path;
-                report_status (@"✅ Subtitles burned in!\n\nSaved to:\n$result");
+                report_status (@"Subtitles burned in!\n\nSaved to:\n$result",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
                 Idle.add (() => {
                     apply_done (operation_id, new OperationOutputResult.for_file (result));
                     return Source.REMOVE;
@@ -958,14 +969,18 @@ public class SubtitlesRunner : Object {
             || codec == "xsub";
     }
 
-    private void update_status (string message) {
+    private void update_status (string message,
+                               string icon_name = StatusIcon.INFO_ICON,
+                               string css_class = StatusIcon.INFO_CSS) {
         if (status_area != null) {
-            status_area.set_status (message);
+            status_area.set_status (message, icon_name, css_class);
         }
     }
 
-    private void report_status (string message) {
-        update_status (message);
+    private void report_status (string message,
+                                string icon_name = StatusIcon.INFO_ICON,
+                                string css_class = StatusIcon.INFO_CSS) {
+        update_status (message, icon_name, css_class);
         log_line (message);
     }
 
@@ -973,8 +988,8 @@ public class SubtitlesRunner : Object {
         log_line ("❌ " + message);
 
         string err = message;
-        string status_message = @"❌ $err\nCheck the console for details.";
-        update_status (status_message);
+        update_status (@"$err\nCheck the console for details.",
+            StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
         Idle.add (() => {
             operation_failed (err);
             return Source.REMOVE;
@@ -982,7 +997,7 @@ public class SubtitlesRunner : Object {
     }
 
     private void report_operation_cancelled (string message) {
-        report_status (message);
+        report_status (message, StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
 
         Idle.add (() => {
             operation_cancelled ();
@@ -994,8 +1009,8 @@ public class SubtitlesRunner : Object {
         log_line ("❌ " + message);
 
         string err = message;
-        string status_message = @"❌ $err\nCheck the console for details.";
-        update_status (status_message);
+        update_status (@"$err\nCheck the console for details.",
+            StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
         Idle.add (() => {
             apply_failed (operation_id, err);
             return Source.REMOVE;

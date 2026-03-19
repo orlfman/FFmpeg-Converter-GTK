@@ -109,11 +109,13 @@ public class TrimRunner : Object {
      */
     public void run () {
         if (segments.length == 0) {
-            report_status ("⚠️ No segments defined — add at least one segment.");
+            report_status ("No segments defined — add at least one segment.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return;
         }
         if (input_file == null || input_file == "") {
-            report_status ("⚠️ Please select an input file first!");
+            report_status ("Please select an input file first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return;
         }
         if (!try_begin_run ()) {
@@ -243,7 +245,8 @@ public class TrimRunner : Object {
         if (use_concat_filter) {
             string output_path = primary_output;
 
-            report_status (@"🔄 $(operation_label) — encoding $(segments.length) segments…");
+            report_status (@"$(operation_label) — encoding $(segments.length) segments…",
+                StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
             update_progress (10.0);
 
             int exit = run_concat_filter_encode (output_path);
@@ -255,7 +258,8 @@ public class TrimRunner : Object {
                 }
             } else {
                 last_output = output_path;
-                report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$output_path");
+                report_status (@"$(operation_label) completed!\n\nSaved to:\n$output_path",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
                 update_progress (100.0);
 
                 var done = new OperationOutputResult.for_file (output_path);
@@ -318,7 +322,8 @@ public class TrimRunner : Object {
                     );
                 }
 
-                report_status (@"🔄 Extracting $seg_label…");
+                report_status (@"Extracting $seg_label…",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 update_progress ((double) i / segments.length * 100.0);
 
                 int exit = extract_segment (i, seg, seg_output);
@@ -338,11 +343,13 @@ public class TrimRunner : Object {
             // ── Phase 2: Concatenate (copy-mode multi-segment only) ──────────
             if (export_separate) {
                 last_output = segment_files[0];
-                report_status (@"✅ $(operation_label) completed — exported $(segments.length) files to:\n$out_dir");
+                report_status (@"$(operation_label) completed — exported $(segments.length) files to:\n$out_dir",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
             } else if (segments.length == 1) {
                 // Single segment was written directly to the output path
                 last_output = segment_files[0];
-                report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$(segment_files[0])");
+                report_status (@"$(operation_label) completed!\n\nSaved to:\n$(segment_files[0])",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
             } else {
                 // Multi-segment copy mode → demuxer concat
                 if (runner.is_cancelled ()) {
@@ -353,7 +360,8 @@ public class TrimRunner : Object {
                 string concat_output = primary_output;
                 last_output = concat_output;
 
-                report_status ("🔄 Concatenating segments…");
+                report_status ("Concatenating segments…",
+                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
                 update_progress (90.0);
 
                 int concat_exit = concat_demuxer (segment_files, tmp_dir, concat_output);
@@ -366,7 +374,8 @@ public class TrimRunner : Object {
                     return;
                 }
 
-                report_status (@"✅ $(operation_label) completed!\n\nSaved to:\n$concat_output");
+                report_status (@"$(operation_label) completed!\n\nSaved to:\n$concat_output",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
             }
 
             update_progress (100.0);
@@ -897,22 +906,25 @@ public class TrimRunner : Object {
     //  INTERNAL — Status reporting (always Idle.add for thread safety)
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void update_status (string message) {
+    private void update_status (string message,
+                               string icon_name = StatusIcon.INFO_ICON,
+                               string css_class = StatusIcon.INFO_CSS) {
         if (status_area != null) {
-            status_area.set_status (message);
+            status_area.set_status (message, icon_name, css_class);
         }
     }
 
-    private void report_status (string message) {
-        update_status (message);
+    private void report_status (string message,
+                                string icon_name = StatusIcon.INFO_ICON,
+                                string css_class = StatusIcon.INFO_CSS) {
+        update_status (message, icon_name, css_class);
         log_line (message);
     }
 
     private void report_cancelled () {
         string msg = @"$(operation_label) cancelled.";
-        string status_message = @"⏹️ $msg";
-        update_status (status_message);
-        log_line (@"⏹️ $msg");
+        update_status (msg, StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+        log_line (msg);
 
         Idle.add (() => {
             export_failed (msg);
@@ -921,8 +933,8 @@ public class TrimRunner : Object {
     }
 
     private void report_error (string message) {
-        string status_message = @"❌ $message\nCheck the console for details.";
-        update_status (status_message);
+        update_status (@"$message\nCheck the console for details.",
+            StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
         log_line ("❌ " + message);
 
         string err = message;

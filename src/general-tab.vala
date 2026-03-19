@@ -880,12 +880,12 @@ public class GeneralTab : Box {
 
     public void start_crop_detection (string input_file, ConsoleTab console_tab) {
         if (input_file == "") {
-            crop_value.set_text ("⚠️ Please select an input file first");
+            crop_value.set_text ("Please select an input file first");
             return;
         }
 
         detect_crop_button.sensitive = false;
-        crop_value.set_text ("🔍 Analyzing for crop (30 seconds)...");
+        crop_value.set_text ("Analyzing for crop (30 seconds)...");
         crop_check.active = true;
 
         console_tab.add_line ("=== Crop Detection Started ===");
@@ -954,7 +954,7 @@ public class GeneralTab : Box {
             string err_msg = e.message;
             Idle.add (() => {
                 if (gen != crop_detect_gen) return Source.REMOVE;
-                crop_value.set_text ("❌ Detection error");
+                crop_value.set_text ("Detection error");
                 console_tab.add_line ("Crop detection failed: " + err_msg);
                 detect_crop_button.sensitive = true;
                 return Source.REMOVE;

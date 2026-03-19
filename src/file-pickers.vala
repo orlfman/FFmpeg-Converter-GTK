@@ -308,6 +308,9 @@ public class FilePickers : Box {
             ".path-breadcrumb .path-crumb:active {\n" +
             "    background: alpha(currentColor, 0.075);\n" +
             "}\n" +
+            ".path-breadcrumb .path-icon-crumb {\n" +
+            "    padding: 0 5px;\n" +
+            "}\n" +
             ".path-breadcrumb .path-overflow {\n" +
             "    min-width: 24px;\n" +
             "    padding-left: 4px;\n" +

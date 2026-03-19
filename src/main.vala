@@ -114,7 +114,8 @@ public class MainWindow : Adw.ApplicationWindow {
                 on_convert_clicked ();
             } else {
                 pending_auto_convert_codec = codec;
-                status_area.set_status ("⏳ Auto-convert queued for %s — waiting for current operation…".printf (codec.up ()));
+                status_area.set_status ("Auto-convert queued for %s — waiting for current operation…".printf (codec.up ()),
+                    StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
             }
         });
 
@@ -158,7 +159,8 @@ public class MainWindow : Adw.ApplicationWindow {
             uint64 operation_id;
             if (!reserve_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, out operation_id)) {
                 status_area.set_status (
-                    @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
+                    @"A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS
                 );
                 return;
             }
@@ -169,7 +171,8 @@ public class MainWindow : Adw.ApplicationWindow {
             uint64 operation_id;
             if (!reserve_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, out operation_id)) {
                 status_area.set_status (
-                    @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one."
+                    @"A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS
                 );
                 return;
             }
@@ -412,8 +415,9 @@ public class MainWindow : Adw.ApplicationWindow {
     private void on_convert_clicked () {
         if (!can_start_primary_operation ()) {
             status_area.set_status (
-                @"⚠️ A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). " +
-                "Cancel it before starting another one."
+                @"A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). " +
+                "Cancel it before starting another one.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS
             );
             return;
         }
@@ -424,7 +428,8 @@ public class MainWindow : Adw.ApplicationWindow {
         if (page == "subtitles") {
             if (!subtitles_tab.can_apply ()) {
                 status_area.set_status (
-                    "⚠️ Load a file with subtitle tracks or add external subtitles first!");
+                    "Load a file with subtitle tracks or add external subtitles first!",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return;
             }
 
@@ -439,20 +444,23 @@ public class MainWindow : Adw.ApplicationWindow {
         ICodecTab? codec_tab = lookup_codec_tab (page);
         if (codec_tab == null) {
             status_area.set_status (
-                "⚠️ Please select a codec tab (SVT-AV1, x265, x264, VP9, Crop & Trim, or Subtitles) first!");
+                "Please select a codec tab (SVT-AV1, x265, x264, VP9, Crop & Trim, or Subtitles) first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return;
         }
 
         // ── Validate input file early (covers both trim and codec paths) ──
         string input_file = file_pickers.input_entry.get_text ();
         if (input_file == "") {
-            status_area.set_status ("⚠️ Please select an input file first!");
+            status_area.set_status ("Please select an input file first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return;
         }
 
         if (!(codec_tab is TrimTab) && codec_audio_probe_pending (codec_tab)) {
             status_area.set_status (
-                "⏳ Checking source audio stream. Please wait a moment and try again.");
+                "Checking source audio stream. Please wait a moment and try again.",
+                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
             return;
         }
 
@@ -680,7 +688,8 @@ public class MainWindow : Adw.ApplicationWindow {
 
         if (!subtitles_tab.can_apply ()) {
             status_area.set_status (
-                "⚠️ Load a file with subtitle tracks or add external subtitles first!");
+                "Load a file with subtitle tracks or add external subtitles first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             release_pending_operation (ActiveOperation.SUBTITLE_APPLY, operation_id, true);
             return;
         }
@@ -1008,7 +1017,8 @@ public class MainWindow : Adw.ApplicationWindow {
                     }
                     string? unique = Converter.find_unique_path (output_file);
                     if (unique == null || unique.length == 0) {
-                        status_area.set_status ("⚠️ Could not derive a unique output filename.");
+                        status_area.set_status ("Could not derive a unique output filename.",
+                            StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                         release_pending_operation (ActiveOperation.CONVERTING, operation_id, true);
                         return;
                     }
@@ -1059,9 +1069,11 @@ public class MainWindow : Adw.ApplicationWindow {
             return AudioCopyUnknownPreflightResult.PROCEED;
         }
 
-        string previous_status = status_area.get_status_snapshot ();
-        string verification_status = "⏳ Verifying audio copy compatibility before conversion...";
-        status_area.set_status (verification_status);
+        string previous_text, previous_icon, previous_css;
+        status_area.get_full_status_snapshot (out previous_text, out previous_icon, out previous_css);
+        string verification_status = "Verifying audio copy compatibility before conversion...";
+        status_area.set_status (verification_status,
+            StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
 
         AudioStreamProbeResult audio_probe =
             yield FfprobeUtils.probe_primary_audio_stream_async (input_file, cancellable);
@@ -1079,20 +1091,23 @@ public class MainWindow : Adw.ApplicationWindow {
                         AudioSettings.get_copy_fallback_codec_for_container (container);
                     string container_label = container.up ();
                     status_area.set_status (
-                        "ℹ️ Source audio cannot be copied into %s. Switched audio to %s."
-                        .printf (container_label, fallback_codec)
+                        "Source audio cannot be copied into %s. Switched audio to %s."
+                        .printf (container_label, fallback_codec),
+                        StatusIcon.NOTICE_ICON, StatusIcon.NOTICE_CSS
                     );
                     console_tab.add_line (
                         "[Audio] Verified source audio is incompatible with %s copy; switched to %s."
                         .printf (container_label, fallback_codec)
                     );
                 } else {
-                    status_area.replace_status_if_current (verification_status, previous_status);
+                    status_area.replace_status_if_current (
+                        verification_status, previous_text, previous_icon, previous_css);
                 }
                 return AudioCopyUnknownPreflightResult.PROCEED;
             case MediaStreamPresence.ABSENT:
                 status_area.set_status (
-                    "ℹ️ No audio stream was found during final verification. Continuing without audio."
+                    "No audio stream was found during final verification. Continuing without audio.",
+                    StatusIcon.NOTICE_ICON, StatusIcon.NOTICE_CSS
                 );
                 console_tab.add_line (
                     "[Audio] Final compatibility check found no audio stream; conversion will continue without audio."
@@ -1103,8 +1118,9 @@ public class MainWindow : Adw.ApplicationWindow {
                 string fallback_codec =
                     AudioSettings.get_copy_fallback_codec_for_container (container);
                 status_area.set_status (
-                    "⚠️ Unable to verify whether source audio can be copied into %s. Select %s manually or try again."
-                    .printf (container.up (), fallback_codec)
+                    "Unable to verify whether source audio can be copied into %s. Select %s manually or try again."
+                    .printf (container.up (), fallback_codec),
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS
                 );
                 console_tab.add_line (
                     "[Audio] Final compatibility check could not verify whether source audio can be copied into %s."
@@ -1386,7 +1402,8 @@ public class MainWindow : Adw.ApplicationWindow {
     private void on_cancel_clicked () {
         string? message = cancel_current_operation ();
         if (message != null) {
-            status_area.set_status (message);
+            status_area.set_status (message,
+                StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
             console_tab.add_line (message);
         }
     }
@@ -1403,19 +1420,19 @@ public class MainWindow : Adw.ApplicationWindow {
         dismiss_active_preflight_dialog ();
 
         if (operation_launch_pending) {
-            message = @"⏹️ Pending $(get_operation_label (current_operation)) cancelled by user.";
+            message = @"Pending $(get_operation_label (current_operation)) cancelled by user.";
         } else {
             switch (current_operation) {
                 case ActiveOperation.SUBTITLE_EXTRACT:
                 case ActiveOperation.SUBTITLE_APPLY:
                     subtitles_tab.cancel_operation ();
-                    message = "⏹️ Subtitle operation cancelled by user.";
+                    message = "Subtitle operation cancelled by user.";
                     should_release_operation = false;
                     break;
 
                 case ActiveOperation.TRIMMING:
                     trim_tab.cancel_trim ();
-                    message = "⏹️ Export cancelled by user.";
+                    message = "Export cancelled by user.";
                     should_release_operation = false;
                     break;
 
@@ -1433,7 +1450,7 @@ public class MainWindow : Adw.ApplicationWindow {
         if (smart_optimizer_active) {
             controller.cancel_smart_optimizer ();
             if (message == null && current_operation == ActiveOperation.IDLE) {
-                message = "⏹️ Smart Optimizer cancelled by user.";
+                message = "Smart Optimizer cancelled by user.";
             }
         }
 

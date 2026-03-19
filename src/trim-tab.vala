@@ -303,26 +303,30 @@ public class TrimTab : Box, ICodecTab {
         ProgressBar progress_bar = status_area.progress_bar;
 
         if (has_pending_or_active_export ()) {
-            status_area.set_status ("⚠️ An export is already running or being prepared.");
+            status_area.set_status ("An export is already running or being prepared.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
 
         if (will_reencode_output () && selected_reencode_audio_probe_pending ()) {
             status_area.set_status (
-                "⏳ Checking source audio stream. Please wait a moment and try again.");
+                "Checking source audio stream. Please wait a moment and try again.",
+                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
             return false;
         }
 
         // For Chapter Split mode, build segments from selected chapters
         if (current_mode == Mode.CHAPTER_SPLIT) {
             if (input_file == null || input_file.strip () == "") {
-                status_area.set_status ("⚠️ Please select an input file first.");
+                status_area.set_status ("Please select an input file first.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return false;
             }
             // Build segments from selected chapters
             rebuild_chapter_segments ();
             if (segments.length == 0) {
-                status_area.set_status ("⚠️ No chapters selected — select at least one chapter to export.");
+                status_area.set_status ("No chapters selected — select at least one chapter to export.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return false;
             }
 
@@ -342,11 +346,13 @@ public class TrimTab : Box, ICodecTab {
         // For Crop Only mode, create a virtual full-video segment
         if (current_mode == Mode.CROP_ONLY) {
             if (input_file == null || input_file.strip () == "") {
-                status_area.set_status ("⚠️ Please select an input file first.");
+                status_area.set_status ("Please select an input file first.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return false;
             }
             if (global_crop_value.strip () == "") {
-                status_area.set_status ("⚠️ Draw a crop rectangle on the video first.");
+                status_area.set_status ("Draw a crop rectangle on the video first.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return false;
             }
             // Create one segment spanning the whole file
@@ -366,11 +372,13 @@ public class TrimTab : Box, ICodecTab {
 
         // Trim Only or Crop & Trim
         if (input_file == null || input_file.strip () == "") {
-            status_area.set_status ("⚠️ Please select an input file first.");
+            status_area.set_status ("Please select an input file first.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
         if (segments.length == 0) {
-            status_area.set_status ("⚠️ Add at least one segment before exporting.");
+            status_area.set_status ("Add at least one segment before exporting.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
 
@@ -437,7 +445,8 @@ public class TrimTab : Box, ICodecTab {
         GenericArray<string>? resolved_outputs = resolve_output_paths (
             input_file, output_folder, segs, output_policy);
         if (resolved_outputs == null) {
-            status_area.set_status ("Could not derive unique output path(s).");
+            status_area.set_status ("Could not derive unique output path(s).",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             fail_operation (operation_id);
             return;
         }
@@ -645,7 +654,8 @@ public class TrimTab : Box, ICodecTab {
         try {
             tmp_dir = DirUtils.make_tmp ("smart-opt-XXXXXX");
         } catch (Error e) {
-            status_area.set_status ("❌ Failed to create temp directory: " + e.message);
+            status_area.set_status ("Failed to create temp directory: " + e.message,
+                StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
             release_smart_cancel (cancel);
             fail_operation (operation_id);
             return;
@@ -655,7 +665,8 @@ public class TrimTab : Box, ICodecTab {
 
         for (int i = 0; i < segs.length; i++) {
             if (cancel.is_cancelled ()) {
-                status_area.set_status ("⏹️ Smart Optimizer cancelled.");
+                status_area.set_status ("Smart Optimizer cancelled.",
+                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
                 cancelled = true;
                 break;
             }
@@ -665,8 +676,9 @@ public class TrimTab : Box, ICodecTab {
                 ? "\"%s\"".printf (seg.label)
                 : "Segment %d".printf (i + 1);
 
-            status_area.set_status ("🧠 Smart Optimizer: analyzing %s (%d/%d)…".printf (
-                seg_name, i + 1, segs.length));
+            status_area.set_status ("Smart Optimizer: analyzing %s (%d/%d)…".printf (
+                seg_name, i + 1, segs.length),
+                StatusIcon.SMART_ICON, StatusIcon.SMART_CSS);
 
             // ── 1. Stream-copy segment to temp file ────────────────────────
             string tmp_seg = Path.build_filename (tmp_dir, "seg_%d.mkv".printf (i));
@@ -749,7 +761,8 @@ public class TrimTab : Box, ICodecTab {
 
             } catch (IOError e) {
                 if (e is IOError.CANCELLED) {
-                    status_area.set_status ("⏹️ Smart Optimizer cancelled.");
+                    status_area.set_status ("Smart Optimizer cancelled.",
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
                     cancelled = true;
                     FileUtils.unlink (tmp_seg);
                     break;
@@ -796,19 +809,22 @@ public class TrimTab : Box, ICodecTab {
 
         // ── Check if anything survived ──────────────────────────────────────
         if (ok_segs.length == 0) {
-            status_area.set_status ("⚠️ Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
-                .printf (target_mb));
+            status_area.set_status ("Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
+                .printf (target_mb),
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             fail_operation (operation_id);
             return;
         }
 
         // ── Launch TrimRunner with only the segments that passed ────────────
         if (skipped.length > 0) {
-            status_area.set_status ("🧠 Analysis complete — exporting %d of %d segments (%d skipped)…"
-                .printf (ok_segs.length, segs.length, skipped.length));
+            status_area.set_status ("Analysis complete — exporting %d of %d segments (%d skipped)…"
+                .printf (ok_segs.length, segs.length, skipped.length),
+                StatusIcon.SMART_ICON, StatusIcon.SMART_CSS);
         } else {
-            status_area.set_status ("🧠 Analysis complete — exporting %d segments…"
-                .printf (ok_segs.length));
+            status_area.set_status ("Analysis complete — exporting %d segments…"
+                .printf (ok_segs.length),
+                StatusIcon.SMART_ICON, StatusIcon.SMART_CSS);
         }
 
         launch_runner (input_file, output_folder, status_area, progress_bar,
@@ -1113,7 +1129,7 @@ public class TrimTab : Box, ICodecTab {
         mode_row.set_icon_name ("applications-multimedia-symbolic");
 
         mode_dropdown = new DropDown (new StringList (
-            { "✂️  Trim Only", "🔲  Crop Only", "🔲✂️  Crop & Trim", "📖  Chapter Split" }
+            { "Trim Only", "Crop Only", "Crop & Trim", "Chapter Split" }
         ), null);
         mode_dropdown.set_valign (Align.CENTER);
         mode_dropdown.set_selected (0);
@@ -1518,7 +1534,7 @@ public class TrimTab : Box, ICodecTab {
             // Update the chapter list group description with scan results
             if (chapters.length > 0) {
                 chapter_list_group.set_description (
-                    "📖 %d chapter%s found — select which to export".printf (
+                    "%d chapter%s found — select which to export".printf (
                         chapters.length,
                         chapters.length == 1 ? "" : "s"));
             } else {
@@ -1842,7 +1858,7 @@ public class TrimTab : Box, ICodecTab {
         }
 
         if (end - start < 0.001) {
-            mark_out_label.set_text ("⚠️ Set a different Out point");
+            mark_out_label.set_text ("Set a different Out point");
             return;
         }
 
@@ -1966,7 +1982,7 @@ public class TrimTab : Box, ICodecTab {
             format_duration (seg.get_duration ())
         );
         if (seg.has_crop ()) {
-            time_str += "  🔲 " + seg.crop_value;
+            time_str += "  [crop: " + seg.crop_value + "]";
         }
         row.set_subtitle (time_str);
 

@@ -16,6 +16,10 @@ public class PathBreadcrumb : Box {
     // Fallback icon used when the file's MIME-based icon cannot be resolved.
     private const string DEFAULT_FILE_ICON = "video-x-generic-symbolic";
 
+    // Icons used for the root ("/") and home directory crumbs.
+    private const string ROOT_ICON = "drive-harddisk-system-symbolic";
+    private const string HOME_ICON = "user-home-symbolic";
+
     // ----- Path state -----
     private string current_path = "";
     private string placeholder_text;
@@ -296,7 +300,22 @@ public class PathBreadcrumb : Box {
         }
 
         // --- Directory crumb: flat button that opens the directory ---
-        var button = new Button.with_label (crumb.label);
+        Button button;
+        string? icon_name = get_crumb_icon_name (crumb);
+        if (icon_name != null) {
+            button = new Button ();
+            button.add_css_class ("path-icon-crumb");
+            var icon = new Image.from_icon_name (icon_name);
+            icon.set_pixel_size (14);
+            button.set_child (icon);
+            Gtk.AccessibleProperty[] props = { Gtk.AccessibleProperty.LABEL };
+            var val = Value (typeof (string));
+            val.set_string (crumb.label);
+            Value[] vals = { val };
+            button.update_property_value (props, vals);
+        } else {
+            button = new Button.with_label (crumb.label);
+        }
         button.add_css_class ("flat");
         button.add_css_class ("path-crumb");
         if (is_last) button.add_css_class ("path-current");
@@ -332,6 +351,16 @@ public class PathBreadcrumb : Box {
 
         menu_button.set_menu_model (menu_model);
         return menu_button;
+    }
+
+    // Returns an icon name for special crumbs (Home, root), or null for normal text crumbs.
+    // Only matches the synthetic root crumbs created by build_crumb_model(),
+    // not arbitrary directories that happen to share the same name.
+    private string? get_crumb_icon_name (Crumb crumb) {
+        string home = Environment.get_home_dir ();
+        if (crumb.label == "Home" && crumb.path == home) return HOME_ICON;
+        if (crumb.label == "/" && crumb.path == "/") return ROOT_ICON;
+        return null;
     }
 
     // Appends a small ">" chevron separator icon between crumb widgets.

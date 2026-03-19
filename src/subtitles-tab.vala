@@ -1422,12 +1422,14 @@ public class SubtitlesTab : Box {
 
     private void report_burn_in_error (string message) {
         if (_status_area != null)
-            _status_area.set_status (@"⚠️ $message");
+            _status_area.set_status (message,
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
     }
 
     private void report_local_warning (string message) {
         if (_status_area != null) {
-            _status_area.set_status (@"⚠️ $message");
+            _status_area.set_status (message,
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
         }
     }
 
