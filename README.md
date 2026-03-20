@@ -108,32 +108,47 @@ meson, ninja, valac, pkg-config, GTK4, libadwaita
 Download the latest source release from [Releases](https://github.com/orlfman/FFmpeg-Converter-GTK/releases), extract it, then:
 
 ```bash
-  cd FFmpeg-Converter-GTK-<version>
-  make
-  sudo make install
+cd FFmpeg-Converter-GTK-<version>
+make
+sudo make install
 ```
 
-### Build & Install
+### Development Build & Install
 
 ```bash
 git clone https://github.com/orlfman/FFmpeg-Converter-GTK.git
 cd FFmpeg-Converter-GTK                                                                                                                                                                                                    
 make                                                      
-sudo make install     
+sudo make install
+
+or
+
+cd FFmpeg-Converter-GTK/DevTools
+./build.sh
 ```
 
 ### Uninstall
 
 ```bash
 cd FFmpeg-Converter-GTK
-make uninstall   
+make uninstall
+
+or
+
+cd FFmpeg-Converter-GTK/DevTools
+./uninstall.sh
 ```
 
 ### Rebuild
 
 ```bash
 cd FFmpeg-Converter-GTK
-make rebuild   
+make rebuild
+
+or
+
+cd FFmpeg-Converter-GTK/DevTools
+./build.sh
 ```
 
 ### Acknowledgments
