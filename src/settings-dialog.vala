@@ -897,7 +897,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         var row = new Adw.ActionRow ();
         row.set_title ("Directory");
-        row.set_icon_name ("folder-open-symbolic");
+        row.add_prefix (new Image.from_icon_name ("folder-open-symbolic"));
 
         output_dir_entry = new Entry ();
         output_dir_entry.set_placeholder_text ("Same as input file");
@@ -986,7 +986,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var target_row = new Adw.ActionRow ();
         target_row.set_title ("Target Size (MB)");
         target_row.set_subtitle ("Maximum output file size — smaller targets require more compression");
-        target_row.set_icon_name ("drive-harddisk-symbolic");
+        target_row.add_prefix (new Image.from_icon_name ("drive-harddisk-symbolic"));
 
         target_mb_spin = new SpinButton.with_range (1, 4096, 1);
         target_mb_spin.set_value (4);

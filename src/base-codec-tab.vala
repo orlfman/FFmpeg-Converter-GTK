@@ -221,6 +221,16 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public DropDown      custom_keyframe_combo { get; protected set; }
     protected PixelFormatSelector pixel_format_selector;
 
+    // ── Per-Tab Target Size ────────────────────────────────────────────────
+    private SpinButton target_mb_spin;
+    private int last_synced_target_mb;
+
+    // ── Source File Size Status ──────────────────────────────────────────────
+    private Image  file_size_icon;
+    private Label  file_size_label;
+    private string current_file_size_css_class = "source-file-size-none";
+    private uint   file_size_generation = 0;
+
     private uint pixel_format_sync_idle_id = 0;
 
     public override void dispose () {
@@ -280,6 +290,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public bool get_auto_convert_active ()       { return auto_convert_active; }
     public bool get_strip_audio_active ()        { return strip_audio_active; }
     public AudioSettings get_audio_settings_ref () { return audio_settings; }
+    public int get_target_mb ()                  { return (int) target_mb_spin.get_value (); }
 
     // Each codec applies recommendations differently
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
@@ -338,6 +349,11 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     protected void add_smart_optimizer_rows (Adw.PreferencesGroup group) {
+        // ── Source file size status (header suffix) ─────────────────────────
+        inject_file_size_css ();
+        inject_target_mb_css ();
+        build_file_size_header (group);
+
         // Smart Optimizer — ActionRow with button suffix for content-aware analysis
         var smart_row = new Adw.ActionRow ();
         smart_row.set_title ("Smart Optimizer");
@@ -352,6 +368,40 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         smart_row.add_suffix (smart_btn);
         smart_row.set_activatable_widget (smart_btn);
         group.add (smart_row);
+
+        // Target Size — per-tab, volatile spin button.
+        // Initializes from the stored preference but is independent of it.
+        // Text is blue when the value matches the stored preference.
+        var target_row = new Adw.ActionRow ();
+        target_row.set_title ("Target Size (MB)");
+        target_row.set_subtitle ("Per-tab target — does not change your stored preference");
+        target_row.add_prefix (new Image.from_icon_name ("drive-harddisk-symbolic"));
+
+        last_synced_target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
+        target_mb_spin = new SpinButton.with_range (1, 4096, 1);
+        target_mb_spin.set_value (last_synced_target_mb);
+        target_mb_spin.set_valign (Align.CENTER);
+        target_mb_spin.set_width_chars (5);
+        target_mb_spin.add_css_class ("target-mb-stored");
+        target_row.add_suffix (target_mb_spin);
+
+        target_mb_spin.value_changed.connect (() => {
+            sync_target_mb_css ();
+        });
+
+        // React to preference changes — if the stored target changed,
+        // update the spin box (preferences is the master).  Per-tab
+        // overrides are only preserved when the stored value is unchanged.
+        AppSettings.get_default ().settings_changed.connect (() => {
+            int new_stored = AppSettings.get_default ().smart_optimizer_target_mb;
+            if (new_stored != last_synced_target_mb) {
+                last_synced_target_mb = new_stored;
+                target_mb_spin.set_value (new_stored);
+            }
+            sync_target_mb_css ();
+        });
+
+        group.add (target_row);
 
         // Auto-convert toggle — per-tab, session-only.
         // When the global override in Preferences is ON, this is forced active
@@ -433,5 +483,153 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         img.set_valign (Align.CENTER);
         img.add_css_class ("accent");
         return img;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SOURCE FILE SIZE STATUS
+    //
+    //  Displays the input file's size in the Quality Profile group header,
+    //  giving quick visibility when using Smart Optimizer without switching
+    //  to the Information tab.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // ── Target MB CSS ─────────────────────────────────────────────────────
+
+    private static bool target_mb_css_injected = false;
+
+    private static void inject_target_mb_css () {
+        if (target_mb_css_injected) return;
+        target_mb_css_injected = true;
+
+        var css = new CssProvider ();
+        css.load_from_string (
+            "spinbutton.target-mb-stored text {\n" +
+            "    color: @accent_color;\n" +
+            "}\n"
+        );
+        StyleContext.add_provider_for_display (
+            Gdk.Display.get_default (),
+            css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+
+    private void sync_target_mb_css () {
+        int current = (int) target_mb_spin.get_value ();
+        int stored  = AppSettings.get_default ().smart_optimizer_target_mb;
+        if (current == stored) {
+            if (!target_mb_spin.has_css_class ("target-mb-stored"))
+                target_mb_spin.add_css_class ("target-mb-stored");
+        } else {
+            target_mb_spin.remove_css_class ("target-mb-stored");
+        }
+    }
+
+    /**
+     * Reset the per-tab target size to the stored preference value.
+     * Called by each codec tab's reset_defaults().
+     */
+    protected void reset_target_mb () {
+        last_synced_target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
+        target_mb_spin.set_value (last_synced_target_mb);
+    }
+
+    private static bool file_size_css_injected = false;
+
+    private static void inject_file_size_css () {
+        if (file_size_css_injected) return;
+        file_size_css_injected = true;
+
+        var css = new CssProvider ();
+        css.load_from_string (
+            ".source-file-size {\n" +
+            "    color: @success_color;\n" +
+            "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".source-file-size-none {\n" +
+            "    color: @window_fg_color;\n" +
+            "    font-size: 0.85em;\n" +
+            "    opacity: 0.55;\n" +
+            "}\n"
+        );
+        StyleContext.add_provider_for_display (
+            Gdk.Display.get_default (),
+            css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+
+    private void build_file_size_header (Adw.PreferencesGroup group) {
+        var header = new Box (Orientation.HORIZONTAL, 6);
+        header.set_halign (Align.END);
+        header.set_valign (Align.CENTER);
+
+        file_size_icon = new Image.from_icon_name ("drive-harddisk-symbolic");
+        file_size_icon.set_valign (Align.CENTER);
+        file_size_icon.add_css_class ("source-file-size-none");
+        header.append (file_size_icon);
+
+        file_size_label = new Label ("No file selected");
+        file_size_label.set_xalign (0.0f);
+        file_size_label.set_halign (Align.END);
+        file_size_label.set_wrap (false);
+        file_size_label.set_ellipsize (Pango.EllipsizeMode.END);
+        file_size_label.add_css_class ("source-file-size-none");
+        header.append (file_size_label);
+
+        group.set_header_suffix (header);
+    }
+
+    /**
+     * Update the source file size display.
+     *
+     * Called by AppController when the input file changes.
+     * Queries the file size asynchronously and updates the icon/label
+     * with a formatted value or a placeholder when no file is selected.
+     * Generation tracking discards stale results from superseded queries.
+     */
+    public void update_source_file_size (string file_path) {
+        file_size_generation++;
+
+        if (file_path.strip ().length == 0) {
+            apply_file_size_display ("No file selected", "source-file-size-none");
+            return;
+        }
+
+        uint my_generation = file_size_generation;
+        query_file_size_async.begin (file_path, my_generation);
+    }
+
+    private async void query_file_size_async (string file_path, uint generation) {
+        try {
+            var f = GLib.File.new_for_path (file_path);
+            var fi = yield f.query_info_async (
+                "standard::size", GLib.FileQueryInfoFlags.NONE,
+                Priority.DEFAULT, null);
+
+            if (generation != file_size_generation) return;
+
+            int64 bytes = fi.get_size ();
+            string formatted = "Source: %s".printf (
+                CodecUtils.format_file_size (bytes));
+            apply_file_size_display (formatted, "source-file-size");
+        } catch (Error e) {
+            if (generation != file_size_generation) return;
+            apply_file_size_display ("File unavailable", "source-file-size-none");
+        }
+    }
+
+    private void apply_file_size_display (string text, string css_class) {
+        file_size_label.set_text (text);
+
+        if (current_file_size_css_class == css_class) return;
+
+        if (current_file_size_css_class.length > 0) {
+            file_size_icon.remove_css_class (current_file_size_css_class);
+            file_size_label.remove_css_class (current_file_size_css_class);
+        }
+        file_size_icon.add_css_class (css_class);
+        file_size_label.add_css_class (css_class);
+        current_file_size_css_class = css_class;
     }
 }

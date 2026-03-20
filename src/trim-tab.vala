@@ -621,7 +621,6 @@ public class TrimTab : Box, ICodecTab {
         smart_cancel = new Cancellable ();
         var cancel = smart_cancel;
 
-        int target_mb  = AppSettings.get_default ().smart_optimizer_target_mb;
         int codec_sel  = (int) codec_choice.get_selected ();
         string preferred_codec;
         switch (codec_sel) {
@@ -631,11 +630,16 @@ public class TrimTab : Box, ICodecTab {
             default: preferred_codec = "x264";    break;
         }
 
+        // Read target from the per-tab spin box when available;
+        // falls back to the stored preference otherwise.
+        BaseCodecTab? selected_codec_tab = get_selected_reencode_codec_tab ();
+        int target_mb = (selected_codec_tab != null)
+            ? selected_codec_tab.get_target_mb ()
+            : AppSettings.get_default ().smart_optimizer_target_mb;
+
         GeneralSettingsSnapshot? general_settings_snapshot = null;
         string shared_video_filter_chain = "";
-        BaseCodecTab? selected_codec_tab = null;
         if (general_tab != null) {
-            selected_codec_tab = get_selected_reencode_codec_tab ();
             PixelFormatSettingsSnapshot? pixel_format = (selected_codec_tab != null)
                 ? selected_codec_tab.snapshot_pixel_format_settings ()
                 : null;
@@ -1126,7 +1130,7 @@ public class TrimTab : Box, ICodecTab {
         var mode_row = new Adw.ActionRow ();
         mode_row.set_title ("Operation");
         mode_row.set_subtitle ("Select between trimming, cropping, or both");
-        mode_row.set_icon_name ("applications-multimedia-symbolic");
+        mode_row.add_prefix (new Image.from_icon_name ("applications-multimedia-symbolic"));
 
         mode_dropdown = new DropDown (new StringList (
             { "Trim Only", "Crop Only", "Crop & Trim", "Chapter Split" }
@@ -1271,7 +1275,7 @@ public class TrimTab : Box, ICodecTab {
         var value_row = new Adw.ActionRow ();
         value_row.set_title ("Crop Value");
         value_row.set_subtitle ("W:H:X:Y — drag on the video; all values snap to even numbers");
-        value_row.set_icon_name ("image-crop-symbolic");
+        value_row.add_prefix (new Image.from_icon_name ("image-crop-symbolic"));
 
         crop_value_display = new Entry ();
         crop_value_display.set_editable (false);
@@ -1288,7 +1292,7 @@ public class TrimTab : Box, ICodecTab {
         crop_scope_row = new Adw.ActionRow ();
         crop_scope_row.set_title ("Per-Segment Crop");
         crop_scope_row.set_subtitle ("When enabled, each segment stores its own crop. When off, one crop applies to all.");
-        crop_scope_row.set_icon_name ("view-list-symbolic");
+        crop_scope_row.add_prefix (new Image.from_icon_name ("view-list-symbolic"));
 
         crop_scope_switch = new Switch ();
         crop_scope_switch.set_valign (Align.CENTER);
@@ -1754,7 +1758,7 @@ public class TrimTab : Box, ICodecTab {
         smart_optimize_row = new Adw.ActionRow ();
         smart_optimize_row.set_title ("Smart Optimizer");
         smart_optimize_row.set_subtitle ("Analyze each segment individually for content-aware CRF and preset");
-        smart_optimize_row.set_icon_name ("starred-symbolic");
+        smart_optimize_row.add_prefix (new Image.from_icon_name ("starred-symbolic"));
 
         smart_optimize_switch = new Switch ();
         smart_optimize_switch.set_valign (Align.CENTER);

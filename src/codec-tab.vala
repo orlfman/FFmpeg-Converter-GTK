@@ -27,6 +27,8 @@ public interface ICodecTab : Object {
 public interface ISmartCodecTab : Object {
     public abstract bool get_auto_convert_active ();
     public abstract bool get_strip_audio_active ();
+    public abstract int get_target_mb ();
     public abstract AudioSettings get_audio_settings_ref ();
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
+    public abstract void update_source_file_size (string file_path);
 }

@@ -5,7 +5,7 @@
 // ── Application Version ─────────────────────────────────────────────────────
 
 namespace AppVersion {
-    public const string VERSION = "1.5.1";
+    public const string VERSION = "1.5.2";
 }
 
 // ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────

@@ -160,6 +160,35 @@ namespace CodecUtils {
     }
 
     /**
+     * Format a byte count as a human-readable file size string.
+     *
+     * Uses binary units (1024-based):
+     *   0         → "0 B"
+     *   < 1 KiB   → "N B"
+     *   < 1 MiB   → "N.NN KB"
+     *   < 1 GiB   → "N.NN MB"
+     *   ≥ 1 GiB   → "N.NN GB"
+     */
+    public string format_file_size (int64 bytes) {
+        if (bytes <= 0)
+            return "0 B";
+
+        double kb = (double) bytes / 1024.0;
+        if (kb < 1.0)
+            return "%lld B".printf (bytes);
+
+        double mb = kb / 1024.0;
+        if (mb < 1.0)
+            return "%.2f KB".printf (kb);
+
+        double gb = mb / 1024.0;
+        if (gb < 1.0)
+            return "%.2f MB".printf (mb);
+
+        return "%.2f GB".printf (gb);
+    }
+
+    /**
      * Extract the display string from a StringList-backed DropDown.
      * Returns "" if the model or selected item is null.
      */

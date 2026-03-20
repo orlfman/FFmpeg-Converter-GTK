@@ -476,13 +476,7 @@ public class InformationTab : Box {
             var f  = GLib.File.new_for_path (file_path);
             var fi = f.query_info ("standard::size", GLib.FileQueryInfoFlags.NONE);
             int64 bytes = fi.get_size ();
-            if (bytes > 0) {
-                double mb = (double) bytes / 1024.0 / 1024.0;
-                if (mb >= 1024.0)
-                    info.file_size = "%.2f GB".printf (mb / 1024.0);
-                else
-                    info.file_size = "%.2f MB".printf (mb);
-            }
+            info.file_size = CodecUtils.format_file_size (bytes);
         } catch (Error e) {}
 
         // ── Run ffprobe ───────────────────────────────────────────────────────

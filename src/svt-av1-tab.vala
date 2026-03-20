@@ -840,6 +840,9 @@ public class SvtAv1Tab : BaseCodecTab {
     // ═══════════════════════════════════════════════════════════════════════════
 
     public void reset_defaults () {
+        // Smart Optimizer
+        reset_target_mb ();
+
         // Encoding
         container_combo.set_selected (0);
         preset_spin.set_value (8);

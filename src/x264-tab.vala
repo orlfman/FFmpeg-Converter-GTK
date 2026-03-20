@@ -916,6 +916,9 @@ public class X264Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void reset_defaults () {
+        // Smart Optimizer
+        reset_target_mb ();
+
         // Encoding
         container_combo.set_selected (0);
         preset_combo.set_selected (5);

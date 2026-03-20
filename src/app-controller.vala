@@ -150,7 +150,14 @@ public class AppController : Object {
             trim_tab.load_video (path);
             subtitles_tab.load_video (path);
             sync_codec_audio_presence.begin (path);
+            update_codec_source_file_size (path);
         });
+    }
+
+    private void update_codec_source_file_size (string path) {
+        foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
+            tab.update_source_file_size (path);
+        }
     }
 
     private void apply_codec_audio_source_state (string codec_name,
@@ -370,7 +377,15 @@ public class AppController : Object {
         smart_opt_cancel = new Cancellable ();
         int my_generation = ++smart_opt_generation;
 
-        int target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
+        // Look up the codec tab once — used for target size, audio probe,
+        // strip-audio, and applying the final recommendation.
+        var smart_tab = codec_registry.get (codec);
+
+        // Read target from the per-tab spin box; falls back to stored
+        // preference if no codec tab is found (should not happen).
+        int target_mb = (smart_tab != null)
+            ? smart_tab.get_target_mb ()
+            : AppSettings.get_default ().smart_optimizer_target_mb;
         status_area.set_status ("Smart Optimizer: analyzing video for %d MB %s target…"
             .printf (target_mb, codec.up ()),
             StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
@@ -438,8 +453,7 @@ public class AppController : Object {
         // Do not override here; the optimizer picks the right audio budget
         // for the target size and stores it in the recommendation.
 
-        // Strip audio — look up from codec registry
-        var smart_tab = codec_registry.get (codec);
+        // Strip audio
         if (smart_tab != null && smart_tab.get_audio_settings_ref ().is_audio_probe_pending ()) {
             status_area.set_status (
                 "Checking source audio stream. Please wait a moment and try Smart Optimizer again.",

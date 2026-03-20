@@ -690,6 +690,9 @@ public class Vp9Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void reset_defaults () {
+        // Smart Optimizer
+        reset_target_mb ();
+
         // Encoding
         container_combo.set_selected (0);
         speed_spin.set_value (4);
