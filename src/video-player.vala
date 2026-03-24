@@ -263,21 +263,45 @@ public class VideoPlayer : Box {
      * Parse a time string "HH:MM:SS.mmm" back to seconds.
      * Also accepts "HH:MM:SS" (no millis) and plain decimal seconds.
      */
-    public static double parse_time (string text) {
+    public static bool try_parse_time (string text, out double seconds) {
+        seconds = 0.0;
+
         string t = text.strip ();
-        if (t.length == 0) return 0.0;
+        if (t.length == 0) return false;
 
         // Try HH:MM:SS.mmm or HH:MM:SS
         string[] parts = t.split (":");
         if (parts.length == 3) {
+            if (!Regex.match_simple ("^[0-9]+$", parts[0])
+                || !Regex.match_simple ("^[0-9]{1,2}$", parts[1])
+                || !Regex.match_simple ("^[0-9]{1,2}(\\.[0-9]+)?$", parts[2])) {
+                return false;
+            }
+
             double h = double.parse (parts[0]);
             double m = double.parse (parts[1]);
             double s = double.parse (parts[2]);
-            return h * 3600.0 + m * 60.0 + s;
+            if (m >= 60.0 || s >= 60.0) {
+                return false;
+            }
+
+            seconds = h * 3600.0 + m * 60.0 + s;
+            return true;
         }
 
         // Fallback: plain seconds
-        return double.parse (t);
+        if (!Regex.match_simple ("^[0-9]+(\\.[0-9]+)?$", t)) {
+            return false;
+        }
+
+        seconds = double.parse (t);
+        return true;
+    }
+
+    public static double parse_time (string text) {
+        double seconds = 0.0;
+        try_parse_time (text, out seconds);
+        return seconds;
     }
 
     // ═════════════════════════════════════════════════════════════════════════

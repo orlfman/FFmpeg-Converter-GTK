@@ -196,11 +196,6 @@ namespace FilterBuilder {
     public string build_audio_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
 
-        // Normalize Audio
-        if (snapshot.normalize_audio) {
-            filters += "loudnorm=I=-23:TP=-1.5:LRA=11";
-        }
-
         // Audio Speed
         if (snapshot.audio_speed_enabled) {
             double mult;
@@ -211,6 +206,148 @@ namespace FilterBuilder {
         }
 
         return filters.length > 0 ? string.joinv (",", filters) : "";
+    }
+
+    public string merge_profile_audio_filter_chain (
+        string base_filters,
+        AudioProcessingSettingsSnapshot processing,
+        double duration = 0.0,
+        bool include_normalization = true,
+        bool apply_fade_in = true,
+        bool apply_fade_out = true) {
+        string processing_filters = AudioProcessingSettings.build_filter_chain_from_snapshot (
+            processing,
+            duration,
+            include_normalization,
+            apply_fade_in,
+            apply_fade_out
+        );
+
+        if (base_filters.length == 0) {
+            return processing_filters;
+        }
+        if (processing_filters.length == 0) {
+            return base_filters;
+        }
+
+        return base_filters + "," + processing_filters;
+    }
+
+    public string build_peak_analysis_audio_filter_chain (
+        string base_filters,
+        AudioProcessingSettingsSnapshot processing,
+        double duration = 0.0,
+        bool apply_fade_in = true,
+        bool apply_fade_out = true) {
+        return merge_profile_audio_filter_chain (
+            base_filters,
+            processing,
+            duration,
+            false,
+            apply_fade_in,
+            apply_fade_out
+        );
+    }
+
+    public string append_volumedetect (string filter_chain) {
+        if (filter_chain.length == 0) {
+            return "volumedetect";
+        }
+
+        return filter_chain + ",volumedetect";
+    }
+
+    public string[] extract_peak_analysis_output_args (string[] audio_args) {
+        string[] args = {};
+
+        for (int i = 0; i < audio_args.length; i++) {
+            string arg = audio_args[i];
+
+            if ((arg == "-ac" || arg == "-ar") && i + 1 < audio_args.length) {
+                args += arg;
+                args += audio_args[i + 1];
+                i++;
+            }
+        }
+
+        return args;
+    }
+
+    public string[] build_audio_peak_detect_cmd (
+        string input_file,
+        string filter_chain,
+        string[]? pre_input_args = null,
+        string[]? post_input_args = null,
+        string[]? output_args = null,
+        string? audio_map = null) {
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
+
+        if (pre_input_args != null) {
+            foreach (unowned string arg in pre_input_args) {
+                cmd += arg;
+            }
+        }
+
+        cmd += "-i";
+        cmd += input_file;
+
+        if (post_input_args != null) {
+            foreach (unowned string arg in post_input_args) {
+                cmd += arg;
+            }
+        }
+
+        cmd += "-vn";
+        cmd += "-sn";
+
+        if (audio_map != null && audio_map.length > 0) {
+            cmd += "-map";
+            cmd += audio_map;
+        }
+
+        cmd += "-af";
+        cmd += append_volumedetect (filter_chain);
+
+        if (output_args != null) {
+            foreach (unowned string arg in output_args) {
+                cmd += arg;
+            }
+        }
+
+        cmd += "-f";
+        cmd += "null";
+        cmd += "-";
+        return cmd;
+    }
+
+    public string[] build_filter_complex_peak_detect_cmd (
+        string[] input_args,
+        string filter_complex,
+        string output_label,
+        string[]? output_args = null) {
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
+
+        foreach (unowned string arg in input_args) {
+            cmd += arg;
+        }
+
+        cmd += "-vn";
+        cmd += "-sn";
+        cmd += "-filter_complex";
+        cmd += filter_complex;
+        cmd += "-map";
+        cmd += output_label;
+
+        if (output_args != null) {
+            foreach (unowned string arg in output_args) {
+                cmd += arg;
+            }
+        }
+
+        cmd += "-f";
+        cmd += "null";
+        cmd += "-";
+        return cmd;
     }
 
     public string build_atempo_chain (double multiplier) {
@@ -266,9 +403,9 @@ namespace FilterBuilder {
         if (af == "") return audio_args;
 
         // Cannot apply filters when audio is disabled or stream-copied.
-        // Note: AudioSettings.update_for_normalize() prevents the user from
-        // selecting "Copy" when normalize is enabled, so the copy case here
-        // is only reached when no audio filters are actually needed.
+        // The UI prevents copy-mode selections while processing requires
+        // re-encoding, so the copy case here is only reached when no audio
+        // filters are actually applicable.
         if (audio_args.length > 0 && audio_args[0] == "-an")
             return audio_args;
         if (audio_args.length >= 2 && audio_args[0] == "-c:a" && audio_args[1] == "copy")

@@ -32,6 +32,7 @@ public class AppController : Object {
     private InformationTab info_tab;
     private ConsoleTab console_tab;
     private TrimTab trim_tab;
+    private AudioTab audio_tab;
     private SubtitlesTab subtitles_tab;
     private Converter converter;
     private HamburgerMenu hamburger;
@@ -43,8 +44,6 @@ public class AppController : Object {
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
     private int smart_opt_generation = 0;
-    private Cancellable? audio_probe_cancellable = null;
-    private uint audio_probe_generation = 0;
 
     // ── Codec Registry ───────────────────────────────────────────────────────
     //    Maps ViewStack page names to their ISmartCodecTab, eliminating
@@ -61,6 +60,7 @@ public class AppController : Object {
                           InformationTab info_tab,
                           ConsoleTab console_tab,
                           TrimTab trim_tab,
+                          AudioTab audio_tab,
                           SubtitlesTab subtitles_tab,
                           Converter converter,
                           HamburgerMenu hamburger,
@@ -76,6 +76,7 @@ public class AppController : Object {
         this.info_tab       = info_tab;
         this.console_tab    = console_tab;
         this.trim_tab       = trim_tab;
+        this.audio_tab      = audio_tab;
         this.subtitles_tab  = subtitles_tab;
         this.converter      = converter;
         this.hamburger      = hamburger;
@@ -101,10 +102,6 @@ public class AppController : Object {
             smart_opt_cancel.cancel ();
             smart_opt_cancel = null;
         }
-        if (audio_probe_cancellable != null) {
-            audio_probe_cancellable.cancel ();
-            audio_probe_cancellable = null;
-        }
         base.dispose ();
     }
 
@@ -121,11 +118,11 @@ public class AppController : Object {
         wire_crop_detection ();
         wire_audio_speed_constraint ();
         wire_video_speed_constraint ();
-        wire_normalize_audio_constraint ();
         wire_conversion_done ();
         wire_trim_done ();
         wire_trim_tab_focus ();
         wire_subtitle_done ();
+        wire_audio_probe_sync ();
         wire_smart_optimizer ();
     }
 
@@ -148,8 +145,14 @@ public class AppController : Object {
             info_tab.reset_output ();
             general_tab.reset_crop ();
             trim_tab.load_video (path);
+            audio_tab.load_video (path);
             subtitles_tab.load_video (path);
-            sync_codec_audio_presence.begin (path);
+            apply_codec_audio_source_state (
+                "",
+                path.strip ().length > 0
+                    ? AudioProbeDisplayState.CHECKING
+                    : AudioProbeDisplayState.UNKNOWN
+            );
             update_codec_source_file_size (path);
         });
     }
@@ -173,37 +176,10 @@ public class AppController : Object {
         }
     }
 
-    private async void sync_codec_audio_presence (string input_file) {
-        audio_probe_generation++;
-        uint generation = audio_probe_generation;
-
-        if (audio_probe_cancellable != null) {
-            audio_probe_cancellable.cancel ();
-            audio_probe_cancellable = null;
-        }
-
-        if (input_file.strip ().length == 0) {
-            apply_codec_audio_source_state ("", AudioProbeDisplayState.UNKNOWN);
-            return;
-        }
-
-        var cancellable = new Cancellable ();
-        audio_probe_cancellable = cancellable;
-        apply_codec_audio_source_state ("", AudioProbeDisplayState.CHECKING);
-
-        AudioStreamProbeResult audio_probe = yield FfprobeUtils.probe_primary_audio_stream_async (
-            input_file,
-            cancellable
-        );
-
-        if (audio_probe_cancellable == cancellable) {
-            audio_probe_cancellable = null;
-        }
-        if (cancellable.is_cancelled () || generation != audio_probe_generation) {
-            return;
-        }
-
-        apply_codec_audio_probe_result (audio_probe);
+    private void wire_audio_probe_sync () {
+        audio_tab.source_audio_probe_updated.connect ((audio_probe) => {
+            apply_codec_audio_probe_result (audio_probe);
+        });
     }
 
     // ── Crop detection button → uses input file + console ───────────────────
@@ -221,18 +197,6 @@ public class AppController : Object {
         general_tab.audio_speed_toggled.connect ((on) => {
             foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
                 tab.get_audio_settings_ref ().update_for_audio_speed (on);
-            }
-        });
-    }
-
-    // ── Normalize audio → disable "Copy" in all codec tab audio lists ───────
-    //    Mirrors wire_audio_speed_constraint: loudnorm is an audio filter
-    //    and audio filters require re-encoding (copy won't apply them).
-
-    private void wire_normalize_audio_constraint () {
-        general_tab.normalize_toggled.connect ((on) => {
-            foreach (unowned ISmartCodecTab tab in codec_registry.get_values ()) {
-                tab.get_audio_settings_ref ().update_for_normalize (on);
             }
         });
     }

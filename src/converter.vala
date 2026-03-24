@@ -23,6 +23,7 @@ public class ConversionConfig : Object {
     public string seek_timestamp { get; set; default = "00:00:00"; }
     public bool   time_enabled   { get; set; default = false; }
     public string time_timestamp { get; set; default = "00:00:00"; }
+    public double output_duration_seconds { get; set; default = 0.0; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -227,6 +228,15 @@ public class Converter : Object {
 
         last_output_file = output_file;
 
+        string codec_name = builder.get_codec_name ();
+        console_tab.add_section_header (
+            "Conversion #%s — %s".printf (operation_id.to_string (), codec_name.up ()),
+            {
+                "Input:  " + input_file,
+                "Output: " + output_file
+            }
+        );
+
         status_area.set_status (@"Starting conversion...\nOutput will be:\n$output_file",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
@@ -250,6 +260,10 @@ public class Converter : Object {
                                     active_runner == runner);
                     if (still_active) {
                         total_duration = dur;
+                        config.output_duration_seconds = compute_output_duration_seconds (
+                            dur, config.seek_enabled ? config.seek_timestamp : "",
+                            config.time_enabled ? config.time_timestamp : ""
+                        );
                     }
                 } finally {
                     state_mutex.unlock ();
@@ -335,6 +349,28 @@ public class Converter : Object {
         runner.run (input, output, two_pass, operation_id);
     }
 
+    private static double compute_output_duration_seconds (double input_duration,
+                                                           string seek_timestamp,
+                                                           string time_timestamp) {
+        double duration = input_duration;
+        if (seek_timestamp.length > 0) {
+            duration -= ConversionUtils.parse_ffmpeg_timestamp (seek_timestamp);
+        }
+        if (duration < 0.0) {
+            duration = 0.0;
+        }
+        if (time_timestamp.length > 0) {
+            double requested = ConversionUtils.parse_ffmpeg_timestamp (time_timestamp);
+            if (requested > 0.0) {
+                duration = (duration > 0.0 && requested < duration) ? requested : duration;
+                if (duration <= 0.0) {
+                    duration = requested;
+                }
+            }
+        }
+        return duration;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  FFMPEG PROCESS EXECUTION (delegates to ProcessRunner)
     // ═════════════════════════════════════════════════════════════════════════
@@ -350,6 +386,13 @@ public class Converter : Object {
                                  string[] argv,
                                  double pass_start = 0.0,
                                  double pass_range = 100.0) {
+        string display_cmd = ConversionUtils.format_command_for_display (argv);
+        print ("\n=== FFmpeg command ===\n%s\n", display_cmd);
+        if (accepts_runner_updates (process_runner)) {
+            console_tab.add_line ("Command: " + display_cmd);
+            console_tab.set_command (display_cmd);
+        }
+
         int exit = process_runner.execute (argv, (clean) => {
             if (!accepts_runner_updates (process_runner)) {
                 return;
@@ -385,11 +428,6 @@ public class Converter : Object {
                 progress_tracker.update_from_time (current_sec, dur, pass_start, pass_range);
             }
         });
-
-        print ("\n=== FFmpeg command ===\n%s\n", string.joinv (" ", argv));
-        if (accepts_runner_updates (process_runner)) {
-            console_tab.set_command (string.joinv (" ", argv));
-        }
 
         return exit;
     }
@@ -470,6 +508,26 @@ public class Converter : Object {
         }
 
         update_status (message, icon_name, css_class);
+    }
+
+    internal void log_console_if_active (ProcessRunner process_runner, string message) {
+        if (!accepts_runner_updates (process_runner)) {
+            return;
+        }
+
+        console_tab.add_line (message);
+    }
+
+    internal void show_command_if_active (ProcessRunner process_runner, string[] argv) {
+        string full_cmd = ConversionUtils.format_command_for_display (argv);
+        print ("\n=== FFmpeg command ===\n%s\n", full_cmd);
+
+        if (!accepts_runner_updates (process_runner)) {
+            return;
+        }
+
+        console_tab.add_line ("Analysis command: " + full_cmd);
+        console_tab.set_command (full_cmd);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

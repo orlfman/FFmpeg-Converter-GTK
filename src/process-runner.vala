@@ -274,7 +274,7 @@ public class ProcessRunner : Object {
 
         try {
             var launcher = new SubprocessLauncher (SubprocessFlags.STDERR_PIPE);
-            process = launcher.spawnv (argv);
+            process = SubprocessCompat.spawnv (launcher, argv);
             bool should_cancel_immediately;
 
             exec_pid = extract_pid (process);

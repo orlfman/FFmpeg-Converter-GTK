@@ -354,7 +354,7 @@ public class FilePickers : Box {
             "    transition: outline 150ms ease;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
+        GtkCompat.add_provider_for_display (
             Gdk.Display.get_default (),
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION

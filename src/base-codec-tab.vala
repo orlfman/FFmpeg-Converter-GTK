@@ -214,7 +214,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public bool strip_audio_active  { get; protected set; default = false; }
 
     // ── Shared Widgets (assigned by subclass during construction) ─────────────
-    public AudioSettings audio_settings       { get; protected set; }
+    public AudioSettings audio_settings        { get; protected set; }
+    public AudioProcessingSettings audio_processing_settings { get; protected set; }
     public DropDown      container_combo       { get; protected set; }
     public Switch        two_pass_switch       { get; protected set; }
     public DropDown      keyint_combo          { get; protected set; }
@@ -262,6 +263,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             snapshot.container = container;
         snapshot.keyframe_settings = snapshot_keyframe_settings (general_settings);
         snapshot.audio_settings = audio_settings.snapshot_settings ();
+        snapshot.audio_processing = audio_processing_settings.snapshot_settings ();
         snapshot.pixel_format = snapshot_pixel_format_settings ();
         return snapshot;
     }
@@ -329,6 +331,32 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
                                          string[] options,
                                          string fallback_option) {
         CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
+    }
+
+    protected void build_shared_audio_groups () {
+        audio_settings = new AudioSettings ();
+        append (audio_settings.get_widget ());
+
+        audio_processing_settings = new AudioProcessingSettings (true);
+        append (audio_processing_settings.get_widget ());
+
+        audio_settings.changed.connect (() => {
+            sync_audio_processing_visibility ();
+        });
+        audio_processing_settings.changed.connect (() => {
+            sync_audio_processing_visibility ();
+        });
+
+        sync_audio_processing_visibility ();
+    }
+
+    protected void sync_audio_processing_visibility () {
+        bool audio_enabled = audio_settings.is_audio_enabled_for_output ();
+        bool processing_active = audio_processing_settings.requires_audio_reencode ();
+        bool copy_selected = audio_settings.snapshot_settings ().codec == AudioCodecName.COPY;
+
+        audio_settings.update_for_processing (processing_active);
+        audio_processing_settings.get_widget ().set_visible (audio_enabled && !copy_selected);
     }
 
     protected void reset_pixel_format_selection () {
@@ -507,7 +535,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             "    color: @accent_color;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
+        GtkCompat.add_provider_for_display (
             Gdk.Display.get_default (),
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -552,7 +580,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             "    opacity: 0.55;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
+        GtkCompat.add_provider_for_display (
             Gdk.Display.get_default (),
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION

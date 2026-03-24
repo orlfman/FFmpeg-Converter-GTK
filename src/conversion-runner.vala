@@ -24,6 +24,12 @@ public class ConversionRunner {
         bool succeeded = false;
 
         try {
+            if (!prepare_peak_normalization (
+                    input,
+                    two_pass ? ConversionPhase.PASS1 : ConversionPhase.ENCODING)) {
+                return;
+            }
+
             if (two_pass) {
                 if (converter.is_cancelled (process_runner)) return;
 
@@ -137,6 +143,28 @@ public class ConversionRunner {
         return args;
     }
 
+    private string[] build_peak_analysis_pre_input_args () {
+        string[] args = {};
+
+        if (config.seek_enabled) {
+            args += "-ss";
+            args += config.seek_timestamp;
+        }
+
+        return args;
+    }
+
+    private string[] build_peak_analysis_post_input_args () {
+        string[] args = {};
+
+        if (config.time_enabled) {
+            args += "-t";
+            args += config.time_timestamp;
+        }
+
+        return args;
+    }
+
     /**
      * Build metadata flags when the output is a real file (not /dev/null).
      * Returns an array that the caller appends to its command.
@@ -200,6 +228,130 @@ public class ConversionRunner {
 
     private string[] get_audio_args_with_filters () {
         return FilterBuilder.merge_audio_filters (
-            config.profile.audio_filters, config.profile.audio_args);
+            build_audio_filters (), config.profile.audio_args);
+    }
+
+    private bool needs_peak_analysis () {
+        if (config.profile.audio_args.length > 0 && config.profile.audio_args[0] == "-an") {
+            return false;
+        }
+
+        return ConversionUtils.audio_processing_needs_peak_analysis (
+            config.profile.audio_processing);
+    }
+
+    private string build_peak_analysis_audio_filters () {
+        if (config.profile.audio_processing.fade_out_enabled
+            && config.profile.audio_processing.fade_out_duration > 0.0
+            && config.output_duration_seconds <= 0.0) {
+            warning ("ConversionRunner: audio fade-out requested but output duration is unknown; skipping fade-out filter.");
+        }
+
+        return FilterBuilder.build_peak_analysis_audio_filter_chain (
+            config.profile.audio_filters,
+            config.profile.audio_processing,
+            config.output_duration_seconds,
+            true,
+            true
+        );
+    }
+
+    private string[] build_peak_detect_cmd (string input) {
+        return FilterBuilder.build_audio_peak_detect_cmd (
+            input,
+            build_peak_analysis_audio_filters (),
+            build_peak_analysis_pre_input_args (),
+            build_peak_analysis_post_input_args (),
+            FilterBuilder.extract_peak_analysis_output_args (config.profile.audio_args),
+            "0:a?"
+        );
+    }
+
+    private bool prepare_peak_normalization (string input, ConversionPhase phase) {
+        if (!needs_peak_analysis ()) {
+            return true;
+        }
+
+        config.profile.audio_processing.peak_normalize_gain_db = 0.0;
+
+        converter.set_phase_if_active (process_runner, phase);
+        converter.update_status_if_active (
+            process_runner,
+            "Analyzing audio peak for normalization...",
+            StatusIcon.PROGRESS_ICON,
+            StatusIcon.PROGRESS_CSS
+        );
+
+        string[] cmd = build_peak_detect_cmd (input);
+        converter.show_command_if_active (process_runner, cmd);
+
+        double max_volume_db = 0.0;
+        bool found_max_volume = false;
+
+        int exit = process_runner.execute (cmd, (line) => {
+            if (!converter.accepts_runner_updates (process_runner)) {
+                return;
+            }
+
+            double parsed_max = 0.0;
+            if (ConversionUtils.try_parse_max_volume_db (line, out parsed_max)) {
+                max_volume_db = parsed_max;
+                found_max_volume = true;
+            }
+
+            if (ConversionUtils.should_log_ffmpeg_line (line)) {
+                converter.log_console_if_active (process_runner, line);
+            }
+        });
+
+        if (converter.is_cancelled (process_runner)) {
+            return false;
+        }
+
+        if (exit != 0) {
+            converter.report_error_if_active (
+                process_runner,
+                "Peak normalization analysis failed."
+            );
+            return false;
+        }
+
+        if (!found_max_volume) {
+            converter.report_error_if_active (
+                process_runner,
+                "Peak normalization analysis did not report a max volume."
+            );
+            return false;
+        }
+
+        config.profile.audio_processing.peak_normalize_gain_db =
+            ConversionUtils.compute_peak_normalize_gain_db (max_volume_db);
+        converter.log_console_if_active (
+            process_runner,
+            "[Audio] Peak normalization target %.2f dBFS, measured %.2f dBFS, gain %.2f dB"
+                .printf (
+                    ConversionUtils.PEAK_NORMALIZE_TARGET_DB,
+                    max_volume_db,
+                    config.profile.audio_processing.peak_normalize_gain_db
+                )
+        );
+        return true;
+    }
+
+    private string build_audio_filters () {
+        if (config.profile.audio_processing.fade_out_enabled
+            && config.profile.audio_processing.fade_out_duration > 0.0
+            && config.output_duration_seconds <= 0.0) {
+            warning ("ConversionRunner: audio fade-out requested but output duration is unknown; skipping fade-out filter.");
+        }
+
+        return FilterBuilder.merge_profile_audio_filter_chain (
+            config.profile.audio_filters,
+            config.profile.audio_processing,
+            config.output_duration_seconds,
+            true,
+            true,
+            true
+        );
     }
 }

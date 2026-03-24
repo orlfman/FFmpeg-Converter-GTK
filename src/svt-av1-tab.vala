@@ -91,6 +91,7 @@ public class SvtAv1Tab : BaseCodecTab {
         build_reset_button ();
 
         connect_signals ();
+        audio_settings.update_for_container (get_container ());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -554,8 +555,7 @@ public class SvtAv1Tab : BaseCodecTab {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void build_audio_group () {
-        audio_settings = new AudioSettings ();
-        append (audio_settings.get_widget ());
+        build_shared_audio_groups ();
     }
 
     private void build_threading_group () {
@@ -892,6 +892,9 @@ public class SvtAv1Tab : BaseCodecTab {
         qm_max_spin.set_value (11);
 
         audio_settings.reset_defaults ();
+        audio_settings.update_for_container (get_container ());
+        audio_processing_settings.reset_defaults ();
+        sync_audio_processing_visibility ();
 
         // Threading & Keyframes
         keyint_combo.set_selected (0);

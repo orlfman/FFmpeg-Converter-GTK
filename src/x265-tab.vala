@@ -81,6 +81,7 @@ public class X265Tab : BaseCodecTab {
         build_reset_button ();
 
         connect_signals ();
+        audio_settings.update_for_container (get_container ());
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -439,8 +440,7 @@ public class X265Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_audio_group () {
-        audio_settings = new AudioSettings ();
-        append (audio_settings.get_widget ());
+        build_shared_audio_groups ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -732,6 +732,9 @@ public class X265Tab : BaseCodecTab {
 
         // Audio
         audio_settings.reset_defaults ();
+        audio_settings.update_for_container (get_container ());
+        audio_processing_settings.reset_defaults ();
+        sync_audio_processing_visibility ();
 
         // Threading & Keyframes
         keyint_combo.set_selected (0);

@@ -6,6 +6,7 @@ using Adw;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ConsoleTab : Box {
+    private const string CONSOLE_FONT_CSS_CLASS = "console-font-custom";
 
     // ── Core widgets ──────────────────────────────────────────────────────────
     public TextView console_view { get; private set; }
@@ -96,6 +97,18 @@ public class ConsoleTab : Box {
         build_error_popover ();
     }
 
+    public override void dispose () {
+        if (font_css != null) {
+            var display = Gdk.Display.get_default ();
+            if (display != null) {
+                GtkCompat.remove_provider_for_display (display, font_css);
+            }
+            font_css = null;
+        }
+
+        base.dispose ();
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  CSS — Injected once for all ConsoleTab instances
     // ═════════════════════════════════════════════════════════════════════════
@@ -159,8 +172,13 @@ public class ConsoleTab : Box {
             "    border-radius: 6px;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
-            Gdk.Display.get_default (),
+        var display = Gdk.Display.get_default ();
+        if (display == null) {
+            return;
+        }
+
+        GtkCompat.add_provider_for_display (
+            display,
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION
         );
@@ -356,6 +374,7 @@ public class ConsoleTab : Box {
         console_view.bottom_margin = 8;
         console_view.left_margin = 8;
         console_view.right_margin = 8;
+        console_view.add_css_class (CONSOLE_FONT_CSS_CLASS);
 
         resolve_system_font ();
         apply_font_size ();
@@ -630,23 +649,30 @@ public class ConsoleTab : Box {
 
     private void apply_font_size () {
         int size = (base_font_size_pt + font_size_offset).clamp (6, 32);
+        var display = Gdk.Display.get_default ();
 
-        if (font_css != null && console_view != null) {
-            console_view.get_style_context ().remove_provider (font_css);
+        if (display == null || console_view == null) {
+            return;
+        }
+
+        if (font_css != null) {
+            GtkCompat.remove_provider_for_display (display, font_css);
         }
 
         font_css = new CssProvider ();
         font_css.load_from_string (
-            "textview { font-family: \"%s\"; font-size: %dpt; }".printf (
-                base_font_family, size
+            ".%s { font-family: \"%s\"; font-size: %dpt; }".printf (
+                CONSOLE_FONT_CSS_CLASS,
+                base_font_family,
+                size
             )
         );
 
-        if (console_view != null) {
-            console_view.get_style_context ().add_provider (
-                font_css, STYLE_PROVIDER_PRIORITY_APPLICATION
-            );
-        }
+        GtkCompat.add_provider_for_display (
+            display,
+            font_css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -928,6 +954,24 @@ public class ConsoleTab : Box {
             command_entry.set_text (full_command);
             return Source.REMOVE;
         });
+    }
+
+    /**
+     * Add a visible section break so sequential operations are easy to
+     * distinguish in the cumulative console log.
+     */
+    public void add_section_header (string title, string[]? details = null) {
+        add_line ("");
+        add_line ("================================================================");
+        add_line (title);
+        if (details != null) {
+            foreach (unowned string detail in details) {
+                if (detail.length > 0) {
+                    add_line (detail);
+                }
+            }
+        }
+        add_line ("================================================================");
     }
 
     /**

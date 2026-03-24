@@ -23,15 +23,15 @@ public class ChapterInfo : Object {
     }
 }
 
-public enum MediaStreamPresence {
-    UNKNOWN,
-    ABSENT,
-    PRESENT
-}
+public class AudioStreamsProbeResult : Object {
+    public bool success { get; set; default = false; }
+    public string error_message { get; set; default = ""; }
+    public double duration_seconds { get; set; default = 0.0; }
+    public GenericArray<AudioStreamInfo> streams { get; private set; }
 
-public class AudioStreamProbeResult : Object {
-    public MediaStreamPresence presence { get; set; default = MediaStreamPresence.UNKNOWN; }
-    public string codec_name { get; set; default = ""; }
+    public AudioStreamsProbeResult () {
+        streams = new GenericArray<AudioStreamInfo> ();
+    }
 }
 
 namespace FfprobeUtils {
@@ -48,7 +48,7 @@ namespace FfprobeUtils {
     }
 
     private void log_ffprobe_debug (string event, string[] cmd, string? detail = null) {
-        string cmd_text = string.joinv (" ", cmd);
+        string cmd_text = ConversionUtils.format_command_for_display (cmd);
         if (detail != null && detail.length > 0) {
             debug ("FfprobeUtils: %s: %s | cmd=%s", event, detail, cmd_text);
         } else {
@@ -98,7 +98,7 @@ namespace FfprobeUtils {
         try {
             var launcher = new SubprocessLauncher (
                 SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
-            var proc = launcher.spawnv (cmd);
+            var proc = SubprocessCompat.spawnv (launcher, cmd);
 
             try {
                 yield proc.communicate_utf8_async (null, cancellable,
@@ -377,19 +377,132 @@ namespace FfprobeUtils {
 
         string[] lines = cleaned.split ("\n");
         foreach (unowned string line in lines) {
-            string codec = line.strip ();
+            string[] parts = line.strip ().split (",");
+            if (parts.length == 0) {
+                continue;
+            }
+
+            string codec = parts[0].strip ();
             if (codec.length == 0) {
                 continue;
             }
 
             result.presence = MediaStreamPresence.PRESENT;
             result.codec_name = codec.down ();
+            if (parts.length >= 2) {
+                result.sample_fmt = parts[1].strip ().down ();
+            }
+            if (parts.length >= 3) {
+                int channels = 0;
+                if (int.try_parse (parts[2].strip (), out channels) && channels > 0) {
+                    result.channels = channels;
+                }
+            }
+            if (parts.length >= 4) {
+                int bits_per_raw_sample = 0;
+                if (int.try_parse (parts[3].strip (), out bits_per_raw_sample)
+                    && bits_per_raw_sample > 0) {
+                    result.bits_per_raw_sample = bits_per_raw_sample;
+                }
+            }
             return result;
         }
 
         result.presence = MediaStreamPresence.ABSENT;
         return result;
     }
+
+    private AudioStreamsProbeResult parse_all_audio_streams_output (string stdout_text) {
+        var result = new AudioStreamsProbeResult ();
+
+        if (stdout_text == null || stdout_text.strip ().length == 0) {
+            result.success = true;
+            return result;
+        }
+
+        try {
+            var parser = new Json.Parser ();
+            parser.load_from_data (stdout_text);
+
+            var root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT) {
+                result.error_message = "ffprobe returned malformed audio stream data.";
+                return result;
+            }
+
+            var root_obj = root.get_object ();
+            if (root_obj.has_member ("format")) {
+                var format = root_obj.get_object_member ("format");
+                if (format != null) {
+                    string duration_str = format.get_string_member_with_default ("duration", "0");
+                    double duration = 0.0;
+                    if (double.try_parse (duration_str, out duration) && duration > 0.0) {
+                        result.duration_seconds = duration;
+                    }
+                }
+            }
+            if (!root_obj.has_member ("streams")) {
+                result.error_message = "ffprobe audio stream data did not contain a streams array.";
+                return result;
+            }
+
+            var stream_array = root_obj.get_array_member ("streams");
+            if (stream_array == null) {
+                result.error_message = "ffprobe returned an invalid audio streams array.";
+                return result;
+            }
+
+            int audio_idx = 0;
+            for (uint i = 0; i < stream_array.get_length (); i++) {
+                var s = stream_array.get_object_element (i);
+                if (s == null)
+                    continue;
+
+                var info = new AudioStreamInfo ();
+                info.audio_index = audio_idx++;
+                info.codec_name = s.get_string_member_with_default ("codec_name", "");
+                info.channels = (int) s.get_int_member_with_default ("channels", 0);
+                info.sample_fmt = s.get_string_member_with_default ("sample_fmt", "").down ();
+
+                string bits_str = s.get_string_member_with_default ("bits_per_raw_sample", "");
+                int bits = 0;
+                if (bits_str.strip ().length > 0 && int.try_parse (bits_str, out bits) && bits > 0) {
+                    info.bits_per_raw_sample = bits;
+                }
+
+                string sr_str = s.get_string_member_with_default ("sample_rate", "0");
+                int sr = 0;
+                if (int.try_parse (sr_str, out sr))
+                    info.sample_rate = sr;
+
+                if (s.has_member ("tags")) {
+                    var tags = s.get_object_member ("tags");
+                    if (tags != null) {
+                        info.language = tags.get_string_member_with_default ("language", "");
+                    }
+                }
+
+                result.streams.add (info);
+            }
+            result.success = true;
+        } catch (Error e) {
+            result.error_message = "Failed to parse ffprobe audio stream data.";
+            debug ("FfprobeUtils: failed to parse audio streams probe: %s | stdout=%s",
+                   e.message, summarize_ffprobe_text (stdout_text));
+        }
+
+        return result;
+    }
+
+#if FFPROBE_UTILS_TEST_BUILD
+    internal AudioStreamProbeResult parse_primary_audio_stream_output_for_test (string stdout_text) {
+        return parse_primary_audio_stream_output (stdout_text);
+    }
+
+    internal AudioStreamsProbeResult parse_all_audio_streams_output_for_test (string stdout_text) {
+        return parse_all_audio_streams_output (stdout_text);
+    }
+#endif
 
     /**
      * Probe the source video stream bit depth. Returns 0 on failure.
@@ -488,19 +601,22 @@ namespace FfprobeUtils {
     public async AudioStreamProbeResult probe_primary_audio_stream_async (
         string input_file,
         Cancellable? cancellable = null) {
+        var result = new AudioStreamProbeResult ();
         string[] cmd = {
             AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-select_streams", "a:0",
-            "-show_entries", "stream=codec_name",
+            "-show_entries", "stream=codec_name,channels,sample_fmt,bits_per_raw_sample",
             "-of", "csv=p=0",
             input_file
         };
         string stdout_text;
         string stderr_text;
 
-        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text)))
-            return new AudioStreamProbeResult ();
+        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text))) {
+            result.presence = MediaStreamPresence.ERROR;
+            return result;
+        }
 
         return parse_primary_audio_stream_output (stdout_text);
     }
@@ -594,5 +710,37 @@ namespace FfprobeUtils {
             return new GenericArray<ChapterInfo> ();
 
         return parse_ffprobe_chapters_output (stdout_text);
+    }
+
+    /**
+     * Probe ALL audio streams in an input file.
+     *
+     * Returns a list of AudioStreamInfo objects with codec, channels,
+     * sample rate, and language for each audio stream.
+     * Used by AudioTab for Extract All Tracks and stream info display.
+     */
+    public async AudioStreamsProbeResult probe_all_audio_streams_async (
+        string input_file,
+        Cancellable? cancellable = null) {
+        var result = new AudioStreamsProbeResult ();
+
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries",
+            "format=duration:stream=codec_name,channels,sample_rate,sample_fmt,bits_per_raw_sample:stream_tags=language",
+            "-print_format", "json",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text))) {
+            result.error_message = "ffprobe execution failed.";
+            return result;
+        }
+
+        return parse_all_audio_streams_output (stdout_text);
     }
 }

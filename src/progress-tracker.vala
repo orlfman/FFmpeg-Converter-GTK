@@ -51,6 +51,7 @@ public class ProgressTracker : Object {
 
     /** Show pulsing progress (used initially, before duration is known). */
     public void show_pulse () {
+        set_pulse_mode (true);
         Idle.add (() => {
             progress_bar.set_visible (true);
             progress_bar.set_text ("Processing...");
@@ -61,6 +62,7 @@ public class ProgressTracker : Object {
 
     /** Show determinate progress starting from 0%. */
     public void show_determinate () {
+        set_pulse_mode (false);
         Idle.add (() => {
             stop_pulsing ();
             progress_bar.set_visible (true);

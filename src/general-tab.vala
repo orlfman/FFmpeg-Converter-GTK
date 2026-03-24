@@ -73,9 +73,6 @@ public class GeneralTab : Box {
     private bool last_video_speed_effective = false;
     private bool last_audio_speed_effective = false;
 
-    // ── Audio ────────────────────────────────────────────────────────────────
-    public Switch normalize_audio      { get; private set; }
-
     // ── Metadata ─────────────────────────────────────────────────────────────
     public Switch preserve_metadata    { get; private set; }
     public Switch remove_chapters      { get; private set; }
@@ -90,8 +87,6 @@ public class GeneralTab : Box {
     public signal void audio_speed_toggled (bool active);
     /** Fired when effective video speed filtering changes state. */
     public signal void video_speed_toggled (bool active);
-    /** Fired when the normalize audio toggle changes. */
-    public signal void normalize_toggled (bool active);
     /** Fired when the Detect Crop button is clicked. */
     public signal void crop_detect_clicked ();
 
@@ -122,10 +117,7 @@ public class GeneralTab : Box {
         // 5. Frame rate & speed adjustments
         build_frame_rate_speed_group ();
 
-        // 6. Audio normalization
-        build_audio_group ();
-
-        // 7. Metadata controls
+        // 6. Metadata controls
         build_metadata_group ();
 
         connect_signals ();
@@ -595,28 +587,7 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  6. AUDIO
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void build_audio_group () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Audio");
-
-        var norm_row = new Adw.ActionRow ();
-        norm_row.set_title ("Normalize Audio");
-        norm_row.set_subtitle ("Standardize loudness levels across the file");
-        normalize_audio = new Switch ();
-        normalize_audio.set_valign (Align.CENTER);
-        normalize_audio.set_active (false);
-        norm_row.add_suffix (normalize_audio);
-        norm_row.set_activatable_widget (normalize_audio);
-        group.add (norm_row);
-
-        append (group);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  7. METADATA
+    //  6. METADATA
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_metadata_group () {
@@ -684,9 +655,6 @@ public class GeneralTab : Box {
                 return;
             }
             emit_video_speed_if_changed ();
-        });
-        normalize_audio.notify["active"].connect (() => {
-            normalize_toggled (normalize_audio.active);
         });
         detect_crop_button.clicked.connect (() => {
             crop_detect_clicked ();
@@ -760,7 +728,6 @@ public class GeneralTab : Box {
             snapshot.pixel_format = pixel_format_settings.copy ();
         }
         snapshot.color_filter = get_color_filter ();
-        snapshot.normalize_audio = normalize_audio.active;
         snapshot.preserve_metadata = preserve_metadata.active;
         snapshot.remove_chapters = remove_chapters.active;
         snapshot.video_filters = video_filters.snapshot_settings (
@@ -916,7 +883,7 @@ public class GeneralTab : Box {
             var launcher = new SubprocessLauncher (
                 SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_MERGE
             );
-            var process = launcher.spawnv (cmd);
+            var process = SubprocessCompat.spawnv (launcher, cmd);
             var reader = new DataInputStream (process.get_stdout_pipe ());
 
             string line;
@@ -1049,8 +1016,6 @@ public class GeneralTab : Box {
             "audio"
         );
     }
-
-    public bool is_normalize_enabled ()    { return normalize_audio.active; }
 
     // ── Crop ─────────────────────────────────────────────────────────────────
 

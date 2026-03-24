@@ -5,18 +5,9 @@ using Adw;
 //  AudioSettings — Reusable audio encoding widget
 // ═══════════════════════════════════════════════════════════════════════════════
 
-public class AudioSettingsSnapshot : Object {
-    public bool enabled = true;
-    public string codec = AudioCodecName.COPY;
-    public string source_codec_name = "";
-    public int sample_rate_hz = 0;
-    public int bitrate_kbps = 128;
-    public string opus_vbr_mode = "Default";
-    public bool opus_surround_fix = true;
-    public string aac_quality = "Disabled";
-    public string mp3_vbr_quality = "Disabled";
-    public string flac_compression = "5";
-    public string vorbis_quality = "Disabled";
+public enum AudioSettingsMode {
+    STANDARD,
+    TRANSCODE_ONLY
 }
 
 public enum AudioProbeDisplayState {
@@ -27,14 +18,9 @@ public enum AudioProbeDisplayState {
     ERROR
 }
 
-private class ContainerAudioPolicy : Object {
-    public string[] selectable_codecs { get; construct set; default = {}; }
-    public string[] copy_compatible_source_codecs { get; construct set; default = {}; }
-    public string fallback_codec { get; construct set; default = ""; }
-}
-
 public class AudioSettings : Object {
     private const string SAMPLE_RATE_SOURCE = "Source";
+    private AudioSettingsMode mode;
 
     // ── Widgets ──────────────────────────────────────────────────────────────
     private Adw.PreferencesGroup group;
@@ -42,10 +28,11 @@ public class AudioSettings : Object {
     private Image audio_status_icon;
     private Label audio_status_label;
 
-    public Adw.ExpanderRow audio_expander  { get; private set; }
+    public Adw.ExpanderRow? audio_expander { get; private set; }
     public DropDown  codec_combo           { get; private set; }
     public DropDown  sample_rate_combo     { get; private set; }
     public DropDown  bitrate_combo         { get; private set; }
+    public DropDown  sample_format_combo   { get; private set; }
     public DropDown  opus_vbr_combo        { get; private set; }
     public Switch    opus_surround_fix     { get; private set; }
     public DropDown  aac_quality_combo     { get; private set; }
@@ -57,6 +44,7 @@ public class AudioSettings : Object {
     private Adw.ActionRow codec_row;
     private Adw.ActionRow sample_rate_row;
     private Adw.ActionRow bitrate_row;
+    private Adw.ActionRow sample_format_row;
     private Adw.ActionRow opus_vbr_row;
     private Adw.ActionRow opus_surround_row;
     private Adw.ActionRow aac_quality_row;
@@ -67,24 +55,31 @@ public class AudioSettings : Object {
     // State for codec list constraints
     private string current_container = ContainerExt.MKV;
     private bool   speed_active = false;
-    private bool   normalize_active = false;
+    private bool   processing_active = false;
     private bool   concat_filter_active = false;
     private bool   desired_audio_enabled = true;
     private bool   suppress_audio_enabled_tracking = false;
     private AudioProbeDisplayState audio_probe_state = AudioProbeDisplayState.UNKNOWN;
     private string current_status_css_class = "";
-    private string source_audio_codec_name = "";
+    private AudioSourceInfo source_audio = new AudioSourceInfo ();
+
+    public signal void changed ();
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
 
-    public AudioSettings () {
+    public AudioSettings (AudioSettingsMode mode = AudioSettingsMode.STANDARD,
+                          string initial_container = ContainerExt.MKV) {
+        this.mode = mode;
+        this.current_container = initial_container;
         inject_audio_status_css ();
         build_ui ();
         connect_signals ();
         update_codec_visibility ();
-        set_audio_probe_state (AudioProbeDisplayState.UNKNOWN);
+        if (uses_probe_ui ()) {
+            set_audio_probe_state (AudioProbeDisplayState.UNKNOWN);
+        }
     }
 
     public Adw.PreferencesGroup get_widget () {
@@ -118,167 +113,252 @@ public class AudioSettings : Object {
             ".audio-status-neutral {\n" +
             "    color: @window_fg_color;\n" +
             "    font-size: 0.85em;\n" +
+            "}\n" +
+            ".audio-status-error {\n" +
+            "    color: @warning_color;\n" +
+            "    font-size: 0.85em;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
-            Gdk.Display.get_default (),
+        var display = Gdk.Display.get_default ();
+        if (display == null) {
+            return;
+        }
+        GtkCompat.add_provider_for_display (
+            display,
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION
         );
     }
 
+    private bool uses_probe_ui () {
+        return mode == AudioSettingsMode.STANDARD;
+    }
+
+    private bool is_transcode_only_mode () {
+        return mode == AudioSettingsMode.TRANSCODE_ONLY;
+    }
+
+    private void add_audio_row (Widget row) {
+        var expander = audio_expander;
+        if (expander != null) {
+            expander.add_row (row);
+        } else {
+            group.add (row);
+        }
+    }
+
+    private static string[] get_permissive_transcode_codecs () {
+        return AudioCompatibilityLogic.get_permissive_transcode_codecs ();
+    }
+
+    private static string[] get_initial_codec_options_for_mode (
+        AudioSettingsMode mode,
+        string container = ContainerExt.MKV) {
+        if (mode == AudioSettingsMode.TRANSCODE_ONLY) {
+            return get_permissive_transcode_codecs ();
+        }
+
+        return AudioCompatibilityLogic.get_selectable_codecs_for_container (container);
+    }
+
+#if AUDIO_SETTINGS_TEST_BUILD
+    internal static string[] get_transcode_only_codecs_for_test () {
+        return get_permissive_transcode_codecs ();
+    }
+
+    internal static string[] get_selectable_codecs_for_container_for_test (string container) {
+        return AudioCompatibilityLogic.get_selectable_codecs_for_container (container);
+    }
+
+    internal static string[] get_initial_codec_options_for_mode_for_test (
+        AudioSettingsMode mode,
+        string container = ContainerExt.MKV) {
+        return get_initial_codec_options_for_mode (mode, container);
+    }
+
+    internal static AudioProbeDisplayState map_probe_presence_to_display_state_for_test (
+        MediaStreamPresence presence) {
+        switch (presence) {
+        case MediaStreamPresence.PRESENT:
+            return AudioProbeDisplayState.FOUND;
+        case MediaStreamPresence.ABSENT:
+            return AudioProbeDisplayState.MISSING;
+        case MediaStreamPresence.ERROR:
+            return AudioProbeDisplayState.ERROR;
+        case MediaStreamPresence.UNKNOWN:
+        default:
+            return AudioProbeDisplayState.UNKNOWN;
+        }
+    }
+#endif
+
     private void build_ui () {
         group = new Adw.PreferencesGroup ();
-        group.set_title ("Audio");
-        group.set_description ("Audio stream encoding settings");
+        if (uses_probe_ui ()) {
+            group.set_title ("Audio");
+            group.set_description ("Audio stream encoding settings");
 
-        audio_status_header = new Box (Orientation.HORIZONTAL, 6);
-        audio_status_header.set_halign (Align.END);
-        audio_status_header.set_valign (Align.CENTER);
+            audio_status_header = new Box (Orientation.HORIZONTAL, 6);
+            audio_status_header.set_halign (Align.END);
+            audio_status_header.set_valign (Align.CENTER);
 
-        audio_status_icon = new Image ();
-        audio_status_icon.set_valign (Align.CENTER);
-        audio_status_header.append (audio_status_icon);
+            audio_status_icon = new Image ();
+            audio_status_icon.set_valign (Align.CENTER);
+            audio_status_header.append (audio_status_icon);
 
-        audio_status_label = new Label ("");
-        audio_status_label.set_xalign (0.0f);
-        audio_status_label.set_halign (Align.END);
-        audio_status_label.set_wrap (false);
-        audio_status_label.set_ellipsize (Pango.EllipsizeMode.END);
-        audio_status_header.append (audio_status_label);
+            audio_status_label = new Label ("");
+            audio_status_label.set_xalign (0.0f);
+            audio_status_label.set_halign (Align.END);
+            audio_status_label.set_wrap (false);
+            audio_status_label.set_ellipsize (Pango.EllipsizeMode.END);
+            audio_status_header.append (audio_status_label);
 
-        group.set_header_suffix (audio_status_header);
+            group.set_header_suffix (audio_status_header);
 
-        audio_expander = new Adw.ExpanderRow ();
-        audio_expander.set_title ("Include Audio");
-        audio_expander.set_subtitle ("Disable to strip audio entirely from the output");
-        audio_expander.set_show_enable_switch (true);
-        audio_expander.set_enable_expansion (true);
+            var expander = new Adw.ExpanderRow ();
+            expander.set_title ("Include Audio");
+            expander.set_subtitle ("Disable to strip audio entirely from the output");
+            expander.set_show_enable_switch (true);
+            expander.set_enable_expansion (true);
+            audio_expander = expander;
+            group.add (expander);
+        } else {
+            group.set_title ("Codec Settings");
+            group.set_description ("Configure the audio encoding parameters");
+            audio_expander = null;
+        }
 
         // ── Codec ────────────────────────────────────────────────────────────
+        string[] codec_options;
+        codec_options = get_initial_codec_options_for_mode (mode, current_container);
         codec_row = new Adw.ActionRow ();
         codec_row.set_title ("Codec");
-        codec_row.set_subtitle ("Copy passes audio through without re-encoding");
-        codec_combo = new DropDown (new StringList (
-            { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.AAC,
-              AudioCodecName.MP3, AudioCodecName.FLAC, AudioCodecName.VORBIS }
-        ), null);
+        codec_row.set_subtitle (
+            is_transcode_only_mode ()
+            ? "Choose the output codec for re-encoding"
+            : "Copy passes audio through without re-encoding"
+        );
+        codec_combo = new DropDown (
+            CodecUtils.build_dropdown_string_list (codec_options),
+            null
+        );
         codec_combo.set_valign (Align.CENTER);
         codec_combo.set_selected (0);
         codec_row.add_suffix (codec_combo);
-        audio_expander.add_row (codec_row);
+        add_audio_row (codec_row);
 
         // ── Sample Rate ──────────────────────────────────────────────────────
         sample_rate_row = new Adw.ActionRow ();
         sample_rate_row.set_title ("Sample Rate");
         sample_rate_row.set_subtitle (
             "Source preserves the input rate; choose a target only when resampling intentionally");
-        sample_rate_combo = new DropDown (new StringList (
-            {
-                SAMPLE_RATE_SOURCE,
-                "8 kHz", "12 kHz", "16 kHz", "22.05 kHz", "24 kHz",
-                "32 kHz", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz",
-                "176.4 kHz", "192 kHz"
-            }
-        ), null);
+        sample_rate_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.sample_rates ()), null);
         sample_rate_combo.set_valign (Align.CENTER);
         sample_rate_combo.set_selected (0);
         sample_rate_row.add_suffix (sample_rate_combo);
         sample_rate_row.set_visible (false);
-        audio_expander.add_row (sample_rate_row);
+        add_audio_row (sample_rate_row);
 
         // ── Bitrate ──────────────────────────────────────────────────────────
         bitrate_row = new Adw.ActionRow ();
         bitrate_row.set_title ("Bitrate");
         bitrate_row.set_subtitle ("Higher = better quality, larger file");
-        bitrate_combo = new DropDown (new StringList (
-            { "64 kbps", "128 kbps", "192 kbps", "256 kbps",
-              "320 kbps", "384 kbps", "448 kbps", "512 kbps" }
-        ), null);
+        bitrate_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.bitrates ()), null);
         bitrate_combo.set_valign (Align.CENTER);
-        bitrate_combo.set_selected (1);
+        bitrate_combo.set_selected (AudioCodecOptions.BITRATE_DEFAULT);
         bitrate_row.add_suffix (bitrate_combo);
         bitrate_row.set_visible (false);
-        audio_expander.add_row (bitrate_row);
+        add_audio_row (bitrate_row);
+
+        // ── Sample Format / Bit Depth ───────────────────────────────────────
+        sample_format_row = new Adw.ActionRow ();
+        sample_format_row.set_title ("Bit Depth");
+        sample_format_row.set_subtitle ("Options vary by codec");
+        string[] sample_format_options = {
+            "Source", "16-bit", "24-bit", "32-bit", "32-bit float"
+        };
+        sample_format_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            sample_format_options
+        ), null);
+        sample_format_combo.set_valign (Align.CENTER);
+        sample_format_combo.set_selected (0);
+        sample_format_row.add_suffix (sample_format_combo);
+        sample_format_row.set_visible (false);
+        add_audio_row (sample_format_row);
 
         // ── Opus VBR Mode ────────────────────────────────────────────────────
         opus_vbr_row = new Adw.ActionRow ();
         opus_vbr_row.set_title ("VBR Mode");
         opus_vbr_row.set_subtitle ("Variable bitrate mode for Opus encoding");
-        opus_vbr_combo = new DropDown (new StringList (
-            { "Default", "Constrained", "Off" }
-        ), null);
+        opus_vbr_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.opus_vbr ()), null);
         opus_vbr_combo.set_valign (Align.CENTER);
         opus_vbr_combo.set_selected (0);
         opus_vbr_row.add_suffix (opus_vbr_combo);
         opus_vbr_row.set_visible (false);
-        audio_expander.add_row (opus_vbr_row);
+        add_audio_row (opus_vbr_row);
 
         // ── Opus Surround ────────────────────────────────────────────────────
         opus_surround_row = new Adw.ActionRow ();
-        opus_surround_row.set_title ("Surround Compatibility");
-        opus_surround_row.set_subtitle ("Remap non-standard layouts like 5.1(side) so Opus can encode them");
+        opus_surround_row.set_title ("Surround Downmix");
+        opus_surround_row.set_subtitle ("Downmix surround audio to stereo for broad Opus player compatibility");
         opus_surround_fix = new Switch ();
         opus_surround_fix.set_valign (Align.CENTER);
         opus_surround_fix.set_active (true);
         opus_surround_row.add_suffix (opus_surround_fix);
         opus_surround_row.set_activatable_widget (opus_surround_fix);
         opus_surround_row.set_visible (false);
-        audio_expander.add_row (opus_surround_row);
+        add_audio_row (opus_surround_row);
 
         // ── AAC Quality ──────────────────────────────────────────────────────
         aac_quality_row = new Adw.ActionRow ();
         aac_quality_row.set_title ("Quality Scale");
         aac_quality_row.set_subtitle ("Disabled uses bitrate instead");
-        aac_quality_combo = new DropDown (new StringList (
-            { "Disabled", "0.1", "0.5", "1" }
-        ), null);
+        aac_quality_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.aac_quality ()), null);
         aac_quality_combo.set_valign (Align.CENTER);
         aac_quality_combo.set_selected (0);
         aac_quality_row.add_suffix (aac_quality_combo);
         aac_quality_row.set_visible (false);
-        audio_expander.add_row (aac_quality_row);
+        add_audio_row (aac_quality_row);
 
         // ── MP3 VBR Quality ──────────────────────────────────────────────────
         mp3_vbr_row = new Adw.ActionRow ();
         mp3_vbr_row.set_title ("VBR Quality");
         mp3_vbr_row.set_subtitle ("0 = best quality — Disabled uses bitrate instead");
-        mp3_vbr_combo = new DropDown (new StringList (
-            { "Disabled", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" }
-        ), null);
+        mp3_vbr_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.mp3_vbr ()), null);
         mp3_vbr_combo.set_valign (Align.CENTER);
         mp3_vbr_combo.set_selected (0);
         mp3_vbr_row.add_suffix (mp3_vbr_combo);
         mp3_vbr_row.set_visible (false);
-        audio_expander.add_row (mp3_vbr_row);
+        add_audio_row (mp3_vbr_row);
 
         // ── FLAC Compression ─────────────────────────────────────────────────
         flac_compression_row = new Adw.ActionRow ();
         flac_compression_row.set_title ("Compression Level");
         flac_compression_row.set_subtitle ("Higher = slower but smaller file (0–12)");
-        flac_compression_combo = new DropDown (new StringList (
-            { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" }
-        ), null);
+        flac_compression_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.flac_compression ()), null);
         flac_compression_combo.set_valign (Align.CENTER);
-        flac_compression_combo.set_selected (5);
+        flac_compression_combo.set_selected (AudioCodecOptions.FLAC_COMPRESSION_DEFAULT);
         flac_compression_row.add_suffix (flac_compression_combo);
         flac_compression_row.set_visible (false);
-        audio_expander.add_row (flac_compression_row);
+        add_audio_row (flac_compression_row);
 
         // ── Vorbis Quality ───────────────────────────────────────────────────
         vorbis_quality_row = new Adw.ActionRow ();
         vorbis_quality_row.set_title ("Quality");
         vorbis_quality_row.set_subtitle ("Higher = better — Disabled uses bitrate instead");
-        vorbis_quality_combo = new DropDown (new StringList (
-            { "Disabled", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" }
-        ), null);
+        vorbis_quality_combo = new DropDown (CodecUtils.build_dropdown_string_list (
+            AudioCodecOptions.vorbis_quality ()), null);
         vorbis_quality_combo.set_valign (Align.CENTER);
         vorbis_quality_combo.set_selected (0);
         vorbis_quality_row.add_suffix (vorbis_quality_combo);
         vorbis_quality_row.set_visible (false);
-        audio_expander.add_row (vorbis_quality_row);
-
-        group.add (audio_expander);
+        add_audio_row (vorbis_quality_row);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -290,17 +370,25 @@ public class AudioSettings : Object {
         aac_quality_combo.notify["selected"].connect (update_codec_visibility);
         mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
         vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
-        audio_expander.notify["enable-expansion"].connect (() => {
-            if (!suppress_audio_enabled_tracking && audio_expander.sensitive) {
-                desired_audio_enabled = audio_expander.enable_expansion;
-            }
-        });
+        var expander = audio_expander;
+        if (expander != null) {
+            expander.notify["enable-expansion"].connect (() => {
+                on_audio_expander_enable_expansion_changed (expander);
+            });
+        }
     }
 
-    private static bool codec_uses_quality_scale (string codec,
-                                                  string aac_quality,
-                                                  string mp3_vbr_quality,
-                                                  string vorbis_quality) {
+    private void on_audio_expander_enable_expansion_changed (Adw.ExpanderRow expander) {
+        if (!suppress_audio_enabled_tracking && expander.sensitive) {
+            desired_audio_enabled = expander.enable_expansion;
+        }
+        changed ();
+    }
+
+    internal static bool codec_uses_quality_scale (string codec,
+                                                   string aac_quality,
+                                                   string mp3_vbr_quality,
+                                                   string vorbis_quality) {
         if (codec == AudioCodecName.AAC)
             return aac_quality != "Disabled";
         if (codec == AudioCodecName.MP3)
@@ -324,8 +412,11 @@ public class AudioSettings : Object {
         bool is_copy = (codec == AudioCodecName.COPY);
         bool use_quality_scale = active_codec_uses_quality_scale (codec);
 
+        update_sample_rate_model (codec);
+        update_bitrate_model (codec);
+        update_sample_format_model (codec);
         sample_rate_row.set_visible (!is_copy);
-        bitrate_row.set_visible (!is_copy && codec != AudioCodecName.FLAC);
+        bitrate_row.set_visible (should_show_bitrate_for_codec (codec));
         bitrate_row.set_sensitive (!use_quality_scale);
         bitrate_row.set_subtitle (
             use_quality_scale
@@ -339,6 +430,36 @@ public class AudioSettings : Object {
         mp3_vbr_row.set_visible (codec == AudioCodecName.MP3);
         flac_compression_row.set_visible (codec == AudioCodecName.FLAC);
         vorbis_quality_row.set_visible (codec == AudioCodecName.VORBIS);
+        changed ();
+    }
+
+    private void update_sample_rate_model (string codec) {
+        string prev = get_dropdown_text (sample_rate_combo);
+        string[] labels = get_sample_rate_labels_for_codec (codec);
+
+        sample_rate_combo.set_model (CodecUtils.build_dropdown_string_list (labels));
+        restore_dropdown_selection (sample_rate_combo, labels, prev);
+    }
+
+    private void update_bitrate_model (string codec) {
+        string prev = get_dropdown_text (bitrate_combo);
+        string[] labels = get_bitrate_labels_for_codec (codec);
+
+        bitrate_combo.set_model (CodecUtils.build_dropdown_string_list (labels));
+        restore_dropdown_selection (bitrate_combo, labels, prev);
+    }
+
+    private void update_sample_format_model (string codec) {
+        string prev = get_dropdown_text (sample_format_combo);
+        string[] labels = get_sample_format_labels_for_codec (codec);
+        bool visible = should_show_sample_format_for_codec (codec);
+
+        sample_format_row.set_title (get_sample_format_title_for_codec (codec));
+        sample_format_row.set_subtitle (get_sample_format_subtitle_for_codec (codec));
+
+        sample_format_combo.set_model (CodecUtils.build_dropdown_string_list (labels));
+        restore_dropdown_selection (sample_format_combo, labels, prev);
+        sample_format_row.set_visible (visible && codec != AudioCodecName.COPY);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -351,7 +472,11 @@ public class AudioSettings : Object {
     }
 
     public void apply_source_audio_state (string codec_name, AudioProbeDisplayState state) {
-        source_audio_codec_name = normalize_source_audio_codec_name (codec_name);
+        source_audio.codec_name = codec_name;
+        if (state != AudioProbeDisplayState.FOUND) {
+            source_audio = new AudioSourceInfo ();
+            source_audio.codec_name = codec_name;
+        }
         apply_audio_probe_state (state, false);
         rebuild_codec_list ();
     }
@@ -359,14 +484,18 @@ public class AudioSettings : Object {
     public void apply_source_audio_probe_result (AudioStreamProbeResult audio_probe) {
         switch (audio_probe.presence) {
         case MediaStreamPresence.PRESENT:
+            source_audio = AudioSourceLogic.from_probe_result (audio_probe);
             apply_source_audio_state (audio_probe.codec_name, AudioProbeDisplayState.FOUND);
             break;
         case MediaStreamPresence.ABSENT:
             apply_source_audio_state ("", AudioProbeDisplayState.MISSING);
             break;
+        case MediaStreamPresence.ERROR:
+            apply_source_audio_state ("", AudioProbeDisplayState.ERROR);
+            break;
         case MediaStreamPresence.UNKNOWN:
         default:
-            apply_source_audio_state ("", AudioProbeDisplayState.ERROR);
+            apply_source_audio_state ("", AudioProbeDisplayState.UNKNOWN);
             break;
         }
     }
@@ -377,11 +506,14 @@ public class AudioSettings : Object {
     }
 
     /**
-     * When audio normalization (loudnorm) is enabled, stream-copy must be
-     * disabled because audio filters require re-encoding.
+     * When shared audio processing is enabled, stream-copy must be disabled
+     * because output filters require re-encoding.
      */
-    public void update_for_normalize (bool active) {
-        normalize_active = active;
+    public void update_for_processing (bool active) {
+        if (processing_active == active) {
+            return;
+        }
+        processing_active = active;
         rebuild_codec_list ();
     }
 
@@ -396,28 +528,40 @@ public class AudioSettings : Object {
     }
 
     /**
-     * True when audio filters (speed change, normalization, concat) are
+     * True when audio filters (speed change, shared processing, concat) are
      * active and stream-copy is not possible — audio must be re-encoded.
      */
     public bool requires_audio_reencode () {
-        return speed_active || normalize_active || concat_filter_active;
+        return speed_active || processing_active || concat_filter_active;
     }
 
     public void set_audio_enabled (bool enabled) {
         desired_audio_enabled = enabled;
 
-        if (audio_probe_state == AudioProbeDisplayState.MISSING) {
-            audio_expander.set_sensitive (false);
-            set_audio_expander_enabled (false);
+        var expander = audio_expander;
+        if (expander == null) {
             return;
         }
 
-        audio_expander.set_sensitive (true);
+        if (audio_probe_state == AudioProbeDisplayState.MISSING) {
+            expander.set_sensitive (false);
+            set_audio_expander_enabled (false);
+            changed ();
+            return;
+        }
+
+        expander.set_sensitive (true);
         set_audio_expander_enabled (enabled);
+        changed ();
     }
 
     public bool is_audio_enabled_for_output () {
-        return audio_expander.enable_expansion
+        var expander = audio_expander;
+        if (expander == null) {
+            return true;
+        }
+
+        return expander.enable_expansion
             && audio_probe_state != AudioProbeDisplayState.MISSING;
     }
 
@@ -431,6 +575,10 @@ public class AudioSettings : Object {
     }
 
     public bool should_verify_unknown_audio_copy_compatibility (string container) {
+        if (audio_expander == null) {
+            return false;
+        }
+
         if (!is_audio_probe_uncertain ())
             return false;
 
@@ -449,6 +597,21 @@ public class AudioSettings : Object {
                                           bool rebuild_after) {
         audio_probe_state = state;
 
+        if (!uses_probe_ui ()) {
+            if (rebuild_after) {
+                rebuild_codec_list ();
+            }
+            return;
+        }
+
+        var expander = audio_expander;
+        if (expander == null) {
+            if (rebuild_after) {
+                rebuild_codec_list ();
+            }
+            return;
+        }
+
         switch (state) {
         case AudioProbeDisplayState.UNKNOWN:
             set_audio_status ("dialog-question-symbolic",
@@ -460,7 +623,7 @@ public class AudioSettings : Object {
             set_audio_status ("view-refresh-symbolic",
                               "Checking audio stream...",
                               "audio-status-checking");
-            audio_expander.set_sensitive (false);
+            expander.set_sensitive (false);
             break;
         case AudioProbeDisplayState.FOUND:
             set_audio_status ("emblem-default-symbolic",
@@ -472,20 +635,22 @@ public class AudioSettings : Object {
             set_audio_status ("window-close-symbolic",
                               "No audio found",
                               "audio-status-missing");
-            audio_expander.set_sensitive (false);
+            expander.set_sensitive (false);
             set_audio_expander_enabled (false);
             break;
         case AudioProbeDisplayState.ERROR:
         default:
             set_audio_status ("dialog-warning-symbolic",
                               "Unable to inspect audio",
-                              "audio-status-checking");
+                              "audio-status-error");
             restore_user_audio_state ();
             break;
         }
 
         if (rebuild_after) {
             rebuild_codec_list ();
+        } else {
+            changed ();
         }
     }
 
@@ -494,12 +659,21 @@ public class AudioSettings : Object {
     }
 
     private void set_audio_expander_enabled (bool enabled) {
+        var expander = audio_expander;
+        if (expander == null) {
+            return;
+        }
+
         suppress_audio_enabled_tracking = true;
-        audio_expander.set_enable_expansion (enabled);
+        expander.set_enable_expansion (enabled);
         suppress_audio_enabled_tracking = false;
     }
 
     private void set_audio_status (string icon_name, string text, string css_class) {
+        if (!uses_probe_ui ()) {
+            return;
+        }
+
         audio_status_icon.set_from_icon_name (icon_name);
         audio_status_label.set_text (text);
         if (current_status_css_class != css_class) {
@@ -515,26 +689,33 @@ public class AudioSettings : Object {
 
     private void rebuild_codec_list () {
         string current = get_codec_text ();
-        ContainerAudioPolicy policy = get_container_audio_policy (current_container);
-        string[] codecs = policy.selectable_codecs;
+        string[] codecs;
 
-        if (speed_active || normalize_active || concat_filter_active) {
-            string[] filtered = {};
-            foreach (string c in codecs) {
-                if (c != AudioCodecName.COPY) filtered += c;
+        if (is_transcode_only_mode ()) {
+            codecs = get_permissive_transcode_codecs ();
+        } else {
+            ContainerAudioPolicy policy =
+                AudioCompatibilityLogic.get_container_audio_policy (current_container);
+            codecs = policy.selectable_codecs;
+
+            if (speed_active || processing_active || concat_filter_active) {
+                string[] filtered = {};
+                foreach (string c in codecs) {
+                    if (c != AudioCodecName.COPY) filtered += c;
+                }
+                codecs = filtered;
             }
-            codecs = filtered;
+
+            if (!is_copy_available_for_current_source ()) {
+                string[] filtered = {};
+                foreach (string c in codecs) {
+                    if (c != AudioCodecName.COPY) filtered += c;
+                }
+                codecs = filtered;
+            }
         }
 
-        if (!is_copy_available_for_current_source ()) {
-            string[] filtered = {};
-            foreach (string c in codecs) {
-                if (c != AudioCodecName.COPY) filtered += c;
-            }
-            codecs = filtered;
-        }
-
-        var new_list = new StringList (codecs);
+        var new_list = CodecUtils.build_dropdown_string_list (codecs);
         codec_combo.set_model (new_list);
 
         bool found = false;
@@ -548,7 +729,9 @@ public class AudioSettings : Object {
         if (!found)
             codec_combo.set_selected (0);
 
-        update_codec_row_subtitle ();
+        if (!is_transcode_only_mode ()) {
+            update_codec_row_subtitle ();
+        }
         update_codec_visibility ();
     }
 
@@ -561,10 +744,9 @@ public class AudioSettings : Object {
         // Source-audio detection is authoritative: when the selected input
         // has no audio stream, force the exported profile to behave as -an
         // even if some caller previously left the UI toggle enabled.
-        snapshot.enabled = audio_expander.enable_expansion
-            && audio_probe_state != AudioProbeDisplayState.MISSING;
+        snapshot.enabled = is_audio_enabled_for_output ();
         snapshot.codec = get_codec_text ();
-        snapshot.source_codec_name = source_audio_codec_name;
+        snapshot.source = source_audio.copy ();
 
         string sr_text = get_dropdown_text (sample_rate_combo);
         snapshot.sample_rate_hz = parse_sample_rate_selection (sr_text);
@@ -580,6 +762,7 @@ public class AudioSettings : Object {
         snapshot.mp3_vbr_quality = get_dropdown_text (mp3_vbr_combo);
         snapshot.flac_compression = get_dropdown_text (flac_compression_combo);
         snapshot.vorbis_quality = get_dropdown_text (vorbis_quality_combo);
+        snapshot.sample_format = get_dropdown_text (sample_format_combo);
         return snapshot;
     }
 
@@ -587,18 +770,72 @@ public class AudioSettings : Object {
         return build_audio_args_from_snapshot (snapshot_settings ());
     }
 
-    public static string[] build_audio_args_from_snapshot (AudioSettingsSnapshot snapshot) {
-        if (!snapshot.enabled)
-            return { "-an" };
-
+    internal static string[] build_sample_format_args_for_snapshot (
+        AudioSettingsSnapshot snapshot) {
         string codec = snapshot.codec;
-
-        if (codec == AudioCodecName.COPY)
-            return { "-c:a", "copy" };
-
         string[] args = {};
+        string effective_sample_format = get_effective_sample_format_selection_for_codec (snapshot);
 
-        // Map UI codec name → FFmpeg codec identifier
+        if (codec == AudioCodecName.WAV
+            || codec == AudioCodecName.AAC
+            || codec == AudioCodecName.VORBIS) {
+            return args;
+        }
+
+        if (codec == AudioCodecName.FLAC) {
+            if (effective_sample_format == "16-bit") {
+                args += "-sample_fmt";
+                args += "s16";
+            } else if (effective_sample_format == "24-bit") {
+                args += "-sample_fmt";
+                args += "s32";
+                args += "-bits_per_raw_sample";
+                args += "24";
+            } else if (effective_sample_format == "32-bit") {
+                args += "-sample_fmt";
+                args += "s32";
+            }
+        } else if (codec == AudioCodecName.OPUS) {
+            if (effective_sample_format == "16-bit") {
+                args += "-sample_fmt";
+                args += "s16";
+            } else if (effective_sample_format == "32-bit float") {
+                args += "-sample_fmt";
+                args += "flt";
+            }
+        } else if (codec == AudioCodecName.MP3) {
+            if (effective_sample_format == "16-bit") {
+                args += "-sample_fmt";
+                args += "s16p";
+            } else if (effective_sample_format == "32-bit float") {
+                args += "-sample_fmt";
+                args += "fltp";
+            }
+        }
+
+        return args;
+    }
+
+    internal static string[] build_transcode_args_from_snapshot (
+        AudioSettingsSnapshot snapshot,
+        bool include_sample_format = true,
+        int channel_override = 0) {
+        string codec = snapshot.codec;
+        string[] args = {};
+        string effective_sample_format = get_effective_sample_format_selection_for_codec (snapshot);
+
+        if (codec == AudioCodecName.WAV) {
+            args += "-c:a";
+            args += resolve_wav_pcm_codec (effective_sample_format);
+
+            if (snapshot.sample_rate_hz > 0) {
+                args += "-ar";
+                args += snapshot.sample_rate_hz.to_string ();
+            }
+
+            return args;
+        }
+
         string ffmpeg_codec = "";
         switch (codec) {
             case AudioCodecName.OPUS:   ffmpeg_codec = AudioCodecFFmpeg.OPUS;   break;
@@ -611,7 +848,6 @@ public class AudioSettings : Object {
         args += "-c:a";
         args += ffmpeg_codec;
 
-        // Keep the source sample rate unless the user explicitly requested resampling.
         if (snapshot.sample_rate_hz > 0) {
             args += "-ar";
             args += snapshot.sample_rate_hz.to_string ();
@@ -624,21 +860,20 @@ public class AudioSettings : Object {
             snapshot.vorbis_quality
         );
 
-        // Bitrate applies only when the selected codec is not lossless and
-        // no codec-specific quality scale is active.
         if (codec != AudioCodecName.FLAC && !use_quality_scale) {
             args += "-b:a";
             args += snapshot.bitrate_kbps.to_string () + "k";
         }
 
-        // ── Codec-specific options ───────────────────────────────────────────
         if (codec == AudioCodecName.OPUS) {
             if (snapshot.opus_surround_fix) {
-                args += "-af";
-                args += "aformat=channel_layouts=7.1|5.1|stereo|mono";
+                if (channel_override == 0 && snapshot.source_channels > 2) {
+                    args += "-ac";
+                    args += "2";
+                }
+                args += "-mapping_family";
+                args += "0";
             }
-            args += "-mapping_family";
-            args += "1";
 
             string vbr = snapshot.opus_vbr_mode;
             if (vbr == "Constrained") {
@@ -671,7 +906,28 @@ public class AudioSettings : Object {
             }
         }
 
+        if (include_sample_format) {
+            foreach (unowned string arg in build_sample_format_args_for_snapshot (snapshot)) {
+                args += arg;
+            }
+        }
+
         return args;
+    }
+
+    public static string[] build_audio_args_from_snapshot (AudioSettingsSnapshot snapshot,
+                                                           int channel_override = 0) {
+        if (!snapshot.enabled)
+            return { "-an" };
+
+        if (snapshot.codec == AudioCodecName.COPY)
+            return { "-c:a", "copy" };
+
+        return build_transcode_args_from_snapshot (
+            snapshot,
+            true,
+            channel_override
+        );
     }
 
     public static void coerce_copy_selection_for_container (AudioSettingsSnapshot snapshot,
@@ -679,10 +935,10 @@ public class AudioSettings : Object {
         if (snapshot.codec != AudioCodecName.COPY)
             return;
 
-        if (container_supports_audio_copy (container, snapshot.source_codec_name))
+        if (AudioCompatibilityLogic.container_supports_audio_copy (container, snapshot.source))
             return;
 
-        string fallback_codec = get_copy_fallback_codec_for_container (container);
+        string fallback_codec = AudioCompatibilityLogic.get_copy_fallback_codec_for_container (container);
         if (fallback_codec.length > 0) {
             snapshot.codec = fallback_codec;
         }
@@ -696,13 +952,14 @@ public class AudioSettings : Object {
         set_audio_enabled (true);
         codec_combo.set_selected (0);
         sample_rate_combo.set_selected (0);
-        bitrate_combo.set_selected (1);
+        bitrate_combo.set_selected (AudioCodecOptions.BITRATE_DEFAULT);
         opus_vbr_combo.set_selected (0);
         opus_surround_fix.set_active (true);
         aac_quality_combo.set_selected (0);
         mp3_vbr_combo.set_selected (0);
-        flac_compression_combo.set_selected (5);
+        flac_compression_combo.set_selected (AudioCodecOptions.FLAC_COMPRESSION_DEFAULT);
         vorbis_quality_combo.set_selected (0);
+        sample_format_combo.set_selected (0);
         update_codec_visibility ();
     }
 
@@ -712,7 +969,10 @@ public class AudioSettings : Object {
 
     private string get_codec_text () {
         var item = codec_combo.selected_item as StringObject;
-        return item != null ? item.string : AudioCodecName.COPY;
+        if (item != null) {
+            return item.string;
+        }
+        return is_transcode_only_mode () ? AudioCodecName.OPUS : AudioCodecName.COPY;
     }
 
     private string get_dropdown_text (DropDown dropdown) {
@@ -720,20 +980,168 @@ public class AudioSettings : Object {
         return item != null ? item.string : "";
     }
 
+    private static void restore_dropdown_selection (DropDown dropdown,
+                                                    string[] labels,
+                                                    string? previous) {
+        if (previous != null) {
+            for (int i = 0; i < labels.length; i++) {
+                if (labels[i] == previous) {
+                    dropdown.set_selected (i);
+                    return;
+                }
+            }
+        }
+
+        dropdown.set_selected (0);
+    }
+
+    internal static string[] get_sample_rate_labels_for_codec (string codec) {
+        switch (codec) {
+            case AudioCodecName.OPUS:
+                return {
+                    SAMPLE_RATE_SOURCE,
+                    "8 kHz", "12 kHz", "16 kHz", "24 kHz", "48 kHz"
+                };
+
+            case AudioCodecName.MP3:
+                return {
+                    SAMPLE_RATE_SOURCE,
+                    "8 kHz", "12 kHz", "16 kHz", "22.05 kHz", "24 kHz",
+                    "32 kHz", "44.1 kHz", "48 kHz"
+                };
+
+            case AudioCodecName.AAC:
+                return {
+                    SAMPLE_RATE_SOURCE,
+                    "8 kHz", "12 kHz", "16 kHz", "22.05 kHz", "24 kHz",
+                    "32 kHz", "44.1 kHz", "48 kHz", "64 kHz", "88.2 kHz", "96 kHz"
+                };
+
+            default:
+                return AudioCodecOptions.sample_rates ();
+        }
+    }
+
+    internal static string[] get_bitrate_labels_for_codec (string codec) {
+        switch (codec) {
+            case AudioCodecName.MP3:
+                return {
+                    "64 kbps", "128 kbps", "192 kbps", "256 kbps", "320 kbps"
+                };
+
+            default:
+                return AudioCodecOptions.bitrates ();
+        }
+    }
+
+    internal static bool should_show_bitrate_for_codec (string codec) {
+        return codec != AudioCodecName.COPY
+            && codec != AudioCodecName.FLAC
+            && codec != AudioCodecName.WAV;
+    }
+
+    internal static bool should_show_sample_format_for_codec (string codec) {
+        return codec != AudioCodecName.COPY
+            && codec != AudioCodecName.AAC
+            && codec != AudioCodecName.VORBIS;
+    }
+
+    internal static string get_sample_format_title_for_codec (string codec) {
+        if (codec == AudioCodecName.WAV || codec == AudioCodecName.FLAC) {
+            return "Bit Depth";
+        }
+        return "Sample Format";
+    }
+
+    internal static string get_sample_format_subtitle_for_codec (string codec) {
+        if (codec == AudioCodecName.WAV) {
+            return "Select the PCM output depth; Source preserves it when probing can determine it";
+        }
+        if (codec == AudioCodecName.FLAC) {
+            return "Select the FLAC output depth; Source preserves a compatible depth when probing can determine it";
+        }
+        if (codec == AudioCodecName.OPUS || codec == AudioCodecName.MP3) {
+            return "Controls encoder input format, not output bit depth";
+        }
+        return "Not available for this codec";
+    }
+
+    internal static string[] get_sample_format_labels_for_codec (string codec) {
+        if (codec == AudioCodecName.WAV) {
+            return { "Source", "16-bit", "24-bit", "32-bit", "32-bit float" };
+        }
+        if (codec == AudioCodecName.FLAC) {
+            return { "Source", "16-bit", "24-bit", "32-bit" };
+        }
+        return { "Source", "16-bit", "32-bit float" };
+    }
+
+    private static string infer_source_bit_depth_label (AudioSettingsSnapshot snapshot) {
+        return AudioCompatibilityLogic.infer_source_depth_label (snapshot.source);
+    }
+
+    private static string get_effective_sample_format_selection_for_codec (
+        AudioSettingsSnapshot snapshot) {
+        if (snapshot.sample_format != "Source") {
+            return snapshot.sample_format;
+        }
+
+        string source_label = infer_source_bit_depth_label (snapshot);
+        if (snapshot.codec == AudioCodecName.FLAC) {
+            switch (source_label) {
+            case "16-bit":
+            case "24-bit":
+            case "32-bit":
+                return source_label;
+            default:
+                return "Source";
+            }
+        }
+
+        if (snapshot.codec == AudioCodecName.WAV) {
+            return source_label;
+        }
+
+        return "Source";
+    }
+
+    private static string resolve_wav_pcm_codec (string effective_sample_format) {
+        switch (effective_sample_format) {
+        case "8-bit":
+            return "pcm_u8";
+        case "24-bit":
+            return "pcm_s24le";
+        case "32-bit":
+            return "pcm_s32le";
+        case "32-bit float":
+            return "pcm_f32le";
+        case "64-bit":
+            return "pcm_s64le";
+        case "64-bit float":
+            return "pcm_f64le";
+        case "16-bit":
+        case "Source":
+        default:
+            return "pcm_s16le";
+        }
+    }
+
     private bool is_copy_available_for_current_source () {
         if (audio_probe_state != AudioProbeDisplayState.FOUND)
             return true;
 
-        return container_supports_audio_copy (current_container, source_audio_codec_name);
+        return AudioCompatibilityLogic.evaluate (source_audio, current_container).can_copy;
     }
 
     private void update_codec_row_subtitle () {
+        AudioCompatibility compatibility =
+            AudioCompatibilityLogic.evaluate (source_audio, current_container);
         if (audio_probe_state == AudioProbeDisplayState.FOUND
-            && !container_supports_audio_copy (current_container, source_audio_codec_name)) {
+            && !compatibility.can_copy) {
             codec_row.set_subtitle (
                 "Copy unavailable: source %s audio is not supported in %s, so audio will be re-encoded"
                 .printf (
-                    format_audio_codec_label (source_audio_codec_name),
+                    format_audio_codec_label (source_audio.codec_name),
                     format_container_label (current_container)
                 )
             );
@@ -745,47 +1153,20 @@ public class AudioSettings : Object {
 
     public static bool container_supports_audio_copy (string container,
                                                       string source_codec_name) {
-        string normalized_codec = normalize_source_audio_codec_name (source_codec_name);
-        ContainerAudioPolicy policy = get_container_audio_policy (container);
-
-        if (normalized_codec.length == 0)
-            return true;
-
-        foreach (string codec in policy.copy_compatible_source_codecs) {
-            if (codec == normalized_codec) {
-                return true;
-            }
-        }
-
-        return policy.copy_compatible_source_codecs.length == 0;
+        return AudioCompatibilityLogic.container_supports_audio_copy_for_codec (
+            container, source_codec_name);
     }
 
     public static string get_copy_fallback_codec_for_container (string container) {
-        return get_container_audio_policy (container).fallback_codec;
+        return AudioCompatibilityLogic.get_copy_fallback_codec_for_container (container);
     }
 
     public static bool container_requires_audio_copy_verification (string container) {
-        ContainerAudioPolicy policy = get_container_audio_policy (container);
-        return policy.copy_compatible_source_codecs.length > 0
-            && policy.fallback_codec.length > 0;
-    }
-
-    private static string normalize_source_audio_codec_name (string codec_name) {
-        string normalized = codec_name.down ().strip ();
-        switch (normalized) {
-            case "libopus":
-                return "opus";
-            case "libvorbis":
-                return "vorbis";
-            case "mp4a":
-                return "aac";
-            default:
-                return normalized;
-        }
+        return AudioCompatibilityLogic.container_requires_audio_copy_verification (container);
     }
 
     private static string format_audio_codec_label (string codec_name) {
-        switch (normalize_source_audio_codec_name (codec_name)) {
+        switch (AudioCompatibilityLogic.normalize_source_audio_codec_name (codec_name)) {
             case "aac":
                 return "AAC";
             case "ac3":
@@ -815,36 +1196,6 @@ public class AudioSettings : Object {
                 return "MKV";
             default:
                 return container.up ();
-        }
-    }
-
-    private static ContainerAudioPolicy get_container_audio_policy (string container) {
-        switch (container.down ().strip ()) {
-            case ContainerExt.WEBM:
-                return new ContainerAudioPolicy () {
-                    selectable_codecs = { AudioCodecName.COPY, AudioCodecName.OPUS, AudioCodecName.VORBIS },
-                    copy_compatible_source_codecs = { "opus", "vorbis" },
-                    fallback_codec = AudioCodecName.OPUS
-                };
-            case ContainerExt.MP4:
-                return new ContainerAudioPolicy () {
-                    selectable_codecs = { AudioCodecName.COPY, AudioCodecName.AAC, AudioCodecName.MP3, AudioCodecName.OPUS },
-                    copy_compatible_source_codecs = { "aac", "mp3", "opus", "alac", "ac3", "eac3" },
-                    fallback_codec = AudioCodecName.AAC
-                };
-            default:
-                return new ContainerAudioPolicy () {
-                    selectable_codecs = {
-                        AudioCodecName.COPY,
-                        AudioCodecName.OPUS,
-                        AudioCodecName.AAC,
-                        AudioCodecName.MP3,
-                        AudioCodecName.FLAC,
-                        AudioCodecName.VORBIS
-                    },
-                    copy_compatible_source_codecs = {},
-                    fallback_codec = ""
-                };
         }
     }
 

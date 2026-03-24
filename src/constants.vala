@@ -5,7 +5,7 @@
 // ── Application Version ─────────────────────────────────────────────────────
 
 namespace AppVersion {
-    public const string VERSION = "1.5.2";
+    public const string VERSION = "1.5.3";
 }
 
 // ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────
@@ -29,6 +29,51 @@ namespace AudioCodecName {
     public const string MP3    = "MP3";
     public const string FLAC   = "FLAC";
     public const string VORBIS = "Vorbis";
+    public const string WAV    = "WAV";
+}
+
+// ── Audio Codec Option Lists (single source of truth for all UIs) ────────────
+//
+// Returned as fresh owned arrays so Vala never needs to pass const gchar **
+// through mutable string[] APIs — eliminating the const-discard warnings.
+
+namespace AudioCodecOptions {
+    public string[] aac_quality () {
+        return { "Disabled", "0.1", "0.3", "0.5", "1", "1.5", "2" };
+    }
+
+    public string[] mp3_vbr () {
+        return { "Disabled", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+    }
+
+    public string[] flac_compression () {
+        return { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" };
+    }
+    public const int FLAC_COMPRESSION_DEFAULT = 5;
+
+    public string[] vorbis_quality () {
+        return { "Disabled", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
+    }
+
+    public string[] opus_vbr () {
+        return { "Default", "Constrained", "Off" };
+    }
+
+    public string[] sample_rates () {
+        return {
+            "Source", "8 kHz", "12 kHz", "16 kHz", "22.05 kHz", "24 kHz",
+            "32 kHz", "44.1 kHz", "48 kHz", "88.2 kHz", "96 kHz",
+            "176.4 kHz", "192 kHz"
+        };
+    }
+
+    public string[] bitrates () {
+        return {
+            "64 kbps", "128 kbps", "192 kbps", "256 kbps",
+            "320 kbps", "384 kbps", "448 kbps", "512 kbps"
+        };
+    }
+    public const int BITRATE_DEFAULT = 1;  // 128 kbps
 }
 
 // ── Audio Codec FFmpeg identifiers ───────────────────────────────────────────
@@ -39,6 +84,25 @@ namespace AudioCodecFFmpeg {
     public const string MP3    = "libmp3lame";
     public const string FLAC   = "flac";
     public const string VORBIS = "libvorbis";
+    public const string WAV    = "pcm_s16le";
+}
+
+// ── Shared string-array helpers ─────────────────────────────────────────────
+
+namespace StringArrayUtils {
+    public string[] copy_generic_array (GenericArray<string> items) {
+        string[] copy = new string[items.length];
+        for (int i = 0; i < items.length; i++) {
+            copy[i] = items[i];
+        }
+        return copy;
+    }
+}
+
+// ── Audio normalization filters ─────────────────────────────────────────────
+
+namespace AudioNormalization {
+    public const string EBU_R128_FILTER = "loudnorm=I=-23:TP=-1.5:LRA=11";
 }
 
 // ── Container Extensions ─────────────────────────────────────────────────────
@@ -149,4 +213,25 @@ namespace ScaleAlgorithm {
 namespace FrameRateLabel {
     public const string ORIGINAL = "Original";
     public const string CUSTOM   = "Custom";
+}
+
+namespace GtkCompat {
+    [CCode (cname = "gtk_style_context_add_provider_for_display",
+            cheader_filename = "gtk/gtk.h")]
+    public extern static void add_provider_for_display (Gdk.Display display,
+                                                        Gtk.StyleProvider provider,
+                                                        uint priority);
+
+    [CCode (cname = "gtk_style_context_remove_provider_for_display",
+            cheader_filename = "gtk/gtk.h")]
+    public extern static void remove_provider_for_display (Gdk.Display display,
+                                                           Gtk.StyleProvider provider);
+}
+
+namespace SubprocessCompat {
+    [CCode (cname = "ffcg_subprocess_launcher_spawnv_compat")]
+    public extern static Subprocess spawnv (
+        SubprocessLauncher launcher,
+        [CCode (array_null_terminated = true)] string[] argv
+    ) throws Error;
 }

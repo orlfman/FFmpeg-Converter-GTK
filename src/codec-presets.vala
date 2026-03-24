@@ -21,15 +21,15 @@ public class CodecPresets : Object {
 
     private static void configure_audio (AudioSettings audio,
                                          string codec_name,
-                                         int bitrate_idx,
+                                         string? bitrate_label = null,
                                          int flac_level = -1) {
         audio.set_audio_enabled (true);
         set_dropdown_by_label (audio.codec_combo, codec_name);
 
         if (codec_name == AudioCodecName.FLAC && flac_level >= 0)
             audio.flac_compression_combo.set_selected ((uint) flac_level);
-        else if (bitrate_idx >= 0)
-            audio.bitrate_combo.set_selected ((uint) bitrate_idx);
+        else if (bitrate_label != null && bitrate_label.length > 0)
+            set_dropdown_by_label (audio.bitrate_combo, bitrate_label);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -57,7 +57,7 @@ public class CodecPresets : Object {
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
             tab.fast_decode_combo.set_selected (0);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "Anime":
@@ -75,7 +75,7 @@ public class CodecPresets : Object {
             tab.dlf_switch.set_active (true);
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Low":
@@ -93,7 +93,7 @@ public class CodecPresets : Object {
             tab.tpl_switch.set_active (false);
             tab.low_latency_switch.set_active (false);
             set_dropdown_by_label (tab.fast_decode_combo, "Level 1");
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "64 kbps");
             break;
 
         case "Medium":
@@ -110,7 +110,7 @@ public class CodecPresets : Object {
             tab.dlf_switch.set_active (true);
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "High":
@@ -129,7 +129,7 @@ public class CodecPresets : Object {
             tab.dlf_switch.set_active (true);
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Very High":
@@ -151,7 +151,7 @@ public class CodecPresets : Object {
             tab.qm_expander.set_enable_expansion (true);
             tab.qm_min_spin.set_value (8);
             tab.qm_max_spin.set_value (15);
-            configure_audio (tab.audio_settings, AudioCodecName.FLAC, -1, 8);
+            configure_audio (tab.audio_settings, AudioCodecName.FLAC, null, 8);
             break;
         }
     }
@@ -180,7 +180,7 @@ public class CodecPresets : Object {
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.psy_rd_spin.set_value (2.0);
             tab.cutree_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.AAC, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.AAC, "128 kbps");
             break;
 
         case "Anime":
@@ -199,7 +199,7 @@ public class CodecPresets : Object {
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.psy_rd_spin.set_value (0.5);
             tab.cutree_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Low":
@@ -212,7 +212,7 @@ public class CodecPresets : Object {
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.psy_rd_spin.set_value (2.0);
             tab.cutree_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "64 kbps");
             break;
 
         case "Medium":
@@ -229,7 +229,7 @@ public class CodecPresets : Object {
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.psy_rd_spin.set_value (2.0);
             tab.cutree_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "High":
@@ -249,7 +249,7 @@ public class CodecPresets : Object {
             tab.psy_rd_spin.set_value (2.0);
             tab.cutree_switch.set_active (true);
             tab.pmode_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Very High":
@@ -270,7 +270,7 @@ public class CodecPresets : Object {
             tab.cutree_switch.set_active (true);
             tab.pmode_switch.set_active (true);
             tab.weightp_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.FLAC, -1, 8);
+            configure_audio (tab.audio_settings, AudioCodecName.FLAC, null, 8);
             break;
         }
     }
@@ -298,7 +298,7 @@ public class CodecPresets : Object {
             tab.deblock_alpha_spin.set_value (0);
             tab.deblock_beta_spin.set_value (0);
             tab.lookahead_expander.set_enable_expansion (false);
-            configure_audio (tab.audio_settings, AudioCodecName.AAC, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.AAC, "128 kbps");
             break;
 
         case "Anime":
@@ -320,7 +320,7 @@ public class CodecPresets : Object {
             tab.psy_trellis_spin.set_value (0.0);
             tab.lookahead_expander.set_enable_expansion (true);
             tab.lookahead_spin.set_value (60);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Low":
@@ -336,7 +336,7 @@ public class CodecPresets : Object {
             tab.bframes_spin.set_value (0);
             tab.mbtree_switch.set_active (false);
             tab.lookahead_expander.set_enable_expansion (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "64 kbps");
             break;
 
         case "Medium":
@@ -358,7 +358,7 @@ public class CodecPresets : Object {
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.psy_rd_spin.set_value (1.0);
             tab.psy_trellis_spin.set_value (0.0);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "High":
@@ -385,7 +385,7 @@ public class CodecPresets : Object {
             tab.lookahead_expander.set_enable_expansion (true);
             tab.lookahead_spin.set_value (60);
             tab.weightp_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Very High":
@@ -412,7 +412,7 @@ public class CodecPresets : Object {
             tab.lookahead_expander.set_enable_expansion (true);
             tab.lookahead_spin.set_value (120);
             tab.weightp_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.FLAC, -1, 8);
+            configure_audio (tab.audio_settings, AudioCodecName.FLAC, null, 8);
             break;
 
         case "Imageboards":
@@ -437,7 +437,7 @@ public class CodecPresets : Object {
             tab.psy_trellis_spin.set_value (0.0);
             tab.lookahead_expander.set_enable_expansion (true);
             tab.lookahead_spin.set_value (40);
-            configure_audio (tab.audio_settings, AudioCodecName.AAC, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.AAC, "64 kbps");
             break;
         }
     }
@@ -465,7 +465,7 @@ public class CodecPresets : Object {
             tab.row_mt_switch.set_active (true);
             set_dropdown_by_label (tab.tile_columns_combo, "2");
             tab.frame_parallel_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "Anime":
@@ -483,7 +483,7 @@ public class CodecPresets : Object {
             tab.lag_in_frames_spin.set_value (25);
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Low":
@@ -498,7 +498,7 @@ public class CodecPresets : Object {
             tab.row_mt_switch.set_active (true);
             set_dropdown_by_label (tab.tile_columns_combo, "2");
             tab.frame_parallel_switch.set_active (true);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "64 kbps");
             break;
 
         case "Medium":
@@ -514,7 +514,7 @@ public class CodecPresets : Object {
             tab.lookahead_expander.set_enable_expansion (false);
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 1);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "128 kbps");
             break;
 
         case "High":
@@ -532,7 +532,7 @@ public class CodecPresets : Object {
             tab.lag_in_frames_spin.set_value (25);
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 2);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "192 kbps");
             break;
 
         case "Very High":
@@ -550,7 +550,7 @@ public class CodecPresets : Object {
             tab.lag_in_frames_spin.set_value (25);
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.FLAC, -1, 8);
+            configure_audio (tab.audio_settings, AudioCodecName.FLAC, null, 8);
             break;
 
         case "Imageboards":
@@ -569,7 +569,7 @@ public class CodecPresets : Object {
             tab.lag_in_frames_spin.set_value (25);
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            configure_audio (tab.audio_settings, AudioCodecName.OPUS, 0);
+            configure_audio (tab.audio_settings, AudioCodecName.OPUS, "64 kbps");
             break;
         }
     }
@@ -585,7 +585,8 @@ public class CodecPresets : Object {
      * AAC for MP4. This ensures maximum compatibility — Opus is the
      * standard WebM audio codec, and AAC is the standard MP4 audio codec.
      *
-     * Bitrate combo indices: 0=64, 1=128, 2=192, 3=256, 4=320 kbps.
+     * Bitrate labels are applied directly so presets remain stable even when
+     * codec-specific bitrate menus differ in length or ordering.
      */
     private static void configure_smart_audio (AudioSettings audio,
                                                 OptimizationRecommendation rec,
@@ -599,7 +600,7 @@ public class CodecPresets : Object {
             if (model != null) {
                 for (uint i = 0; i < model.get_n_items (); i++) {
                     if (model.get_string (i) == AudioCodecName.COPY) {
-                        configure_audio (audio, AudioCodecName.COPY, -1);
+                        configure_audio (audio, AudioCodecName.COPY);
                         return;
                     }
                 }
@@ -611,19 +612,19 @@ public class CodecPresets : Object {
         string codec = is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC;
         switch (rec.size_tier) {
             case SizeTier.TINY:
-                configure_audio (audio, codec, 0);    // 64 kbps
+                configure_audio (audio, codec, "64 kbps");
                 break;
             case SizeTier.SMALL:
-                configure_audio (audio, codec, 1);    // 128 kbps
+                configure_audio (audio, codec, "128 kbps");
                 break;
             case SizeTier.MEDIUM:
-                configure_audio (audio, codec, 2);    // 192 kbps
+                configure_audio (audio, codec, "192 kbps");
                 break;
             case SizeTier.LARGE:
-                configure_audio (audio, codec, 3);    // 256 kbps
+                configure_audio (audio, codec, "256 kbps");
                 break;
             case SizeTier.XLARGE:
-                configure_audio (audio, codec, 4);    // 320 kbps
+                configure_audio (audio, codec, "320 kbps");
                 break;
         }
     }

@@ -24,7 +24,7 @@ public class SubtitleStream : Object {
         if (title.length > 0) parts.add (@"\"$(title)\"");
         if (is_default) parts.add ("[default]");
         if (is_forced) parts.add ("[forced]");
-        return string.joinv ("  ·  ", parts.data);
+        return string.joinv ("  ·  ", StringArrayUtils.copy_generic_array (parts));
     }
 
     public SubtitleStream snapshot () {
@@ -74,7 +74,7 @@ public class ExternalSubtitle : Object {
         if (title.length > 0) parts.add (@"\"$(title)\"");
         if (is_default) parts.add ("[default]");
         if (is_forced) parts.add ("[forced]");
-        return string.joinv ("  ·  ", parts.data);
+        return string.joinv ("  ·  ", StringArrayUtils.copy_generic_array (parts));
     }
 
     public ExternalSubtitle snapshot () {
@@ -238,7 +238,7 @@ public class SubtitlesRunner : Object {
             };
 
             log_line ("=== Subtitle Extract ===");
-            log_line (string.joinv (" ", cmd));
+            log_line (ConversionUtils.format_command_for_display (cmd));
 
             int exit = runner.execute (cmd, (line) => {
                 log_line (line);
@@ -401,7 +401,7 @@ public class SubtitlesRunner : Object {
                 };
 
                 log_line (@"=== Extract All — Track #$(s.sub_index) ===");
-                log_line (string.joinv (" ", cmd));
+                log_line (ConversionUtils.format_command_for_display (cmd));
 
                 int exit = runner.execute (cmd, (line) => {
                     log_line (line);
@@ -668,7 +668,7 @@ public class SubtitlesRunner : Object {
         cmd += output_path;
 
         log_line ("=== Subtitle Remux ===");
-        log_line (string.joinv (" ", cmd));
+        log_line (ConversionUtils.format_command_for_display (cmd));
 
         bool saw_format_mismatch = false;
         int exit = runner.execute (cmd, (line) => {
@@ -729,6 +729,128 @@ public class SubtitlesRunner : Object {
         }
     }
 
+    private string build_audio_filters (EncodeProfileSnapshot profile, double duration) {
+        if (profile.audio_processing.fade_out_enabled
+            && profile.audio_processing.fade_out_duration > 0.0
+            && duration <= 0.0) {
+            log_line ("⚠ Audio fade-out requested, but output duration is unknown. Skipping fade-out filter.");
+        }
+
+        return FilterBuilder.merge_profile_audio_filter_chain (
+            profile.audio_filters,
+            profile.audio_processing,
+            duration,
+            true,
+            true,
+            true
+        );
+    }
+
+    private bool needs_peak_analysis (EncodeProfileSnapshot profile) {
+        if (profile.audio_args.length > 0 && profile.audio_args[0] == "-an") {
+            return false;
+        }
+
+        return ConversionUtils.audio_processing_needs_peak_analysis (
+            profile.audio_processing);
+    }
+
+    private string build_peak_analysis_audio_filters (EncodeProfileSnapshot profile,
+                                                      double duration) {
+        if (profile.audio_processing.fade_out_enabled
+            && profile.audio_processing.fade_out_duration > 0.0
+            && duration <= 0.0) {
+            log_line ("⚠ Audio fade-out requested, but output duration is unknown. Skipping fade-out filter.");
+        }
+
+        return FilterBuilder.build_peak_analysis_audio_filter_chain (
+            profile.audio_filters,
+            profile.audio_processing,
+            duration,
+            true,
+            true
+        );
+    }
+
+    private bool prepare_peak_normalization (uint64 operation_id,
+                                             string input_file,
+                                             EncodeProfileSnapshot profile,
+                                             double duration) {
+        if (!needs_peak_analysis (profile)) {
+            return true;
+        }
+
+        profile.audio_processing.peak_normalize_gain_db = 0.0;
+
+        report_status ("Analyzing audio peak for normalization...",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+
+        string[] cmd = FilterBuilder.build_audio_peak_detect_cmd (
+            input_file,
+            build_peak_analysis_audio_filters (profile, duration),
+            null,
+            null,
+            FilterBuilder.extract_peak_analysis_output_args (profile.audio_args),
+            "0:a?"
+        );
+
+        string full_cmd = ConversionUtils.format_command_for_display (cmd);
+        log_line ("=== Peak Normalization Analysis ===");
+        log_line (full_cmd);
+        if (console_tab != null) {
+            Idle.add (() => {
+                console_tab.set_command (full_cmd);
+                return Source.REMOVE;
+            });
+        }
+
+        double max_volume_db = 0.0;
+        bool found_max_volume = false;
+
+        int exit = runner.execute (cmd, (line) => {
+            double parsed_max = 0.0;
+            if (ConversionUtils.try_parse_max_volume_db (line, out parsed_max)) {
+                max_volume_db = parsed_max;
+                found_max_volume = true;
+            }
+
+            if (ConversionUtils.should_log_ffmpeg_line (line)) {
+                log_line (line);
+            }
+        });
+
+        if (runner.is_cancelled ()) {
+            Idle.add (() => {
+                apply_cancelled (operation_id);
+                return Source.REMOVE;
+            });
+            return false;
+        }
+
+        if (exit != 0) {
+            report_apply_error (operation_id, "Peak normalization analysis failed.");
+            return false;
+        }
+
+        if (!found_max_volume) {
+            report_apply_error (
+                operation_id,
+                "Peak normalization analysis did not report a max volume."
+            );
+            return false;
+        }
+
+        profile.audio_processing.peak_normalize_gain_db =
+            ConversionUtils.compute_peak_normalize_gain_db (max_volume_db);
+        log_line ("[Audio] Peak normalization target %.2f dBFS, measured %.2f dBFS, gain %.2f dB"
+            .printf (
+                ConversionUtils.PEAK_NORMALIZE_TARGET_DB,
+                max_volume_db,
+                profile.audio_processing.peak_normalize_gain_db
+            ));
+        return true;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  BURN IN — Hardcode subtitles into video frames (full re-encode)
     //
@@ -778,6 +900,17 @@ public class SubtitlesRunner : Object {
             double duration = probe_duration (input_file);
             string[] resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
                 profile, input_file);
+
+            if (!prepare_peak_normalization (operation_id, input_file, profile, duration)) {
+                if (tracker != null) {
+                    if (runner.is_cancelled ()) {
+                        tracker.hide_cancelled ();
+                    } else {
+                        tracker.hide ();
+                    }
+                }
+                return;
+            }
 
             if (tracker != null) {
                 if (duration > 0) {
@@ -863,7 +996,9 @@ public class SubtitlesRunner : Object {
                 cmd += "-an";
             } else {
                 string[] merged = FilterBuilder.merge_audio_filters (
-                    profile.audio_filters, profile.audio_args);
+                    build_audio_filters (profile, duration),
+                    profile.audio_args
+                );
                 foreach (string a in merged) cmd += a;
             }
 
@@ -876,9 +1011,9 @@ public class SubtitlesRunner : Object {
             cmd += output_path;
 
             log_line ("=== Subtitle Burn-In ===");
-            log_line (string.joinv (" ", cmd));
+            string full_cmd = ConversionUtils.format_command_for_display (cmd);
+            log_line (full_cmd);
             if (console_tab != null) {
-                string full_cmd = string.joinv (" ", cmd);
                 Idle.add (() => {
                     console_tab.set_command (full_cmd);
                     return Source.REMOVE;

@@ -121,7 +121,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             "    font-size: 0.85em;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
+        GtkCompat.add_provider_for_display (
             Gdk.Display.get_default (),
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -673,7 +673,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
         string[] cmd = { binary_path, "-version" };
-        var proc = launcher.spawnv (cmd);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
 
         bool timed_out = false;
         uint timeout_id = 0;
@@ -792,7 +792,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
                                                  Cancellable cancellable) throws Error {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
-        var proc = launcher.spawnv (cmd);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
 
         bool timed_out = false;
         uint timeout_id = 0;

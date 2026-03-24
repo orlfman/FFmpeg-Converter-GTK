@@ -28,9 +28,19 @@ internal class VideoInfo : Object {
     // Audio
     public string audio_codec       = "N/A";
     public string audio_channels    = "N/A";
+    public string channel_layout    = "N/A";
     public string sample_rate       = "N/A";
+    public string audio_bit_depth   = "N/A";
     public string audio_bitrate     = "N/A";
     public string audio_compression = "N/A";
+    public string audio_encoder     = "N/A";
+
+    // Metadata tags
+    public string artist       = "N/A";
+    public string album        = "N/A";
+    public string date         = "N/A";
+    public string genre        = "N/A";
+    public string track_number = "N/A";
 
     // Subtitles
     public string subtitle_info = "N/A";
@@ -68,18 +78,40 @@ public class InformationTab : Box {
 
     private Label iv_acodec;
     private Label iv_channels;
+    private Label iv_channel_layout;
     private Label iv_samplerate;
+    private Label iv_a_depth;
     private Label iv_a_bitrate;
     private Label iv_a_compression;
+    private Label iv_a_encoder;
 
+    private Adw.ActionRow iv_channel_layout_row;
+    private Adw.ActionRow iv_a_depth_row;
     private Adw.ActionRow iv_a_bitrate_row;
     private Adw.ActionRow iv_a_compression_row;
+    private Adw.ActionRow iv_a_encoder_row;
 
     private Label iv_subtitle;
     private Adw.PreferencesGroup iv_subtitle_group;
 
+    // ── Input metadata labels ──────────────────────────────────────────────────
+    private Adw.PreferencesGroup iv_metadata_group;
+    private Label iv_artist;
+    private Label iv_album;
+    private Label iv_date;
+    private Label iv_genre;
+    private Label iv_track_number;
+
+    private Adw.ActionRow iv_artist_row;
+    private Adw.ActionRow iv_album_row;
+    private Adw.ActionRow iv_date_row;
+    private Adw.ActionRow iv_genre_row;
+    private Adw.ActionRow iv_track_number_row;
+
     // ── Output section value labels + revealer ────────────────────────────────
     private Revealer output_revealer;
+    private Box single_output_box;
+    private Box multi_output_box;
 
     private Label ov_filename;
     private Label ov_size;
@@ -106,15 +138,36 @@ public class InformationTab : Box {
 
     private Label ov_acodec;
     private Label ov_channels;
+    private Label ov_channel_layout;
     private Label ov_samplerate;
+    private Label ov_a_depth;
     private Label ov_a_bitrate;
     private Label ov_a_compression;
+    private Label ov_a_encoder;
 
+    private Adw.ActionRow ov_channel_layout_row;
+    private Adw.ActionRow ov_a_depth_row;
     private Adw.ActionRow ov_a_bitrate_row;
     private Adw.ActionRow ov_a_compression_row;
+    private Adw.ActionRow ov_a_encoder_row;
 
     private Label ov_subtitle;
+    private Adw.PreferencesGroup ov_video_group;
     private Adw.PreferencesGroup ov_subtitle_group;
+
+    // ── Output metadata labels ─────────────────────────────────────────────────
+    private Adw.PreferencesGroup ov_metadata_group;
+    private Label ov_artist;
+    private Label ov_album;
+    private Label ov_date;
+    private Label ov_genre;
+    private Label ov_track_number;
+
+    private Adw.ActionRow ov_artist_row;
+    private Adw.ActionRow ov_album_row;
+    private Adw.ActionRow ov_date_row;
+    private Adw.ActionRow ov_genre_row;
+    private Adw.ActionRow ov_track_number_row;
 
     public InformationTab () {
         Object (orientation: Orientation.VERTICAL, spacing: 0);
@@ -196,12 +249,27 @@ public class InformationTab : Box {
         var in_audio_group = new Adw.PreferencesGroup ();
         in_audio_group.set_title ("Audio Stream");
 
-        iv_acodec        = make_row (in_audio_group, "Codec");
-        iv_channels      = make_row (in_audio_group, "Channels");
-        iv_samplerate    = make_row (in_audio_group, "Sample Rate");
-        iv_a_bitrate     = make_row_conditional (in_audio_group, "Bit Rate", out iv_a_bitrate_row);
-        iv_a_compression = make_row_conditional (in_audio_group, "Compression Level", out iv_a_compression_row);
+        iv_acodec         = make_row (in_audio_group, "Codec");
+        iv_channels       = make_row (in_audio_group, "Channels");
+        iv_channel_layout = make_row_conditional (in_audio_group, "Channel Layout", out iv_channel_layout_row);
+        iv_samplerate     = make_row (in_audio_group, "Sample Rate");
+        iv_a_depth        = make_row_conditional (in_audio_group, "Bit Depth", out iv_a_depth_row);
+        iv_a_bitrate      = make_row_conditional (in_audio_group, "Bit Rate", out iv_a_bitrate_row);
+        iv_a_compression  = make_row_conditional (in_audio_group, "Compression Level", out iv_a_compression_row);
+        iv_a_encoder      = make_row_conditional (in_audio_group, "Encoder", out iv_a_encoder_row);
         content.append (in_audio_group);
+
+        // ────────────── Input: Metadata (conditional group) ──────────────────
+        iv_metadata_group = new Adw.PreferencesGroup ();
+        iv_metadata_group.set_title ("Metadata");
+        iv_metadata_group.set_visible (false);
+
+        iv_artist       = make_row_conditional (iv_metadata_group, "Artist", out iv_artist_row);
+        iv_album        = make_row_conditional (iv_metadata_group, "Album", out iv_album_row);
+        iv_date         = make_row_conditional (iv_metadata_group, "Date", out iv_date_row);
+        iv_genre        = make_row_conditional (iv_metadata_group, "Genre", out iv_genre_row);
+        iv_track_number = make_row_conditional (iv_metadata_group, "Track", out iv_track_number_row);
+        content.append (iv_metadata_group);
 
         // ────────────── Input: Subtitles (conditional group) ─────────────────
         iv_subtitle_group = new Adw.PreferencesGroup ();
@@ -216,14 +284,17 @@ public class InformationTab : Box {
         output_revealer.set_transition_duration (450);
         output_revealer.set_reveal_child (false);
 
-        var out_box = new Box (Orientation.VERTICAL, 20);
-        out_box.set_margin_top (4);
+        var output_wrapper = new Box (Orientation.VERTICAL, 0);
+        output_wrapper.set_margin_top (4);
 
         // Decorative section separator
         var sep = new Separator (Orientation.HORIZONTAL);
         sep.set_margin_top (8);
         sep.set_margin_bottom (8);
-        out_box.append (sep);
+        output_wrapper.append (sep);
+
+        // ── Single output (static layout for single-file results) ────────
+        single_output_box = new Box (Orientation.VERTICAL, 20);
 
         // Output: File
         var out_file_group = new Adw.PreferencesGroup ();
@@ -234,45 +305,67 @@ public class InformationTab : Box {
         ov_size      = make_row (out_file_group, "File Size");
         ov_container = make_row (out_file_group, "Container");
         ov_duration  = make_row (out_file_group, "Duration");
-        out_box.append (out_file_group);
+        single_output_box.append (out_file_group);
 
         // Output: Video
-        var out_video_group = new Adw.PreferencesGroup ();
-        out_video_group.set_title ("Output Video Stream");
+        ov_video_group = new Adw.PreferencesGroup ();
+        ov_video_group.set_title ("Output Video Stream");
 
-        ov_resolution = make_row (out_video_group, "Resolution");
-        ov_aspect     = make_row (out_video_group, "Aspect Ratio");
-        ov_vcodec     = make_row (out_video_group, "Codec");
-        ov_profile    = make_row_conditional (out_video_group, "Profile / Level", out ov_profile_row);
-        ov_fps        = make_row (out_video_group, "Frame Rate");
-        ov_bitrate    = make_row (out_video_group, "Bit Rate");
-        ov_pixfmt     = make_row (out_video_group, "Pixel Format");
-        ov_depth      = make_row (out_video_group, "Color Depth");
-        ov_colorspace = make_row (out_video_group, "Color Space");
-        ov_hdr        = make_row_conditional (out_video_group, "HDR", out ov_hdr_row);
-        ov_scan       = make_row_conditional (out_video_group, "Scan Type", out ov_scan_row);
-        ov_keyframes  = make_row_conditional (out_video_group, "Keyframes", out ov_keyframes_row);
-        out_box.append (out_video_group);
+        ov_resolution = make_row (ov_video_group, "Resolution");
+        ov_aspect     = make_row (ov_video_group, "Aspect Ratio");
+        ov_vcodec     = make_row (ov_video_group, "Codec");
+        ov_profile    = make_row_conditional (ov_video_group, "Profile / Level", out ov_profile_row);
+        ov_fps        = make_row (ov_video_group, "Frame Rate");
+        ov_bitrate    = make_row (ov_video_group, "Bit Rate");
+        ov_pixfmt     = make_row (ov_video_group, "Pixel Format");
+        ov_depth      = make_row (ov_video_group, "Color Depth");
+        ov_colorspace = make_row (ov_video_group, "Color Space");
+        ov_hdr        = make_row_conditional (ov_video_group, "HDR", out ov_hdr_row);
+        ov_scan       = make_row_conditional (ov_video_group, "Scan Type", out ov_scan_row);
+        ov_keyframes  = make_row_conditional (ov_video_group, "Keyframes", out ov_keyframes_row);
+        single_output_box.append (ov_video_group);
 
         // Output: Audio
         var out_audio_group = new Adw.PreferencesGroup ();
         out_audio_group.set_title ("Output Audio Stream");
 
-        ov_acodec        = make_row (out_audio_group, "Codec");
-        ov_channels      = make_row (out_audio_group, "Channels");
-        ov_samplerate    = make_row (out_audio_group, "Sample Rate");
-        ov_a_bitrate     = make_row_conditional (out_audio_group, "Bit Rate", out ov_a_bitrate_row);
-        ov_a_compression = make_row_conditional (out_audio_group, "Compression Level", out ov_a_compression_row);
-        out_box.append (out_audio_group);
+        ov_acodec         = make_row (out_audio_group, "Codec");
+        ov_channels       = make_row (out_audio_group, "Channels");
+        ov_channel_layout = make_row_conditional (out_audio_group, "Channel Layout", out ov_channel_layout_row);
+        ov_samplerate     = make_row (out_audio_group, "Sample Rate");
+        ov_a_depth        = make_row_conditional (out_audio_group, "Bit Depth", out ov_a_depth_row);
+        ov_a_bitrate      = make_row_conditional (out_audio_group, "Bit Rate", out ov_a_bitrate_row);
+        ov_a_compression  = make_row_conditional (out_audio_group, "Compression Level", out ov_a_compression_row);
+        ov_a_encoder      = make_row_conditional (out_audio_group, "Encoder", out ov_a_encoder_row);
+        single_output_box.append (out_audio_group);
+
+        // Output: Metadata (conditional group)
+        ov_metadata_group = new Adw.PreferencesGroup ();
+        ov_metadata_group.set_title ("Metadata");
+        ov_metadata_group.set_visible (false);
+
+        ov_artist       = make_row_conditional (ov_metadata_group, "Artist", out ov_artist_row);
+        ov_album        = make_row_conditional (ov_metadata_group, "Album", out ov_album_row);
+        ov_date         = make_row_conditional (ov_metadata_group, "Date", out ov_date_row);
+        ov_genre        = make_row_conditional (ov_metadata_group, "Genre", out ov_genre_row);
+        ov_track_number = make_row_conditional (ov_metadata_group, "Track", out ov_track_number_row);
+        single_output_box.append (ov_metadata_group);
 
         // Output: Subtitles (conditional group)
         ov_subtitle_group = new Adw.PreferencesGroup ();
         ov_subtitle_group.set_title ("Output Subtitle Streams");
         ov_subtitle_group.set_visible (false);
         ov_subtitle = make_row (ov_subtitle_group, "Tracks");
-        out_box.append (ov_subtitle_group);
+        single_output_box.append (ov_subtitle_group);
 
-        output_revealer.set_child (out_box);
+        output_wrapper.append (single_output_box);
+
+        // ── Multiple outputs (dynamic layout for multi-file results) ─────
+        multi_output_box = new Box (Orientation.VERTICAL, 20);
+        multi_output_box.set_visible (false);
+        output_wrapper.append (multi_output_box);
+
+        output_revealer.set_child (output_wrapper);
         content.append (output_revealer);
 
         clamp.set_child (content);
@@ -342,6 +435,10 @@ public class InformationTab : Box {
     public void load_output_info (string file_path) {
         if (file_path.strip () == "") return;
 
+        single_output_box.set_visible (true);
+        multi_output_box.set_visible (false);
+        clear_multi_output ();
+
         new Thread<void> ("info-output", () => {
             var info = probe_file (file_path);
             Idle.add (() => {
@@ -356,7 +453,37 @@ public class InformationTab : Box {
     public void reset_output () {
         Idle.add (() => {
             output_revealer.set_reveal_child (false);
+            clear_multi_output ();
             return Source.REMOVE;
+        });
+    }
+
+    // Call after a multi-file operation (e.g. Extract All) with all output paths
+    public void load_output_info_multiple (string[] file_paths) {
+        if (file_paths.length == 0) return;
+
+        single_output_box.set_visible (false);
+        clear_multi_output ();
+        multi_output_box.set_visible (true);
+
+        // Snapshot paths for background thread
+        string[] paths = new string[file_paths.length];
+        for (int i = 0; i < file_paths.length; i++)
+            paths[i] = file_paths[i];
+
+        new Thread<void> ("info-multi-output", () => {
+            var infos = new GenericArray<VideoInfo> ();
+            foreach (unowned string path in paths) {
+                if (path.strip ().length > 0
+                    && FileUtils.test (path, FileTest.EXISTS)) {
+                    infos.add (probe_file (path));
+                }
+            }
+            Idle.add (() => {
+                populate_multi_output (infos);
+                output_revealer.set_reveal_child (true);
+                return Source.REMOVE;
+            });
         });
     }
 
@@ -384,9 +511,14 @@ public class InformationTab : Box {
 
         iv_acodec.set_text ("…");
         iv_channels.set_text ("…");
+        iv_channel_layout_row.set_visible (false);
         iv_samplerate.set_text ("…");
+        iv_a_depth_row.set_visible (false);
         iv_a_bitrate_row.set_visible (false);
         iv_a_compression_row.set_visible (false);
+        iv_a_encoder_row.set_visible (false);
+
+        iv_metadata_group.set_visible (false);
 
         iv_subtitle_group.set_visible (false);
     }
@@ -413,9 +545,24 @@ public class InformationTab : Box {
 
         iv_acodec.set_text (i.audio_codec);
         iv_channels.set_text (i.audio_channels);
+        show_conditional (iv_channel_layout_row, iv_channel_layout, i.channel_layout);
         iv_samplerate.set_text (i.sample_rate);
+        show_conditional (iv_a_depth_row, iv_a_depth, i.audio_bit_depth);
         show_conditional (iv_a_bitrate_row, iv_a_bitrate, i.audio_bitrate);
         show_conditional (iv_a_compression_row, iv_a_compression, i.audio_compression);
+        show_conditional (iv_a_encoder_row, iv_a_encoder, i.audio_encoder);
+
+        // Metadata group — show only if at least one tag is present
+        bool has_meta = (i.artist != "N/A" || i.album != "N/A" || i.date != "N/A"
+                         || i.genre != "N/A" || i.track_number != "N/A");
+        iv_metadata_group.set_visible (has_meta);
+        if (has_meta) {
+            show_conditional (iv_artist_row, iv_artist, i.artist);
+            show_conditional (iv_album_row, iv_album, i.album);
+            show_conditional (iv_date_row, iv_date, i.date);
+            show_conditional (iv_genre_row, iv_genre, i.genre);
+            show_conditional (iv_track_number_row, iv_track_number, i.track_number);
+        }
 
         bool has_subs = (i.subtitle_info != "N/A");
         iv_subtitle_group.set_visible (has_subs);
@@ -423,29 +570,50 @@ public class InformationTab : Box {
     }
 
     private void populate_output (VideoInfo i) {
+        bool has_video = (i.video_codec != "N/A");
+
         ov_filename.set_text (i.filename);
         ov_size.set_text (i.file_size);
         ov_container.set_text (i.container);
         ov_duration.set_text (i.duration);
 
-        ov_resolution.set_text (i.resolution);
-        ov_aspect.set_text (i.aspect);
-        ov_vcodec.set_text (i.video_codec);
-        show_conditional (ov_profile_row, ov_profile, i.video_profile);
-        ov_fps.set_text (i.frame_rate);
-        ov_bitrate.set_text (i.bit_rate);
-        ov_pixfmt.set_text (i.pix_fmt);
-        ov_depth.set_text (i.color_depth);
-        ov_colorspace.set_text (i.color_space);
-        show_conditional (ov_hdr_row, ov_hdr, i.hdr_format);
-        show_conditional (ov_scan_row, ov_scan, i.scan_type);
-        show_conditional (ov_keyframes_row, ov_keyframes, i.keyframe_count);
+        // Hide video group entirely for audio-only output
+        ov_video_group.set_visible (has_video);
+        if (has_video) {
+            ov_resolution.set_text (i.resolution);
+            ov_aspect.set_text (i.aspect);
+            ov_vcodec.set_text (i.video_codec);
+            show_conditional (ov_profile_row, ov_profile, i.video_profile);
+            ov_fps.set_text (i.frame_rate);
+            ov_bitrate.set_text (i.bit_rate);
+            ov_pixfmt.set_text (i.pix_fmt);
+            ov_depth.set_text (i.color_depth);
+            ov_colorspace.set_text (i.color_space);
+            show_conditional (ov_hdr_row, ov_hdr, i.hdr_format);
+            show_conditional (ov_scan_row, ov_scan, i.scan_type);
+            show_conditional (ov_keyframes_row, ov_keyframes, i.keyframe_count);
+        }
 
         ov_acodec.set_text (i.audio_codec);
         ov_channels.set_text (i.audio_channels);
+        show_conditional (ov_channel_layout_row, ov_channel_layout, i.channel_layout);
         ov_samplerate.set_text (i.sample_rate);
+        show_conditional (ov_a_depth_row, ov_a_depth, i.audio_bit_depth);
         show_conditional (ov_a_bitrate_row, ov_a_bitrate, i.audio_bitrate);
         show_conditional (ov_a_compression_row, ov_a_compression, i.audio_compression);
+        show_conditional (ov_a_encoder_row, ov_a_encoder, i.audio_encoder);
+
+        // Metadata group — show only if at least one tag is present
+        bool has_meta = (i.artist != "N/A" || i.album != "N/A" || i.date != "N/A"
+                         || i.genre != "N/A" || i.track_number != "N/A");
+        ov_metadata_group.set_visible (has_meta);
+        if (has_meta) {
+            show_conditional (ov_artist_row, ov_artist, i.artist);
+            show_conditional (ov_album_row, ov_album, i.album);
+            show_conditional (ov_date_row, ov_date, i.date);
+            show_conditional (ov_genre_row, ov_genre, i.genre);
+            show_conditional (ov_track_number_row, ov_track_number, i.track_number);
+        }
 
         bool has_subs = (i.subtitle_info != "N/A");
         ov_subtitle_group.set_visible (has_subs);
@@ -459,6 +627,101 @@ public class InformationTab : Box {
         bool show = (val != "N/A");
         row.set_visible (show);
         if (show) label.set_text (val);
+    }
+
+    // ── Multi-output helpers ────────────────────────────────────────────────────
+
+    private void populate_multi_output (GenericArray<VideoInfo> infos) {
+        clear_multi_output ();
+
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Output Files");
+        group.set_description ("%d file%s".printf (
+            infos.length, infos.length == 1 ? "" : "s"));
+
+        for (int i = 0; i < infos.length; i++) {
+            var info = infos[i];
+            var expander = new Adw.ExpanderRow ();
+            expander.set_title (info.filename);
+            expander.set_subtitle (build_output_summary (info));
+
+            // File info
+            add_detail_row (expander, "File Size", info.file_size);
+            add_detail_row (expander, "Container", info.container);
+            add_detail_row (expander, "Duration", info.duration);
+
+            // Video (if present)
+            if (info.video_codec != "N/A") {
+                add_detail_row (expander, "Resolution", info.resolution);
+                add_detail_row (expander, "Video Codec", info.video_codec);
+                add_detail_row (expander, "Frame Rate", info.frame_rate);
+                add_detail_row (expander, "Pixel Format", info.pix_fmt);
+                add_detail_row (expander, "Video Bit Rate", info.bit_rate);
+            }
+
+            // Audio (if present)
+            if (info.audio_codec != "N/A") {
+                add_detail_row (expander, "Audio Codec", info.audio_codec);
+                add_detail_row (expander, "Channels", info.audio_channels);
+                add_detail_row (expander, "Channel Layout", info.channel_layout);
+                add_detail_row (expander, "Sample Rate", info.sample_rate);
+                add_detail_row (expander, "Bit Depth", info.audio_bit_depth);
+                add_detail_row (expander, "Audio Bit Rate", info.audio_bitrate);
+                add_detail_row (expander, "Compression", info.audio_compression);
+                add_detail_row (expander, "Encoder", info.audio_encoder);
+            }
+
+            // Metadata (if present)
+            add_detail_row (expander, "Artist", info.artist);
+            add_detail_row (expander, "Album", info.album);
+            add_detail_row (expander, "Date", info.date);
+            add_detail_row (expander, "Genre", info.genre);
+            add_detail_row (expander, "Track", info.track_number);
+
+            group.add (expander);
+        }
+        multi_output_box.append (group);
+    }
+
+    private static string build_output_summary (VideoInfo info) {
+        var parts = new GenericArray<string> ();
+        if (info.audio_codec != "N/A") {
+            parts.add (info.audio_codec);
+            if (info.audio_channels != "N/A") parts.add (info.audio_channels);
+            if (info.sample_rate != "N/A") parts.add (info.sample_rate);
+            if (info.audio_bitrate != "N/A") parts.add (info.audio_bitrate);
+        } else if (info.video_codec != "N/A") {
+            parts.add (info.video_codec);
+            if (info.resolution != "N/A") parts.add (info.resolution);
+            if (info.frame_rate != "N/A") parts.add (info.frame_rate);
+            if (info.bit_rate != "N/A") parts.add (info.bit_rate);
+        }
+        if (info.file_size != "N/A") parts.add (info.file_size);
+        return string.joinv ("  ·  ", StringArrayUtils.copy_generic_array (parts));
+    }
+
+    private static void add_detail_row (Adw.ExpanderRow expander,
+                                         string title, string val) {
+        if (val == "N/A" || val.strip ().length == 0) return;
+        var row = new Adw.ActionRow ();
+        row.set_title (title);
+        var label = new Label (val);
+        label.add_css_class ("dim-label");
+        label.set_selectable (true);
+        label.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
+        label.set_max_width_chars (42);
+        label.set_halign (Align.END);
+        row.add_suffix (label);
+        expander.add_row (row);
+    }
+
+    private void clear_multi_output () {
+        var child = multi_output_box.get_first_child ();
+        while (child != null) {
+            var next = child.get_next_sibling ();
+            multi_output_box.remove (child);
+            child = next;
+        }
     }
 
     // ── ffprobe probing (runs on background thread) ───────────────────────────
@@ -553,7 +816,7 @@ public class InformationTab : Box {
                         first_audio = current_stream;
                     } else if (current_is_subtitle) {
                         subtitle_count++;
-                        string lang = current_stream.get ("TAG:language") ?? "";
+                        string lang = current_stream.get ("tag:language") ?? "";
                         if (lang.length > 0 && lang != "und")
                             subtitle_langs.add (lang);
                     }
@@ -572,7 +835,7 @@ public class InformationTab : Box {
                 int eq = line.index_of_char ('=');
                 if (eq <= 0) continue;
 
-                string key = line.substring (0, eq).strip ();
+                string key = line.substring (0, eq).strip ().down ();
                 string val = line.substring (eq + 1).strip ();
                 current_map.set (key, val);
 
@@ -622,9 +885,9 @@ public class InformationTab : Box {
             // Bit rate: prefer stream-level, fall back to TAG:BPS (Matroska), then container-level
             string br = best_video.get ("bit_rate") ?? "N/A";
             if (br == "N/A" || br == "0" || int64.parse (br) <= 0)
-                br = best_video.get ("TAG:BPS") ?? "N/A";
+                br = best_video.get ("tag:bps") ?? "N/A";
             if (br == "N/A" || br == "0" || int64.parse (br) <= 0)
-                br = best_video.get ("TAG:BPS-eng") ?? "N/A";
+                br = best_video.get ("tag:bps-eng") ?? "N/A";
             if (br == "N/A" || br == "0" || int64.parse (br) <= 0)
                 br = (format_map != null) ? (format_map.get ("bit_rate") ?? "N/A") : "N/A";
             if (br != "N/A") {
@@ -673,11 +936,17 @@ public class InformationTab : Box {
         if (first_audio != null) {
             info.audio_codec = first_audio.get ("codec_name") ?? "N/A";
 
-            // Channels
+            // Channels + channel layout
             string layout = first_audio.get ("channel_layout") ?? "";
             string ch_str = first_audio.get ("channels") ?? "";
             if (layout.length > 0) {
                 info.audio_channels = format_channel_layout (layout);
+                // Show raw layout when it differs from the friendly name
+                // (e.g. "5.1(side)" → Channels shows "5.1 Surround", Layout shows "5.1(side)")
+                string raw = layout.strip ();
+                string friendly = info.audio_channels;
+                if (raw.down () != friendly.down ())
+                    info.channel_layout = raw;
             } else if (ch_str.length > 0) {
                 int ch = int.parse (ch_str);
                 info.audio_channels = format_channel_count (ch);
@@ -691,12 +960,30 @@ public class InformationTab : Box {
                     : sr + " Hz";
             }
 
+            // Audio bit depth — prefer bits_per_raw_sample, fall back to
+            // sample_fmt only for lossless/PCM codecs where bit depth is
+            // meaningful.  Lossy codecs (opus, aac, mp3, vorbis, …) report
+            // the decoder's internal format (usually fltp) which is not a
+            // real bit depth, so the row stays hidden for those.
+            string bprs = first_audio.get ("bits_per_raw_sample") ?? "";
+            if (bprs.length > 0 && bprs != "0" && bprs != "N/A") {
+                info.audio_bit_depth = bprs + "-bit";
+            } else {
+                string codec_lo = info.audio_codec.down ();
+                if (is_lossless_audio_codec (codec_lo)) {
+                    string sfmt = first_audio.get ("sample_fmt") ?? "";
+                    if (sfmt.length > 0) {
+                        info.audio_bit_depth = format_sample_fmt (sfmt);
+                    }
+                }
+            }
+
             // Audio bit rate — fall back to TAG:BPS (Matroska/WebM) for VBR codecs like Opus
             string abr = first_audio.get ("bit_rate") ?? "N/A";
             if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
-                abr = first_audio.get ("TAG:BPS") ?? "N/A";
+                abr = first_audio.get ("tag:bps") ?? "N/A";
             if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
-                abr = first_audio.get ("TAG:BPS-eng") ?? "N/A";
+                abr = first_audio.get ("tag:bps-eng") ?? "N/A";
             if (abr != "N/A" && abr.length > 0) {
                 int64 abri = int64.parse (abr);
                 if (abri > 0)
@@ -707,6 +994,11 @@ public class InformationTab : Box {
             string cl = first_audio.get ("compression_level") ?? "";
             if (cl.length > 0 && cl != "N/A")
                 info.audio_compression = cl;
+
+            // Audio encoder — stream-level TAG:encoder (e.g. "Lavc62.28.100 pcm_s32le")
+            string aenc = first_audio.get ("tag:encoder") ?? "";
+            if (aenc.length > 0 && aenc != "N/A")
+                info.audio_encoder = aenc;
         }
 
         // ── Subtitle info ─────────────────────────────────────────────────────
@@ -739,14 +1031,64 @@ public class InformationTab : Box {
                 info.duration = "%02d:%02d:%02d".printf (hr, mn, sc);
             }
 
-            // Title: prefer metadata tag, then fall back to filename stem
-            string t = format_map.get ("TAG:title") ?? format_map.get ("title") ?? "";
-            if (t.strip ().length > 0) {
+            extract_metadata_tags (format_map, info);
+        }
+
+        // Some containers (Opus, Ogg) store metadata on the stream rather
+        // than the format level — fill in any tags still missing.
+        if (first_audio != null) {
+            extract_metadata_tags (first_audio, info);
+        }
+
+        // Title fallback: if no tag was found, use filename stem
+        if (info.title == "N/A") {
+            int d = info.filename.last_index_of_char ('.');
+            info.title = (d > 0) ? info.filename.substring (0, d) : info.filename;
+        }
+    }
+
+    /**
+     * Extract metadata tags from a key-value map into info fields.
+     * Only fills fields that are still "N/A" so format-level tags
+     * take priority over stream-level tags.
+     */
+    private static void extract_metadata_tags (HashTable<string, string> map,
+                                                VideoInfo info) {
+        if (info.title == "N/A") {
+            string t = map.get ("tag:title") ?? "";
+            if (t.strip ().length > 0)
                 info.title = t.strip ();
-            } else {
-                int d = info.filename.last_index_of_char ('.');
-                info.title = (d > 0) ? info.filename.substring (0, d) : info.filename;
-            }
+        }
+
+        if (info.artist == "N/A") {
+            string artist = map.get ("tag:artist") ?? "";
+            if (artist.strip ().length > 0)
+                info.artist = artist.strip ();
+        }
+
+        if (info.album == "N/A") {
+            string album = map.get ("tag:album") ?? "";
+            if (album.strip ().length > 0)
+                info.album = album.strip ();
+        }
+
+        if (info.date == "N/A") {
+            string date = map.get ("tag:date")
+                       ?? map.get ("tag:year") ?? "";
+            if (date.strip ().length > 0)
+                info.date = date.strip ();
+        }
+
+        if (info.genre == "N/A") {
+            string genre = map.get ("tag:genre") ?? "";
+            if (genre.strip ().length > 0)
+                info.genre = genre.strip ();
+        }
+
+        if (info.track_number == "N/A") {
+            string track = map.get ("tag:track") ?? "";
+            if (track.strip ().length > 0)
+                info.track_number = track.strip ();
         }
     }
 
@@ -811,9 +1153,15 @@ public class InformationTab : Box {
             } else if (frac3 % 100 == 0) {
                 return whole.to_string () + "." + (frac3 / 100).to_string () + " fps";
             } else if (frac3 % 10 == 0) {
-                return "%lld.%02lld fps".printf (whole, frac3 / 10);
+                int64 frac2 = frac3 / 10;
+                return whole.to_string () + "." + (frac2 < 10 ? "0" : "") + frac2.to_string () + " fps";
             } else {
-                return "%lld.%03lld fps".printf (whole, frac3);
+                return whole.to_string ()
+                    + "."
+                    + (frac3 < 100 ? "0" : "")
+                    + (frac3 < 10 ? "0" : "")
+                    + frac3.to_string ()
+                    + " fps";
             }
         }
         return raw + " fps";
@@ -834,6 +1182,37 @@ public class InformationTab : Box {
         if (lo == "6.1")            return "6.1 Surround";
         if (lo == "7.1")            return "7.1 Surround";
         return layout;
+    }
+
+    /**
+     * Whether a codec name represents a lossless or PCM codec where
+     * sample_fmt conveys a meaningful bit depth.
+     */
+    private static bool is_lossless_audio_codec (string codec) {
+        return codec == "flac"
+            || codec == "alac"
+            || codec == "wavpack"
+            || codec == "ape"
+            || codec == "tta"
+            || codec == "tak"
+            || codec == "mlp"
+            || codec == "truehd"
+            || codec.has_prefix ("pcm_");
+    }
+
+    /**
+     * Format an FFmpeg sample_fmt string into a friendly bit-depth label.
+     * Returns "N/A" for unrecognised formats so the row stays hidden.
+     */
+    private static string format_sample_fmt (string fmt) {
+        string lo = fmt.down ();
+        if (lo == "u8" || lo == "u8p")     return "8-bit";
+        if (lo == "s16" || lo == "s16p")   return "16-bit";
+        if (lo == "s32" || lo == "s32p")   return "32-bit";
+        if (lo == "s64" || lo == "s64p")   return "64-bit";
+        if (lo == "flt" || lo == "fltp")   return "32-bit float";
+        if (lo == "dbl" || lo == "dblp")   return "64-bit float";
+        return "N/A";
     }
 
     /**

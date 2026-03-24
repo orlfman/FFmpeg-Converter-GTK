@@ -11,6 +11,7 @@ public class OperationOutputResult : Object {
     public string[] output_paths { get; construct set; default = {}; }
     public string primary_file_path { get; construct set; default = ""; }
     public string open_folder_path { get; construct set; default = ""; }
+    public string summary { get; set; default = ""; }
 
     public OperationOutputResult.for_file (string path) {
         string[] paths = { path };

@@ -9,12 +9,68 @@ namespace ConversionUtils {
     private const int ASCII_FORMAT_BUFFER_SIZE = 64;
     private const int MAX_UNIQUE_PATH_ATTEMPTS = 10000;
     private const int MAX_RANDOM_UNIQUE_PATH_ATTEMPTS = 256;
+    public const double PEAK_NORMALIZE_TARGET_DB = -1.0;
     private enum DirectoryStatus {
         DIRECTORY,
         MISSING,
         NOT_DIRECTORY,
         ERROR,
         CANCELLED
+    }
+
+    public bool audio_processing_needs_peak_analysis (
+        AudioProcessingSettingsSnapshot processing) {
+        return processing.normalize_enabled && !processing.normalize_ebu;
+    }
+
+    public bool try_parse_max_volume_db (string line, out double max_volume_db) {
+        max_volume_db = 0.0;
+
+        int marker = line.index_of ("max_volume:");
+        if (marker < 0)
+            return false;
+
+        string value = line.substring (marker + "max_volume:".length).strip ();
+        if (value.has_suffix (" dB")) {
+            value = value.substring (0, value.length - 3).strip ();
+        }
+
+        return double.try_parse (value, out max_volume_db);
+    }
+
+    public double compute_peak_normalize_gain_db (double max_volume_db) {
+        return PEAK_NORMALIZE_TARGET_DB - max_volume_db;
+    }
+
+    /**
+     * Format an argv array for shell-display (logs, console previews, copy-paste).
+     *
+     * Arguments that are safe bare tokens are left unquoted; everything else
+     * is single-quoted with internal ' escaped as '\''.
+     */
+    public string format_command_for_display (string[] argv) {
+        string[] quoted = new string[argv.length];
+        for (int i = 0; i < argv.length; i++) {
+            quoted[i] = shell_quote_arg (argv[i]);
+        }
+        return string.joinv (" ", quoted);
+    }
+
+    private string shell_quote_arg (string arg) {
+        if (arg.length == 0) return "''";
+
+        for (int i = 0; i < arg.length; i++) {
+            char c = arg[i];
+            if (c == ' ' || c == '\'' || c == '"' || c == '$' || c == '&'
+                || c == '|' || c == ';' || c == '(' || c == ')' || c == '*'
+                || c == '?' || c == '[' || c == '\\' || c == '!' || c == '{'
+                || c == '}' || c == '<' || c == '>' || c == '`' || c == '~'
+                || c == '#' || c == '\n' || c == '\t') {
+                return "'" + arg.replace ("'", "'\\''") + "'";
+            }
+        }
+
+        return arg;
     }
 
     private string describe_file_path (File file) {

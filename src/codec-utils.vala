@@ -41,7 +41,6 @@ public class GeneralSettingsSnapshot : Object {
     public bool audio_speed_enabled = false;
     public double audio_speed_percent = 0.0;
     public string color_filter = "";
-    public bool normalize_audio = false;
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
 }
@@ -50,6 +49,7 @@ public class CodecTabSettingsSnapshot : Object {
     public string container = ContainerExt.MKV;
     public KeyframeSettingsSnapshot keyframe_settings { get; set; default = new KeyframeSettingsSnapshot (); }
     public AudioSettingsSnapshot audio_settings { get; set; default = new AudioSettingsSnapshot (); }
+    public AudioProcessingSettingsSnapshot audio_processing { get; set; default = new AudioProcessingSettingsSnapshot (); }
     public PixelFormatSettingsSnapshot pixel_format { get; set; default = new PixelFormatSettingsSnapshot (); }
 }
 
@@ -69,6 +69,7 @@ public class EncodeProfileSnapshot : Object {
     public string video_filters = "";
     public string video_filters_skip_crop = "";
     public string audio_filters = "";
+    public AudioProcessingSettingsSnapshot audio_processing { get; set; default = new AudioProcessingSettingsSnapshot (); }
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
 }
@@ -82,7 +83,6 @@ public class EncodeProfileSnapshot : Object {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace CodecUtils {
-
     public StringList build_dropdown_string_list (string[] options) {
         var model = new StringList (null);
         foreach (unowned string option in options) {
@@ -175,7 +175,7 @@ namespace CodecUtils {
 
         double kb = (double) bytes / 1024.0;
         if (kb < 1.0)
-            return "%lld B".printf (bytes);
+            return bytes.to_string () + " B";
 
         double mb = kb / 1024.0;
         if (mb < 1.0)
@@ -409,8 +409,18 @@ namespace CodecUtils {
             codec_settings.audio_settings,
             snapshot.container
         );
-        snapshot.audio_args = AudioSettings.build_audio_args_from_snapshot (
-            codec_settings.audio_settings);
+        var audio_args = new GenericArray<string> ();
+        foreach (string arg in AudioSettings.build_audio_args_from_snapshot (
+            codec_settings.audio_settings,
+            codec_settings.audio_processing.channel_downmix)) {
+            audio_args.add (arg);
+        }
+        foreach (string arg in AudioProcessingSettings.build_output_args_from_snapshot (
+            codec_settings.audio_processing)) {
+            audio_args.add (arg);
+        }
+        snapshot.audio_args = StringArrayUtils.copy_generic_array (audio_args);
+        snapshot.audio_processing = codec_settings.audio_processing.copy ();
 
         if (general_settings != null) {
             snapshot.video_filters = FilterBuilder.build_video_filter_chain_from_snapshot (

@@ -15,7 +15,8 @@ private enum ActiveOperation {
     CONVERTING,
     TRIMMING,
     SUBTITLE_EXTRACT,
-    SUBTITLE_APPLY
+    SUBTITLE_APPLY,
+    AUDIO_EXTRACT
 }
 
 private enum AudioCopyUnknownPreflightResult {
@@ -42,6 +43,7 @@ public class MainWindow : Adw.ApplicationWindow {
     private ConsoleTab console_tab;
     private GeneralTab general_tab;
     private TrimTab trim_tab;
+    private AudioTab audio_tab;
     private SubtitlesTab subtitles_tab;
     private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
@@ -81,6 +83,7 @@ public class MainWindow : Adw.ApplicationWindow {
 
         set_title ("FFmpeg Converter GTK");
         set_default_size (1280, 720);
+        set_size_request (640, 520);
 
         create_components ();
         build_layout ();
@@ -89,7 +92,7 @@ public class MainWindow : Adw.ApplicationWindow {
             file_pickers, general_tab,
             svt_tab, x265_tab, x264_tab, vp9_tab,
             info_tab, console_tab, trim_tab,
-            subtitles_tab,
+            audio_tab, subtitles_tab,
             converter, hamburger,
             cancel_button, status_area,
             view_stack
@@ -214,6 +217,53 @@ public class MainWindow : Adw.ApplicationWindow {
                 ActiveOperation.SUBTITLE_APPLY, operation_id, true);
         });
 
+        // ── Audio extraction signals ─────────────────────────────────────
+        audio_tab.audio_extract_all_requested.connect (() => {
+            if (!can_start_primary_operation ()) {
+                status_area.set_status (
+                    @"A $(get_operation_label (current_operation)) $(get_operation_activity_phrase ()). Cancel it before starting another one.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                return;
+            }
+
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.AUDIO_EXTRACT, out operation_id))
+                return;
+            start_audio_extract_all (operation_id);
+        });
+
+        audio_tab.audio_extract_succeeded.connect ((operation_id, output_result) => {
+            if (!complete_tracked_operation (
+                    ActiveOperation.AUDIO_EXTRACT, operation_id, true)) {
+                return;
+            }
+
+            string toast_title = (output_result.summary.length > 0)
+                ? output_result.summary
+                : "Audio extraction complete";
+            post_success_toast (toast_title, output_result);
+
+            if (output_result.kind == OperationOutputKind.FILE) {
+                string primary_file = output_result.primary_file_path;
+                if (primary_file.length > 0
+                    && FileUtils.test (primary_file, FileTest.EXISTS)) {
+                    info_tab.load_output_info (primary_file);
+                }
+            } else if (output_result.output_paths.length > 0) {
+                info_tab.load_output_info_multiple (output_result.output_paths);
+            }
+
+            maybe_finish_close_after_cancellation ();
+        });
+        audio_tab.audio_extract_failed.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+        });
+        audio_tab.audio_extract_cancelled.connect ((operation_id) => {
+            complete_tracked_operation_with_close (
+                ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+        });
+
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
         close_request.connect (on_close_request);
     }
@@ -254,6 +304,8 @@ public class MainWindow : Adw.ApplicationWindow {
         trim_tab.x264_tab   = x264_tab;
         trim_tab.vp9_tab    = vp9_tab;
 
+        audio_tab = new AudioTab ();
+
         subtitles_tab = new SubtitlesTab ();
         subtitles_tab.file_pickers = file_pickers;
         subtitles_tab.general_tab  = general_tab;
@@ -269,7 +321,7 @@ public class MainWindow : Adw.ApplicationWindow {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  LAYOUT — Adw.ViewStack + ViewSwitcherTitle + ViewSwitcherBar
+    //  LAYOUT — Adw.ViewStack + ViewSwitcher + Breakpoints
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_layout () {
@@ -287,6 +339,7 @@ public class MainWindow : Adw.ApplicationWindow {
         add_scrolled_page (view_stack, x264_tab,    "x264",     "x264",        "video-x-generic-symbolic");
         add_scrolled_page (view_stack, vp9_tab,     "vp9",      "VP9",         "video-x-generic-symbolic");
         add_scrolled_page (view_stack, trim_tab,    "trim",     "Crop & Trim", "edit-cut-symbolic");
+        add_scrolled_page (view_stack, audio_tab,   "audio",    "Audio",       "audio-x-generic-symbolic");
         add_scrolled_page (view_stack, subtitles_tab, "subtitles", "Subtitles", "media-view-subtitles-symbolic");
 
         var info_page = view_stack.add_titled (info_tab, "info", "Information");
@@ -294,10 +347,12 @@ public class MainWindow : Adw.ApplicationWindow {
 
         add_scrolled_page (view_stack, console_tab, "console",  "Console",     "utilities-terminal-symbolic");
 
-        var switcher_title = new Adw.ViewSwitcherTitle ();
-        switcher_title.set_stack (view_stack);
-        switcher_title.set_title ("FFmpeg Converter GTK");
-        header.set_title_widget (switcher_title);
+        var view_switcher = new Adw.ViewSwitcher ();
+        view_switcher.set_stack (view_stack);
+        view_switcher.set_policy (Adw.ViewSwitcherPolicy.WIDE);
+        header.set_title_widget (view_switcher);
+
+        var window_title = new Adw.WindowTitle ("FFmpeg Converter GTK", "");
 
         toolbar_view.add_top_bar (header);
 
@@ -319,12 +374,33 @@ public class MainWindow : Adw.ApplicationWindow {
 
         toolbar_view.set_content (toast_overlay);
 
-        // ── Bottom bar: revealed when header has no room for tabs ────────────
+        // ── Bottom bar: revealed when window is too narrow for header tabs ──
         var switcher_bar = new Adw.ViewSwitcherBar ();
         switcher_bar.set_stack (view_stack);
-        switcher_title.bind_property ("title-visible", switcher_bar, "reveal",
-            BindingFlags.SYNC_CREATE);
+        switcher_bar.set_reveal (false);
         toolbar_view.add_bottom_bar (switcher_bar);
+
+        // ── Responsive breakpoints ──────────────────────────────────────────
+        // Medium: switch header tabs to icon-only when space is limited
+        var bp_medium = new Adw.Breakpoint (
+            Adw.BreakpointCondition.parse ("max-width: 1610sp")
+        );
+        var narrow_policy = Value (typeof (Adw.ViewSwitcherPolicy));
+        narrow_policy.set_enum ((int) Adw.ViewSwitcherPolicy.NARROW);
+        bp_medium.add_setter (view_switcher, "policy", narrow_policy);
+        add_breakpoint (bp_medium);
+
+        // Narrow: move tabs to bottom bar, show title in header
+        var bp_narrow = new Adw.Breakpoint (
+            Adw.BreakpointCondition.parse ("max-width: 900sp")
+        );
+        var reveal_true = Value (typeof (bool));
+        reveal_true.set_boolean (true);
+        bp_narrow.add_setter (switcher_bar, "reveal", reveal_true);
+        var title_val = Value (typeof (Gtk.Widget));
+        title_val.set_object (window_title);
+        bp_narrow.add_setter (header, "title-widget", title_val);
+        add_breakpoint (bp_narrow);
 
         set_content (toolbar_view);
 
@@ -344,7 +420,8 @@ public class MainWindow : Adw.ApplicationWindow {
     private void update_convert_sensitivity () {
         string? page = view_stack.visible_child_name;
         bool active = page == "svt-av1" || page == "x265" || page == "x264"
-                   || page == "vp9"     || page == "trim" || page == "subtitles";
+                   || page == "vp9"     || page == "trim" || page == "audio"
+                   || page == "subtitles";
         convert_button.set_sensitive (active && can_start_primary_operation ());
     }
 
@@ -359,6 +436,7 @@ public class MainWindow : Adw.ApplicationWindow {
         case ActiveOperation.TRIMMING:       return "export";
         case ActiveOperation.SUBTITLE_EXTRACT: return "subtitle extraction";
         case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
+        case ActiveOperation.AUDIO_EXTRACT:  return "audio extraction";
         default:                             return idle_fallback;
         }
     }
@@ -423,6 +501,22 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         string? page = view_stack.visible_child_name;
+
+        // ── Audio has its own extraction path ─────────────────────────────
+        if (page == "audio") {
+            if (!audio_tab.can_extract ()) {
+                status_area.set_status (
+                    "Load a file with audio to begin extraction!",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                return;
+            }
+
+            uint64 operation_id;
+            if (!reserve_pending_operation (ActiveOperation.AUDIO_EXTRACT, out operation_id))
+                return;
+            start_audio_extract (operation_id);
+            return;
+        }
 
         // ── Subtitles has its own path (remux / burn-in, no codec tab) ────
         if (page == "subtitles") {
@@ -788,6 +882,111 @@ public class MainWindow : Adw.ApplicationWindow {
         }
     }
 
+    // ── Audio extraction path ──────────────────────────────────────────────────
+
+    private void start_audio_extract (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id)) {
+            return;
+        }
+
+        string input_file = file_pickers.input_entry.get_text ();
+        string output_folder = file_pickers.output_entry.get_text ();
+        string expected = audio_tab.get_expected_output_path (input_file, output_folder);
+
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            launch_audio_extract (input_file, output_folder, operation_id, true);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+                        return;
+                    launch_audio_extract (input_file, output_folder, operation_id, true);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+                        return;
+                    launch_audio_extract (input_file, output_folder, operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+                }
+            );
+        } else {
+            launch_audio_extract (input_file, output_folder, operation_id);
+        }
+    }
+
+    private void launch_audio_extract (string input_file, string output_folder,
+                                        uint64 operation_id,
+                                        bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+            return;
+
+        if (!audio_tab.start_extract (input_file, output_folder,
+                                       status_area, console_tab, operation_id,
+                                       allow_overwrite)) {
+            release_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.AUDIO_EXTRACT, operation_id);
+    }
+
+    private void start_audio_extract_all (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id)) {
+            return;
+        }
+
+        string input_file = file_pickers.input_entry.get_text ();
+        string output_folder = file_pickers.output_entry.get_text ();
+
+        // Extract All produces multiple files with track-number suffixes;
+        // check the first track's expected path as a representative.
+        string expected = audio_tab.get_expected_extract_all_path (input_file, output_folder);
+
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            launch_audio_extract_all (input_file, output_folder, operation_id, true);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+                        return;
+                    launch_audio_extract_all (input_file, output_folder, operation_id, true);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+                        return;
+                    launch_audio_extract_all (input_file, output_folder, operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+                }
+            );
+        } else {
+            launch_audio_extract_all (input_file, output_folder, operation_id);
+        }
+    }
+
+    private void launch_audio_extract_all (string input_file, string output_folder,
+                                            uint64 operation_id,
+                                            bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id))
+            return;
+
+        if (!audio_tab.start_extract_all (input_file, output_folder,
+                                           status_area, console_tab, operation_id,
+                                           allow_overwrite)) {
+            release_pending_operation (ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.AUDIO_EXTRACT, operation_id);
+    }
+
     // ── Crop & Trim path ─────────────────────────────────────────────────────
 
     private void start_trim_operation (TrimTab trim,
@@ -1113,6 +1312,18 @@ public class MainWindow : Adw.ApplicationWindow {
                     "[Audio] Final compatibility check found no audio stream; conversion will continue without audio."
                 );
                 return AudioCopyUnknownPreflightResult.PROCEED;
+            case MediaStreamPresence.ERROR:
+                string fallback_codec =
+                    AudioSettings.get_copy_fallback_codec_for_container (container);
+                status_area.set_status (
+                    "Audio verification failed while probing the source. Select %s manually or try again."
+                    .printf (fallback_codec),
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS
+                );
+                console_tab.add_line (
+                    "[Audio] Final compatibility check failed while probing the source audio stream."
+                );
+                return AudioCopyUnknownPreflightResult.BLOCK;
             case MediaStreamPresence.UNKNOWN:
             default:
                 string fallback_codec =
@@ -1441,6 +1652,12 @@ public class MainWindow : Adw.ApplicationWindow {
                     should_release_operation = false;
                     break;
 
+                case ActiveOperation.AUDIO_EXTRACT:
+                    audio_tab.cancel_extract ();
+                    message = "Audio extraction cancelled by user.";
+                    should_release_operation = false;
+                    break;
+
                 default:
                     break;
             }
@@ -1479,6 +1696,7 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
+            audio_tab.cleanup_player ();
             return false;  // No operation running — allow close
         }
 
@@ -1524,6 +1742,7 @@ public class MainWindow : Adw.ApplicationWindow {
      */
     private void force_cancel_and_close () {
         cancel_current_operation ();
+        audio_tab.cleanup_player ();
         close_after_cancellation = true;
         maybe_finish_close_after_cancellation ();
     }

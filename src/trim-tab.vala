@@ -1047,7 +1047,7 @@ public class TrimTab : Box, ICodecTab {
             "    transition: border-color 150ms ease, box-shadow 150ms ease;\n" +
             "}\n"
         );
-        StyleContext.add_provider_for_display (
+        GtkCompat.add_provider_for_display (
             Gdk.Display.get_default (),
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION

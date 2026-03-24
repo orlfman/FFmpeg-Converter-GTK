@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '1.5.2',
+  version : '1.5.3',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -8,6 +8,7 @@ project('ffmpeg-converter-gtk',
   ]
 )
 gnome = import('gnome')
+fs = import('fs')
 add_project_arguments('--target-glib=2.0', '--pkg=posix', language : 'vala')
 dependencies = [
   dependency('glib-2.0'),
@@ -19,6 +20,7 @@ dependencies = [
 ]
 sources = files(
   'src/main.vala',
+  'src/subprocess-compat.c',
   'src/app-controller.vala',
   'src/process-runner.vala',
   'src/conversion-utils.vala',
@@ -35,6 +37,12 @@ sources = files(
   'src/filter-builder.vala',
   'src/video-filters.vala',
   'src/svt-av1-builder.vala',
+  'src/audio-probe-types.vala',
+  'src/audio-source-info.vala',
+  'src/audio-compatibility.vala',
+  'src/audio-extract-logic.vala',
+  'src/audio-codec-settings.vala',
+  'src/audio-processing-settings.vala',
   'src/audio-settings.vala',
   'src/conversion-runner.vala',
   'src/codec-builder.vala',
@@ -63,7 +71,11 @@ sources = files(
   'src/subtitles-runner.vala',
   'src/ffprobe-utils.vala',
   'src/codec-utils.vala',
-  'src/smart-optimizer.vala'
+  'src/smart-optimizer.vala',
+  'src/audio-tab.vala',
+  'src/audio-player.vala',
+  'src/audio-builder.vala',
+  'src/audio-runner.vala'
 )
 executable('ffmpeg-converter-gtk',
   sources,
@@ -73,7 +85,6 @@ executable('ffmpeg-converter-gtk',
   install_dir : get_option('bindir')
 )
 
-fs = import('fs')
 if fs.exists('tests/subtitle-language-guesser-test.vala')
   subtitle_language_guesser_test = executable(
     'subtitle-language-guesser-test',
@@ -90,4 +101,116 @@ if fs.exists('tests/subtitle-language-guesser-test.vala')
   )
 
   test('subtitle-language-guesser', subtitle_language_guesser_test)
+endif
+
+if fs.exists('tests/audio-builder-test.vala')
+  audio_builder_test = executable(
+    'audio-builder-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-settings.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-builder.vala',
+      'tests/audio-builder-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+    ],
+    link_args : ['-lm'],
+  )
+
+  test('audio-builder', audio_builder_test)
+endif
+
+if fs.exists('tests/audio-settings-test.vala')
+  audio_settings_test = executable(
+    'audio-settings-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-settings.vala',
+      'src/audio-builder.vala',
+      'tests/audio-settings-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+    ],
+    vala_args : ['--define=AUDIO_SETTINGS_TEST_BUILD'],
+    link_args : ['-lm'],
+  )
+
+  test('audio-settings', audio_settings_test)
+endif
+
+if fs.exists('tests/audio-extract-logic-test.vala')
+  audio_extract_logic_test = executable(
+    'audio-extract-logic-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-settings.vala',
+      'src/audio-builder.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-processing-settings.vala',
+      'tests/audio-extract-logic-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+    ],
+  )
+
+  test('audio-extract-logic', audio_extract_logic_test)
+endif
+
+if fs.exists('tests/ffprobe-utils-test.vala')
+  ffprobe_utils_test = executable(
+    'ffprobe-utils-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-settings.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-builder.vala',
+      'src/audio-processing-settings.vala',
+      'src/subprocess-compat.c',
+      'src/ffprobe-utils.vala',
+      'tests/ffprobe-utils-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gio-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+      dependency('json-glib-1.0'),
+    ],
+    vala_args : ['--define=FFPROBE_UTILS_TEST_BUILD'],
+    link_args : ['-lm'],
+  )
+
+  test('ffprobe-utils', ffprobe_utils_test)
 endif

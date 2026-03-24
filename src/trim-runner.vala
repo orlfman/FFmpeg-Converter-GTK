@@ -27,6 +27,7 @@ using GLib;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimRunner : Object {
+    private const int PEAK_ANALYSIS_FAILED_EXIT = -10001;
 
     // ── Configuration (set before calling run) ──────────────────────────────
     public string input_file { get; set; }
@@ -249,6 +250,13 @@ public class TrimRunner : Object {
                 StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
             update_progress (10.0);
 
+            if (!prepare_peak_normalization_for_concat ()) {
+                if (runner.is_cancelled ()) {
+                    report_cancelled ();
+                }
+                return;
+            }
+
             int exit = run_concat_filter_encode (output_path);
             if (exit != 0) {
                 if (runner.is_cancelled ()) {
@@ -330,6 +338,8 @@ public class TrimRunner : Object {
                 if (exit != 0) {
                     if (runner.is_cancelled ()) {
                         report_cancelled ();
+                    } else if (exit == PEAK_ANALYSIS_FAILED_EXIT) {
+                        return;
                     } else {
                         report_error (@"$seg_label extraction failed (exit code $exit).");
                     }
@@ -455,7 +465,8 @@ public class TrimRunner : Object {
         // ── Build filter_complex ─────────────────────────────────────────────
         var fc = new StringBuilder ();
 
-        string general_af = get_general_audio_filters ();
+        AudioProcessingSettingsSnapshot processing = get_audio_processing_settings ();
+        bool normalize_after_concat = processing.normalize_enabled && processing.normalize_ebu;
 
         for (int i = 0; i < segments.length; i++) {
             var seg = segments[i];
@@ -481,9 +492,14 @@ public class TrimRunner : Object {
             fc.append (@"[$i:v]$(vf)[v$i]; ");
 
             if (!audio_disabled) {
-                string af;
-                if (general_af.length > 0) {
-                    af = general_af + ",asetpts=PTS-STARTPTS";
+                string af = build_audio_filters_for_segment (
+                    seg.end_time - seg.start_time,
+                    i == 0,
+                    i == segments.length - 1,
+                    !normalize_after_concat
+                );
+                if (af.length > 0) {
+                    af += ",asetpts=PTS-STARTPTS";
                 } else {
                     af = "asetpts=PTS-STARTPTS";
                 }
@@ -501,9 +517,14 @@ public class TrimRunner : Object {
         }
 
         int a_streams = audio_disabled ? 0 : 1;
-        fc.append (@"concat=n=$(segments.length):v=1:a=$a_streams[outv]");
-        if (!audio_disabled) {
-            fc.append ("[outa]");
+        if (!audio_disabled && normalize_after_concat) {
+            fc.append (@"concat=n=$(segments.length):v=1:a=$a_streams[outv][concata]");
+            fc.append ("[concata]%s[outa]".printf (AudioNormalization.EBU_R128_FILTER));
+        } else {
+            fc.append (@"concat=n=$(segments.length):v=1:a=$a_streams[outv]");
+            if (!audio_disabled) {
+                fc.append ("[outa]");
+            }
         }
 
         cmd += "-filter_complex";
@@ -554,6 +575,158 @@ public class TrimRunner : Object {
 
         log_line (@"🎬 Using concat filter for $(segments.length) segments (single-pass encode)");
         return execute_ffmpeg (cmd);
+    }
+
+    private bool needs_peak_analysis () {
+        string[] audio_args = get_audio_args ();
+        if (audio_args.length > 0 && audio_args[0] == "-an") {
+            return false;
+        }
+
+        return reencode_profile != null
+            && ConversionUtils.audio_processing_needs_peak_analysis (
+                reencode_profile.audio_processing);
+    }
+
+    private bool prepare_peak_normalization_for_concat () {
+        if (!needs_peak_analysis () || reencode_profile == null) {
+            return true;
+        }
+
+        reencode_profile.audio_processing.peak_normalize_gain_db = 0.0;
+        report_status ("Analyzing audio peak for normalization...",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+
+        string[] input_args = {};
+        var fc = new StringBuilder ();
+
+        for (int i = 0; i < segments.length; i++) {
+            var seg = segments[i];
+            string duration_text = ConversionUtils.format_ffmpeg_double (
+                seg.get_duration (), "%.6f");
+            string start_text = ConversionUtils.format_ffmpeg_double (
+                seg.start_time, "%.6f");
+
+            input_args += "-ss";
+            input_args += start_text;
+            input_args += "-t";
+            input_args += duration_text;
+            input_args += "-i";
+            input_args += input_file;
+
+            string filters = build_audio_filters_for_segment (
+                seg.get_duration (),
+                i == 0,
+                i == segments.length - 1,
+                false
+            );
+
+            if (filters.length > 0) {
+                fc.append ("[%d:a]%s,asetpts=PTS-STARTPTS[a%d]; ".printf (
+                    i, filters, i));
+            } else {
+                fc.append ("[%d:a]asetpts=PTS-STARTPTS[a%d]; ".printf (i, i));
+            }
+        }
+
+        for (int i = 0; i < segments.length; i++) {
+            fc.append ("[a%d]".printf (i));
+        }
+        fc.append ("concat=n=%d:v=0:a=1[concat]; ".printf (segments.length));
+        fc.append ("[concat]%s[out]".printf (
+            FilterBuilder.append_volumedetect ("")
+        ));
+
+        string[] cmd = FilterBuilder.build_filter_complex_peak_detect_cmd (
+            input_args,
+            fc.str,
+            "[out]",
+            FilterBuilder.extract_peak_analysis_output_args (
+                get_audio_codec_args_for_concat ())
+        );
+
+        return execute_peak_analysis (cmd);
+    }
+
+    private bool prepare_peak_normalization_for_segment (TrimSegment seg,
+                                                         bool apply_fade_in = true,
+                                                         bool apply_fade_out = true) {
+        if (!needs_peak_analysis () || reencode_profile == null) {
+            return true;
+        }
+
+        reencode_profile.audio_processing.peak_normalize_gain_db = 0.0;
+        report_status ("Analyzing audio peak for normalization...",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+
+        string[] pre_input_args = {
+            "-ss", format_seconds (seg.start_time)
+        };
+        string[] post_input_args = {
+            "-t", format_seconds (seg.end_time - seg.start_time)
+        };
+        string filter_chain = build_audio_filters_for_segment (
+            seg.end_time - seg.start_time,
+            apply_fade_in,
+            apply_fade_out,
+            false
+        );
+        string[] cmd = FilterBuilder.build_audio_peak_detect_cmd (
+            input_file,
+            filter_chain,
+            pre_input_args,
+            post_input_args,
+            FilterBuilder.extract_peak_analysis_output_args (get_audio_args ()),
+            "0:a?"
+        );
+
+        return execute_peak_analysis (cmd);
+    }
+
+    private bool execute_peak_analysis (string[] cmd) {
+        string full_cmd = ConversionUtils.format_command_for_display (cmd);
+        log_line ("\n=== Peak Normalization Analysis ===\n" + full_cmd);
+        if (console_tab != null) {
+            console_tab.set_command (full_cmd);
+        }
+
+        double max_volume_db = 0.0;
+        bool found_max_volume = false;
+        int exit = runner.execute (cmd, (clean) => {
+            double parsed_max = 0.0;
+            if (ConversionUtils.try_parse_max_volume_db (clean, out parsed_max)) {
+                max_volume_db = parsed_max;
+                found_max_volume = true;
+            }
+
+            if (ConversionUtils.should_log_ffmpeg_line (clean)) {
+                log_line (clean);
+            }
+        });
+
+        if (runner.is_cancelled ()) {
+            return false;
+        }
+
+        if (exit != 0) {
+            report_error ("Peak normalization analysis failed.");
+            return false;
+        }
+
+        if (!found_max_volume || reencode_profile == null) {
+            report_error ("Peak normalization analysis did not report a max volume.");
+            return false;
+        }
+
+        reencode_profile.audio_processing.peak_normalize_gain_db =
+            ConversionUtils.compute_peak_normalize_gain_db (max_volume_db);
+        log_line ("[Audio] Peak normalization target %.2f dBFS, measured %.2f dBFS, gain %.2f dB"
+            .printf (
+                ConversionUtils.PEAK_NORMALIZE_TARGET_DB,
+                max_volume_db,
+                reencode_profile.audio_processing.peak_normalize_gain_db
+            ));
+        return true;
     }
 
     private string[] get_audio_codec_args_for_concat () {
@@ -629,6 +802,10 @@ public class TrimRunner : Object {
             cmd += "-c:a";
             cmd += "copy";
         } else {
+            if (!prepare_peak_normalization_for_segment (seg)) {
+                return runner.is_cancelled () ? 1 : PEAK_ANALYSIS_FAILED_EXIT;
+            }
+
             string vf = build_segment_vf (seg);
             if (vf != "") {
                 cmd += "-vf";
@@ -663,7 +840,7 @@ public class TrimRunner : Object {
                 }
             }
 
-            string af = get_general_audio_filters ();
+            string af = build_audio_filters_for_segment (seg.end_time - seg.start_time);
             string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
@@ -770,7 +947,7 @@ public class TrimRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private int execute_ffmpeg (string[] argv) {
-        string full_cmd = string.joinv (" ", argv);
+        string full_cmd = ConversionUtils.format_command_for_display (argv);
         log_line ("\n=== FFmpeg command ===\n" + full_cmd);
         if (console_tab != null) {
             console_tab.set_command (full_cmd);
@@ -828,11 +1005,29 @@ public class TrimRunner : Object {
         return {};
     }
 
-    private string get_general_audio_filters () {
-        if (reencode_profile != null) {
-            return reencode_profile.audio_filters;
+    private string build_audio_filters_for_segment (double duration,
+                                                    bool apply_fade_in = true,
+                                                    bool apply_fade_out = true,
+                                                    bool include_normalization = true) {
+        if (reencode_profile == null) {
+            return "";
         }
-        return "";
+
+        return FilterBuilder.merge_profile_audio_filter_chain (
+            reencode_profile.audio_filters,
+            reencode_profile.audio_processing,
+            duration,
+            include_normalization,
+            apply_fade_in,
+            apply_fade_out
+        );
+    }
+
+    private AudioProcessingSettingsSnapshot get_audio_processing_settings () {
+        if (reencode_profile != null) {
+            return reencode_profile.audio_processing;
+        }
+        return new AudioProcessingSettingsSnapshot ();
     }
 
     private string get_general_video_filters () {

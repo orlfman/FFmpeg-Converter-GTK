@@ -2577,7 +2577,7 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-f");              cmd.add ("null");
         cmd.add ("-");
 
-        return cmd.data;
+        return StringArrayUtils.copy_generic_array (cmd);
     }
 
     /**
@@ -2662,7 +2662,7 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-f");    cmd.add ("matroska");
         cmd.add (output);
 
-        return cmd.data;
+        return StringArrayUtils.copy_generic_array (cmd);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -2877,7 +2877,7 @@ public class SmartOptimizer : GLib.Object {
     private async string run_subprocess_stdout (string[] cmd, Cancellable? cancellable = null) throws Error {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
-        var proc = launcher.spawnv (cmd);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
         string stdout_buf;
         string stderr_buf;
         try {
@@ -2894,7 +2894,7 @@ public class SmartOptimizer : GLib.Object {
     private async string run_subprocess_stderr (string[] cmd, Cancellable? cancellable = null) throws Error {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_PIPE);
-        var proc = launcher.spawnv (cmd);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
         string stdout_buf;
         string stderr_buf;
         try {
@@ -2914,7 +2914,7 @@ public class SmartOptimizer : GLib.Object {
     private async void run_subprocess_wait (string[] cmd, Cancellable? cancellable = null) throws Error {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_SILENCE);
-        var proc = launcher.spawnv (cmd);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
 
         string stdout_buf;
         string stderr_buf;
@@ -2945,7 +2945,7 @@ public class SmartOptimizer : GLib.Object {
                 : "no output");
         throw new IOError.FAILED (
             "Command failed: %s\nTool said: %s",
-            string.joinv (" ", cmd), detail);
+            ConversionUtils.format_command_for_display (cmd), detail);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -2976,7 +2976,7 @@ public class SmartOptimizer : GLib.Object {
     private string tmp_path (string label) {
         return GLib.Path.build_filename (
             Environment.get_tmp_dir (),
-            "smart_opt_%s_%lld.mkv".printf (label, get_real_time ()));
+            "smart_opt_%s_%s.mkv".printf (label, get_real_time ().to_string ()));
     }
 
     /**

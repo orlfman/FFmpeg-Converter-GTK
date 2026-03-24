@@ -60,3 +60,6 @@ builddir-debug/
 
 # Release archives
 releases/
+
+# Local planning notes
+AUDIO-TAB-PLAN.md
