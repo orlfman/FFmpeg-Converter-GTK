@@ -81,6 +81,7 @@ public class TrimRunner : Object {
 
     // ── Signal ──────────────────────────────────────────────────────────────
     public signal void export_done (OperationOutputResult output_result);
+    public signal void export_cancelled (string cancel_message);
     public signal void export_failed (string message);
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -164,6 +165,10 @@ public class TrimRunner : Object {
 
     public bool is_cancelled () {
         return runner.is_cancelled ();
+    }
+
+    public string get_cancel_completion_message () {
+        return runner.get_cancel_completion_message ();
     }
 
     private bool try_begin_run () {
@@ -1117,12 +1122,12 @@ public class TrimRunner : Object {
     }
 
     private void report_cancelled () {
-        string msg = @"$(operation_label) cancelled.";
+        string msg = @"$(operation_label) cancelled.\n$(runner.get_cancel_completion_message ())";
         update_status (msg, StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
-        log_line (msg);
+        log_line (@"$(operation_label) cancelled.");
 
         Idle.add (() => {
-            export_failed (msg);
+            export_cancelled (msg);
             return Source.REMOVE;
         });
     }

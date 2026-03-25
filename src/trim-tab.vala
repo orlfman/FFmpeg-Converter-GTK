@@ -74,6 +74,10 @@ public class TrimTab : Box, ICodecTab {
             owner.handle_runner_export_done (runner, operation_id, output_result);
         }
 
+        public void on_export_cancelled (string cancel_message) {
+            owner.handle_runner_export_cancelled (runner, operation_id, cancel_message);
+        }
+
         public void on_export_failed (string msg) {
             owner.handle_runner_export_failed (runner, operation_id);
         }
@@ -227,7 +231,7 @@ public class TrimTab : Box, ICodecTab {
     public signal void trim_done (OperationOutputResult output_result);
     public signal void trim_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void trim_failed (uint64 operation_id);
-    public signal void trim_cancelled (uint64 operation_id);
+    public signal void trim_cancelled (uint64 operation_id, string cancel_message);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -595,6 +599,7 @@ public class TrimTab : Box, ICodecTab {
         binding.operation_id = operation_id;
         active_runner_binding = binding;
         runner.export_done.connect (binding.on_export_done);
+        runner.export_cancelled.connect (binding.on_export_cancelled);
         runner.export_failed.connect (binding.on_export_failed);
 
         active_runner = runner;
@@ -919,14 +924,19 @@ public class TrimTab : Box, ICodecTab {
 
     private void complete_active_operation (uint64 operation_id,
                                             bool was_cancelled,
-                                            OperationOutputResult? output_result = null) {
+                                            OperationOutputResult? output_result = null,
+                                            string cancel_message = "") {
         active_runner = null;
         active_runner_binding = null;
         active_operation_id = 0;
         cancel_pending = false;
 
         if (was_cancelled) {
-            trim_cancelled (operation_id);
+            string resolved_cancel_message = cancel_message;
+            if (resolved_cancel_message.length == 0) {
+                resolved_cancel_message = "Export cancelled.";
+            }
+            trim_cancelled (operation_id, resolved_cancel_message);
             return;
         }
 
@@ -2189,11 +2199,24 @@ public class TrimTab : Box, ICodecTab {
         complete_active_operation (operation_id, false, output_result);
     }
 
+    internal void handle_runner_export_cancelled (TrimRunner runner,
+                                                  uint64 operation_id,
+                                                  string cancel_message) {
+        if (active_runner != runner || active_operation_id != operation_id)
+            return;
+        complete_active_operation (operation_id, true, null, cancel_message);
+    }
+
     internal void handle_runner_export_failed (TrimRunner runner,
                                                uint64 operation_id) {
         if (active_runner != runner || active_operation_id != operation_id)
             return;
-        complete_active_operation (operation_id, cancel_pending || runner.is_cancelled ());
+        complete_active_operation (
+            operation_id,
+            cancel_pending || runner.is_cancelled (),
+            null,
+            runner.get_cancel_completion_message ()
+        );
     }
 
     internal void seek_to_detected_chapter (int idx) {

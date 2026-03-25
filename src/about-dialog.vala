@@ -15,7 +15,6 @@ namespace AboutDialog {
         about.add_legal_section ("FFmpeg Converter GTK", null, Gtk.License.GPL_3_0, null);
         about.add_legal_section ("FFmpeg", "This application is a frontend for FFmpeg and does not bundle or distribute it.\nFFmpeg is a trademark of Fabrice Bellard.\nhttps://ffmpeg.org", Gtk.License.CUSTOM, null);
         about.set_comments ("A GTK4/libadwaita frontend for FFmpeg video conversion.");
-        about.set_developers ({ "orlfman https://github.com/orlfman" });
 
         about.present (parent);
     }

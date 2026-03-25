@@ -48,7 +48,7 @@ public class Converter : Object {
     public signal void conversion_done (OperationOutputResult output_result);
     public signal void conversion_succeeded (uint64 operation_id, OperationOutputResult output_result);
     public signal void conversion_failed (uint64 operation_id);
-    public signal void conversion_cancelled (uint64 operation_id);
+    public signal void conversion_cancelled (uint64 operation_id, string cancel_message);
 
     // ── Stable dependencies ─────────────────────────────────────────────────
     private StatusArea status_area;
@@ -70,6 +70,7 @@ public class Converter : Object {
     private ProcessRunner? active_runner = null;
     private string _last_output_file = "";
     private string? _passlog_base = null;
+    private string? _passlog_run_dir = null;
 
     // ── Thread-safe accessors ───────────────────────────────────────────────
     public string last_output_file {
@@ -243,7 +244,7 @@ public class Converter : Object {
         bool two_pass = codec_tab.get_two_pass ();
 
         // Snapshot all UI state into a ConversionConfig
-        var config = snapshot_config (input_file, output_file, codec_tab, builder);
+        var config = snapshot_config (input_file, output_file, codec_tab, builder, two_pass);
 
         progress_tracker.reset_throttle ();
         progress_tracker.show_pulse ();
@@ -309,16 +310,36 @@ public class Converter : Object {
     private ConversionConfig snapshot_config (string input_file,
                                               string output_file,
                                               ICodecTab codec_tab,
-                                              ICodecBuilder builder) {
+                                              ICodecBuilder builder,
+                                              bool two_pass) {
         var config = new ConversionConfig ();
 
-        // Passlog — use $TMPDIR-respecting path
-        string plog = Path.build_filename (
-            Environment.get_tmp_dir (),
-            "ffmpeg_passlog_" + GLib.get_real_time ().to_string ()
-        );
-        passlog_base = plog;
-        config.passlog_base = plog;
+        passlog_base = null;
+        _passlog_run_dir = null;
+
+        if (two_pass) {
+            string codec_name = builder.get_codec_name ();
+            string? managed_run_dir = ConversionUtils.create_managed_temp_run_dir (
+                "conversion",
+                codec_name
+            );
+
+            if (managed_run_dir != null) {
+                _passlog_run_dir = managed_run_dir;
+                string plog = Path.build_filename (managed_run_dir, "passlog");
+                passlog_base = plog;
+                config.passlog_base = plog;
+            } else {
+                // Fall back to the legacy temp-file base if the managed run
+                // directory cannot be created.
+                string plog = Path.build_filename (
+                    Environment.get_tmp_dir (),
+                    "ffmpeg_passlog_" + GLib.get_real_time ().to_string ()
+                );
+                passlog_base = plog;
+                config.passlog_base = plog;
+            }
+        }
 
         PixelFormatSettingsSnapshot? pixel_format =
             (codec_tab is BaseCodecTab)
@@ -536,23 +557,32 @@ public class Converter : Object {
 
     private void cleanup_passlog () {
         string? plog = passlog_base;
-        if (plog == null) return;
+        if (plog != null) {
+            string[] suffixes = {
+                "-0.log", "-0.log.mbtree", "-0.log.cutree",
+                "-0.log.temp", ".log", ".log.mbtree"
+            };
 
-        string[] suffixes = {
-            "-0.log", "-0.log.mbtree", "-0.log.cutree",
-            "-0.log.temp", ".log", ".log.mbtree"
-        };
-
-        foreach (string suffix in suffixes) {
-            try {
-                var f = File.new_for_path (plog + suffix);
-                if (f.query_exists ()) f.delete ();
-            } catch (Error e) {
-                // Best effort
+            foreach (string suffix in suffixes) {
+                try {
+                    var f = File.new_for_path (plog + suffix);
+                    if (f.query_exists ()) f.delete ();
+                } catch (Error e) {
+                    // Best effort
+                }
             }
         }
 
+        string? run_dir = _passlog_run_dir;
+        if (run_dir != null) {
+            ConversionUtils.try_remove_empty_dir_chain (
+                run_dir,
+                ConversionUtils.get_app_temp_root ()
+            );
+        }
+
         passlog_base = null;
+        _passlog_run_dir = null;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -626,7 +656,10 @@ public class Converter : Object {
                 if (hide_cancelled_progress) {
                     progress_tracker.hide_cancelled ();
                 }
-                conversion_cancelled (operation_id);
+                conversion_cancelled (
+                    operation_id,
+                    process_runner.get_cancel_completion_message ()
+                );
                 return Source.REMOVE;
             }
 

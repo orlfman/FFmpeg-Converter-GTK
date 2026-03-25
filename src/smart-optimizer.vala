@@ -620,7 +620,8 @@ public class SmartOptimizer : GLib.Object {
 
         int preset_idx = safe_preset_idx + (int) Math.round (
             (ideal_preset_idx - safe_preset_idx) * profile.type_confidence * content_factor);
-        preset_idx = preset_idx.clamp (0, X264_PRESETS.length - 1);
+        int max_preset_idx = ((int) X264_PRESETS.length) - 1;
+        preset_idx = preset_idx.clamp (0, max_preset_idx);
 
         // ── 6. Base CRF calibration ────────────────────────────────────
         // Encode sample segments at four CRFs with the TARGET preset,

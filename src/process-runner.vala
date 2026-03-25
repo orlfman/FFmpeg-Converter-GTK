@@ -15,12 +15,20 @@ using Posix;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class ProcessRunner : Object {
+    public enum CancelOutcome {
+        NONE,
+        REQUESTED,
+        STOPPED_GRACEFULLY,
+        STOPPED_BY_SIGTERM,
+        FORCE_STOPPED
+    }
 
     // ── Thread-safe shared state ────────────────────────────────────────────
     private Mutex state_mutex = Mutex ();
     private Subprocess? current_process = null;
     private Pid current_pid = 0;
     private bool cancelled = false;
+    private CancelOutcome cancel_outcome = CancelOutcome.NONE;
     private uint64 current_execution_id = 0;
     private uint64 escalation_execution_id = 0;
     private uint64 next_execution_id = 1;
@@ -70,13 +78,90 @@ public class ProcessRunner : Object {
         }
     }
 
-    private int get_process_result (Subprocess process, Pid pid) {
+    private void set_cancel_outcome_if_cancelled (CancelOutcome outcome) {
+        state_mutex.lock ();
+        try {
+            if (cancelled) {
+                cancel_outcome = outcome;
+            }
+        } finally {
+            state_mutex.unlock ();
+        }
+    }
+
+    public CancelOutcome get_cancel_outcome () {
+        CancelOutcome outcome;
+
+        state_mutex.lock ();
+        try {
+            outcome = cancel_outcome;
+        } finally {
+            state_mutex.unlock ();
+        }
+
+        return outcome;
+    }
+
+    public string get_cancel_completion_message () {
+        switch (get_cancel_outcome ()) {
+            case CancelOutcome.STOPPED_GRACEFULLY:
+            case CancelOutcome.STOPPED_BY_SIGTERM:
+                return "FFmpeg stopped cleanly.";
+            case CancelOutcome.FORCE_STOPPED:
+                return "FFmpeg was force-stopped.";
+            case CancelOutcome.REQUESTED:
+                return "FFmpeg stop was requested.";
+            default:
+                return "FFmpeg cancellation completed.";
+        }
+    }
+
+    private int get_process_result (Subprocess process, Pid pid, bool cancel_requested) {
         if (process.get_if_exited ()) {
+            if (cancel_requested) {
+                set_cancel_outcome_if_cancelled (CancelOutcome.STOPPED_GRACEFULLY);
+                if (pid > 0) {
+                    log_event (
+                        "ProcessRunner: FFmpeg process (PID %d) exited after cancel request".printf (pid),
+                        "✅ FFmpeg stopped cleanly."
+                    );
+                } else {
+                    log_event (
+                        "ProcessRunner: FFmpeg process exited after cancel request",
+                        "✅ FFmpeg stopped cleanly."
+                    );
+                }
+            }
             return process.get_exit_status ();
         }
 
         if (process.get_if_signaled ()) {
             int signal_num = process.get_term_sig ();
+            bool cancelled_by_user = cancel_requested;
+
+            if (cancelled_by_user && signal_num == (int) Posix.Signal.TERM) {
+                set_cancel_outcome_if_cancelled (CancelOutcome.STOPPED_BY_SIGTERM);
+                if (pid > 0) {
+                    log_event (
+                        "ProcessRunner: FFmpeg process (PID %d) terminated by SIGTERM after cancel request"
+                            .printf (pid),
+                        "✅ FFmpeg stopped cleanly."
+                    );
+                } else {
+                    log_event (
+                        "ProcessRunner: FFmpeg process terminated by SIGTERM after cancel request",
+                        "✅ FFmpeg stopped cleanly."
+                    );
+                }
+                return 128 + signal_num;
+            }
+
+            if (cancelled_by_user && signal_num == (int) Posix.Signal.KILL) {
+                set_cancel_outcome_if_cancelled (CancelOutcome.FORCE_STOPPED);
+                // Fall through so the generic signal logger emits the existing
+                // "FFmpeg was force-stopped." confirmation message.
+            }
+
             if (pid > 0) {
                 log_event (
                     "ProcessRunner: FFmpeg process (PID %d) terminated by signal %d".printf (
@@ -153,6 +238,7 @@ public class ProcessRunner : Object {
     private void request_cancel (uint64 execution_id,
                                  Subprocess process,
                                  Pid pid) {
+        set_cancel_outcome_if_cancelled (CancelOutcome.REQUESTED);
         process.send_signal ((int) Posix.Signal.TERM);
 
         if (pid > 0) {
@@ -232,6 +318,7 @@ public class ProcessRunner : Object {
         state_mutex.lock ();
         try {
             cancelled = false;
+            cancel_outcome = CancelOutcome.NONE;
             if (current_process != null) {
                 stale_process = current_process;
                 stale_pid = current_pid;
@@ -320,7 +407,8 @@ public class ProcessRunner : Object {
             }
 
             process.wait ();
-            int result = get_process_result (process, exec_pid);
+            bool cancel_requested = is_cancelled ();
+            int result = get_process_result (process, exec_pid, cancel_requested);
             clear_current_process_if_current (execution_id, process);
 
             return result;

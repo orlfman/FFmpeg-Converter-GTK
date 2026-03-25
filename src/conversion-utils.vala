@@ -9,7 +9,12 @@ namespace ConversionUtils {
     private const int ASCII_FORMAT_BUFFER_SIZE = 64;
     private const int MAX_UNIQUE_PATH_ATTEMPTS = 10000;
     private const int MAX_RANDOM_UNIQUE_PATH_ATTEMPTS = 256;
+    private const int MAX_MANAGED_TEMP_FILE_ATTEMPTS = 32;
+    private const int STALE_MANAGED_RUN_MAX_AGE_SECONDS = 24 * 60 * 60;
+    private const int TEMP_DIR_MODE = 448; // 0700
     public const double PEAK_NORMALIZE_TARGET_DB = -1.0;
+    private Mutex managed_temp_file_mutex;
+    private uint managed_temp_file_sequence = 0;
     private enum DirectoryStatus {
         DIRECTORY,
         MISSING,
@@ -394,6 +399,338 @@ namespace ConversionUtils {
             );
         } catch (Error e) {
             return null;
+        }
+    }
+
+    public string get_app_temp_root () {
+        return Path.build_filename (
+            Environment.get_tmp_dir (),
+            "ffmpeg-converter-gtk-%u".printf ((uint) Posix.getuid ())
+        );
+    }
+
+    public string sanitize_temp_component (string value) {
+        if (value.length == 0)
+            return "default";
+
+        var builder = new StringBuilder ();
+        for (int i = 0; i < value.length; i++) {
+            char c = value[i];
+            if ((c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.') {
+                builder.append_c (c);
+            } else {
+                builder.append_c ('-');
+            }
+        }
+
+        return (builder.len > 0) ? builder.str : "default";
+    }
+
+    public string? create_managed_temp_run_dir (string feature,
+                                                string detail = "") {
+        string root = get_app_temp_root ();
+        string feature_dir = Path.build_filename (root, sanitize_temp_component (feature));
+        string base_dir = feature_dir;
+        if (detail.length > 0) {
+            base_dir = Path.build_filename (feature_dir, sanitize_temp_component (detail));
+        }
+
+        if (DirUtils.create_with_parents (base_dir, TEMP_DIR_MODE) != 0) {
+            return null;
+        }
+
+        string run_dir = Path.build_filename (
+            base_dir,
+            "run-%s-%d".printf (
+                GLib.get_real_time ().to_string (),
+                (int) Posix.getpid ()
+            )
+        );
+
+        if (DirUtils.create_with_parents (run_dir, TEMP_DIR_MODE) != 0) {
+            return null;
+        }
+
+        return run_dir;
+    }
+
+    internal bool is_same_or_descendant_path (string path, string ancestor) {
+        if (path == ancestor)
+            return true;
+
+        string prefix = ancestor;
+        if (!prefix.has_suffix (Path.DIR_SEPARATOR_S))
+            prefix += Path.DIR_SEPARATOR_S;
+
+        return path.has_prefix (prefix);
+    }
+
+    public string? ensure_managed_temp_subdir (string run_dir, string name) {
+        string root = get_app_temp_root ();
+        if (!is_same_or_descendant_path (run_dir, root)) {
+            return null;
+        }
+
+        string subdir = Path.build_filename (run_dir, sanitize_temp_component (name));
+        if (DirUtils.create_with_parents (subdir, TEMP_DIR_MODE) != 0) {
+            return null;
+        }
+
+        return subdir;
+    }
+
+    private uint next_managed_temp_file_sequence () {
+        managed_temp_file_mutex.lock ();
+        managed_temp_file_sequence++;
+        uint next_value = managed_temp_file_sequence;
+        managed_temp_file_mutex.unlock ();
+        return next_value;
+    }
+
+    public string? create_managed_temp_file (string dir,
+                                             string prefix,
+                                             string suffix = "") {
+        string root = get_app_temp_root ();
+        if (!is_same_or_descendant_path (dir, root)) {
+            return null;
+        }
+        if (!FileUtils.test (dir, FileTest.IS_DIR)) {
+            return null;
+        }
+
+        string safe_prefix = sanitize_temp_component (prefix);
+        string safe_suffix = "";
+        if (suffix.length > 0) {
+            safe_suffix = (suffix[0] == '.')
+                ? "." + sanitize_temp_component (suffix.substring (1))
+                : sanitize_temp_component (suffix);
+        }
+
+        for (int attempt = 0; attempt < MAX_MANAGED_TEMP_FILE_ATTEMPTS; attempt++) {
+            string candidate = Path.build_filename (
+                dir,
+                "%s-%s-%u%s".printf (
+                    safe_prefix,
+                    GLib.get_real_time ().to_string (),
+                    next_managed_temp_file_sequence (),
+                    safe_suffix
+                )
+            );
+
+            try {
+                var stream = File.new_for_path (candidate).create (FileCreateFlags.PRIVATE);
+                stream.close ();
+                return candidate;
+            } catch (Error e) {
+                FileUtils.unlink (candidate);
+                continue;
+            }
+        }
+
+        return null;
+    }
+
+    private bool try_parse_managed_run_dir_name (string name, out int pid) {
+        pid = 0;
+
+        if (!name.has_prefix ("run-"))
+            return false;
+
+        int split = name.last_index_of_char ('-');
+        if (split <= 4 || split >= name.length - 1)
+            return false;
+
+        string created_part = name.substring (4, split - 4);
+        string pid_part = name.substring (split + 1);
+        int64 created_usec = 0;
+
+        if (!int64.try_parse (created_part, out created_usec)
+            || !int.try_parse (pid_part, out pid)) {
+            return false;
+        }
+
+        return created_usec > 0 && pid > 0;
+    }
+
+    private bool is_process_alive_for_pid (int pid) {
+        if (pid <= 0)
+            return false;
+
+        string proc_path = Path.build_filename ("/proc", pid.to_string ());
+        return FileUtils.test (proc_path, FileTest.IS_DIR);
+    }
+
+    private int64 query_file_modified_usec (File file) {
+        try {
+            FileInfo info = file.query_info (
+                "%s,%s".printf (
+                    FileAttribute.TIME_MODIFIED,
+                    FileAttribute.TIME_MODIFIED_USEC
+                ),
+                FileQueryInfoFlags.NONE
+            );
+
+            return ((int64) info.get_attribute_uint64 (FileAttribute.TIME_MODIFIED) * 1000000)
+                + (int64) info.get_attribute_uint32 (FileAttribute.TIME_MODIFIED_USEC);
+        } catch (Error e) {
+            return 0;
+        }
+    }
+
+    private bool should_remove_stale_managed_run_dir (File dir, string name) {
+        int pid;
+        if (try_parse_managed_run_dir_name (name, out pid)) {
+            return !is_process_alive_for_pid (pid);
+        }
+
+        if (!name.has_prefix ("run-"))
+            return false;
+
+        int64 modified_usec = query_file_modified_usec (dir);
+        if (modified_usec <= 0)
+            return false;
+
+        return (GLib.get_real_time () - modified_usec)
+            > ((int64) STALE_MANAGED_RUN_MAX_AGE_SECONDS * 1000000);
+    }
+
+    private void delete_directory_tree (File dir) {
+        FileEnumerator? enumerator = null;
+        try {
+            enumerator = dir.enumerate_children (
+                "%s,%s".printf (
+                    FileAttribute.STANDARD_NAME,
+                    FileAttribute.STANDARD_TYPE
+                ),
+                FileQueryInfoFlags.NOFOLLOW_SYMLINKS
+            );
+
+            FileInfo? info;
+            while ((info = enumerator.next_file ()) != null) {
+                var child = dir.get_child (info.get_name ());
+                if (info.get_file_type () == FileType.DIRECTORY) {
+                    delete_directory_tree (child);
+                } else {
+                    try {
+                        child.delete ();
+                    } catch (Error e) {
+                        // Best effort cleanup for stale temp artifacts.
+                    }
+                }
+            }
+        } catch (Error e) {
+            // Best effort cleanup for stale temp artifacts.
+        } finally {
+            if (enumerator != null) {
+                try {
+                    enumerator.close ();
+                } catch (Error e) {
+                    // Best effort cleanup for stale temp artifacts.
+                }
+            }
+        }
+
+        try {
+            dir.delete ();
+        } catch (Error e) {
+            // Best effort cleanup for stale temp artifacts.
+        }
+    }
+
+    private void cleanup_stale_managed_run_dirs_in_tree (File dir, string root) {
+        FileEnumerator? enumerator = null;
+        try {
+            enumerator = dir.enumerate_children (
+                "%s,%s".printf (
+                    FileAttribute.STANDARD_NAME,
+                    FileAttribute.STANDARD_TYPE
+                ),
+                FileQueryInfoFlags.NOFOLLOW_SYMLINKS
+            );
+
+            FileInfo? info;
+            while ((info = enumerator.next_file ()) != null) {
+                if (info.get_file_type () != FileType.DIRECTORY)
+                    continue;
+
+                var child = dir.get_child (info.get_name ());
+                string? child_path = child.get_path ();
+                if (child_path == null || !is_same_or_descendant_path (child_path, root))
+                    continue;
+
+                if (should_remove_stale_managed_run_dir (child, info.get_name ())) {
+                    delete_directory_tree (child);
+                    try_remove_empty_dir_chain (Path.get_dirname (child_path), root);
+                    continue;
+                }
+
+                cleanup_stale_managed_run_dirs_in_tree (child, root);
+            }
+        } catch (Error e) {
+            // Best effort cleanup for stale temp artifacts.
+        } finally {
+            if (enumerator != null) {
+                try {
+                    enumerator.close ();
+                } catch (Error e) {
+                    // Best effort cleanup for stale temp artifacts.
+                }
+            }
+        }
+    }
+
+    private string[] get_managed_temp_top_level_branches () {
+        return {
+            "conversion",
+            "audio-player",
+            "audio-runner",
+            "smart-optimizer"
+        };
+    }
+
+    public void cleanup_stale_managed_temp_runs () {
+        string root = get_app_temp_root ();
+        if (!FileUtils.test (root, FileTest.IS_DIR))
+            return;
+
+        foreach (string branch_name in get_managed_temp_top_level_branches ()) {
+            string branch_path = Path.build_filename (root, branch_name);
+            if (!FileUtils.test (branch_path, FileTest.IS_DIR))
+                continue;
+
+            cleanup_stale_managed_run_dirs_in_tree (
+                File.new_for_path (branch_path),
+                root
+            );
+            try_remove_empty_dir_chain (branch_path, root);
+        }
+
+        try_remove_empty_dir_chain (root, root);
+    }
+
+    public void try_remove_empty_dir_chain (string start_dir, string stop_dir) {
+        if (start_dir.length == 0 || stop_dir.length == 0)
+            return;
+
+        string current = start_dir;
+        while (is_same_or_descendant_path (current, stop_dir)) {
+            try {
+                File.new_for_path (current).delete ();
+            } catch (Error e) {
+                break;
+            }
+
+            if (current == stop_dir)
+                break;
+
+            string parent = Path.get_dirname (current);
+            if (parent == current)
+                break;
+
+            current = parent;
         }
     }
 

@@ -25,6 +25,8 @@ private enum AudioCopyUnknownPreflightResult {
     CANCELLED
 }
 
+private bool stale_managed_temp_cleanup_started = false;
+
 private class MainWindowToastFolderBinding : Object {
     public string folder_path = "";
 
@@ -152,9 +154,17 @@ public class MainWindow : Adw.ApplicationWindow {
             complete_tracked_operation_with_close (
                 ActiveOperation.CONVERTING, operation_id, true);
         });
-        converter.conversion_cancelled.connect ((operation_id) => {
-            complete_tracked_operation_with_close (
-                ActiveOperation.CONVERTING, operation_id, true);
+        converter.conversion_cancelled.connect ((operation_id, cancel_message) => {
+            if (!complete_tracked_operation_with_close (
+                    ActiveOperation.CONVERTING, operation_id, true)) {
+                return;
+            }
+
+            status_area.set_status (
+                @"Conversion cancelled.\n$cancel_message",
+                StatusIcon.CANCELLED_ICON,
+                StatusIcon.CANCELLED_CSS
+            );
         });
         trim_tab.trim_succeeded.connect ((operation_id, output_result) => {
             if (!complete_tracked_operation (
@@ -169,9 +179,17 @@ public class MainWindow : Adw.ApplicationWindow {
             complete_tracked_operation_with_close (
                 ActiveOperation.TRIMMING, operation_id, true);
         });
-        trim_tab.trim_cancelled.connect ((operation_id) => {
-            complete_tracked_operation_with_close (
-                ActiveOperation.TRIMMING, operation_id, true);
+        trim_tab.trim_cancelled.connect ((operation_id, cancel_message) => {
+            if (!complete_tracked_operation_with_close (
+                    ActiveOperation.TRIMMING, operation_id, true)) {
+                return;
+            }
+
+            status_area.set_status (
+                cancel_message,
+                StatusIcon.CANCELLED_ICON,
+                StatusIcon.CANCELLED_CSS
+            );
         });
         subtitles_tab.subtitle_extract_requested.connect ((input_file, stream, output_path) => {
             uint64 operation_id;
@@ -1836,6 +1854,22 @@ int main (string[] args) {
     return app.run (args);
 }
 
+private void start_managed_temp_cleanup_if_needed () {
+    if (stale_managed_temp_cleanup_started)
+        return;
+
+    stale_managed_temp_cleanup_started = true;
+
+    try {
+        new Thread<void>.try ("managed-temp-cleanup", () => {
+            ConversionUtils.cleanup_stale_managed_temp_runs ();
+        });
+    } catch (Error e) {
+        stale_managed_temp_cleanup_started = false;
+        warning ("Failed to start managed temp cleanup thread: %s", e.message);
+    }
+}
+
 private void on_application_activate (GLib.Application app) {
     var gtk_app = app as Gtk.Application;
     if (gtk_app == null)
@@ -1849,4 +1883,5 @@ private void on_application_activate (GLib.Application app) {
         win = new MainWindow (adw_app);
     }
     win.present ();
+    start_managed_temp_cleanup_if_needed ();
 }

@@ -34,17 +34,6 @@ class AudioWaveformCacheEntry : Object {
     }
 }
 
-class AudioPlaybackCacheEntry : Object {
-    public ConversionUtils.FileSignature signature;
-    public string extracted_path;
-
-    public AudioPlaybackCacheEntry (ConversionUtils.FileSignature signature,
-                                    string extracted_path) {
-        this.signature = signature;
-        this.extracted_path = extracted_path;
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AudioPlayer — Waveform-based audio player with segment highlights
 //
@@ -88,16 +77,15 @@ public class AudioPlayer : Box {
     private Cancellable? playback_extract_cancellable = null;
     private Subprocess? playback_extract_proc = null;
     private uint playback_extract_generation = 0;
+    private string? temp_run_dir = null;
+    private string? playback_temp_dir = null;
+    private string? waveform_temp_dir = null;
     private ulong style_manager_dark_handler_id = 0;
     private HashTable<string, AudioWaveformCacheEntry> waveform_cache =
         new HashTable<string, AudioWaveformCacheEntry> (str_hash, str_equal);
     private string[] waveform_cache_lru = {};
-    private HashTable<string, AudioPlaybackCacheEntry> playback_cache =
-        new HashTable<string, AudioPlaybackCacheEntry> (str_hash, str_equal);
-    private string[] playback_cache_lru = {};
 
     private const int MAX_WAVEFORM_CACHE_ENTRIES = 12;
-    private const int MAX_PLAYBACK_CACHE_ENTRIES = 4;
 
     // ── Segment highlights ───────────────────────────────────────────────────
     private GenericArray<AudioSegment> highlight_segments = new GenericArray<AudioSegment> ();
@@ -332,16 +320,8 @@ public class AudioPlayer : Box {
         generate_waveform_async (path, stream_index, signature);
 
         if (stream_index > 0) {
-            if (signature != null) {
-                var cached = lookup_playback_cache (signature, stream_index);
-                if (cached != null) {
-                    load_media_from_path (cached.extracted_path);
-                    return;
-                }
-            }
-
             // Extract specific audio stream to temp file for playback
-            extract_and_load_playback.begin (path, stream_index, signature);
+            extract_and_load_playback.begin (path, stream_index);
         } else {
             // Default: load original file directly (first audio stream)
             load_media_from_path (path);
@@ -367,20 +347,15 @@ public class AudioPlayer : Box {
     }
 
     private async void extract_and_load_playback (string input_path,
-                                                  int stream_index,
-                                                  ConversionUtils.FileSignature? signature = null) {
+                                                  int stream_index) {
         uint gen = ++playback_extract_generation;
         var cancel = new Cancellable ();
         playback_extract_cancellable = cancel;
 
         string tmp_path;
-        try {
-            int fd;
-            fd = FileUtils.open_tmp ("audio-play-XXXXXX.mka", out tmp_path);
-            Posix.close (fd);
-        } catch (Error e) {
-            debug ("AudioPlayer: failed to create playback temp file: %s, falling back", e.message);
-            load_media_from_path (input_path);
+        if (!create_playback_temp_path (out tmp_path)) {
+            debug ("AudioPlayer: failed to create playback temp file, falling back");
+            fallback_to_primary_stream (input_path);
             return;
         }
 
@@ -413,7 +388,7 @@ public class AudioPlayer : Box {
                 }
                 debug ("AudioPlayer: playback extraction failed: %s, falling back", e.message);
                 cleanup_playback_tmp ();
-                load_media_from_path (input_path);
+                fallback_to_primary_stream (input_path);
                 return;
             }
 
@@ -426,35 +401,137 @@ public class AudioPlayer : Box {
             }
 
             if (proc.get_successful ()) {
-                if (signature != null) {
-                    store_playback_cache (signature, stream_index, tmp_path);
-                    if (playback_tmp_path == tmp_path) {
-                        playback_tmp_path = null;
-                    }
-                }
                 load_media_from_path (tmp_path);
             } else {
                 debug ("AudioPlayer: playback extraction ffmpeg failed, falling back to original");
                 cleanup_playback_tmp ();
-                // Fall back to original file (plays first audio stream)
-                load_media_from_path (input_path);
+                fallback_to_primary_stream (input_path);
             }
         } catch (Error e) {
             debug ("AudioPlayer: failed to spawn playback extraction: %s, falling back", e.message);
             if (gen == playback_extract_generation) {
                 cleanup_playback_tmp ();
-                // Fall back to original file
-                load_media_from_path (input_path);
+                fallback_to_primary_stream (input_path);
             } else {
                 FileUtils.unlink (tmp_path);
             }
         }
     }
 
+    private void fallback_to_primary_stream (string input_path) {
+        current_waveform_input_path = input_path;
+        current_waveform_stream_index = 0;
+        generate_waveform_async (input_path, 0);
+        load_media_from_path (input_path);
+    }
+
     private void clear_playback_extract_proc (Subprocess proc) {
         if (playback_extract_proc == proc) {
             playback_extract_proc = null;
         }
+    }
+
+    private bool ensure_temp_dirs () {
+        if (temp_run_dir != null && playback_temp_dir != null && waveform_temp_dir != null) {
+            if (FileUtils.test (temp_run_dir, FileTest.IS_DIR)
+                && FileUtils.test (playback_temp_dir, FileTest.IS_DIR)
+                && FileUtils.test (waveform_temp_dir, FileTest.IS_DIR)) {
+                return true;
+            }
+
+            cleanup_temp_dirs ();
+        }
+
+        string? run_dir = ConversionUtils.create_managed_temp_run_dir ("audio-player");
+        if (run_dir == null)
+            return false;
+
+        string? next_playback_dir = ConversionUtils.ensure_managed_temp_subdir (
+            run_dir,
+            "playback"
+        );
+        string? next_waveform_dir = ConversionUtils.ensure_managed_temp_subdir (
+            run_dir,
+            "waveform"
+        );
+        if (next_playback_dir == null || next_waveform_dir == null) {
+            ConversionUtils.try_remove_empty_dir_chain (
+                run_dir,
+                ConversionUtils.get_app_temp_root ()
+            );
+            return false;
+        }
+
+        temp_run_dir = run_dir;
+        playback_temp_dir = next_playback_dir;
+        waveform_temp_dir = next_waveform_dir;
+        return true;
+    }
+
+    private bool create_playback_temp_path (out string path) {
+        path = "";
+
+        if (ensure_temp_dirs () && playback_temp_dir != null) {
+            string? managed_path = ConversionUtils.create_managed_temp_file (
+                playback_temp_dir,
+                "audio-play",
+                ".mka"
+            );
+            if (managed_path != null) {
+                path = managed_path;
+                return true;
+            }
+        }
+
+        try {
+            int fd = FileUtils.open_tmp ("audio-play-XXXXXX.mka", out path);
+            Posix.close (fd);
+            return true;
+        } catch (Error e) {
+            return false;
+        }
+    }
+
+    private bool create_waveform_temp_path (out string path) {
+        path = "";
+
+        if (ensure_temp_dirs () && waveform_temp_dir != null) {
+            string? managed_path = ConversionUtils.create_managed_temp_file (
+                waveform_temp_dir,
+                "waveform",
+                ".png"
+            );
+            if (managed_path != null) {
+                path = managed_path;
+                return true;
+            }
+        }
+
+        try {
+            int fd = FileUtils.open_tmp ("waveform-XXXXXX.png", out path);
+            Posix.close (fd);
+            return true;
+        } catch (Error e) {
+            return false;
+        }
+    }
+
+    private void cleanup_temp_dirs () {
+        string root = ConversionUtils.get_app_temp_root ();
+
+        if (waveform_temp_dir != null) {
+            ConversionUtils.try_remove_empty_dir_chain (waveform_temp_dir, root);
+        }
+        if (playback_temp_dir != null) {
+            ConversionUtils.try_remove_empty_dir_chain (playback_temp_dir, root);
+        }
+        if (temp_run_dir != null) {
+            ConversionUtils.try_remove_empty_dir_chain (temp_run_dir, root);
+        }
+
+        temp_run_dir = null;
+        playback_temp_dir = null;
+        waveform_temp_dir = null;
     }
 
     private void cleanup_playback_tmp () {
@@ -474,117 +551,6 @@ public class AudioPlayer : Box {
             playback_extract_proc = null;
         }
         cleanup_playback_tmp ();
-    }
-
-    private string build_playback_cache_key (string path, int stream_index) {
-        return "%s|%d".printf (path, stream_index);
-    }
-
-    private void remove_playback_cache_key_from_lru (string key) {
-        int idx = -1;
-        for (int i = 0; i < playback_cache_lru.length; i++) {
-            if (playback_cache_lru[i] == key) {
-                idx = i;
-                break;
-            }
-        }
-
-        if (idx < 0)
-            return;
-
-        string[] next = {};
-        for (int i = 0; i < playback_cache_lru.length; i++) {
-            if (i != idx)
-                next += playback_cache_lru[i];
-        }
-        playback_cache_lru = next;
-    }
-
-    private void touch_playback_cache_key (string key) {
-        remove_playback_cache_key_from_lru (key);
-        playback_cache_lru += key;
-
-        while (playback_cache_lru.length > MAX_PLAYBACK_CACHE_ENTRIES) {
-            string evicted = playback_cache_lru[0];
-            var evicted_entry = playback_cache.lookup (evicted);
-            string[] next = {};
-            for (int i = 1; i < playback_cache_lru.length; i++)
-                next += playback_cache_lru[i];
-            playback_cache_lru = next;
-            playback_cache.remove (evicted);
-            if (evicted_entry != null) {
-                FileUtils.unlink (evicted_entry.extracted_path);
-            }
-        }
-    }
-
-    private void clear_playback_cache_for_path (string path) {
-        string[] keys = playback_cache_lru;
-        for (int i = 0; i < keys.length; i++) {
-            string key = keys[i];
-            var entry = playback_cache.lookup (key);
-            if (entry != null && entry.signature.path == path) {
-                playback_cache.remove (key);
-                remove_playback_cache_key_from_lru (key);
-                FileUtils.unlink (entry.extracted_path);
-            }
-        }
-    }
-
-    private AudioPlaybackCacheEntry? lookup_playback_cache (
-        ConversionUtils.FileSignature signature,
-        int stream_index
-    ) {
-        string key = build_playback_cache_key (signature.path, stream_index);
-        var entry = playback_cache.lookup (key);
-        if (entry == null)
-            return null;
-
-        if (!entry.signature.matches (signature)) {
-            clear_playback_cache_for_path (signature.path);
-            return null;
-        }
-
-        if (!FileUtils.test (entry.extracted_path, FileTest.EXISTS)) {
-            playback_cache.remove (key);
-            remove_playback_cache_key_from_lru (key);
-            return null;
-        }
-
-        touch_playback_cache_key (key);
-        return entry;
-    }
-
-    private void store_playback_cache (ConversionUtils.FileSignature signature,
-                                       int stream_index,
-                                       string extracted_path) {
-        string key = build_playback_cache_key (signature.path, stream_index);
-        var existing = playback_cache.lookup (key);
-        if (existing != null) {
-            if (!existing.signature.matches (signature)) {
-                clear_playback_cache_for_path (signature.path);
-            } else if (existing.extracted_path != extracted_path) {
-                FileUtils.unlink (existing.extracted_path);
-            }
-        }
-
-        playback_cache.insert (
-            key,
-            new AudioPlaybackCacheEntry (signature, extracted_path)
-        );
-        touch_playback_cache_key (key);
-    }
-
-    private void clear_playback_cache () {
-        string[] keys = playback_cache_lru;
-        for (int i = 0; i < keys.length; i++) {
-            var entry = playback_cache.lookup (keys[i]);
-            if (entry != null) {
-                FileUtils.unlink (entry.extracted_path);
-            }
-        }
-        playback_cache.remove_all ();
-        playback_cache_lru = {};
     }
 
     public void clear () {
@@ -623,7 +589,7 @@ public class AudioPlayer : Box {
         current_waveform_input_path = "";
         current_waveform_stream_index = 0;
         clear_waveform_cache ();
-        clear_playback_cache ();
+        cleanup_temp_dirs ();
     }
 
     public override void dispose () {
@@ -668,12 +634,8 @@ public class AudioPlayer : Box {
         waveform_picture.set_paintable (null);
 
         string tmp_path;
-        try {
-            int fd;
-            fd = FileUtils.open_tmp ("waveform-XXXXXX.png", out tmp_path);
-            Posix.close (fd);
-        } catch (Error e) {
-            debug ("AudioPlayer: failed to create temp file for waveform: %s", e.message);
+        if (!create_waveform_temp_path (out tmp_path)) {
+            debug ("AudioPlayer: failed to create temp file for waveform");
             spinner_box.set_visible (false);
             waveform_spinner.stop ();
             return;
