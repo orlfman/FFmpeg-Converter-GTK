@@ -15,6 +15,7 @@ ICON_DEST="/usr/share/icons/hicolor/scalable/apps/ffmpeg-converter-gtk.svg"
 # Track what was installed for summary
 declare -a installed_items=()
 declare -a skipped_items=()
+RUN_TESTS=0
 
 check_dependency() {
     if ! command -v "$1" &> /dev/null; then
@@ -87,6 +88,17 @@ check_dependency pkg-config
 echo "✅ All dependencies found"
 echo
 
+# --- Optional test run prompt ---
+read -p "Run Meson tests after building? [y/N] " -n 1 -r REPLY
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    RUN_TESTS=1
+    echo "→ Tests will run after the build completes"
+else
+    echo "→ Skipping tests"
+fi
+echo
+
 # --- Version bump prompt ---
 MESON_FILE="$PROJECT_DIR/meson.build"
 CONSTANTS_FILE="$PROJECT_DIR/src/constants.vala"
@@ -133,6 +145,17 @@ if [ ! -f "$BUILD_DIR/$BINARY_NAME" ]; then
 fi
 echo "✅ Build successful!"
 echo
+
+# --- Optional tests ---
+if [ "$RUN_TESTS" -eq 1 ]; then
+    echo "🧪 Running tests..."
+    if ! meson test -C "$BUILD_DIR"; then
+        echo "❌ Tests failed"
+        exit 1
+    fi
+    echo "✅ Tests passed!"
+    echo
+fi
 
 # --- Installation ---
 echo "Preparing to install (sudo may be required)..."

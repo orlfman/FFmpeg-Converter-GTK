@@ -74,6 +74,7 @@ sources = files(
   'src/smart-optimizer.vala',
   'src/audio-tab.vala',
   'src/audio-player.vala',
+  'src/player-styles.vala',
   'src/audio-builder.vala',
   'src/audio-runner.vala'
 )
@@ -93,6 +94,7 @@ if fs.exists('tests/subtitle-language-guesser-test.vala')
       'tests/subtitle-language-guesser-test.vala',
     ),
     vala_args : ['--define=SUBTITLE_LANGUAGE_GUESSER_TEST_BUILD'],
+    build_by_default : false,
     dependencies : [
       dependency('glib-2.0'),
       dependency('gio-2.0'),
@@ -124,6 +126,7 @@ if fs.exists('tests/audio-builder-test.vala')
       dependency('gtk4'),
       dependency('libadwaita-1'),
     ],
+    build_by_default : false,
     link_args : ['-lm'],
   )
 
@@ -151,6 +154,7 @@ if fs.exists('tests/audio-settings-test.vala')
       dependency('libadwaita-1'),
     ],
     vala_args : ['--define=AUDIO_SETTINGS_TEST_BUILD'],
+    build_by_default : false,
     link_args : ['-lm'],
   )
 
@@ -178,6 +182,7 @@ if fs.exists('tests/audio-extract-logic-test.vala')
       dependency('gtk4'),
       dependency('libadwaita-1'),
     ],
+    build_by_default : false,
   )
 
   test('audio-extract-logic', audio_extract_logic_test)
@@ -209,8 +214,80 @@ if fs.exists('tests/ffprobe-utils-test.vala')
       dependency('json-glib-1.0'),
     ],
     vala_args : ['--define=FFPROBE_UTILS_TEST_BUILD'],
+    build_by_default : false,
     link_args : ['-lm'],
   )
 
   test('ffprobe-utils', ffprobe_utils_test)
+endif
+
+if fs.exists('tests/trim-subtitles-state-test.vala')
+  trim_subtitles_state_test = executable(
+    'trim-subtitles-state-test',
+    files(
+      'src/subprocess-compat.c',
+      'src/process-runner.vala',
+      'src/conversion-utils.vala',
+      'src/operation-output-result.vala',
+      'src/progress-tracker.vala',
+      'src/constants.vala',
+      'src/svt-av1-tab.vala',
+      'src/general-tab.vala',
+      'src/converter.vala',
+      'src/file-pickers.vala',
+      'src/path-breadcrumb.vala',
+      'src/status-area.vala',
+      'src/console-tab.vala',
+      'src/filter-builder.vala',
+      'src/video-filters.vala',
+      'src/svt-av1-builder.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-settings.vala',
+      'src/conversion-runner.vala',
+      'src/codec-builder.vala',
+      'src/x265-tab.vala',
+      'src/x265-builder.vala',
+      'src/codec-tab.vala',
+      'src/base-codec-tab.vala',
+      'src/color-correction-dialog.vala',
+      'src/information-tab.vala',
+      'src/about-dialog.vala',
+      'src/hamburger-menu.vala',
+      'src/video-player.vala',
+      'src/crop-overlay.vala',
+      'src/trim-tab.vala',
+      'src/trim-builder.vala',
+      'src/trim-runner.vala',
+      'src/x264-tab.vala',
+      'src/x264-builder.vala',
+      'src/vp9-tab.vala',
+      'src/vp9-builder.vala',
+      'src/codec-presets.vala',
+      'src/app-settings.vala',
+      'src/settings-dialog.vala',
+      'src/subtitle-language-guesser.vala',
+      'src/subtitles-tab.vala',
+      'src/subtitles-runner.vala',
+      'src/ffprobe-utils.vala',
+      'src/codec-utils.vala',
+      'src/smart-optimizer.vala',
+      'src/audio-tab.vala',
+      'src/audio-player.vala',
+      'src/player-styles.vala',
+      'src/audio-builder.vala',
+      'src/audio-runner.vala',
+      'tests/trim-subtitles-state-test.vala',
+    ),
+    dependencies : dependencies,
+    vala_args : ['--define=TRIM_SUBTITLES_STATE_TEST_BUILD'],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('trim-subtitles-state', trim_subtitles_state_test)
 endif

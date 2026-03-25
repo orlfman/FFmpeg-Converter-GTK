@@ -270,6 +270,24 @@ private void test_copy_output_extension_prefers_shared_source_model () {
     );
 }
 
+private void test_segmented_opus_copy_uses_mka_extension () {
+    var config = new AudioExtractConfig ();
+    config.copy_mode = true;
+    config.source_audio.codec_name = "opus";
+
+    assert_contains (
+        AudioBuilder.get_output_extension (config, "", 1),
+        ".mka",
+        "segmented opus copy output extension"
+    );
+
+    assert_contains (
+        AudioBuilder.get_output_extension (config, "", 0),
+        ".opus",
+        "full-track opus copy output extension"
+    );
+}
+
 private void test_probe_result_to_mp4_alac_copy_chain_keeps_copy_and_m4a () {
     var probe = new AudioStreamProbeResult ();
     probe.presence = MediaStreamPresence.PRESENT;
@@ -374,6 +392,7 @@ void main (string[] args) {
     Test.add_func ("/audio-builder/concat-filter-applies-ebu-normalization-once-after-concat", test_concat_filter_applies_ebu_normalization_once_after_concat);
     Test.add_func ("/audio-builder/output-extension-uses-shared-audio-settings", test_output_extension_uses_shared_audio_settings);
     Test.add_func ("/audio-builder/copy-output-extension-prefers-shared-source-model", test_copy_output_extension_prefers_shared_source_model);
+    Test.add_func ("/audio-builder/segmented-opus-copy-uses-mka-extension", test_segmented_opus_copy_uses_mka_extension);
     Test.add_func ("/audio-builder/probe-result-to-mp4-alac-copy-chain-keeps-copy-and-m4a", test_probe_result_to_mp4_alac_copy_chain_keeps_copy_and_m4a);
     Test.add_func ("/audio-builder/codec-args-skip-bitrate-when-quality-mode-is-enabled", test_codec_args_skip_bitrate_when_quality_mode_is_enabled);
     Test.add_func ("/audio-builder/processing-args-apply-sample-format-only-to-supported-codecs", test_processing_args_apply_sample_format_only_to_supported_codecs);

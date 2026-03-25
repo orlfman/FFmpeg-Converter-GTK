@@ -65,6 +65,78 @@ public enum TrimOutputConflictPolicy {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class TrimTab : Box, ICodecTab {
+    private class RunnerBinding : Object {
+        public unowned TrimTab owner;
+        public unowned TrimRunner runner;
+        public uint64 operation_id;
+
+        public void on_export_done (OperationOutputResult output_result) {
+            owner.handle_runner_export_done (runner, operation_id, output_result);
+        }
+
+        public void on_export_failed (string msg) {
+            owner.handle_runner_export_failed (runner, operation_id);
+        }
+    }
+
+    private class ChapterRowBinding : Object {
+        public unowned TrimTab owner;
+        public CheckButton check;
+        public int idx;
+
+        public void on_seek_clicked () {
+            owner.seek_to_detected_chapter (idx);
+        }
+
+        public void on_toggled () {
+            owner.set_detected_chapter_selected (idx, check.active);
+        }
+    }
+
+    private class SegmentRowBinding : Object {
+        public unowned TrimTab owner;
+        public Entry start_entry;
+        public Entry end_entry;
+        public Button? move_up_button;
+        public Button? move_down_button;
+        public int idx;
+
+        public void on_move_up_clicked () {
+            owner.move_segment_up (idx);
+        }
+
+        public void on_move_down_clicked () {
+            owner.move_segment_down (idx);
+        }
+
+        public void on_start_changed () {
+            owner.validate_segment_start_entry (start_entry, idx);
+        }
+
+        public void on_start_activate () {
+            owner.activate_segment_start_entry (start_entry, idx);
+        }
+
+        public void on_end_changed () {
+            owner.validate_segment_end_entry (end_entry, idx);
+        }
+
+        public void on_end_activate () {
+            owner.activate_segment_end_entry (end_entry, idx);
+        }
+
+        public void on_crop_clicked () {
+            owner.apply_current_crop_to_segment (idx);
+        }
+
+        public void on_seek_clicked () {
+            owner.seek_to_segment_start (idx);
+        }
+
+        public void on_delete_clicked () {
+            owner.delete_segment_row (idx);
+        }
+    }
 
     // ── Mode ─────────────────────────────────────────────────────────────────
     public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
@@ -145,6 +217,11 @@ public class TrimTab : Box, ICodecTab {
     private uint64 active_operation_id = 0;
     private bool cancel_pending = false;
     private bool speed_locked = false;  // true when speed filters force re-encode
+    private RunnerBinding? active_runner_binding = null;
+    private GenericArray<ChapterRowBinding> chapter_row_bindings =
+        new GenericArray<ChapterRowBinding> ();
+    private GenericArray<SegmentRowBinding> segment_row_bindings =
+        new GenericArray<SegmentRowBinding> ();
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void trim_done (OperationOutputResult output_result);
@@ -512,20 +589,13 @@ public class TrimTab : Box, ICodecTab {
 
         runner.set_segments (segs);
 
-        runner.export_done.connect ((output_result) => {
-            if (active_runner != runner || active_operation_id != operation_id) {
-                return;
-            }
-
-            complete_active_operation (operation_id, false, output_result);
-        });
-        runner.export_failed.connect ((msg) => {
-            if (active_runner != runner || active_operation_id != operation_id) {
-                return;
-            }
-
-            complete_active_operation (operation_id, cancel_pending || runner.is_cancelled ());
-        });
+        var binding = new RunnerBinding ();
+        binding.owner = this;
+        binding.runner = runner;
+        binding.operation_id = operation_id;
+        active_runner_binding = binding;
+        runner.export_done.connect (binding.on_export_done);
+        runner.export_failed.connect (binding.on_export_failed);
 
         active_runner = runner;
         runner.run ();
@@ -851,6 +921,7 @@ public class TrimTab : Box, ICodecTab {
                                             bool was_cancelled,
                                             OperationOutputResult? output_result = null) {
         active_runner = null;
+        active_runner_binding = null;
         active_operation_id = 0;
         cancel_pending = false;
 
@@ -1564,6 +1635,8 @@ public class TrimTab : Box, ICodecTab {
      * Rebuild the chapter list UI from the detected_chapters array.
      */
     private void rebuild_chapter_list () {
+        chapter_row_bindings = new GenericArray<ChapterRowBinding> ();
+
         // Clear existing rows
         Gtk.Widget? child = chapter_listbox.get_first_child ();
         while (child != null) {
@@ -1576,7 +1649,10 @@ public class TrimTab : Box, ICodecTab {
 
         for (int i = 0; i < detected_chapters.length; i++) {
             var ch = detected_chapters[i];
-            int idx = i;  // capture for closure
+            var binding = new ChapterRowBinding ();
+            binding.owner = this;
+            binding.idx = i;
+            chapter_row_bindings.add (binding);
 
             var row = new Adw.ActionRow ();
             row.set_title (ch.title);
@@ -1598,22 +1674,15 @@ public class TrimTab : Box, ICodecTab {
             seek_btn.set_tooltip_text ("Seek player to chapter start");
             seek_btn.set_valign (Align.CENTER);
             seek_btn.add_css_class ("flat");
-            seek_btn.clicked.connect (() => {
-                player.seek_to (detected_chapters[idx].start_time);
-            });
+            seek_btn.clicked.connect (binding.on_seek_clicked);
             row.add_suffix (seek_btn);
 
             // Selection checkbox
             var check = new CheckButton ();
             check.set_active (ch.selected);
             check.set_valign (Align.CENTER);
-            check.toggled.connect (() => {
-                detected_chapters[idx].selected = check.active;
-                // Update segment list in real time
-                if (current_mode == Mode.CHAPTER_SPLIT) {
-                    rebuild_chapter_segments ();
-                }
-            });
+            binding.check = check;
+            check.toggled.connect (binding.on_toggled);
             row.add_suffix (check);
             row.set_activatable_widget (check);
 
@@ -1921,6 +1990,8 @@ public class TrimTab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void rebuild_segment_rows () {
+        segment_row_bindings = new GenericArray<SegmentRowBinding> ();
+
         Gtk.Widget? child = segment_listbox.get_first_child ();
         while (child != null) {
             Gtk.Widget? next = child.get_next_sibling ();
@@ -1962,21 +2033,17 @@ public class TrimTab : Box, ICodecTab {
 
     private Gtk.Widget build_segment_row (int index) {
         var seg = segments[index];
-
-        // ── Closure safety ───────────────────────────────────────────────────
-        // Vala closures capture variables by reference.  Although `index` is a
-        // method parameter (not a loop variable), we capture it into a single
-        // local so that every lambda below closes over the same per-row value.
-        // Do NOT remove this — without it, future refactors that inline this
-        // method into a loop would silently break.
-        int idx = index;
+        var binding = new SegmentRowBinding ();
+        binding.owner = this;
+        binding.idx = index;
+        segment_row_bindings.add (binding);
 
         var row = new Adw.ActionRow ();
         // Use chapter title as row title when available, fall back to number
         if (seg.label != null && seg.label.strip ().length > 0) {
-            row.set_title ("#%d — %s".printf (idx + 1, seg.label));
+            row.set_title ("#%d — %s".printf (index + 1, seg.label));
         } else {
-            row.set_title ("#%d".printf (idx + 1));
+            row.set_title ("#%d".printf (index + 1));
         }
 
         // Build subtitle with optional crop indicator
@@ -2001,9 +2068,8 @@ public class TrimTab : Box, ICodecTab {
             up_btn.set_valign (Align.CENTER);
             up_btn.add_css_class ("flat");
             up_btn.set_sensitive (index > 0);
-            up_btn.clicked.connect (() => {
-                if (idx > 0) swap_segments (idx, idx - 1);
-            });
+            binding.move_up_button = up_btn;
+            up_btn.clicked.connect (binding.on_move_up_clicked);
             row.add_suffix (up_btn);
 
             // ── Move Down ────────────────────────────────────────────────────
@@ -2012,9 +2078,8 @@ public class TrimTab : Box, ICodecTab {
             down_btn.set_valign (Align.CENTER);
             down_btn.add_css_class ("flat");
             down_btn.set_sensitive (index < segments.length - 1);
-            down_btn.clicked.connect (() => {
-                if (idx < segments.length - 1) swap_segments (idx, idx + 1);
-            });
+            binding.move_down_button = down_btn;
+            down_btn.clicked.connect (binding.on_move_down_clicked);
             row.add_suffix (down_btn);
 
             return row;
@@ -2028,22 +2093,13 @@ public class TrimTab : Box, ICodecTab {
         start_entry.set_valign (Align.CENTER);
         start_entry.add_css_class ("monospace");
         start_entry.set_tooltip_text ("Start time (editable)");
+        binding.start_entry = start_entry;
 
         // Fix #6: Live validation on every keystroke
-        start_entry.changed.connect (() => {
-            double parsed = VideoPlayer.parse_time (start_entry.get_text ());
-            validate_segment_time (start_entry, parsed, segments[idx].end_time, true);
-        });
+        start_entry.changed.connect (binding.on_start_changed);
 
         // Fix #6: Only commit the value if validation passes
-        start_entry.activate.connect (() => {
-            double new_val = VideoPlayer.parse_time (start_entry.get_text ());
-            bool valid = validate_segment_time (start_entry, new_val, segments[idx].end_time, true);
-            if (valid) {
-                segments[idx].start_time = new_val;
-                rebuild_segment_rows ();
-            }
-        });
+        start_entry.activate.connect (binding.on_start_activate);
         row.add_suffix (start_entry);
 
         var arrow = new Label ("→");
@@ -2061,22 +2117,13 @@ public class TrimTab : Box, ICodecTab {
         end_entry.set_valign (Align.CENTER);
         end_entry.add_css_class ("monospace");
         end_entry.set_tooltip_text ("End time (editable)");
+        binding.end_entry = end_entry;
 
         // Fix #6: Live validation on every keystroke
-        end_entry.changed.connect (() => {
-            double parsed = VideoPlayer.parse_time (end_entry.get_text ());
-            validate_segment_time (end_entry, parsed, segments[idx].start_time, false);
-        });
+        end_entry.changed.connect (binding.on_end_changed);
 
         // Fix #6: Only commit the value if validation passes
-        end_entry.activate.connect (() => {
-            double new_val = VideoPlayer.parse_time (end_entry.get_text ());
-            bool valid = validate_segment_time (end_entry, new_val, segments[idx].start_time, false);
-            if (valid) {
-                segments[idx].end_time = new_val;
-                rebuild_segment_rows ();
-            }
-        });
+        end_entry.activate.connect (binding.on_end_activate);
         row.add_suffix (end_entry);
 
         // ── Crop button (Crop & Trim per-segment mode) ──────────────────────
@@ -2090,11 +2137,7 @@ public class TrimTab : Box, ICodecTab {
             crop_btn.set_valign (Align.CENTER);
             crop_btn.add_css_class ("flat");
             if (seg.has_crop ()) crop_btn.add_css_class ("accent");
-            crop_btn.clicked.connect (() => {
-                string cv = player.crop_overlay.get_crop_string ();
-                segments[idx].crop_value = cv;
-                rebuild_segment_rows ();
-            });
+            crop_btn.clicked.connect (binding.on_crop_clicked);
             row.add_suffix (crop_btn);
         }
 
@@ -2103,9 +2146,7 @@ public class TrimTab : Box, ICodecTab {
         seek_btn.set_tooltip_text ("Seek player to segment start");
         seek_btn.set_valign (Align.CENTER);
         seek_btn.add_css_class ("flat");
-        seek_btn.clicked.connect (() => {
-            player.seek_to (segments[idx].start_time);
-        });
+        seek_btn.clicked.connect (binding.on_seek_clicked);
         row.add_suffix (seek_btn);
 
         // ── Move Up ──────────────────────────────────────────────────────────
@@ -2114,9 +2155,8 @@ public class TrimTab : Box, ICodecTab {
         up_btn.set_valign (Align.CENTER);
         up_btn.add_css_class ("flat");
         up_btn.set_sensitive (index > 0);
-        up_btn.clicked.connect (() => {
-            if (idx > 0) swap_segments (idx, idx - 1);
-        });
+        binding.move_up_button = up_btn;
+        up_btn.clicked.connect (binding.on_move_up_clicked);
         row.add_suffix (up_btn);
 
         // ── Move Down ────────────────────────────────────────────────────────
@@ -2125,9 +2165,8 @@ public class TrimTab : Box, ICodecTab {
         down_btn.set_valign (Align.CENTER);
         down_btn.add_css_class ("flat");
         down_btn.set_sensitive (index < segments.length - 1);
-        down_btn.clicked.connect (() => {
-            if (idx < segments.length - 1) swap_segments (idx, idx + 1);
-        });
+        binding.move_down_button = down_btn;
+        down_btn.clicked.connect (binding.on_move_down_clicked);
         row.add_suffix (down_btn);
 
         // ── Delete ───────────────────────────────────────────────────────────
@@ -2136,12 +2175,88 @@ public class TrimTab : Box, ICodecTab {
         delete_btn.set_valign (Align.CENTER);
         delete_btn.add_css_class ("flat");
         delete_btn.add_css_class ("error");
-        delete_btn.clicked.connect (() => {
-            remove_segment (idx);
-        });
+        delete_btn.clicked.connect (binding.on_delete_clicked);
         row.add_suffix (delete_btn);
 
         return row;
+    }
+
+    internal void handle_runner_export_done (TrimRunner runner,
+                                             uint64 operation_id,
+                                             OperationOutputResult output_result) {
+        if (active_runner != runner || active_operation_id != operation_id)
+            return;
+        complete_active_operation (operation_id, false, output_result);
+    }
+
+    internal void handle_runner_export_failed (TrimRunner runner,
+                                               uint64 operation_id) {
+        if (active_runner != runner || active_operation_id != operation_id)
+            return;
+        complete_active_operation (operation_id, cancel_pending || runner.is_cancelled ());
+    }
+
+    internal void seek_to_detected_chapter (int idx) {
+        player.seek_to (detected_chapters[idx].start_time);
+    }
+
+    internal void set_detected_chapter_selected (int idx, bool selected) {
+        detected_chapters[idx].selected = selected;
+        if (current_mode == Mode.CHAPTER_SPLIT) {
+            rebuild_chapter_segments ();
+        }
+    }
+
+    internal void move_segment_up (int idx) {
+        if (idx > 0)
+            swap_segments (idx, idx - 1);
+    }
+
+    internal void move_segment_down (int idx) {
+        if (idx < segments.length - 1)
+            swap_segments (idx, idx + 1);
+    }
+
+    internal void validate_segment_start_entry (Entry start_entry, int idx) {
+        double parsed = VideoPlayer.parse_time (start_entry.get_text ());
+        validate_segment_time (start_entry, parsed, segments[idx].end_time, true);
+    }
+
+    internal void activate_segment_start_entry (Entry start_entry, int idx) {
+        double new_val = VideoPlayer.parse_time (start_entry.get_text ());
+        bool valid = validate_segment_time (start_entry, new_val, segments[idx].end_time, true);
+        if (valid) {
+            segments[idx].start_time = new_val;
+            rebuild_segment_rows ();
+        }
+    }
+
+    internal void validate_segment_end_entry (Entry end_entry, int idx) {
+        double parsed = VideoPlayer.parse_time (end_entry.get_text ());
+        validate_segment_time (end_entry, parsed, segments[idx].start_time, false);
+    }
+
+    internal void activate_segment_end_entry (Entry end_entry, int idx) {
+        double new_val = VideoPlayer.parse_time (end_entry.get_text ());
+        bool valid = validate_segment_time (end_entry, new_val, segments[idx].start_time, false);
+        if (valid) {
+            segments[idx].end_time = new_val;
+            rebuild_segment_rows ();
+        }
+    }
+
+    internal void apply_current_crop_to_segment (int idx) {
+        string cv = player.crop_overlay.get_crop_string ();
+        segments[idx].crop_value = cv;
+        rebuild_segment_rows ();
+    }
+
+    internal void seek_to_segment_start (int idx) {
+        player.seek_to (segments[idx].start_time);
+    }
+
+    internal void delete_segment_row (int idx) {
+        remove_segment (idx);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2182,4 +2297,133 @@ public class TrimTab : Box, ICodecTab {
             return "%dh %dm %ds".printf (h, m, s);
         return "%dm %ds".printf (m, s);
     }
+
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal void load_detected_chapters_for_widget_test (GenericArray<ChapterInfo> chapters) {
+        detected_chapters = chapters;
+        apply_mode (Mode.CHAPTER_SPLIT);
+        rebuild_chapter_list ();
+        rebuild_chapter_segments ();
+    }
+
+    internal CheckButton? get_chapter_checkbox_for_widget_test (int idx) {
+        if (idx < 0 || idx >= chapter_row_bindings.length)
+            return null;
+        return chapter_row_bindings[idx].check;
+    }
+
+    internal int get_segment_count_for_widget_test () {
+        return segments.length;
+    }
+
+    internal string get_segment_count_label_for_widget_test () {
+        return segment_count_label.get_text ();
+    }
+
+    internal void load_segments_for_widget_test (GenericArray<TrimSegment> test_segments) {
+        segments = test_segments;
+        apply_mode (Mode.TRIM_ONLY);
+        rebuild_segment_rows ();
+    }
+
+    internal Button? get_segment_move_up_button_for_widget_test (int idx) {
+        if (idx < 0 || idx >= segment_row_bindings.length)
+            return null;
+        return segment_row_bindings[idx].move_up_button;
+    }
+
+    internal string get_segment_label_for_widget_test (int idx) {
+        return segments[idx].label;
+    }
+
+    internal static GenericArray<TrimSegment> derive_chapter_segments_for_test (
+        GenericArray<ChapterInfo> detected_chapters,
+        GenericArray<TrimSegment> existing_segments) {
+        var selected_set = new HashTable<string, ChapterInfo> (str_hash, str_equal);
+        for (int i = 0; i < detected_chapters.length; i++) {
+            var ch = detected_chapters[i];
+            if (ch.selected) {
+                string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
+                selected_set.set (key, ch);
+            }
+        }
+
+        var kept = new GenericArray<TrimSegment> ();
+        var kept_keys = new HashTable<string, bool> (str_hash, str_equal);
+        for (int i = 0; i < existing_segments.length; i++) {
+            var seg = existing_segments[i];
+            string key = "%.6f:%.6f".printf (seg.start_time, seg.end_time);
+            if (selected_set.contains (key)) {
+                kept.add (seg);
+                kept_keys.set (key, true);
+            }
+        }
+
+        for (int i = 0; i < detected_chapters.length; i++) {
+            var ch = detected_chapters[i];
+            if (!ch.selected)
+                continue;
+            string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
+            if (!kept_keys.contains (key)) {
+                var seg = new TrimSegment (ch.start_time, ch.end_time);
+                seg.label = ch.title;
+                kept.add (seg);
+            }
+        }
+
+        return kept;
+    }
+
+    internal static void move_segment_up_for_test (GenericArray<TrimSegment> segments, int idx) {
+        if (idx <= 0 || idx >= segments.length)
+            return;
+        var tmp = segments[idx];
+        segments[idx] = segments[idx - 1];
+        segments[idx - 1] = tmp;
+    }
+
+    internal static void move_segment_down_for_test (GenericArray<TrimSegment> segments, int idx) {
+        if (idx < 0 || idx >= segments.length - 1)
+            return;
+        var tmp = segments[idx];
+        segments[idx] = segments[idx + 1];
+        segments[idx + 1] = tmp;
+    }
+
+    internal static void delete_segment_for_test (GenericArray<TrimSegment> segments, int idx) {
+        if (idx < 0 || idx >= segments.length)
+            return;
+        segments.remove_index (idx);
+    }
+
+    internal static bool apply_segment_start_edit_for_test (TrimSegment segment, double new_start) {
+        if (new_start >= segment.end_time)
+            return false;
+        segment.start_time = new_start;
+        return true;
+    }
+
+    internal static bool apply_segment_end_edit_for_test (TrimSegment segment, double new_end) {
+        if (new_end <= segment.start_time)
+            return false;
+        segment.end_time = new_end;
+        return true;
+    }
+
+    internal static void apply_crop_to_segment_for_test (TrimSegment segment, string crop_value) {
+        segment.crop_value = crop_value;
+    }
+
+    internal static bool runner_callback_matches_active_operation_for_test (
+        bool same_runner,
+        uint64 active_operation_id,
+        uint64 callback_operation_id) {
+        return same_runner && active_operation_id == callback_operation_id;
+    }
+
+    internal static bool export_failure_counts_as_cancelled_for_test (bool cancel_pending,
+                                                                      bool runner_cancelled) {
+        return cancel_pending || runner_cancelled;
+    }
+#endif
 }

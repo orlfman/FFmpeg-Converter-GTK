@@ -2,6 +2,38 @@ using Gtk;
 using Adw;
 
 public class ColorCorrectionDialog : Adw.Window {
+    private class ToggleRowBinding : Object {
+        public CheckButton check;
+        public Scale scale;
+        public SpinButton spin;
+
+        public void on_toggled () {
+            scale.set_sensitive (check.active);
+            spin.set_sensitive (check.active);
+        }
+    }
+
+    private class ScaleSpinBinding : Object {
+        public Scale scale;
+        public SpinButton spin;
+        private bool updating = false;
+
+        public void on_scale_value_changed () {
+            if (updating)
+                return;
+            updating = true;
+            spin.set_value (scale.get_value ());
+            updating = false;
+        }
+
+        public void on_spin_value_changed () {
+            if (updating)
+                return;
+            updating = true;
+            scale.set_value (spin.get_value ());
+            updating = false;
+        }
+    }
 
     // ── Basic ────────────────────────────────────────────────────────────────
     private CheckButton brightness_enable;
@@ -56,6 +88,10 @@ public class ColorCorrectionDialog : Adw.Window {
     private SpinButton  levels_gomax;
     private SpinButton  levels_bomax;
     private Adw.PreferencesGroup levels_in_group;
+    private GenericArray<ToggleRowBinding> toggle_row_bindings =
+        new GenericArray<ToggleRowBinding> ();
+    private GenericArray<ScaleSpinBinding> scale_spin_bindings =
+        new GenericArray<ScaleSpinBinding> ();
     private Adw.PreferencesGroup levels_out_group;
 
     // ── Color Balance ────────────────────────────────────────────────────────
@@ -587,29 +623,23 @@ public class ColorCorrectionDialog : Adw.Window {
     private void wire_row (CheckButton check, Scale scale, SpinButton spin) {
         scale.set_sensitive (false);
         spin.set_sensitive (false);
-
-        check.toggled.connect (() => {
-            scale.set_sensitive (check.active);
-            spin.set_sensitive (check.active);
-        });
+        var binding = new ToggleRowBinding ();
+        binding.check = check;
+        binding.scale = scale;
+        binding.spin = spin;
+        toggle_row_bindings.add (binding);
+        check.toggled.connect (binding.on_toggled);
 
         wire_scale_spin (scale, spin);
     }
 
     private void wire_scale_spin (Scale scale, SpinButton spin) {
-        bool updating = false;
-        scale.value_changed.connect (() => {
-            if (updating) return;
-            updating = true;
-            spin.set_value (scale.get_value ());
-            updating = false;
-        });
-        spin.value_changed.connect (() => {
-            if (updating) return;
-            updating = true;
-            scale.set_value (spin.get_value ());
-            updating = false;
-        });
+        var binding = new ScaleSpinBinding ();
+        binding.scale = scale;
+        binding.spin = spin;
+        scale_spin_bindings.add (binding);
+        scale.value_changed.connect (binding.on_scale_value_changed);
+        spin.value_changed.connect (binding.on_spin_value_changed);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -46,6 +46,7 @@ public class VideoPlayer : Box {
 
     public VideoPlayer () {
         Object (orientation: Orientation.VERTICAL, spacing: 6);
+        PlayerStyles.ensure_loaded ();
         build_ui ();
     }
 
@@ -86,65 +87,73 @@ public class VideoPlayer : Box {
         append (scrubber);
 
         // ── Transport Controls ───────────────────────────────────────────────
-        var controls = new Box (Orientation.HORIZONTAL, 6);
+        var controls = new Box (Orientation.HORIZONTAL, 0);
         controls.set_halign (Align.CENTER);
-        controls.set_margin_top (2);
+        controls.set_margin_top (8);
         controls.set_margin_bottom (4);
+        controls.add_css_class ("transport-bar");
 
-        // Seek back 5 s
+        // Back seek group — linked
+        var back_group = new Box (Orientation.HORIZONTAL, 0);
+        back_group.add_css_class ("linked");
+
         var seek_back = new Button.from_icon_name ("media-seek-backward-symbolic");
         seek_back.set_tooltip_text ("Seek back 5 seconds");
-        seek_back.add_css_class ("flat");
         seek_back.clicked.connect (() => seek_relative (-5.0));
-        controls.append (seek_back);
+        back_group.append (seek_back);
 
-        // Frame back
         var frame_back = new Button.from_icon_name ("go-previous-symbolic");
         frame_back.set_tooltip_text ("Step back 1 frame (~33 ms)");
-        frame_back.add_css_class ("flat");
         frame_back.clicked.connect (() => step_frame (-1));
-        controls.append (frame_back);
+        back_group.append (frame_back);
 
-        // Play / Pause
+        controls.append (back_group);
+
+        // Play / Pause — center focus
         play_button = new Button.from_icon_name ("media-playback-start-symbolic");
         play_button.set_tooltip_text ("Play / Pause");
+        play_button.add_css_class ("suggested-action");
         play_button.add_css_class ("circular");
+        play_button.set_margin_start (10);
+        play_button.set_margin_end (10);
         play_button.clicked.connect (toggle_playback);
         controls.append (play_button);
 
-        // Frame forward
+        // Forward seek group — linked
+        var fwd_group = new Box (Orientation.HORIZONTAL, 0);
+        fwd_group.add_css_class ("linked");
+
         var frame_fwd = new Button.from_icon_name ("go-next-symbolic");
         frame_fwd.set_tooltip_text ("Step forward 1 frame (~33 ms)");
-        frame_fwd.add_css_class ("flat");
         frame_fwd.clicked.connect (() => step_frame (1));
-        controls.append (frame_fwd);
+        fwd_group.append (frame_fwd);
 
-        // Seek forward 5 s
         var seek_fwd = new Button.from_icon_name ("media-seek-forward-symbolic");
         seek_fwd.set_tooltip_text ("Seek forward 5 seconds");
-        seek_fwd.add_css_class ("flat");
         seek_fwd.clicked.connect (() => seek_relative (5.0));
-        controls.append (seek_fwd);
+        fwd_group.append (seek_fwd);
 
-        // Separator
-        var sep = new Separator (Orientation.VERTICAL);
-        sep.set_margin_start (12);
-        sep.set_margin_end (12);
-        controls.append (sep);
+        controls.append (fwd_group);
 
-        // Time display
+        // Time display — styled readout
+        var time_box = new Box (Orientation.HORIZONTAL, 4);
+        time_box.add_css_class ("transport-time");
+        time_box.set_margin_start (14);
+
         time_label = new Label ("00:00:00.000");
         time_label.add_css_class ("monospace");
-        controls.append (time_label);
+        time_box.append (time_label);
 
-        var slash = new Label (" / ");
+        var slash = new Label ("/");
         slash.add_css_class ("dim-label");
-        controls.append (slash);
+        time_box.append (slash);
 
         duration_label = new Label ("00:00:00.000");
         duration_label.add_css_class ("monospace");
         duration_label.add_css_class ("dim-label");
-        controls.append (duration_label);
+        time_box.append (duration_label);
+
+        controls.append (time_box);
 
         append (controls);
     }

@@ -54,6 +54,8 @@ public class PathBreadcrumb : Box {
     private SimpleAction? open_output_action;  // Output breadcrumb only: opens last output file
     private SimpleAction open_crumb_action;    // Opens a directory from the overflow menu
     private string last_output_file = "";
+    private GenericArray<CrumbBinding> crumb_bindings =
+        new GenericArray<CrumbBinding> ();
 
     // Lightweight data model for a single breadcrumb segment.
     private class Crumb : Object {
@@ -63,6 +65,19 @@ public class PathBreadcrumb : Box {
 
         public Crumb (string label, string path, bool clickable) {
             Object (label: label, path: path, clickable: clickable);
+        }
+    }
+
+    private class CrumbBinding : Object {
+        public unowned PathBreadcrumb owner;
+        public string path = "";
+
+        public void on_reveal_clicked () {
+            owner.reveal_bound_path (path);
+        }
+
+        public void on_open_clicked () {
+            owner.open_bound_path (path);
         }
     }
 
@@ -160,6 +175,7 @@ public class PathBreadcrumb : Box {
     // Clears the crumb box and repopulates it from the current path.
     // Shows the placeholder label when there is no path.
     private void rebuild () {
+        crumb_bindings = new GenericArray<CrumbBinding> ();
         clear_box (crumb_box);
 
         if (current_path.length == 0) {
@@ -274,11 +290,11 @@ public class PathBreadcrumb : Box {
             file_button.set_hexpand (false);
             file_button.set_focus_on_click (false);
             file_button.set_tooltip_text (crumb.path);
-            file_button.clicked.connect (() => {
-                cancel_reveal ();
-                reveal_cancellable = new Cancellable ();
-                reveal_in_file_manager.begin (crumb.path, reveal_cancellable);
-            });
+            var file_binding = new CrumbBinding ();
+            file_binding.owner = this;
+            file_binding.path = crumb.path;
+            crumb_bindings.add (file_binding);
+            file_button.clicked.connect (file_binding.on_reveal_clicked);
 
             var file_chip = new Box (Orientation.HORIZONTAL, 6);
             file_chip.add_css_class ("path-file-chip");
@@ -322,10 +338,22 @@ public class PathBreadcrumb : Box {
         button.set_focus_on_click (false);
         button.set_tooltip_text (crumb.path);
         button.set_valign (Align.CENTER);
-        button.clicked.connect (() => {
-            open_path (crumb.path);
-        });
+        var crumb_binding = new CrumbBinding ();
+        crumb_binding.owner = this;
+        crumb_binding.path = crumb.path;
+        crumb_bindings.add (crumb_binding);
+        button.clicked.connect (crumb_binding.on_open_clicked);
         return button;
+    }
+
+    internal void reveal_bound_path (string path) {
+        cancel_reveal ();
+        reveal_cancellable = new Cancellable ();
+        reveal_in_file_manager.begin (path, reveal_cancellable);
+    }
+
+    internal void open_bound_path (string path) {
+        open_path (path);
     }
 
     // Builds a "..." overflow MenuButton containing all the hidden middle crumbs.

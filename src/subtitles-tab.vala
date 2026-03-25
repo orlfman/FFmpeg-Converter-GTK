@@ -24,7 +24,153 @@ private class AddedDefaultBinding : Object {
     }
 }
 
+    private class DetectedRowBinding : Object {
+        public unowned SubtitlesTab owner;
+        public SubtitleStream stream;
+        public Adw.ExpanderRow expander;
+        public Entry lang_entry;
+        public Entry title_entry;
+        public Switch default_sw;
+        public Switch forced_sw;
+        public Button? move_up_button;
+        public Button? move_down_button;
+        public int drag_idx;
+
+    public Gdk.ContentProvider? on_drag_prepare (double x, double y) {
+        return owner.begin_detected_drag (drag_idx);
+    }
+
+    public void on_drag_begin (DragSource source, Gdk.Drag drag) {
+        owner.set_drag_icon_for_expander (source, expander);
+    }
+
+    public bool on_drag_cancel (DragSource source, Gdk.Drag drag, Gdk.DragCancelReason reason) {
+        return owner.finish_drag_cancel ();
+    }
+
+    public void on_drag_end (DragSource source, Gdk.Drag drag, bool delete_data) {
+        owner.finish_drag_state ();
+    }
+
+    public bool on_drop (Value value, double x, double y) {
+        return owner.complete_detected_drop (drag_idx, value);
+    }
+
+    public void on_expanded_notify () {
+        stream.details_expanded = expander.get_expanded ();
+    }
+
+    public void on_enable_expansion_notify () {
+        stream.marked_remove = !expander.get_enable_expansion ();
+        if (stream.marked_remove) {
+            stream.details_expanded = false;
+        }
+        owner.refresh_ui_state_from_binding ();
+    }
+
+    public void on_language_changed () {
+        stream.language = lang_entry.get_text ().strip ();
+    }
+
+    public void on_title_changed () {
+        stream.title = title_entry.get_text ().strip ();
+    }
+
+    public void on_default_active_notify () {
+        owner.handle_detected_default_toggle (stream, default_sw);
+    }
+
+    public void on_forced_active_notify () {
+        stream.is_forced = forced_sw.active;
+    }
+
+    public void on_move_up_clicked () {
+        owner.move_detected_from_binding (stream, -1);
+    }
+
+    public void on_move_down_clicked () {
+        owner.move_detected_from_binding (stream, 1);
+    }
+}
+
+    private class AddedRowBinding : Object {
+        public unowned SubtitlesTab owner;
+        public ExternalSubtitle ext;
+        public Adw.ExpanderRow expander;
+        public Entry lang_entry;
+        public Entry title_entry;
+        public Switch default_sw;
+        public Switch forced_sw;
+        public Switch bitmap_sw;
+        public Button? remove_button;
+        public Button? move_up_button;
+        public Button? move_down_button;
+        public int index;
+        public int drag_idx;
+
+    public void on_expanded_notify () {
+        ext.details_expanded = expander.get_expanded ();
+    }
+
+    public Gdk.ContentProvider? on_drag_prepare (double x, double y) {
+        return owner.begin_added_drag (drag_idx);
+    }
+
+    public void on_drag_begin (DragSource source, Gdk.Drag drag) {
+        owner.set_drag_icon_for_expander (source, expander);
+    }
+
+    public bool on_drag_cancel (DragSource source, Gdk.Drag drag, Gdk.DragCancelReason reason) {
+        return owner.finish_drag_cancel ();
+    }
+
+    public void on_drag_end (DragSource source, Gdk.Drag drag, bool delete_data) {
+        owner.finish_drag_state ();
+    }
+
+    public bool on_drop (Value value, double x, double y) {
+        return owner.complete_added_drop (drag_idx, value);
+    }
+
+    public void on_remove_clicked () {
+        owner.remove_added_from_binding (index);
+    }
+
+    public void on_language_changed () {
+        ext.language = lang_entry.get_text ().strip ();
+        expander.set_subtitle (ext.language.length > 0 ? ext.language : "no language set");
+    }
+
+    public void on_title_changed () {
+        ext.title = title_entry.get_text ().strip ();
+    }
+
+    public void on_default_active_notify () {
+        owner.handle_added_default_toggle (ext, default_sw);
+    }
+
+    public void on_forced_active_notify () {
+        ext.is_forced = forced_sw.active;
+    }
+
+    public void on_bitmap_active_notify () {
+        ext.is_bitmap = bitmap_sw.active;
+    }
+
+    public void on_move_up_clicked () {
+        owner.move_added_from_binding (index, -1);
+    }
+
+    public void on_move_down_clicked () {
+        owner.move_added_from_binding (index, 1);
+    }
+}
+
 public class SubtitlesTab : Box {
+    private const string MISSING_SUBTITLE_INPUT_WARNING =
+        "Load a file with subtitle tracks or add external subtitles first!";
+    private const string DEFAULT_READY_STATUS =
+        "Ready. Select a file and click Convert.";
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void subtitle_done (OperationOutputResult output_result);
@@ -68,6 +214,10 @@ public class SubtitlesTab : Box {
         new GenericArray<DetectedDefaultBinding> ();
     private GenericArray<AddedDefaultBinding> added_default_bindings =
         new GenericArray<AddedDefaultBinding> ();
+    private GenericArray<DetectedRowBinding> detected_row_bindings =
+        new GenericArray<DetectedRowBinding> ();
+    private GenericArray<AddedRowBinding> added_row_bindings =
+        new GenericArray<AddedRowBinding> ();
 
     // ── Drag-and-drop state ──────────────────────────────────────────────────
     private int _drag_from_detected = -1;
@@ -133,6 +283,7 @@ public class SubtitlesTab : Box {
 
     private void rebuild_detected_group () {
         detected_default_bindings = new GenericArray<DetectedDefaultBinding> ();
+        detected_row_bindings = new GenericArray<DetectedRowBinding> ();
         clear_box (detected_section);
 
         var group = new Adw.PreferencesGroup ();
@@ -158,7 +309,7 @@ public class SubtitlesTab : Box {
             // Stream count badge
             int count = detected_streams.length;
             var count_label = new Label (@"$count found");
-            count_label.add_css_class ("dim-label");
+            count_label.add_css_class ("source-file-size");
             count_label.set_valign (Align.CENTER);
             group.set_header_suffix (count_label);
 
@@ -172,6 +323,12 @@ public class SubtitlesTab : Box {
 
     private Adw.ExpanderRow build_detected_row (SubtitleStream stream, int idx) {
         var expander = new Adw.ExpanderRow ();
+        var binding = new DetectedRowBinding ();
+        binding.owner = this;
+        binding.stream = stream;
+        binding.expander = expander;
+        binding.drag_idx = idx;
+        detected_row_bindings.add (binding);
 
         // Title: "#0  ·  subrip  ·  eng"
         string codec = stream.codec_name.length > 0 ? stream.codec_name : "unknown";
@@ -187,40 +344,14 @@ public class SubtitlesTab : Box {
         // ── Drag-and-drop reorder ────────────────────────────────────────────
         var drag_source = new DragSource ();
         drag_source.set_actions (Gdk.DragAction.MOVE);
-        int drag_idx = idx;
-        drag_source.prepare.connect ((x, y) => {
-            _drag_from_detected = drag_idx;
-            _drag_from_added = -1;
-            var val = Value (typeof (string));
-            val.set_string (DRAG_ORIGIN_DETECTED);
-            return new Gdk.ContentProvider.for_value (val);
-        });
-        drag_source.drag_begin.connect ((source, drag) => {
-            var paintable = new WidgetPaintable (expander);
-            source.set_icon (paintable, 0, 0);
-        });
-        drag_source.drag_cancel.connect ((source, drag, reason) => {
-            clear_drag_state ();
-            return false;
-        });
-        drag_source.drag_end.connect ((source, drag, delete_data) => {
-            clear_drag_state ();
-        });
+        drag_source.prepare.connect (binding.on_drag_prepare);
+        drag_source.drag_begin.connect (binding.on_drag_begin);
+        drag_source.drag_cancel.connect (binding.on_drag_cancel);
+        drag_source.drag_end.connect (binding.on_drag_end);
         expander.add_controller (drag_source);
 
         var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
-        drop_target.drop.connect ((value, x, y) => {
-            string? drag_origin = value.get_string ();
-            if (drag_origin != DRAG_ORIGIN_DETECTED) {
-                clear_drag_state ();
-                return false;
-            }
-            if (_drag_from_detected >= 0 && _drag_from_detected != drag_idx) {
-                reorder_detected (_drag_from_detected, drag_idx);
-            }
-            clear_drag_state ();
-            return true;
-        });
+        drop_target.drop.connect (binding.on_drop);
         expander.add_controller (drop_target);
 
         // ── Include/exclude via enable-switch ────────────────────────────────
@@ -229,18 +360,10 @@ public class SubtitlesTab : Box {
         expander.set_expanded (!stream.marked_remove && stream.details_expanded);
 
         // Keep persistent row UI state on the stream so rebuilds can restore it.
-        expander.notify["expanded"].connect (() => {
-            stream.details_expanded = expander.get_expanded ();
-        });
+        expander.notify["expanded"].connect (binding.on_expanded_notify);
 
         // Bind inclusion switch state → marked_remove
-        expander.notify["enable-expansion"].connect (() => {
-            stream.marked_remove = !expander.get_enable_expansion ();
-            if (stream.marked_remove) {
-                stream.details_expanded = false;
-            }
-            update_ui_state ();
-        });
+        expander.notify["enable-expansion"].connect (binding.on_enable_expansion_notify);
 
         // ── Language ─────────────────────────────────────────────────────────
         var lang_row = new Adw.ActionRow ();
@@ -251,9 +374,8 @@ public class SubtitlesTab : Box {
         lang_entry.set_placeholder_text ("eng");
         lang_entry.set_width_chars (8);
         lang_entry.set_valign (Align.CENTER);
-        lang_entry.changed.connect (() => {
-            stream.language = lang_entry.get_text ().strip ();
-        });
+        binding.lang_entry = lang_entry;
+        lang_entry.changed.connect (binding.on_language_changed);
         lang_row.add_suffix (lang_entry);
         expander.add_row (lang_row);
 
@@ -266,9 +388,8 @@ public class SubtitlesTab : Box {
         title_entry.set_placeholder_text ("e.g. English (SDH)");
         title_entry.set_width_chars (20);
         title_entry.set_valign (Align.CENTER);
-        title_entry.changed.connect (() => {
-            stream.title = title_entry.get_text ().strip ();
-        });
+        binding.title_entry = title_entry;
+        title_entry.changed.connect (binding.on_title_changed);
         title_row.add_suffix (title_entry);
         expander.add_row (title_row);
 
@@ -280,18 +401,8 @@ public class SubtitlesTab : Box {
         default_sw.set_active (stream.is_default);
         default_sw.set_valign (Align.CENTER);
         register_detected_default_switch (stream, default_sw);
-        default_sw.notify["active"].connect (() => {
-            if (_updating_defaults) return;
-            if (default_sw.active) {
-                _updating_defaults = true;
-                clear_all_defaults ();
-                stream.is_default = true;
-                sync_default_switches ();
-                _updating_defaults = false;
-            } else {
-                stream.is_default = false;
-            }
-        });
+        binding.default_sw = default_sw;
+        default_sw.notify["active"].connect (binding.on_default_active_notify);
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
         expander.add_row (default_row);
@@ -303,9 +414,8 @@ public class SubtitlesTab : Box {
         var forced_sw = new Switch ();
         forced_sw.set_active (stream.is_forced);
         forced_sw.set_valign (Align.CENTER);
-        forced_sw.notify["active"].connect (() => {
-            stream.is_forced = forced_sw.active;
-        });
+        binding.forced_sw = forced_sw;
+        forced_sw.notify["active"].connect (binding.on_forced_active_notify);
         forced_row.add_suffix (forced_sw);
         forced_row.set_activatable_widget (forced_sw);
         expander.add_row (forced_row);
@@ -321,13 +431,15 @@ public class SubtitlesTab : Box {
         var up_btn = new Button.from_icon_name ("go-up-symbolic");
         up_btn.add_css_class ("flat");
         up_btn.set_tooltip_text ("Move up");
-        up_btn.clicked.connect (() => move_detected (stream, -1));
+        binding.move_up_button = up_btn;
+        up_btn.clicked.connect (binding.on_move_up_clicked);
         move_box.append (up_btn);
 
         var down_btn = new Button.from_icon_name ("go-down-symbolic");
         down_btn.add_css_class ("flat");
         down_btn.set_tooltip_text ("Move down");
-        down_btn.clicked.connect (() => move_detected (stream, 1));
+        binding.move_down_button = down_btn;
+        down_btn.clicked.connect (binding.on_move_down_clicked);
         move_box.append (down_btn);
 
         move_row.add_suffix (move_box);
@@ -399,6 +511,7 @@ public class SubtitlesTab : Box {
 
     private void rebuild_add_group () {
         added_default_bindings = new GenericArray<AddedDefaultBinding> ();
+        added_row_bindings = new GenericArray<AddedRowBinding> ();
         clear_box (add_section);
 
         var group = new Adw.PreferencesGroup ();
@@ -433,6 +546,13 @@ public class SubtitlesTab : Box {
 
     private Adw.ExpanderRow build_added_row (ExternalSubtitle ext, int index) {
         var expander = new Adw.ExpanderRow ();
+        var binding = new AddedRowBinding ();
+        binding.owner = this;
+        binding.ext = ext;
+        binding.expander = expander;
+        binding.index = index;
+        binding.drag_idx = index;
+        added_row_bindings.add (binding);
 
         string basename = Path.get_basename (ext.file_path);
         expander.set_title (basename);
@@ -441,47 +561,19 @@ public class SubtitlesTab : Box {
         expander.set_expanded (ext.details_expanded);
 
         // Keep persistent row UI state on the subtitle so rebuilds can restore it.
-        expander.notify["expanded"].connect (() => {
-            ext.details_expanded = expander.get_expanded ();
-        });
+        expander.notify["expanded"].connect (binding.on_expanded_notify);
 
         // ── Drag-and-drop reorder ────────────────────────────────────────────
         var drag_source = new DragSource ();
         drag_source.set_actions (Gdk.DragAction.MOVE);
-        int drag_idx = index;
-        drag_source.prepare.connect ((x, y) => {
-            _drag_from_added = drag_idx;
-            _drag_from_detected = -1;
-            var val = Value (typeof (string));
-            val.set_string (DRAG_ORIGIN_ADDED);
-            return new Gdk.ContentProvider.for_value (val);
-        });
-        drag_source.drag_begin.connect ((source, drag) => {
-            var paintable = new WidgetPaintable (expander);
-            source.set_icon (paintable, 0, 0);
-        });
-        drag_source.drag_cancel.connect ((source, drag, reason) => {
-            clear_drag_state ();
-            return false;
-        });
-        drag_source.drag_end.connect ((source, drag, delete_data) => {
-            clear_drag_state ();
-        });
+        drag_source.prepare.connect (binding.on_drag_prepare);
+        drag_source.drag_begin.connect (binding.on_drag_begin);
+        drag_source.drag_cancel.connect (binding.on_drag_cancel);
+        drag_source.drag_end.connect (binding.on_drag_end);
         expander.add_controller (drag_source);
 
         var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
-        drop_target.drop.connect ((value, x, y) => {
-            string? drag_origin = value.get_string ();
-            if (drag_origin != DRAG_ORIGIN_ADDED) {
-                clear_drag_state ();
-                return false;
-            }
-            if (_drag_from_added >= 0 && _drag_from_added != drag_idx) {
-                reorder_added (_drag_from_added, drag_idx);
-            }
-            clear_drag_state ();
-            return true;
-        });
+        drop_target.drop.connect (binding.on_drop);
         expander.add_controller (drop_target);
 
         // Remove button
@@ -490,15 +582,8 @@ public class SubtitlesTab : Box {
         rm_btn.add_css_class ("error");
         rm_btn.set_valign (Align.CENTER);
         rm_btn.set_tooltip_text ("Remove this subtitle");
-        int idx = index;
-        rm_btn.clicked.connect (() => {
-            if (idx >= 0 && idx < added_subtitles.length) {
-                added_subtitles.remove_index (idx);
-                rebuild_add_group ();
-                rebuild_burn_track_combo ();
-                update_ui_state ();
-            }
-        });
+        binding.remove_button = rm_btn;
+        rm_btn.clicked.connect (binding.on_remove_clicked);
         expander.add_suffix (rm_btn);
 
         // ── Language ─────────────────────────────────────────────────────────
@@ -510,12 +595,8 @@ public class SubtitlesTab : Box {
         lang_entry.set_placeholder_text ("eng");
         lang_entry.set_width_chars (8);
         lang_entry.set_valign (Align.CENTER);
-        lang_entry.changed.connect (() => {
-            ext.language = lang_entry.get_text ().strip ();
-            expander.set_subtitle (
-                ext.language.length > 0 ? ext.language : "no language set"
-            );
-        });
+        binding.lang_entry = lang_entry;
+        lang_entry.changed.connect (binding.on_language_changed);
         lang_row.add_suffix (lang_entry);
         expander.add_row (lang_row);
 
@@ -528,9 +609,8 @@ public class SubtitlesTab : Box {
         title_entry.set_placeholder_text ("e.g. English (SDH)");
         title_entry.set_width_chars (20);
         title_entry.set_valign (Align.CENTER);
-        title_entry.changed.connect (() => {
-            ext.title = title_entry.get_text ().strip ();
-        });
+        binding.title_entry = title_entry;
+        title_entry.changed.connect (binding.on_title_changed);
         title_row.add_suffix (title_entry);
         expander.add_row (title_row);
 
@@ -542,18 +622,8 @@ public class SubtitlesTab : Box {
         default_sw.set_active (ext.is_default);
         default_sw.set_valign (Align.CENTER);
         register_added_default_switch (ext, default_sw);
-        default_sw.notify["active"].connect (() => {
-            if (_updating_defaults) return;
-            if (default_sw.active) {
-                _updating_defaults = true;
-                clear_all_defaults ();
-                ext.is_default = true;
-                sync_default_switches ();
-                _updating_defaults = false;
-            } else {
-                ext.is_default = false;
-            }
-        });
+        binding.default_sw = default_sw;
+        default_sw.notify["active"].connect (binding.on_default_active_notify);
         default_row.add_suffix (default_sw);
         default_row.set_activatable_widget (default_sw);
         expander.add_row (default_row);
@@ -565,9 +635,8 @@ public class SubtitlesTab : Box {
         var forced_sw = new Switch ();
         forced_sw.set_active (ext.is_forced);
         forced_sw.set_valign (Align.CENTER);
-        forced_sw.notify["active"].connect (() => {
-            ext.is_forced = forced_sw.active;
-        });
+        binding.forced_sw = forced_sw;
+        forced_sw.notify["active"].connect (binding.on_forced_active_notify);
         forced_row.add_suffix (forced_sw);
         forced_row.set_activatable_widget (forced_sw);
         expander.add_row (forced_row);
@@ -579,9 +648,8 @@ public class SubtitlesTab : Box {
         var bitmap_sw = new Switch ();
         bitmap_sw.set_active (ext.is_bitmap);
         bitmap_sw.set_valign (Align.CENTER);
-        bitmap_sw.notify["active"].connect (() => {
-            ext.is_bitmap = bitmap_sw.active;
-        });
+        binding.bitmap_sw = bitmap_sw;
+        bitmap_sw.notify["active"].connect (binding.on_bitmap_active_notify);
         bitmap_row.add_suffix (bitmap_sw);
         bitmap_row.set_activatable_widget (bitmap_sw);
         expander.add_row (bitmap_row);
@@ -595,15 +663,15 @@ public class SubtitlesTab : Box {
         var up_btn = new Button.from_icon_name ("go-up-symbolic");
         up_btn.add_css_class ("flat");
         up_btn.set_tooltip_text ("Move up");
-        int up_idx = index;
-        up_btn.clicked.connect (() => move_added (up_idx, -1));
+        binding.move_up_button = up_btn;
+        up_btn.clicked.connect (binding.on_move_up_clicked);
         move_box.append (up_btn);
 
         var down_btn = new Button.from_icon_name ("go-down-symbolic");
         down_btn.add_css_class ("flat");
         down_btn.set_tooltip_text ("Move down");
-        int down_idx = index;
-        down_btn.clicked.connect (() => move_added (down_idx, 1));
+        binding.move_down_button = down_btn;
+        down_btn.clicked.connect (binding.on_move_down_clicked);
         move_box.append (down_btn);
 
         move_row.add_suffix (move_box);
@@ -735,65 +803,177 @@ public class SubtitlesTab : Box {
     private void connect_signals () {
         extract_button.clicked.connect (on_extract_clicked);
         extract_all_button.clicked.connect (on_extract_all_clicked);
+        runner.operation_done.connect (on_runner_operation_done);
+        runner.operation_failed.connect (on_runner_operation_failed);
+        runner.operation_cancelled.connect (on_runner_operation_cancelled);
+        runner.apply_done.connect (on_runner_apply_done);
+        runner.apply_failed.connect (on_runner_apply_failed);
+        runner.apply_cancelled.connect (on_runner_apply_cancelled);
+    }
 
-        runner.operation_done.connect ((output_result) => {
-            uint64 operation_id = active_extract_operation_id;
-            active_extract_operation_id = 0;
-            set_busy (false);
-            subtitle_done (output_result);
-            if (operation_id != 0) {
-                subtitle_extract_succeeded (operation_id, output_result);
-            }
-        });
+    private void on_runner_operation_done (OperationOutputResult output_result) {
+        uint64 operation_id = active_extract_operation_id;
+        active_extract_operation_id = 0;
+        set_busy (false);
+        subtitle_done (output_result);
+        if (operation_id != 0) {
+            subtitle_extract_succeeded (operation_id, output_result);
+        }
+    }
 
-        runner.operation_failed.connect ((msg) => {
-            uint64 operation_id = active_extract_operation_id;
-            active_extract_operation_id = 0;
-            set_busy (false);
-            if (operation_id != 0) {
-                subtitle_extract_failed (operation_id);
-            }
-        });
+    private void on_runner_operation_failed (string msg) {
+        uint64 operation_id = active_extract_operation_id;
+        active_extract_operation_id = 0;
+        set_busy (false);
+        if (operation_id != 0) {
+            subtitle_extract_failed (operation_id);
+        }
+    }
 
-        runner.operation_cancelled.connect (() => {
-            uint64 operation_id = active_extract_operation_id;
-            active_extract_operation_id = 0;
-            set_busy (false);
-            if (operation_id != 0) {
-                subtitle_extract_cancelled (operation_id);
-            }
-        });
+    private void on_runner_operation_cancelled () {
+        uint64 operation_id = active_extract_operation_id;
+        active_extract_operation_id = 0;
+        set_busy (false);
+        if (operation_id != 0) {
+            subtitle_extract_cancelled (operation_id);
+        }
+    }
 
-        runner.apply_done.connect ((operation_id, output_result) => {
-            if (active_apply_operation_id != operation_id) {
-                return;
-            }
+    private void on_runner_apply_done (uint64 operation_id,
+                                       OperationOutputResult output_result) {
+        if (active_apply_operation_id != operation_id) {
+            return;
+        }
 
-            active_apply_operation_id = 0;
-            set_busy (false);
-            subtitle_done (output_result);
-            subtitle_apply_succeeded (operation_id, output_result);
-        });
+        active_apply_operation_id = 0;
+        set_busy (false);
+        subtitle_done (output_result);
+        subtitle_apply_succeeded (operation_id, output_result);
+    }
 
-        runner.apply_failed.connect ((operation_id, msg) => {
-            if (active_apply_operation_id != operation_id) {
-                return;
-            }
+    private void on_runner_apply_failed (uint64 operation_id, string msg) {
+        if (active_apply_operation_id != operation_id) {
+            return;
+        }
 
-            active_apply_operation_id = 0;
-            set_busy (false);
-            subtitle_apply_failed (operation_id);
-        });
+        active_apply_operation_id = 0;
+        set_busy (false);
+        subtitle_apply_failed (operation_id);
+    }
 
-        runner.apply_cancelled.connect ((operation_id) => {
-            if (active_apply_operation_id != operation_id) {
-                return;
-            }
+    private void on_runner_apply_cancelled (uint64 operation_id) {
+        if (active_apply_operation_id != operation_id) {
+            return;
+        }
 
-            active_apply_operation_id = 0;
-            set_busy (false);
-            subtitle_apply_cancelled (operation_id);
-        });
+        active_apply_operation_id = 0;
+        set_busy (false);
+        subtitle_apply_cancelled (operation_id);
+    }
+
+    internal Gdk.ContentProvider begin_detected_drag (int drag_idx) {
+        _drag_from_detected = drag_idx;
+        _drag_from_added = -1;
+        var val = Value (typeof (string));
+        val.set_string (DRAG_ORIGIN_DETECTED);
+        return new Gdk.ContentProvider.for_value (val);
+    }
+
+    internal Gdk.ContentProvider begin_added_drag (int drag_idx) {
+        _drag_from_added = drag_idx;
+        _drag_from_detected = -1;
+        var val = Value (typeof (string));
+        val.set_string (DRAG_ORIGIN_ADDED);
+        return new Gdk.ContentProvider.for_value (val);
+    }
+
+    internal void set_drag_icon_for_expander (DragSource source, Adw.ExpanderRow expander) {
+        var paintable = new WidgetPaintable (expander);
+        source.set_icon (paintable, 0, 0);
+    }
+
+    internal bool finish_drag_cancel () {
+        clear_drag_state ();
+        return false;
+    }
+
+    internal void finish_drag_state () {
+        clear_drag_state ();
+    }
+
+    internal bool complete_detected_drop (int drag_idx, Value value) {
+        string? drag_origin = value.get_string ();
+        if (drag_origin != DRAG_ORIGIN_DETECTED) {
+            clear_drag_state ();
+            return false;
+        }
+        if (_drag_from_detected >= 0 && _drag_from_detected != drag_idx) {
+            reorder_detected (_drag_from_detected, drag_idx);
+        }
+        clear_drag_state ();
+        return true;
+    }
+
+    internal bool complete_added_drop (int drag_idx, Value value) {
+        string? drag_origin = value.get_string ();
+        if (drag_origin != DRAG_ORIGIN_ADDED) {
+            clear_drag_state ();
+            return false;
+        }
+        if (_drag_from_added >= 0 && _drag_from_added != drag_idx) {
+            reorder_added (_drag_from_added, drag_idx);
+        }
+        clear_drag_state ();
+        return true;
+    }
+
+    internal void refresh_ui_state_from_binding () {
+        update_ui_state ();
+    }
+
+    internal void handle_detected_default_toggle (SubtitleStream stream, Switch default_sw) {
+        if (_updating_defaults)
+            return;
+        if (default_sw.active) {
+            _updating_defaults = true;
+            clear_all_defaults ();
+            stream.is_default = true;
+            sync_default_switches ();
+            _updating_defaults = false;
+        } else {
+            stream.is_default = false;
+        }
+    }
+
+    internal void handle_added_default_toggle (ExternalSubtitle ext, Switch default_sw) {
+        if (_updating_defaults)
+            return;
+        if (default_sw.active) {
+            _updating_defaults = true;
+            clear_all_defaults ();
+            ext.is_default = true;
+            sync_default_switches ();
+            _updating_defaults = false;
+        } else {
+            ext.is_default = false;
+        }
+    }
+
+    internal void move_detected_from_binding (SubtitleStream stream, int dir) {
+        move_detected (stream, dir);
+    }
+
+    internal void move_added_from_binding (int index, int dir) {
+        move_added (index, dir);
+    }
+
+    internal void remove_added_from_binding (int index) {
+        if (index >= 0 && index < added_subtitles.length) {
+            added_subtitles.remove_index (index);
+            rebuild_add_group ();
+            rebuild_burn_track_combo ();
+            update_ui_state ();
+        }
     }
 
     private void set_busy (bool busy) {
@@ -1198,7 +1378,7 @@ public class SubtitlesTab : Box {
 
         if (is_burn_in_mode ()) {
             // Burn-in needs at least one track to burn
-            return burn_track_combo.get_sensitive ();
+            return has_burn_tracks ();
         } else {
             // Remux needs at least one stream or added file
             bool has_streams = (detected_streams.length > 0);
@@ -1618,16 +1798,7 @@ public class SubtitlesTab : Box {
         bool has_file = (current_input_file.length > 0);
         bool has_streams = (detected_streams.length > 0);
         bool editable = !_is_busy && !operation_locked;
-        bool has_burn_tracks = (added_subtitles.length > 0);
-
-        if (!has_burn_tracks) {
-            for (int i = 0; i < detected_streams.length; i++) {
-                if (!detected_streams[i].marked_remove) {
-                    has_burn_tracks = true;
-                    break;
-                }
-            }
-        }
+        bool has_burn_tracks = has_burn_tracks ();
 
         detected_section.set_sensitive (editable);
         add_section.set_sensitive (editable);
@@ -1644,6 +1815,26 @@ public class SubtitlesTab : Box {
         // Refresh compat info in case the input file changed (affects "Source")
         if (container_compat_row != null)
             update_container_compat_info ();
+
+        if (_status_area != null && can_apply ()) {
+            _status_area.replace_status_if_current (
+                MISSING_SUBTITLE_INPUT_WARNING,
+                DEFAULT_READY_STATUS
+            );
+        }
+    }
+
+    private bool has_burn_tracks () {
+        if (added_subtitles.length > 0)
+            return true;
+
+        for (int i = 0; i < detected_streams.length; i++) {
+            if (!detected_streams[i].marked_remove) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1692,4 +1883,148 @@ public class SubtitlesTab : Box {
         }
         return p;
     }
+
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal static void move_detected_for_test (GenericArray<SubtitleStream> detected_streams,
+                                                 SubtitleStream stream,
+                                                 int dir) {
+        int idx = -1;
+        for (int i = 0; i < detected_streams.length; i++) {
+            if (detected_streams[i] == stream) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0)
+            return;
+
+        int n = idx + dir;
+        if (n < 0 || n >= detected_streams.length)
+            return;
+
+        var tmp = detected_streams[idx];
+        detected_streams[idx] = detected_streams[n];
+        detected_streams[n] = tmp;
+    }
+
+    internal static void move_added_for_test (GenericArray<ExternalSubtitle> added_subtitles,
+                                              int index,
+                                              int dir) {
+        int n = index + dir;
+        if (index < 0 || index >= added_subtitles.length || n < 0 || n >= added_subtitles.length)
+            return;
+
+        var tmp = added_subtitles[index];
+        added_subtitles[index] = added_subtitles[n];
+        added_subtitles[n] = tmp;
+    }
+
+    internal static void reorder_detected_for_test (GenericArray<SubtitleStream> detected_streams,
+                                                    int from,
+                                                    int to) {
+        if (from == to)
+            return;
+        if (from < 0 || from >= detected_streams.length || to < 0 || to >= detected_streams.length)
+            return;
+
+        var stream = detected_streams[from];
+        if (from < to) {
+            for (int i = from; i < to; i++)
+                detected_streams[i] = detected_streams[i + 1];
+        } else {
+            for (int i = from; i > to; i--)
+                detected_streams[i] = detected_streams[i - 1];
+        }
+        detected_streams[to] = stream;
+    }
+
+    internal static void reorder_added_for_test (GenericArray<ExternalSubtitle> added_subtitles,
+                                                 int from,
+                                                 int to) {
+        if (from == to)
+            return;
+        if (from < 0 || from >= added_subtitles.length || to < 0 || to >= added_subtitles.length)
+            return;
+
+        var ext = added_subtitles[from];
+        if (from < to) {
+            for (int i = from; i < to; i++)
+                added_subtitles[i] = added_subtitles[i + 1];
+        } else {
+            for (int i = from; i > to; i--)
+                added_subtitles[i] = added_subtitles[i - 1];
+        }
+        added_subtitles[to] = ext;
+    }
+
+    internal static void remove_added_for_test (GenericArray<ExternalSubtitle> added_subtitles,
+                                                int index) {
+        if (index < 0 || index >= added_subtitles.length)
+            return;
+        added_subtitles.remove_index (index);
+    }
+
+    internal static void set_detected_default_for_test (GenericArray<SubtitleStream> detected_streams,
+                                                        GenericArray<ExternalSubtitle> added_subtitles,
+                                                        SubtitleStream stream,
+                                                        bool active) {
+        if (active) {
+            clear_all_defaults_for_test (detected_streams, added_subtitles);
+            stream.is_default = true;
+        } else {
+            stream.is_default = false;
+        }
+    }
+
+    internal static void set_added_default_for_test (GenericArray<SubtitleStream> detected_streams,
+                                                     GenericArray<ExternalSubtitle> added_subtitles,
+                                                     ExternalSubtitle ext,
+                                                     bool active) {
+        if (active) {
+            clear_all_defaults_for_test (detected_streams, added_subtitles);
+            ext.is_default = true;
+        } else {
+            ext.is_default = false;
+        }
+    }
+
+    internal static GenericArray<int> build_remux_order_for_test (
+        GenericArray<SubtitleStream> detected_streams,
+        GenericArray<ExternalSubtitle> added_subtitles) {
+        var order = new GenericArray<int> ();
+        for (int i = 0; i < detected_streams.length; i++) {
+            if (!detected_streams[i].marked_remove)
+                order.add (i);
+        }
+        for (int i = 0; i < added_subtitles.length; i++)
+            order.add (detected_streams.length + i);
+        return order;
+    }
+
+    internal static uint64 finish_extract_operation_for_test (ref bool busy,
+                                                              ref uint64 active_extract_operation_id) {
+        uint64 operation_id = active_extract_operation_id;
+        active_extract_operation_id = 0;
+        busy = false;
+        return operation_id;
+    }
+
+    internal static bool finish_apply_operation_for_test (ref bool busy,
+                                                          ref uint64 active_apply_operation_id,
+                                                          uint64 callback_operation_id) {
+        if (active_apply_operation_id != callback_operation_id)
+            return false;
+        active_apply_operation_id = 0;
+        busy = false;
+        return true;
+    }
+
+    private static void clear_all_defaults_for_test (GenericArray<SubtitleStream> detected_streams,
+                                                     GenericArray<ExternalSubtitle> added_subtitles) {
+        for (int i = 0; i < detected_streams.length; i++)
+            detected_streams[i].is_default = false;
+        for (int i = 0; i < added_subtitles.length; i++)
+            added_subtitles[i].is_default = false;
+    }
+#endif
 }

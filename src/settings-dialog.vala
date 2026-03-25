@@ -26,6 +26,23 @@ public class SettingsDialog : Adw.PreferencesDialog {
         public Cancellable? cancellable = null;
     }
 
+    private class BinaryRowBinding : Object {
+        public unowned SettingsDialog owner;
+        public Entry entry;
+        public Label status;
+        public string default_name;
+        public bool check_codec_support;
+        public BinaryValidationState validation_state;
+
+        public void on_entry_changed () {
+            owner.validate_path (entry, status, default_name, check_codec_support, validation_state);
+        }
+
+        public void on_browse_clicked () {
+            owner.pick_binary_file (entry, default_name);
+        }
+    }
+
     // ── Path entries ──────────────────────────────────────────────────────────
     private Entry ffmpeg_entry;
     private Entry ffprobe_entry;
@@ -58,6 +75,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private BinaryValidationState ffmpeg_validation = new BinaryValidationState ();
     private BinaryValidationState ffprobe_validation = new BinaryValidationState ();
     private BinaryValidationState ffplay_validation = new BinaryValidationState ();
+    private GenericArray<BinaryRowBinding> binary_row_bindings =
+        new GenericArray<BinaryRowBinding> ();
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -398,18 +417,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
         entry.set_hexpand (false);
         entry.set_valign (Align.CENTER);
         entry.add_css_class ("monospace");
-        entry.changed.connect (() => {
-            validate_path (entry, status, default_name, check_codec_support, validation_state);
-        });
+        var binding = new BinaryRowBinding ();
+        binding.owner = this;
+        binding.entry = entry;
+        binding.status = status;
+        binding.default_name = default_name;
+        binding.check_codec_support = check_codec_support;
+        binding.validation_state = validation_state;
+        binary_row_bindings.add (binding);
+        entry.changed.connect (binding.on_entry_changed);
         row.add_suffix (entry);
 
         var browse_btn = new Button.from_icon_name ("document-open-symbolic");
         browse_btn.set_tooltip_text ("Browse for %s binary".printf (default_name));
         browse_btn.add_css_class ("flat");
         browse_btn.set_valign (Align.CENTER);
-        browse_btn.clicked.connect (() => {
-            pick_binary_file (entry, default_name);
-        });
+        browse_btn.clicked.connect (binding.on_browse_clicked);
         row.add_suffix (browse_btn);
 
         group.add (row);

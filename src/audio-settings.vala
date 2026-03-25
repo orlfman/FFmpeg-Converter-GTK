@@ -370,15 +370,17 @@ public class AudioSettings : Object {
         aac_quality_combo.notify["selected"].connect (update_codec_visibility);
         mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
         vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
-        var expander = audio_expander;
-        if (expander != null) {
-            expander.notify["enable-expansion"].connect (() => {
-                on_audio_expander_enable_expansion_changed (expander);
-            });
+        if (audio_expander != null) {
+            audio_expander.notify["enable-expansion"].connect (
+                on_audio_expander_enable_expansion_notify);
         }
     }
 
-    private void on_audio_expander_enable_expansion_changed (Adw.ExpanderRow expander) {
+    private void on_audio_expander_enable_expansion_notify () {
+        var expander = audio_expander;
+        if (expander == null)
+            return;
+
         if (!suppress_audio_enabled_tracking && expander.sensitive) {
             desired_audio_enabled = expander.enable_expansion;
         }

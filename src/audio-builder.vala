@@ -162,8 +162,22 @@ namespace AudioBuilder {
      * Get the output extension based on the selected codec in transcode mode,
      * or based on the source codec in copy mode.
      */
-    public string get_output_extension (AudioExtractConfig config, string source_codec) {
+    public string get_output_extension (AudioExtractConfig config,
+                                        string source_codec,
+                                        int segment_count = 0) {
         if (config.copy_mode) {
+            if (segment_count > 0) {
+                string effective_source_codec =
+                    (config.source_audio.codec_name.length > 0)
+                    ? config.source_audio.codec_name
+                    : source_codec;
+                if (AudioCompatibilityLogic.normalize_source_audio_codec_name (
+                        effective_source_codec) == "opus") {
+                    // Stream-copying trimmed Opus directly to .opus can produce
+                    // invalid Ogg granule positions. Use Matroska instead.
+                    return ".mka";
+                }
+            }
             if (config.source_audio.codec_name.length > 0) {
                 return AudioSourceLogic.get_copy_extension (config.source_audio);
             }

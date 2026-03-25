@@ -1,5 +1,6 @@
 # FFmpeg Converter GTK - Makefile
-# Wrapper around Meson for building from source with make
+# Wrapper around Meson for release-oriented app builds.
+# Tests are opt-in via `make test` and are not compiled by default.
 
 BUILDDIR    := builddir
 BINARY      := ffmpeg-converter-gtk
@@ -60,10 +61,10 @@ help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all              Build the project (default)"
+	@echo "  all              Build the application only (default)"
 	@echo "  setup            Check dependencies and run meson setup"
-	@echo "  build            Compile the project"
-	@echo "  test             Build and run tests"
+	@echo "  build            Compile the application for release-style builds"
+	@echo "  test             Build and run the optional Meson test targets"
 	@echo "  install          Install binary, icon, and desktop file"
 	@echo "  install-binary   Install only the binary to $(BINDIR)"
 	@echo "  install-icon     Install the application icon"

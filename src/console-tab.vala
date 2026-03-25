@@ -8,6 +8,16 @@ using Adw;
 public class ConsoleTab : Box {
     private const string CONSOLE_FONT_CSS_CLASS = "console-font-custom";
 
+    private class FilterToggleBinding : Object {
+        public unowned ConsoleTab owner;
+        public ToggleButton button;
+        public string category;
+
+        public void on_toggled () {
+            owner.apply_filter_from_toggle (category, button.active);
+        }
+    }
+
     // ── Core widgets ──────────────────────────────────────────────────────────
     public TextView console_view { get; private set; }
     private Button clear_button;
@@ -29,6 +39,8 @@ public class ConsoleTab : Box {
     private ToggleButton filter_success_btn;
     private ToggleButton filter_info_btn;
     private ToggleButton filter_progress_btn;
+    private GenericArray<FilterToggleBinding> filter_toggle_bindings =
+        new GenericArray<FilterToggleBinding> ();
 
     // ── Font size ─────────────────────────────────────────────────────────────
     private Button font_down_btn;
@@ -339,12 +351,18 @@ public class ConsoleTab : Box {
         btn.set_active (true);
         btn.add_css_class ("flat");
         btn.add_css_class ("console-filter-btn");
-
-        btn.toggled.connect (() => {
-            apply_filter (category, btn.active);
-        });
+        var binding = new FilterToggleBinding ();
+        binding.owner = this;
+        binding.button = btn;
+        binding.category = category;
+        filter_toggle_bindings.add (binding);
+        btn.toggled.connect (binding.on_toggled);
 
         return btn;
+    }
+
+    internal void apply_filter_from_toggle (string category, bool visible) {
+        apply_filter (category, visible);
     }
 
     private void apply_filter (string category, bool visible) {

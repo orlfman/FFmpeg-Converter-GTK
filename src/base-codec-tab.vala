@@ -205,6 +205,27 @@ public class PixelFormatSelector : Adw.PreferencesGroup {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
+    private class SmartOptimizerRowsBinding : Object {
+        public unowned BaseCodecTab owner;
+        public Adw.SwitchRow auto_convert_row;
+        public Adw.SwitchRow strip_audio_row;
+
+        public void on_auto_convert_active_notify () {
+            owner.handle_auto_convert_active_notify (auto_convert_row, strip_audio_row);
+        }
+
+        public void on_settings_changed_for_auto_convert () {
+            owner.handle_auto_convert_settings_changed (auto_convert_row);
+        }
+
+        public void on_strip_audio_active_notify () {
+            owner.handle_strip_audio_active_notify (strip_audio_row);
+        }
+
+        public void on_settings_changed_for_strip_audio () {
+            owner.handle_strip_audio_settings_changed (strip_audio_row);
+        }
+    }
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void smart_optimizer_requested ();
@@ -212,6 +233,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // ── Shared Smart Optimizer State ─────────────────────────────────────────
     public bool auto_convert_active { get; protected set; default = false; }
     public bool strip_audio_active  { get; protected set; default = false; }
+    private SmartOptimizerRowsBinding? smart_optimizer_rows_binding = null;
 
     // ── Shared Widgets (assigned by subclass during construction) ─────────────
     public AudioSettings audio_settings        { get; protected set; }
@@ -458,48 +480,65 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         strip_audio_active = audio_global && auto_convert_active;
 
         // Wire auto-convert → strip_audio visibility after both rows exist
-        auto_convert_row.notify["active"].connect (() => {
-            auto_convert_active = auto_convert_row.get_active ();
-            strip_audio_row.set_visible (auto_convert_active);
-            if (!auto_convert_active) {
-                strip_audio_row.set_active (false);
-            } else {
-                bool sa_locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-                if (sa_locked) {
-                    strip_audio_row.set_active (true);
-                    strip_audio_row.set_sensitive (false);
-                }
-            }
-        });
+        var binding = new SmartOptimizerRowsBinding ();
+        binding.owner = this;
+        binding.auto_convert_row = auto_convert_row;
+        binding.strip_audio_row = strip_audio_row;
+        smart_optimizer_rows_binding = binding;
+        auto_convert_row.notify["active"].connect (binding.on_auto_convert_active_notify);
 
         // React to global override changes from Preferences.
-        AppSettings.get_default ().settings_changed.connect (() => {
-            bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
-            if (locked) {
-                auto_convert_row.set_active (true);
-                auto_convert_row.set_sensitive (false);
-            } else if (!auto_convert_row.get_sensitive ()) {
-                auto_convert_row.set_sensitive (true);
-                auto_convert_row.set_active (false);
-            }
-        });
+        AppSettings.get_default ().settings_changed.connect (
+            binding.on_settings_changed_for_auto_convert);
 
-        strip_audio_row.notify["active"].connect (() => {
-            strip_audio_active = strip_audio_row.get_active ();
-        });
+        strip_audio_row.notify["active"].connect (binding.on_strip_audio_active_notify);
 
-        AppSettings.get_default ().settings_changed.connect (() => {
-            bool locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-            if (!strip_audio_row.get_visible ()) return;
-            if (locked) {
+        AppSettings.get_default ().settings_changed.connect (
+            binding.on_settings_changed_for_strip_audio);
+        group.add (strip_audio_row);
+    }
+
+    internal void handle_auto_convert_active_notify (Adw.SwitchRow auto_convert_row,
+                                                     Adw.SwitchRow strip_audio_row) {
+        auto_convert_active = auto_convert_row.get_active ();
+        strip_audio_row.set_visible (auto_convert_active);
+        if (!auto_convert_active) {
+            strip_audio_row.set_active (false);
+        } else {
+            bool sa_locked = AppSettings.get_default ().smart_optimizer_strip_audio;
+            if (sa_locked) {
                 strip_audio_row.set_active (true);
                 strip_audio_row.set_sensitive (false);
-            } else if (!strip_audio_row.get_sensitive ()) {
-                strip_audio_row.set_sensitive (true);
-                strip_audio_row.set_active (false);
             }
-        });
-        group.add (strip_audio_row);
+        }
+    }
+
+    internal void handle_auto_convert_settings_changed (Adw.SwitchRow auto_convert_row) {
+        bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
+        if (locked) {
+            auto_convert_row.set_active (true);
+            auto_convert_row.set_sensitive (false);
+        } else if (!auto_convert_row.get_sensitive ()) {
+            auto_convert_row.set_sensitive (true);
+            auto_convert_row.set_active (false);
+        }
+    }
+
+    internal void handle_strip_audio_active_notify (Adw.SwitchRow strip_audio_row) {
+        strip_audio_active = strip_audio_row.get_active ();
+    }
+
+    internal void handle_strip_audio_settings_changed (Adw.SwitchRow strip_audio_row) {
+        bool locked = AppSettings.get_default ().smart_optimizer_strip_audio;
+        if (!strip_audio_row.get_visible ())
+            return;
+        if (locked) {
+            strip_audio_row.set_active (true);
+            strip_audio_row.set_sensitive (false);
+        } else if (!strip_audio_row.get_sensitive ()) {
+            strip_audio_row.set_sensitive (true);
+            strip_audio_row.set_active (false);
+        }
     }
 
     /**

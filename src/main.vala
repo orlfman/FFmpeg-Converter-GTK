@@ -25,6 +25,19 @@ private enum AudioCopyUnknownPreflightResult {
     CANCELLED
 }
 
+private class MainWindowToastFolderBinding : Object {
+    public string folder_path = "";
+
+    public void on_button_clicked () {
+        try {
+            var folder = File.new_for_path (folder_path);
+            AppInfo.launch_default_for_uri (folder.get_uri (), null);
+        } catch (Error e) {
+            warning ("Failed to open folder: %s", e.message);
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MainWindow — Application window layout and user action handlers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -48,6 +61,8 @@ public class MainWindow : Adw.ApplicationWindow {
     private Adw.ViewStack view_stack;
     private HamburgerMenu hamburger;
     private Adw.ToastOverlay toast_overlay;
+    private GenericArray<MainWindowToastFolderBinding> toast_folder_bindings =
+        new GenericArray<MainWindowToastFolderBinding> ();
 
     // Prevent GC from collecting the controller
     private AppController controller;
@@ -1766,14 +1781,10 @@ public class MainWindow : Adw.ApplicationWindow {
         string folder_path = output_result.get_open_folder_target ();
         if (folder_path.length > 0 && FileUtils.test (folder_path, FileTest.IS_DIR)) {
             toast.set_button_label ("Open Folder");
-            toast.button_clicked.connect (() => {
-                try {
-                    var folder = File.new_for_path (folder_path);
-                    AppInfo.launch_default_for_uri (folder.get_uri (), null);
-                } catch (Error e) {
-                    warning ("Failed to open folder: %s", e.message);
-                }
-            });
+            var binding = new MainWindowToastFolderBinding ();
+            binding.folder_path = folder_path;
+            toast_folder_bindings.add (binding);
+            toast.button_clicked.connect (binding.on_button_clicked);
         }
 
         toast_overlay.add_toast (toast);
@@ -1820,13 +1831,22 @@ public class MainWindow : Adw.ApplicationWindow {
 int main (string[] args) {
     var app = new Adw.Application ("com.github.pieman.FFmpegConverterGTK", ApplicationFlags.DEFAULT_FLAGS);
 
-    app.activate.connect (() => {
-        var win = app.get_active_window () as MainWindow;
-        if (win == null) {
-            win = new MainWindow (app);
-        }
-        win.present ();
-    });
+    app.activate.connect (on_application_activate);
 
     return app.run (args);
+}
+
+private void on_application_activate (GLib.Application app) {
+    var gtk_app = app as Gtk.Application;
+    if (gtk_app == null)
+        return;
+
+    var win = gtk_app.get_active_window () as MainWindow;
+    if (win == null) {
+        var adw_app = app as Adw.Application;
+        if (adw_app == null)
+            return;
+        win = new MainWindow (adw_app);
+    }
+    win.present ();
 }

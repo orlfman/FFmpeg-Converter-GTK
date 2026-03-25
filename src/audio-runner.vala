@@ -417,7 +417,7 @@ public class AudioRunner : Object {
             }
 
             var seg = segments[i];
-            string ext = AudioBuilder.get_output_extension (config, source_codec);
+            string ext = AudioBuilder.get_output_extension (config, source_codec, 1);
             string tmp_path = Path.build_filename (tmp_dir, "seg_%d%s".printf (i, ext));
             temp_files.add (tmp_path);
 
