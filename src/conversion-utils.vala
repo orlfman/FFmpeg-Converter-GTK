@@ -550,17 +550,24 @@ namespace ConversionUtils {
         if (!name.has_prefix ("run-"))
             return false;
 
-        int split = name.last_index_of_char ('-');
-        if (split <= 4 || split >= name.length - 1)
+        string suffix = name.substring (4);
+        string[] parts = suffix.split ("-");
+        if (parts.length != 2 && parts.length != 3)
             return false;
 
-        string created_part = name.substring (4, split - 4);
-        string pid_part = name.substring (split + 1);
+        string created_part = parts[0];
+        string pid_part = parts[1];
         int64 created_usec = 0;
 
         if (!int64.try_parse (created_part, out created_usec)
             || !int.try_parse (pid_part, out pid)) {
             return false;
+        }
+
+        if (parts.length == 3) {
+            uint seq = 0;
+            if (!uint.try_parse (parts[2], out seq) || seq == 0)
+                return false;
         }
 
         return created_usec > 0 && pid > 0;
