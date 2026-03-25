@@ -395,28 +395,34 @@ public class SmartOptimizer : GLib.Object {
         OptimizationContext   ctx             = OptimizationContext (),
         Cancellable?          cancellable     = null
     ) throws Error {
-        int requested_target_mb = target_mb;
-        target_mb = target_mb.clamp (1, 4096);
-        if (target_mb != requested_target_mb) {
-            warning ("Smart Optimizer: target %d MB out of range, clamped to %d MB",
-                requested_target_mb, target_mb);
-        }
+        string? temp_run_dir = ConversionUtils.create_managed_temp_run_dir (
+            "smart-optimizer",
+            "analysis"
+        );
 
-        // ── 1. Probe ────────────────────────────────────────────────────
-        SmartOptimizerVideoInfo info;
         try {
-            info = yield probe_video (input_file, cancellable);
-        } catch (Error e) {
-            if (e is IOError.CANCELLED) throw e;
-            warning ("Probe failed: %s", e.message);
-            return make_error_rec (preferred_codec,
-                "Could not read video file: %s".printf (e.message));
-        }
-        if (info.duration <= 0) {
-            return make_error_rec (preferred_codec,
-                "Video has zero duration — ffprobe could not determine the length.\n"
-                + "The file may be corrupt, truncated, or in an unsupported container format.");
-        }
+            int requested_target_mb = target_mb;
+            target_mb = target_mb.clamp (1, 4096);
+            if (target_mb != requested_target_mb) {
+                warning ("Smart Optimizer: target %d MB out of range, clamped to %d MB",
+                    requested_target_mb, target_mb);
+            }
+
+            // ── 1. Probe ────────────────────────────────────────────────────
+            SmartOptimizerVideoInfo info;
+            try {
+                info = yield probe_video (input_file, cancellable);
+            } catch (Error e) {
+                if (e is IOError.CANCELLED) throw e;
+                warning ("Probe failed: %s", e.message);
+                return make_error_rec (preferred_codec,
+                    "Could not read video file: %s".printf (e.message));
+            }
+            if (info.duration <= 0) {
+                return make_error_rec (preferred_codec,
+                    "Video has zero duration — ffprobe could not determine the length.\n"
+                    + "The file may be corrupt, truncated, or in an unsupported container format.");
+            }
 
         // ── 1b. Apply context overrides ─────────────────────────────────
         double trim_start = (ctx.trim_start_seconds > 0)
@@ -646,7 +652,7 @@ public class SmartOptimizer : GLib.Object {
                 cal_sizes[ci] = yield calibration_encode (
                     input_file, preferred_codec, cal_crfs[ci], positions,
                     encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
-                    calibration_pix_fmt);
+                    calibration_pix_fmt, temp_run_dir);
             }
         } catch (IOError.CANCELLED e) {
             throw e;
@@ -727,7 +733,7 @@ public class SmartOptimizer : GLib.Object {
                         double extra_size = yield calibration_encode (
                             input_file, preferred_codec, extra_crfs[ci], positions,
                             encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
-                            calibration_pix_fmt);
+                            calibration_pix_fmt, temp_run_dir);
                         if (extra_size <= 0) {
                             warning ("Adaptive calibration produced invalid result: CRF %d → %.0fKiB",
                                 extra_crfs[ci], extra_size);
@@ -794,7 +800,7 @@ public class SmartOptimizer : GLib.Object {
                     verify_actual_kib = yield calibration_encode (
                         input_file, preferred_codec, predicted_crf, positions,
                         encode_duration, sample_segment_duration, vf, cancellable, preset_idx,
-                        calibration_pix_fmt);
+                        calibration_pix_fmt, temp_run_dir);
 
                     if (verify_actual_kib > 0) {
                         model_correction = verify_actual_kib / verify_model_kib;
@@ -847,7 +853,7 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 measured_audio_kbps = yield measure_audio_bitrate (
                     input_file, resolved_container, positions[0],
-                    sample_segment_duration, tier_audio, cancellable);
+                    sample_segment_duration, tier_audio, cancellable, temp_run_dir);
                 if (measured_audio_kbps > 0) {
                     // Sanity check: measured bitrate should not exceed
                     // 2× the tier budget (encoder overhead, container
@@ -1334,25 +1340,28 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  Video filters applied to calibration: yes\n");
         }
 
-        return OptimizationRecommendation () {
-            codec                 = preferred_codec,
-            crf                   = predicted_crf,
-            preset                = preset_label,
-            two_pass              = recommend_two_pass,
-            target_bitrate_kbps   = target_video_kbps,
-            estimated_size_kib    = estimated_total_kib,
-            notes                 = notes.str,
-            is_impossible         = is_impossible,
-            content_type          = profile.content_type,
-            confidence            = confidence,
-            size_tier             = tier,
-            recommended_audio_kbps = info.audio_bitrate_kbps,
-            stream_copy_audio     = use_stream_copy_audio,
-            strip_metadata        = (tier == SizeTier.TINY),
-            recommended_pix_fmt   = bit_depth.pix_fmt,
-            resolved_container    = resolved_container,
-            target_size_kib       = (int) target_total_kib
-        };
+            return OptimizationRecommendation () {
+                codec                 = preferred_codec,
+                crf                   = predicted_crf,
+                preset                = preset_label,
+                two_pass              = recommend_two_pass,
+                target_bitrate_kbps   = target_video_kbps,
+                estimated_size_kib    = estimated_total_kib,
+                notes                 = notes.str,
+                is_impossible         = is_impossible,
+                content_type          = profile.content_type,
+                confidence            = confidence,
+                size_tier             = tier,
+                recommended_audio_kbps = info.audio_bitrate_kbps,
+                stream_copy_audio     = use_stream_copy_audio,
+                strip_metadata        = (tier == SizeTier.TINY),
+                recommended_pix_fmt   = bit_depth.pix_fmt,
+                resolved_container    = resolved_container,
+                target_size_kib       = (int) target_total_kib
+            };
+        } finally {
+            cleanup_temp_run_dir (temp_run_dir);
+        }
     }
 
     /**
@@ -2425,10 +2434,11 @@ public class SmartOptimizer : GLib.Object {
         double        seek_pos,
         double        segment_duration,
         int           target_audio_kbps,
-        Cancellable?  cancellable = null
+        Cancellable?  cancellable = null,
+        string?       temp_run_dir = null
     ) throws Error {
         string ffmpeg = AppSettings.get_default ().ffmpeg_path;
-        string tmp = tmp_path ("audio_measure");
+        string tmp = tmp_path ("audio_measure", temp_run_dir);
 
         // Pick audio codec and raw container based on the resolved output container
         string audio_codec = (resolved_container == "webm") ? "libopus" : "aac";
@@ -2489,12 +2499,13 @@ public class SmartOptimizer : GLib.Object {
         string        video_filter_chain = "",
         Cancellable?  cancellable = null,
         int           preset_idx = -1,
-        string        pix_fmt = ""
+        string        pix_fmt = "",
+        string?       temp_run_dir = null
     ) throws Error {
         double sample_duration = double.min (
             (double) positions.length * segment_duration, full_duration);
 
-        string tmp = tmp_path ("cal_%d".printf (crf));
+        string tmp = tmp_path ("cal_%d".printf (crf), temp_run_dir);
 
         string[] cmd = build_concat_encode_cmd (
             input_file, codec, crf, positions, segment_duration, tmp,
@@ -2974,10 +2985,31 @@ public class SmartOptimizer : GLib.Object {
         return X264_PRESETS[preset_idx];
     }
 
-    private string tmp_path (string label) {
+    private string tmp_path (string label, string? temp_run_dir = null) {
+        if (temp_run_dir != null) {
+            string? managed_path = ConversionUtils.create_managed_temp_file (
+                temp_run_dir,
+                "smart-opt-" + label,
+                ".mkv"
+            );
+            if (managed_path != null) {
+                return managed_path;
+            }
+        }
+
         return GLib.Path.build_filename (
             Environment.get_tmp_dir (),
             "smart_opt_%s_%s.mkv".printf (label, get_real_time ().to_string ()));
+    }
+
+    private void cleanup_temp_run_dir (string? run_dir) {
+        if (run_dir == null)
+            return;
+
+        ConversionUtils.try_remove_empty_dir_chain (
+            run_dir,
+            ConversionUtils.get_app_temp_root ()
+        );
     }
 
     /**

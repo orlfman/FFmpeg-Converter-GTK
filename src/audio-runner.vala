@@ -389,10 +389,9 @@ public class AudioRunner : Object {
 
         // Create temp directory for intermediate files
         string tmp_dir;
-        try {
-            tmp_dir = DirUtils.make_tmp ("audio-concat-XXXXXX");
-        } catch (Error e) {
-            report_error ("Failed to create temp directory: " + e.message);
+        string create_error;
+        if (!create_concat_temp_dir (out tmp_dir, out create_error)) {
+            report_error ("Failed to create temp directory: " + create_error);
             return;
         }
 
@@ -625,8 +624,34 @@ public class AudioRunner : Object {
         if (FileUtils.unlink (concat_list) != 0) {
             warning ("AudioRunner: failed to remove concat list %s", concat_list);
         }
-        if (DirUtils.remove (dir) != 0) {
+        string managed_root = ConversionUtils.get_app_temp_root ();
+        if (ConversionUtils.is_same_or_descendant_path (dir, managed_root)) {
+            ConversionUtils.try_remove_empty_dir_chain (dir, managed_root);
+        } else if (DirUtils.remove (dir) != 0) {
             warning ("AudioRunner: failed to remove temp directory %s", dir);
+        }
+    }
+
+    private bool create_concat_temp_dir (out string dir, out string error_message) {
+        dir = "";
+        error_message = "";
+
+        string? managed_dir = ConversionUtils.create_managed_temp_run_dir (
+            "audio-runner",
+            "concat"
+        );
+        if (managed_dir != null) {
+            dir = managed_dir;
+            return true;
+        }
+
+        try {
+            dir = DirUtils.make_tmp ("audio-concat-XXXXXX");
+            return true;
+        } catch (Error e) {
+            warning ("AudioRunner: failed to create temp directory: %s", e.message);
+            error_message = e.message;
+            return false;
         }
     }
 

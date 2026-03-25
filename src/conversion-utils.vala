@@ -442,19 +442,30 @@ namespace ConversionUtils {
             return null;
         }
 
-        string run_dir = Path.build_filename (
-            base_dir,
-            "run-%s-%d".printf (
-                GLib.get_real_time ().to_string (),
-                (int) Posix.getpid ()
-            )
-        );
+        // Use sequence counter + exclusive mkdir to guarantee uniqueness,
+        // mirroring the pattern in create_managed_temp_file().
+        for (int attempt = 0; attempt < MAX_MANAGED_TEMP_FILE_ATTEMPTS; attempt++) {
+            string run_dir = Path.build_filename (
+                base_dir,
+                "run-%s-%d-%u".printf (
+                    GLib.get_real_time ().to_string (),
+                    (int) Posix.getpid (),
+                    next_managed_temp_file_sequence ()
+                )
+            );
 
-        if (DirUtils.create_with_parents (run_dir, TEMP_DIR_MODE) != 0) {
-            return null;
+            if (DirUtils.create (run_dir, TEMP_DIR_MODE) == 0) {
+                return run_dir;
+            }
+
+            // EEXIST means collision — retry with a new sequence number.
+            // Any other error is a real failure.
+            if (errno != Posix.EEXIST) {
+                return null;
+            }
         }
 
-        return run_dir;
+        return null;
     }
 
     internal bool is_same_or_descendant_path (string path, string ancestor) {
