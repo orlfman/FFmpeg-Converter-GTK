@@ -120,23 +120,23 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var css = new CssProvider ();
         css.load_from_string (
             ".settings-path-found {\n" +
-            "    color: #16c464;\n" +
+            "    color: @success_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".settings-path-missing {\n" +
-            "    color: #e74856;\n" +
+            "    color: @error_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".settings-path-checking {\n" +
-            "    color: #e5a50a;\n" +
+            "    color: @warning_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".settings-path-warning {\n" +
-            "    color: #e5a50a;\n" +
+            "    color: @warning_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n" +
             ".settings-overwrite-warning .title {\n" +
-            "    color: #e5a50a;\n" +
+            "    color: @warning_color;\n" +
             "    font-size: 0.85em;\n" +
             "}\n"
         );

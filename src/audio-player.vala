@@ -858,6 +858,8 @@ public class AudioPlayer : Box {
         if (_duration <= 0.0)
             return;
 
+        bool dark = Adw.StyleManager.get_default ().dark;
+
         // Draw segment regions
         if (highlight_segments.length > 0) {
             for (int i = 0; i < highlight_segments.length; i++) {
@@ -866,13 +868,21 @@ public class AudioPlayer : Box {
                 double x_end = (seg.end_time / _duration) * width;
                 double seg_width = (x_end - x_start).clamp (1.0, width);
 
-                // Filled region
-                cr.set_source_rgba (0.35, 0.60, 0.90, 0.22);
+                // Filled region — brighter tint on dark, deeper on light
+                if (dark) {
+                    cr.set_source_rgba (0.35, 0.60, 0.90, 0.22);
+                } else {
+                    cr.set_source_rgba (0.15, 0.40, 0.75, 0.18);
+                }
                 cr.rectangle (x_start, 0, seg_width, height);
                 cr.fill ();
 
                 // Bright edge lines at segment boundaries
-                cr.set_source_rgba (0.40, 0.65, 0.95, 0.6);
+                if (dark) {
+                    cr.set_source_rgba (0.40, 0.65, 0.95, 0.6);
+                } else {
+                    cr.set_source_rgba (0.15, 0.40, 0.75, 0.55);
+                }
                 cr.set_line_width (1.0);
                 cr.move_to (x_start, 0);
                 cr.line_to (x_start, height);
@@ -887,7 +897,6 @@ public class AudioPlayer : Box {
         double pos = get_position_seconds ();
         if (pos > 0.0) {
             double x = (pos / _duration) * width;
-            bool dark = Adw.StyleManager.get_default ().dark;
 
             // Glow
             if (dark) {

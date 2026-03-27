@@ -88,6 +88,9 @@ public class ConsoleTab : Box {
     private int search_match_count = 0;
     private int search_current_index = -1;
 
+    // ── Theme change tracking ───────────────────────────────────────────────
+    private ulong style_manager_dark_handler_id = 0;
+
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
     // ═════════════════════════════════════════════════════════════════════════
@@ -110,6 +113,8 @@ public class ConsoleTab : Box {
     }
 
     public override void dispose () {
+        disconnect_style_manager ();
+
         if (font_css != null) {
             var display = Gdk.Display.get_default ();
             if (display != null) {
@@ -160,10 +165,10 @@ public class ConsoleTab : Box {
             "    font-weight: 600;\n" +
             "}\n" +
             ".console-stat-error {\n" +
-            "    color: #e74856;\n" +
+            "    color: @error_color;\n" +
             "}\n" +
             ".console-stat-warning {\n" +
-            "    color: #e5a50a;\n" +
+            "    color: @warning_color;\n" +
             "}\n" +
             // Font size buttons
             ".console-font-btn {\n" +
@@ -397,6 +402,7 @@ public class ConsoleTab : Box {
         resolve_system_font ();
         apply_font_size ();
         create_text_tags ();
+        connect_style_manager ();
         setup_click_handler ();
 
         var scrolled = new ScrolledWindow ();
@@ -700,31 +706,51 @@ public class ConsoleTab : Box {
     private void create_text_tags () {
         var buffer = console_view.buffer;
 
-        tag_error = buffer.create_tag ("error",
-            "foreground", "#e74856"     // Soft red
-        );
-        tag_success = buffer.create_tag ("success",
-            "foreground", "#16c464"     // Soft green
-        );
-        tag_warning = buffer.create_tag ("warning",
-            "foreground", "#e5a50a"     // Amber
-        );
-        tag_info = buffer.create_tag ("info"
-            // No special color — uses theme default
-        );
-        tag_progress = buffer.create_tag ("progress",
-            "foreground", "#888888"     // Dimmed gray
-        );
-        tag_search_highlight = buffer.create_tag ("search-highlight",
-            "background", "#fce94f80"   // Translucent yellow
-        );
-        tag_search_active = buffer.create_tag ("search-active",
-            "background", "#f57900",    // Orange
-            "foreground", "#ffffff"
-        );
-        tag_error_click = buffer.create_tag ("error-click",
-            "background", "#e7485620"   // Translucent red
-        );
+        tag_error = buffer.create_tag ("error");
+        tag_success = buffer.create_tag ("success");
+        tag_warning = buffer.create_tag ("warning");
+        tag_info = buffer.create_tag ("info");
+        tag_progress = buffer.create_tag ("progress");
+        tag_search_highlight = buffer.create_tag ("search-highlight");
+        tag_search_active = buffer.create_tag ("search-active");
+        tag_error_click = buffer.create_tag ("error-click");
+
+        apply_tag_colors_for_theme ();
+    }
+
+    private void apply_tag_colors_for_theme () {
+        bool dark = Adw.StyleManager.get_default ().dark;
+
+        // Semantic colors — slightly adjusted per theme for good contrast
+        tag_error.foreground       = dark ? "#e74856" : "#c7243a";
+        tag_success.foreground     = dark ? "#16c464" : "#118a46";
+        tag_warning.foreground     = dark ? "#e5a50a" : "#a67908";
+        tag_progress.foreground    = dark ? "#888888" : "#6e6e6e";
+
+        // Search highlight — translucent tint behind matched text
+        tag_search_highlight.background = dark ? "#fce94f80" : "#f5d00060";
+
+        // Active search match — high contrast pill
+        tag_search_active.background = dark ? "#f57900" : "#e06800";
+        tag_search_active.foreground = "#ffffff";
+
+        // Clickable error background tint
+        tag_error_click.background = dark ? "#e7485620" : "#c7243a18";
+    }
+
+    private void connect_style_manager () {
+        var sm = Adw.StyleManager.get_default ();
+        style_manager_dark_handler_id = sm.notify["dark"].connect (() => {
+            apply_tag_colors_for_theme ();
+        });
+    }
+
+    private void disconnect_style_manager () {
+        if (style_manager_dark_handler_id == 0)
+            return;
+
+        Adw.StyleManager.get_default ().disconnect (style_manager_dark_handler_id);
+        style_manager_dark_handler_id = 0;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
