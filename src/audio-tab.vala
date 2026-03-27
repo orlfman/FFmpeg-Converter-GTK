@@ -3,11 +3,22 @@ using Adw;
 using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  AudioTab — Audio extraction from video files
+//  AudioTabMode — Selects between Extract, Remove, and Add operations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public enum AudioTabMode {
+    EXTRACT,
+    REMOVE,
+    ADD
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  AudioTab — Audio extraction and removal from video files
 //
 //  Supports stream copy, transcoding with full codec controls, audio
 //  processing (normalization, fade, downmix), a waveform-based audio player
-//  with multi-segment trimming, and batch extraction of all audio tracks.
+//  with multi-segment trimming, batch extraction of all audio tracks,
+//  and removing all audio streams from a file.
 //
 //  NOT based on BaseCodecTab — this is a standalone Box like SubtitlesTab.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -128,6 +139,31 @@ public class AudioTab : Box {
     private Adw.PreferencesGroup? extract_all_group;
     private Adw.ActionRow? extract_all_summary_row;
 
+    // ── Mode selector ─────────────────────────────────────────────────────────
+    private AudioTabMode current_mode = AudioTabMode.EXTRACT;
+    private ToggleButton extract_mode_btn;
+    private ToggleButton remove_mode_btn;
+    private ToggleButton add_mode_btn;
+
+    // ── Remove mode ───────────────────────────────────────────────────────────
+    private Adw.PreferencesGroup? remove_options_group;
+    private Adw.SwitchRow remove_all_row;
+    private Adw.SwitchRow remove_keep_subtitles_row;
+    private Adw.SwitchRow remove_strip_metadata_row;
+
+    // ── Add mode ──────────────────────────────────────────────────────────────
+    private Adw.PreferencesGroup? add_source_group;
+    private Adw.ActionRow add_source_row;
+    private string add_audio_file_path = "";
+    private Adw.PreferencesGroup? add_options_group;
+    private Adw.SwitchRow add_replace_row;
+    private Adw.SwitchRow add_keep_subtitles_row;
+    private Adw.SwitchRow add_strip_metadata_row;
+    private Adw.SwitchRow add_copy_mode_row;
+    private Adw.PreferencesGroup? add_codec_group;
+    private AudioSettings? add_audio_settings;
+    private Adw.StatusPage? add_no_file_page;
+
     // ── Runner ───────────────────────────────────────────────────────────────
     private AudioRunner? active_runner = null;
     private uint64 active_operation_id = 0;
@@ -149,6 +185,7 @@ public class AudioTab : Box {
 
         inject_audio_tab_css ();
 
+        build_mode_selector ();
         build_status_banner ();
         build_player_section ();
         build_mark_controls ();
@@ -165,6 +202,9 @@ public class AudioTab : Box {
         build_codec_controls ();
         build_processing_options ();
         build_extract_all ();
+        build_remove_options ();
+        build_add_audio_source ();
+        build_add_audio_options ();
 
         update_mode_visibility ();
     }
@@ -206,7 +246,7 @@ public class AudioTab : Box {
         if (stream_count_badge != null) stream_count_badge.set_visible (false);
 
         if (path.length == 0) {
-            show_no_audio ("No File Loaded", "Select an input file to extract audio");
+            show_no_audio ("No File Loaded", no_file_description ());
             emit_source_audio_probe (MediaStreamPresence.UNKNOWN);
             return;
         }
@@ -366,6 +406,14 @@ public class AudioTab : Box {
         return has_audio && current_input_file.length > 0;
     }
 
+    public bool can_remove () {
+        return has_audio && current_input_file.length > 0;
+    }
+
+    public AudioTabMode get_mode () {
+        return current_mode;
+    }
+
     public string get_input_file () {
         return current_input_file;
     }
@@ -431,6 +479,258 @@ public class AudioTab : Box {
             ext));
     }
 
+    /**
+     * Start audio removal — strips all audio streams from the file.
+     */
+    public bool start_remove (string input_file,
+                               string output_folder,
+                               StatusArea status_area,
+                               ConsoleTab console_tab,
+                               uint64 operation_id,
+                               bool allow_overwrite = false) {
+        if (has_pending_or_active_extract ()) {
+            status_area.set_status ("An audio operation is already running.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        if (!has_audio) {
+            status_area.set_status ("No audio stream found in the input file.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        // Determine output extension from input file
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        string out_path = Path.build_filename (
+            out_dir, "%s-noaudio%s".printf (name_no_ext, ext));
+        if (!allow_overwrite) {
+            string? unique = ConversionUtils.find_unique_path (out_path);
+            out_path = unique ?? out_path;
+        }
+
+        var runner_inst = new AudioRunner ();
+        runner_inst.input_file = input_file;
+        runner_inst.status_area = status_area;
+        runner_inst.progress_bar = status_area.progress_bar;
+        runner_inst.console_tab = console_tab;
+        runner_inst.set_primary_output (out_path);
+        runner_inst.set_total_duration (loaded_duration);
+
+        activate_runner (runner_inst, operation_id);
+        bool remove_all = remove_all_row.get_active ();
+        runner_inst.run_remove (
+            remove_all ? -1 : all_audio_streams[selected_stream_index].audio_index,
+            all_audio_streams.length,
+            remove_keep_subtitles_row.get_active (),
+            remove_strip_metadata_row.get_active ()
+        );
+        return true;
+    }
+
+    /**
+     * Return the expected output path for Remove Audio,
+     * without auto-rename.  Used by the overwrite protection dialog.
+     */
+    public string get_expected_remove_output_path (string input_file,
+                                                    string output_folder) {
+        if (input_file.length == 0 || !has_audio) return "";
+
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        return Path.build_filename (
+            out_dir, "%s-noaudio%s".printf (name_no_ext, ext));
+    }
+
+    /**
+     * Whether the Add Audio operation can run.
+     * Needs an input video file and a selected external audio file.
+     */
+    public bool can_add_audio () {
+        return current_input_file.length > 0 && add_audio_file_path.length > 0;
+    }
+
+    /**
+     * Start the add-audio (mux) operation.
+     */
+    public bool start_add_audio (string input_file,
+                                  string output_folder,
+                                  StatusArea status_area,
+                                  ConsoleTab console_tab,
+                                  uint64 operation_id,
+                                  bool allow_overwrite = false) {
+        if (has_pending_or_active_extract ()) {
+            status_area.set_status ("An audio operation is already running.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        if (add_audio_file_path.length == 0) {
+            status_area.set_status ("Please select an audio file to add.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        // Output uses same container as input
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        bool replace = add_replace_row.get_active ();
+        string suffix = replace ? "-replaced-audio" : "-added-audio";
+        string out_path = Path.build_filename (
+            out_dir, "%s%s%s".printf (name_no_ext, suffix, ext));
+        if (!allow_overwrite) {
+            string? unique = ConversionUtils.find_unique_path (out_path);
+            out_path = unique ?? out_path;
+        }
+
+        // Build audio codec args
+        bool copy_mode = add_copy_mode_row.get_active ();
+        string[] audio_codec_args;
+        if (copy_mode) {
+            audio_codec_args = { "-c:a", "copy" };
+        } else {
+            audio_codec_args = AudioSettings.build_transcode_args_from_snapshot (
+                add_audio_settings.snapshot_settings (), true, 0);
+        }
+
+        var runner_inst = new AudioRunner ();
+        runner_inst.input_file = input_file;
+        runner_inst.status_area = status_area;
+        runner_inst.progress_bar = status_area.progress_bar;
+        runner_inst.console_tab = console_tab;
+        runner_inst.set_primary_output (out_path);
+        runner_inst.set_total_duration (loaded_duration);
+
+        activate_runner (runner_inst, operation_id);
+        runner_inst.run_add_audio (
+            add_audio_file_path,
+            replace,
+            all_audio_streams.length,
+            add_keep_subtitles_row.get_active (),
+            add_strip_metadata_row.get_active (),
+            audio_codec_args
+        );
+        return true;
+    }
+
+    /**
+     * Return the expected output path for Add Audio,
+     * without auto-rename.  Used by the overwrite protection dialog.
+     */
+    public string get_expected_add_audio_output_path (string input_file,
+                                                       string output_folder) {
+        if (input_file.length == 0 || add_audio_file_path.length == 0) return "";
+
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        bool replace = add_replace_row.get_active ();
+        string suffix = replace ? "-replaced-audio" : "-added-audio";
+        return Path.build_filename (
+            out_dir, "%s%s%s".printf (name_no_ext, suffix, ext));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  0. MODE SELECTOR
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_mode_selector () {
+        var mode_box = new Box (Orientation.HORIZONTAL, 0);
+        mode_box.add_css_class ("linked");
+        mode_box.set_halign (Align.CENTER);
+
+        extract_mode_btn = new ToggleButton.with_label ("Extract");
+        extract_mode_btn.set_active (true);
+
+        remove_mode_btn = new ToggleButton.with_label ("Remove");
+        remove_mode_btn.set_group (extract_mode_btn);
+
+        add_mode_btn = new ToggleButton.with_label ("Add / Replace");
+        add_mode_btn.set_group (extract_mode_btn);
+
+        mode_box.append (extract_mode_btn);
+        mode_box.append (remove_mode_btn);
+        mode_box.append (add_mode_btn);
+        append (mode_box);
+
+        extract_mode_btn.toggled.connect (on_mode_toggled);
+        remove_mode_btn.toggled.connect (on_mode_toggled);
+        add_mode_btn.toggled.connect (on_mode_toggled);
+    }
+
+    private void on_mode_toggled () {
+        AudioTabMode new_mode;
+        if (remove_mode_btn.get_active ()) {
+            new_mode = AudioTabMode.REMOVE;
+        } else if (add_mode_btn.get_active ()) {
+            new_mode = AudioTabMode.ADD;
+        } else {
+            new_mode = AudioTabMode.EXTRACT;
+        }
+        if (new_mode != current_mode) {
+            current_mode = new_mode;
+            update_tab_mode ();
+        }
+    }
+
+    private void update_tab_mode () {
+        bool add = current_mode == AudioTabMode.ADD;
+
+        if (add) {
+            // In Add mode, we need a loaded video file but not necessarily audio
+            bool has_file = current_input_file.length > 0;
+            no_audio_page.set_visible (!has_file);
+            info_group.set_visible (has_file && has_audio);
+            if (!has_file) {
+                no_audio_page.set_description (no_file_description ());
+            }
+            set_controls_visible (has_file);
+        } else {
+            // Extract/Remove modes require audio
+            no_audio_page.set_visible (!has_audio);
+            info_group.set_visible (has_audio);
+            if (!has_audio) {
+                no_audio_page.set_description (no_file_description ());
+            }
+            set_controls_visible (has_audio);
+        }
+    }
+
+    private string no_file_description () {
+        switch (current_mode) {
+        case AudioTabMode.REMOVE:
+            return "Select a file with audio to remove audio tracks";
+        case AudioTabMode.ADD:
+            return "Select a video file to add audio";
+        default:
+            return "Select a file with audio to begin extraction";
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  1. STATUS BANNER
     // ═════════════════════════════════════════════════════════════════════════
@@ -440,7 +740,7 @@ public class AudioTab : Box {
         no_audio_page = new Adw.StatusPage ();
         no_audio_page.set_icon_name ("audio-x-generic-symbolic");
         no_audio_page.set_title ("No Audio Streams Found");
-        no_audio_page.set_description ("Select a file with audio to begin extraction");
+        no_audio_page.set_description (no_file_description ());
         no_audio_page.set_visible (true);
         append (no_audio_page);
 
@@ -467,9 +767,17 @@ public class AudioTab : Box {
         no_audio_page.set_icon_name ("audio-x-generic-symbolic");
         no_audio_page.set_title (title);
         no_audio_page.set_description (description);
-        no_audio_page.set_visible (true);
         info_group.set_visible (false);
         set_controls_visible (false);
+
+        // In Add mode with a loaded file, audio in the primary file isn't
+        // required — hide the no-audio banner and show the add controls.
+        if (current_mode == AudioTabMode.ADD && current_input_file.length > 0) {
+            no_audio_page.set_visible (false);
+            set_controls_visible (true);
+        } else {
+            no_audio_page.set_visible (true);
+        }
     }
 
     private void show_probe_pending () {
@@ -497,16 +805,45 @@ public class AudioTab : Box {
     }
 
     private void set_controls_visible (bool visible) {
-        player.set_visible (visible);
-        if (mark_group != null) mark_group.set_visible (visible);
-        if (seg_box != null) seg_box.set_visible (visible);
-        if (output_separator != null) output_separator.set_visible (visible);
-        if (output_group != null) output_group.set_visible (visible);
+        bool extract = current_mode == AudioTabMode.EXTRACT;
+        bool remove = current_mode == AudioTabMode.REMOVE;
+        bool add = current_mode == AudioTabMode.ADD;
+
+        // Extract-mode controls
+        player.set_visible (visible && extract);
+        if (mark_group != null) mark_group.set_visible (visible && extract);
+        if (seg_box != null) seg_box.set_visible (visible && extract);
+        if (output_separator != null) output_separator.set_visible (visible && extract);
+        if (output_group != null) output_group.set_visible (visible && extract);
         if (codec_group != null)
-            codec_group.set_visible (visible && copy_mode_row != null && !copy_mode_row.get_active ());
+            codec_group.set_visible (visible && extract
+                && copy_mode_row != null && !copy_mode_row.get_active ());
         if (processing_group != null)
-            processing_group.set_visible (visible && copy_mode_row != null && !copy_mode_row.get_active ());
-        if (extract_all_group != null) extract_all_group.set_visible (visible);
+            processing_group.set_visible (visible && extract
+                && copy_mode_row != null && !copy_mode_row.get_active ());
+        if (extract_all_group != null) extract_all_group.set_visible (visible && extract);
+
+        // Remove-mode controls
+        if (remove_options_group != null)
+            remove_options_group.set_visible (visible && remove);
+        if (remove_all_row != null)
+            remove_all_row.set_visible (all_audio_streams.length > 1);
+
+        // Add-mode controls — gated on visible (= has_file in Add mode)
+        // so they don't show alongside the main no-file status page
+        if (add_no_file_page != null)
+            add_no_file_page.set_visible (visible && add
+                && add_audio_file_path.length == 0);
+        if (add_source_group != null)
+            add_source_group.set_visible (visible && add
+                && add_audio_file_path.length > 0);
+        if (add_options_group != null)
+            add_options_group.set_visible (visible && add
+                && add_audio_file_path.length > 0);
+        if (add_codec_group != null)
+            add_codec_group.set_visible (visible && add
+                && add_audio_file_path.length > 0
+                && add_copy_mode_row != null && !add_copy_mode_row.get_active ());
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -964,6 +1301,353 @@ public class AudioTab : Box {
         if (all_audio_streams.length == 0 || current_input_file.length == 0)
             return;
         audio_extract_all_requested ();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  9. REMOVE AUDIO OPTIONS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_remove_options () {
+        remove_options_group = new Adw.PreferencesGroup ();
+        remove_options_group.set_title ("Remove Audio");
+        remove_options_group.set_description (
+            "Remove the selected audio track from the file without re-encoding");
+        remove_options_group.set_visible (false);
+
+        remove_all_row = new Adw.SwitchRow ();
+        remove_all_row.set_title ("Remove All Audio Tracks");
+        remove_all_row.set_subtitle ("Strip every audio stream instead of just the selected one");
+        remove_all_row.set_active (false);
+        remove_options_group.add (remove_all_row);
+
+        remove_keep_subtitles_row = new Adw.SwitchRow ();
+        remove_keep_subtitles_row.set_title ("Keep Subtitles");
+        remove_keep_subtitles_row.set_subtitle ("Preserve subtitle tracks in the output");
+        remove_keep_subtitles_row.set_active (true);
+        remove_options_group.add (remove_keep_subtitles_row);
+
+        remove_strip_metadata_row = new Adw.SwitchRow ();
+        remove_strip_metadata_row.set_title ("Strip Metadata");
+        remove_strip_metadata_row.set_subtitle ("Remove all metadata tags from output");
+        remove_strip_metadata_row.set_active (false);
+        remove_options_group.add (remove_strip_metadata_row);
+
+        append (remove_options_group);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  10. ADD AUDIO — Source file picker and probe info
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private const string[] AUDIO_EXTENSIONS = {
+        ".mp3", ".aac", ".flac", ".wav", ".m4a", ".opus", ".ogg", ".mka",
+        ".wma", ".ac3", ".eac3", ".dts"
+    };
+
+    private static bool is_audio_file (string path) {
+        string lower = path.down ();
+        foreach (unowned string ext in AUDIO_EXTENSIONS) {
+            if (lower.has_suffix (ext)) return true;
+        }
+        return false;
+    }
+
+    private void build_add_audio_source () {
+        // Placeholder shown when no audio file is selected — clickable + drag-drop
+        add_no_file_page = new Adw.StatusPage ();
+        add_no_file_page.set_icon_name ("list-add-symbolic");
+        add_no_file_page.set_title ("No Audio File Selected");
+        add_no_file_page.set_description ("Click here or drag and drop an audio file");
+        add_no_file_page.set_visible (false);
+        add_no_file_page.set_cursor_from_name ("pointer");
+
+        // Click anywhere on the status page to browse
+        var click = new GestureClick ();
+        click.released.connect ((n, x, y) => {
+            on_add_audio_browse_clicked ();
+        });
+        add_no_file_page.add_controller (click);
+
+        // Drag-and-drop: accept file drops
+        var file_drop = new DropTarget (typeof (File), Gdk.DragAction.COPY);
+        file_drop.enter.connect ((x, y) => {
+            add_no_file_page.add_css_class ("audio-drop-active");
+            return Gdk.DragAction.COPY;
+        });
+        file_drop.leave.connect (() => {
+            add_no_file_page.remove_css_class ("audio-drop-active");
+        });
+        file_drop.drop.connect ((val, x, y) => {
+            add_no_file_page.remove_css_class ("audio-drop-active");
+            var file = val.get_object () as File;
+            if (file == null) return false;
+            string? path = file.get_path ();
+            if (path == null || !is_audio_file (path)) return false;
+            apply_add_audio_path (path);
+            return true;
+        });
+        add_no_file_page.add_controller (file_drop);
+
+        // Also accept plain text URI drops
+        var text_drop = new DropTarget (Type.STRING, Gdk.DragAction.COPY);
+        text_drop.enter.connect ((x, y) => {
+            add_no_file_page.add_css_class ("audio-drop-active");
+            return Gdk.DragAction.COPY;
+        });
+        text_drop.leave.connect (() => {
+            add_no_file_page.remove_css_class ("audio-drop-active");
+        });
+        text_drop.drop.connect ((val, x, y) => {
+            add_no_file_page.remove_css_class ("audio-drop-active");
+            string? text = val.get_string ();
+            if (text == null) return false;
+            string path = resolve_dropped_text (text);
+            if (path.length > 0 && is_audio_file (path)) {
+                apply_add_audio_path (path);
+                return true;
+            }
+            return false;
+        });
+        add_no_file_page.add_controller (text_drop);
+
+        inject_add_audio_drop_css ();
+        append (add_no_file_page);
+
+        add_source_group = new Adw.PreferencesGroup ();
+        add_source_group.set_title ("Audio Source");
+        add_source_group.set_visible (false);
+
+        add_source_row = new Adw.ActionRow ();
+        add_source_row.set_title ("No file selected");
+        add_source_row.set_subtitle ("Choose an audio file to add");
+        add_source_row.add_prefix (make_icon ("audio-x-generic-symbolic"));
+
+        var browse_btn = new Button.with_label ("Browse…");
+        browse_btn.add_css_class ("suggested-action");
+        browse_btn.set_valign (Align.CENTER);
+        browse_btn.clicked.connect (on_add_audio_browse_clicked);
+        add_source_row.add_suffix (browse_btn);
+
+        var clear_btn = new Button.from_icon_name ("edit-clear-symbolic");
+        clear_btn.set_tooltip_text ("Clear selected audio file");
+        clear_btn.add_css_class ("flat");
+        clear_btn.set_valign (Align.CENTER);
+        clear_btn.clicked.connect (() => {
+            add_audio_file_path = "";
+            add_source_row.set_title ("No file selected");
+            add_source_row.set_subtitle ("Choose an audio file to add");
+            set_controls_visible (current_input_file.length > 0);
+        });
+        add_source_row.add_suffix (clear_btn);
+
+        add_source_group.add (add_source_row);
+
+        // Drag-and-drop on the source group to replace the selected file
+        var src_file_drop = new DropTarget (typeof (File), Gdk.DragAction.COPY);
+        src_file_drop.enter.connect ((x, y) => {
+            add_source_group.add_css_class ("audio-drop-active");
+            return Gdk.DragAction.COPY;
+        });
+        src_file_drop.leave.connect (() => {
+            add_source_group.remove_css_class ("audio-drop-active");
+        });
+        src_file_drop.drop.connect ((val, x, y) => {
+            add_source_group.remove_css_class ("audio-drop-active");
+            var file = val.get_object () as File;
+            if (file == null) return false;
+            string? path = file.get_path ();
+            if (path == null || !is_audio_file (path)) return false;
+            apply_add_audio_path (path);
+            return true;
+        });
+        add_source_group.add_controller (src_file_drop);
+
+        var src_text_drop = new DropTarget (Type.STRING, Gdk.DragAction.COPY);
+        src_text_drop.enter.connect ((x, y) => {
+            add_source_group.add_css_class ("audio-drop-active");
+            return Gdk.DragAction.COPY;
+        });
+        src_text_drop.leave.connect (() => {
+            add_source_group.remove_css_class ("audio-drop-active");
+        });
+        src_text_drop.drop.connect ((val, x, y) => {
+            add_source_group.remove_css_class ("audio-drop-active");
+            string? text = val.get_string ();
+            if (text == null) return false;
+            string path = resolve_dropped_text (text);
+            if (path.length > 0 && is_audio_file (path)) {
+                apply_add_audio_path (path);
+                return true;
+            }
+            return false;
+        });
+        add_source_group.add_controller (src_text_drop);
+
+        append (add_source_group);
+    }
+
+    private void on_add_audio_browse_clicked () {
+        var dialog = new FileDialog ();
+        dialog.title = "Select Audio File";
+
+        var audio_filter = new FileFilter ();
+        audio_filter.name = "Audio files (.mp3, .aac, .flac, .wav, .m4a, .opus, .ogg, .mka)";
+        audio_filter.add_pattern ("*.mp3");
+        audio_filter.add_pattern ("*.aac");
+        audio_filter.add_pattern ("*.flac");
+        audio_filter.add_pattern ("*.wav");
+        audio_filter.add_pattern ("*.m4a");
+        audio_filter.add_pattern ("*.opus");
+        audio_filter.add_pattern ("*.ogg");
+        audio_filter.add_pattern ("*.mka");
+        audio_filter.add_pattern ("*.wma");
+        audio_filter.add_pattern ("*.ac3");
+        audio_filter.add_pattern ("*.eac3");
+        audio_filter.add_pattern ("*.dts");
+
+        var all_filter = new FileFilter ();
+        all_filter.name = "All files";
+        all_filter.add_pattern ("*");
+
+        var filters = new GLib.ListStore (typeof (FileFilter));
+        filters.append (audio_filter);
+        filters.append (all_filter);
+        dialog.set_filters (filters);
+
+        dialog.open.begin (get_root () as Gtk.Window, null, (obj, res) => {
+            try {
+                var file = dialog.open.end (res);
+                if (file == null) return;
+                string? path = file.get_path ();
+                if (path == null) return;
+                apply_add_audio_path (path);
+            } catch (Error e) {
+                // User cancelled — ignore
+            }
+        });
+    }
+
+    private void apply_add_audio_path (string path) {
+        add_audio_file_path = path;
+        string basename = Path.get_basename (path);
+        add_source_row.set_title (basename);
+        add_source_row.set_subtitle (path);
+
+        // Probe the audio file for info
+        probe_add_audio_file.begin (path);
+
+        set_controls_visible (current_input_file.length > 0);
+    }
+
+    private async void probe_add_audio_file (string path) {
+        var result = yield FfprobeUtils.probe_all_audio_streams_async (path, null);
+        if (!result.success || result.streams.length == 0) {
+            add_source_row.set_subtitle ("No audio streams found in file");
+            return;
+        }
+
+        var info = result.streams[0];
+        add_source_row.set_subtitle (info.display_label ());
+    }
+
+    /**
+     * Resolve a dropped text payload into a local file path.
+     * Handles file:// URIs, newline-separated URI lists, and plain paths.
+     */
+    private static string resolve_dropped_text (string text) {
+        string trimmed = text.strip ();
+        if (trimmed.length == 0) return "";
+
+        string first_line = trimmed.split ("\n")[0].strip ();
+        if (first_line.has_suffix ("\r"))
+            first_line = first_line.substring (0, first_line.length - 1);
+
+        if (first_line.has_prefix ("file://")) {
+            var gfile = File.new_for_uri (first_line);
+            return gfile.get_path () ?? "";
+        }
+
+        if (first_line.has_prefix ("/")) {
+            return first_line;
+        }
+
+        return "";
+    }
+
+    private static bool add_audio_drop_css_injected = false;
+
+    private static void inject_add_audio_drop_css () {
+        if (add_audio_drop_css_injected) return;
+        add_audio_drop_css_injected = true;
+
+        var css = new CssProvider ();
+        css.load_from_string (
+            ".audio-drop-active {\n" +
+            "    outline: 2px dashed @accent_color;\n" +
+            "    outline-offset: 4px;\n" +
+            "    border-radius: 12px;\n" +
+            "    background: alpha(@accent_color, 0.06);\n" +
+            "    transition: outline 150ms ease, background 150ms ease;\n" +
+            "}\n"
+        );
+        GtkCompat.add_provider_for_display (
+            Gdk.Display.get_default (),
+            css,
+            STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  11. ADD AUDIO — Options
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_add_audio_options () {
+        add_options_group = new Adw.PreferencesGroup ();
+        add_options_group.set_title ("Options");
+        add_options_group.set_visible (false);
+
+        add_replace_row = new Adw.SwitchRow ();
+        add_replace_row.set_title ("Replace Existing Audio");
+        add_replace_row.set_subtitle ("Remove original audio tracks and use only the new one");
+        add_replace_row.set_active (false);
+        add_options_group.add (add_replace_row);
+
+        add_copy_mode_row = new Adw.SwitchRow ();
+        add_copy_mode_row.set_title ("Stream Copy");
+        add_copy_mode_row.set_subtitle ("Copy audio without re-encoding (fastest, lossless)");
+        add_copy_mode_row.set_active (true);
+        add_copy_mode_row.notify["active"].connect (() => {
+            update_add_codec_visibility ();
+        });
+        add_options_group.add (add_copy_mode_row);
+
+        add_keep_subtitles_row = new Adw.SwitchRow ();
+        add_keep_subtitles_row.set_title ("Keep Subtitles");
+        add_keep_subtitles_row.set_subtitle ("Preserve subtitle tracks in the output");
+        add_keep_subtitles_row.set_active (true);
+        add_options_group.add (add_keep_subtitles_row);
+
+        add_strip_metadata_row = new Adw.SwitchRow ();
+        add_strip_metadata_row.set_title ("Strip Metadata");
+        add_strip_metadata_row.set_subtitle ("Remove all metadata tags from output");
+        add_strip_metadata_row.set_active (false);
+        add_options_group.add (add_strip_metadata_row);
+
+        append (add_options_group);
+
+        // Codec controls for transcode mode
+        add_audio_settings = new AudioSettings (AudioSettingsMode.TRANSCODE_ONLY);
+        add_codec_group = add_audio_settings.get_widget ();
+        add_codec_group.set_visible (false);
+        append (add_codec_group);
+    }
+
+    private void update_add_codec_visibility () {
+        bool show = current_mode == AudioTabMode.ADD
+            && add_audio_file_path.length > 0
+            && add_copy_mode_row != null
+            && !add_copy_mode_row.get_active ();
+        if (add_codec_group != null) add_codec_group.set_visible (show);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -16,7 +16,9 @@ private enum ActiveOperation {
     TRIMMING,
     SUBTITLE_EXTRACT,
     SUBTITLE_APPLY,
-    AUDIO_EXTRACT
+    AUDIO_EXTRACT,
+    AUDIO_REMOVE,
+    AUDIO_ADD
 }
 
 private enum AudioCopyUnknownPreflightResult {
@@ -266,14 +268,26 @@ public class MainWindow : Adw.ApplicationWindow {
         });
 
         audio_tab.audio_extract_succeeded.connect ((operation_id, output_result) => {
-            if (!complete_tracked_operation (
-                    ActiveOperation.AUDIO_EXTRACT, operation_id, true)) {
+            // Matches Extract, Remove, and Add operations
+            ActiveOperation op = resolve_audio_operation ();
+
+            if (!complete_tracked_operation (op, operation_id, true)) {
                 return;
             }
 
-            string toast_title = (output_result.summary.length > 0)
-                ? output_result.summary
-                : "Audio extraction complete";
+            string toast_title;
+            if (output_result.summary.length > 0) {
+                toast_title = output_result.summary;
+            } else {
+                switch (op) {
+                case ActiveOperation.AUDIO_REMOVE:
+                    toast_title = "Audio removed"; break;
+                case ActiveOperation.AUDIO_ADD:
+                    toast_title = "Audio added"; break;
+                default:
+                    toast_title = "Audio extraction complete"; break;
+                }
+            }
             post_success_toast (toast_title, output_result);
 
             if (output_result.kind == OperationOutputKind.FILE) {
@@ -290,11 +304,11 @@ public class MainWindow : Adw.ApplicationWindow {
         });
         audio_tab.audio_extract_failed.connect ((operation_id) => {
             complete_tracked_operation_with_close (
-                ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+                resolve_audio_operation (), operation_id, true);
         });
         audio_tab.audio_extract_cancelled.connect ((operation_id) => {
             complete_tracked_operation_with_close (
-                ActiveOperation.AUDIO_EXTRACT, operation_id, true);
+                resolve_audio_operation (), operation_id, true);
         });
 
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
@@ -470,12 +484,23 @@ public class MainWindow : Adw.ApplicationWindow {
         case ActiveOperation.SUBTITLE_EXTRACT: return "subtitle extraction";
         case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
         case ActiveOperation.AUDIO_EXTRACT:  return "audio extraction";
+        case ActiveOperation.AUDIO_REMOVE:   return "audio removal";
+        case ActiveOperation.AUDIO_ADD:      return "audio muxing";
         default:                             return idle_fallback;
         }
     }
 
     private string get_operation_activity_phrase () {
         return operation_launch_pending ? "is already being prepared" : "is already running";
+    }
+
+    /** Resolve the current audio operation type for signal dispatch. */
+    private ActiveOperation resolve_audio_operation () {
+        switch (current_operation) {
+        case ActiveOperation.AUDIO_REMOVE: return ActiveOperation.AUDIO_REMOVE;
+        case ActiveOperation.AUDIO_ADD:    return ActiveOperation.AUDIO_ADD;
+        default:                           return ActiveOperation.AUDIO_EXTRACT;
+        }
     }
 
     /** Wrap a widget in a ScrolledWindow and add as a ViewStack page with icon. */
@@ -535,8 +560,38 @@ public class MainWindow : Adw.ApplicationWindow {
 
         string? page = view_stack.visible_child_name;
 
-        // ── Audio has its own extraction path ─────────────────────────────
+        // ── Audio has extraction, removal, and add paths ──────────────────
         if (page == "audio") {
+            if (audio_tab.get_mode () == AudioTabMode.REMOVE) {
+                if (!audio_tab.can_remove ()) {
+                    status_area.set_status (
+                        "Load a file with audio to remove audio tracks!",
+                        StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                    return;
+                }
+
+                uint64 operation_id;
+                if (!reserve_pending_operation (ActiveOperation.AUDIO_REMOVE, out operation_id))
+                    return;
+                start_audio_remove (operation_id);
+                return;
+            }
+
+            if (audio_tab.get_mode () == AudioTabMode.ADD) {
+                if (!audio_tab.can_add_audio ()) {
+                    status_area.set_status (
+                        "Select a video file and an audio file to add!",
+                        StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                    return;
+                }
+
+                uint64 operation_id;
+                if (!reserve_pending_operation (ActiveOperation.AUDIO_ADD, out operation_id))
+                    return;
+                start_audio_add (operation_id);
+                return;
+            }
+
             if (!audio_tab.can_extract ()) {
                 status_area.set_status (
                     "Load a file with audio to begin extraction!",
@@ -1018,6 +1073,110 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         activate_cancel (ActiveOperation.AUDIO_EXTRACT, operation_id);
+    }
+
+    // ── Audio removal path ───────────────────────────────────────────────────
+
+    private void start_audio_remove (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id))
+            return;
+
+        string input_file = file_pickers.input_entry.get_text ();
+        string output_folder = file_pickers.output_entry.get_text ();
+        string expected = audio_tab.get_expected_remove_output_path (
+            input_file, output_folder);
+
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            launch_audio_remove (input_file, output_folder, operation_id, true);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id))
+                        return;
+                    launch_audio_remove (input_file, output_folder, operation_id, true);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id))
+                        return;
+                    launch_audio_remove (input_file, output_folder, operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id, true);
+                }
+            );
+        } else {
+            launch_audio_remove (input_file, output_folder, operation_id);
+        }
+    }
+
+    private void launch_audio_remove (string input_file, string output_folder,
+                                       uint64 operation_id,
+                                       bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id))
+            return;
+
+        if (!audio_tab.start_remove (input_file, output_folder,
+                                      status_area, console_tab, operation_id,
+                                      allow_overwrite)) {
+            release_pending_operation (ActiveOperation.AUDIO_REMOVE, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.AUDIO_REMOVE, operation_id);
+    }
+
+    // ── Audio add path ───────────────────────────────────────────────────────
+
+    private void start_audio_add (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_ADD, operation_id))
+            return;
+
+        string input_file = file_pickers.input_entry.get_text ();
+        string output_folder = file_pickers.output_entry.get_text ();
+        string expected = audio_tab.get_expected_add_audio_output_path (
+            input_file, output_folder);
+
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            launch_audio_add (input_file, output_folder, operation_id, true);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_ADD, operation_id))
+                        return;
+                    launch_audio_add (input_file, output_folder, operation_id, true);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_ADD, operation_id))
+                        return;
+                    launch_audio_add (input_file, output_folder, operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.AUDIO_ADD, operation_id, true);
+                }
+            );
+        } else {
+            launch_audio_add (input_file, output_folder, operation_id);
+        }
+    }
+
+    private void launch_audio_add (string input_file, string output_folder,
+                                    uint64 operation_id,
+                                    bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_ADD, operation_id))
+            return;
+
+        if (!audio_tab.start_add_audio (input_file, output_folder,
+                                         status_area, console_tab, operation_id,
+                                         allow_overwrite)) {
+            release_pending_operation (ActiveOperation.AUDIO_ADD, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.AUDIO_ADD, operation_id);
     }
 
     // ── Crop & Trim path ─────────────────────────────────────────────────────
@@ -1688,6 +1847,18 @@ public class MainWindow : Adw.ApplicationWindow {
                 case ActiveOperation.AUDIO_EXTRACT:
                     audio_tab.cancel_extract ();
                     message = "Audio extraction cancelled by user.";
+                    should_release_operation = false;
+                    break;
+
+                case ActiveOperation.AUDIO_REMOVE:
+                    audio_tab.cancel_extract ();
+                    message = "Audio removal cancelled by user.";
+                    should_release_operation = false;
+                    break;
+
+                case ActiveOperation.AUDIO_ADD:
+                    audio_tab.cancel_extract ();
+                    message = "Audio muxing cancelled by user.";
                     should_release_operation = false;
                     break;
 

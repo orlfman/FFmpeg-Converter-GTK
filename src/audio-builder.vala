@@ -596,4 +596,153 @@ namespace AudioBuilder {
             output_file
         };
     }
+
+    /**
+     * Build a command to remove audio from a file.
+     * When audio_stream_index >= 0 and multiple streams exist, removes only
+     * that stream.  Otherwise removes all audio.
+     * Copies video and (optionally) subtitle streams without re-encoding.
+     */
+    public string[] build_remove_audio_cmd (string input_file,
+                                             string output_file,
+                                             int audio_stream_index,
+                                             int total_audio_streams,
+                                             bool keep_subtitles,
+                                             bool strip_metadata) {
+        var cmd = new GenericArray<string> ();
+        cmd.add (AppSettings.get_default ().ffmpeg_path);
+        cmd.add ("-y");
+        cmd.add ("-i");
+        cmd.add (input_file);
+
+        // Map everything, then exclude audio:
+        //  - audio_stream_index < 0 → remove ALL audio streams
+        //  - single stream          → remove all (same effect)
+        //  - otherwise              → remove only the selected stream
+        cmd.add ("-map");
+        cmd.add ("0");
+        if (audio_stream_index >= 0 && total_audio_streams > 1) {
+            cmd.add ("-map");
+            cmd.add ("-0:a:%d".printf (audio_stream_index));
+        } else {
+            cmd.add ("-map");
+            cmd.add ("-0:a");
+        }
+
+        if (!keep_subtitles) {
+            cmd.add ("-map");
+            cmd.add ("-0:s");
+        }
+
+        cmd.add ("-c");
+        cmd.add ("copy");
+
+        if (strip_metadata) {
+            cmd.add ("-map_metadata");
+            cmd.add ("-1");
+        }
+
+        cmd.add ("-progress");
+        cmd.add ("pipe:2");
+        cmd.add (output_file);
+        return StringArrayUtils.copy_generic_array (cmd);
+    }
+
+    /**
+     * Build a command to mux an external audio file into a video file.
+     *
+     * @param replace_audio  If true, drop existing audio and use only the new track.
+     *                       If false, keep existing audio and append the new track.
+     * @param audio_codec_args  Codec arguments for the new audio track (e.g. {"-c:a", "copy"}
+     *                          or {"-c:a", "libopus", "-b:a", "128k"}).  When empty,
+     *                          the new track is stream-copied.
+     */
+    public string[] build_add_audio_cmd (string video_file,
+                                          string audio_file,
+                                          string output_file,
+                                          bool replace_audio,
+                                          int existing_audio_streams,
+                                          bool keep_subtitles,
+                                          bool strip_metadata,
+                                          string[] audio_codec_args) {
+        var cmd = new GenericArray<string> ();
+        cmd.add (AppSettings.get_default ().ffmpeg_path);
+        cmd.add ("-y");
+        cmd.add ("-i");
+        cmd.add (video_file);
+        cmd.add ("-i");
+        cmd.add (audio_file);
+
+        // Map video from first input
+        cmd.add ("-map");
+        cmd.add ("0:v");
+
+        if (replace_audio) {
+            // Only the new audio track
+            cmd.add ("-map");
+            cmd.add ("1:a");
+        } else {
+            // Keep existing audio, append new track
+            cmd.add ("-map");
+            cmd.add ("0:a?");
+            cmd.add ("-map");
+            cmd.add ("1:a");
+        }
+
+        // Subtitles
+        if (keep_subtitles) {
+            cmd.add ("-map");
+            cmd.add ("0:s?");
+        }
+
+        // Copy video codec
+        cmd.add ("-c:v");
+        cmd.add ("copy");
+
+        // Subtitle codec (if kept)
+        if (keep_subtitles) {
+            cmd.add ("-c:s");
+            cmd.add ("copy");
+        }
+
+        // Audio codec: when keeping existing tracks, copy them and only
+        // re-encode the newly added track (last audio output stream)
+        if (replace_audio || existing_audio_streams == 0) {
+            // Only one audio stream in output — apply codec args to all
+            if (audio_codec_args.length > 0) {
+                foreach (unowned string arg in audio_codec_args) {
+                    cmd.add (arg);
+                }
+            } else {
+                cmd.add ("-c:a");
+                cmd.add ("copy");
+            }
+        } else {
+            // Copy existing audio streams
+            cmd.add ("-c:a");
+            cmd.add ("copy");
+            // Apply codec args only to the new track (output audio index N)
+            if (audio_codec_args.length > 0) {
+                int new_idx = existing_audio_streams;
+                foreach (unowned string arg in audio_codec_args) {
+                    // Rewrite -c:a to target the specific stream
+                    if (arg == "-c:a") {
+                        cmd.add ("-c:a:%d".printf (new_idx));
+                    } else {
+                        cmd.add (arg);
+                    }
+                }
+            }
+        }
+
+        if (strip_metadata) {
+            cmd.add ("-map_metadata");
+            cmd.add ("-1");
+        }
+
+        cmd.add ("-progress");
+        cmd.add ("pipe:2");
+        cmd.add (output_file);
+        return StringArrayUtils.copy_generic_array (cmd);
+    }
 }

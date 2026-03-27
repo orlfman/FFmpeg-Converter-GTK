@@ -178,6 +178,110 @@ public class AudioRunner : Object {
         }
     }
 
+    /**
+     * Run the audio removal pipeline on a background thread.
+     * Removes the selected audio stream (or all when index < 0).
+     */
+    public void run_remove (int audio_stream_index,
+                            int total_audio_streams,
+                            bool keep_subtitles,
+                            bool strip_metadata) {
+        if (input_file == "" || primary_output_path == "") {
+            report_status ("Please select an input file first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
+
+        if (!try_begin_run ()) {
+            warning ("AudioRunner.run_remove() ignored while another execution is active.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
+
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_pulse ();
+        }
+
+        int asi = audio_stream_index;
+        int tas = total_audio_streams;
+        bool ks = keep_subtitles;
+        bool sm = strip_metadata;
+
+        try {
+            new Thread<void>.try ("audio-remove-thread", () => {
+                try {
+                    run_remove_internal (asi, tas, ks, sm);
+                } finally {
+                    finish_progress ();
+                    end_run ();
+                }
+            });
+        } catch (Error e) {
+            reset_progress ();
+            end_run ();
+            report_error ("Failed to start audio removal thread: " + e.message);
+        }
+    }
+
+    /**
+     * Run the add-audio (mux) pipeline on a background thread.
+     * Muxes an external audio file into the video, either adding alongside
+     * existing audio or replacing it.
+     */
+    public void run_add_audio (string audio_file,
+                                bool replace_audio,
+                                int existing_audio_streams,
+                                bool keep_subtitles,
+                                bool strip_metadata,
+                                string[] audio_codec_args) {
+        if (input_file == "" || primary_output_path == "" || audio_file == "") {
+            report_status ("Please select input and audio files first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
+
+        if (!try_begin_run ()) {
+            warning ("AudioRunner.run_add_audio() ignored while another execution is active.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
+
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_pulse ();
+        }
+
+        // Snapshot parameters for thread safety
+        string af = audio_file;
+        bool ra = replace_audio;
+        int eas = existing_audio_streams;
+        bool ks = keep_subtitles;
+        bool sm = strip_metadata;
+        string[] aca = audio_codec_args.copy ();
+
+        try {
+            new Thread<void>.try ("audio-add-thread", () => {
+                try {
+                    run_add_audio_internal (af, ra, eas, ks, sm, aca);
+                } finally {
+                    finish_progress ();
+                    end_run ();
+                }
+            });
+        } catch (Error e) {
+            reset_progress ();
+            end_run ();
+            report_error ("Failed to start audio muxing thread: " + e.message);
+        }
+    }
+
     public void cancel () {
         runner.cancel ();
     }
@@ -573,6 +677,98 @@ public class AudioRunner : Object {
         report_status (summary + "!",
             StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
         emit_done_multiple_with_summary (completed_paths, folder, summary);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Remove audio
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void run_remove_internal (int audio_stream_index,
+                                      int total_audio_streams,
+                                      bool keep_subtitles,
+                                      bool strip_metadata) {
+        report_status ("Removing audio…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+        log_line ("[Audio] Removing audio from: " + input_file);
+
+        progress_offset = 0.0;
+        progress_duration = total_duration;
+        refresh_progress_mode ();
+
+        string[] cmd = AudioBuilder.build_remove_audio_cmd (
+            input_file, primary_output_path,
+            audio_stream_index, total_audio_streams,
+            keep_subtitles, strip_metadata);
+
+        show_command (cmd);
+
+        int exit_code = runner.execute (cmd, handle_ffmpeg_line);
+
+        if (runner.is_cancelled ()) {
+            report_status ("Audio removal cancelled.",
+                StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+            emit_failed ("Cancelled");
+            return;
+        }
+
+        if (exit_code != 0) {
+            report_error ("Audio removal failed (exit %d).".printf (exit_code));
+            return;
+        }
+
+        report_status ("Audio removed successfully!",
+            StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+        emit_done_file (primary_output_path);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Add audio (mux)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void run_add_audio_internal (string audio_file,
+                                          bool replace_audio,
+                                          int existing_audio_streams,
+                                          bool keep_subtitles,
+                                          bool strip_metadata,
+                                          string[] audio_codec_args) {
+        string action = replace_audio ? "Replacing" : "Adding";
+        report_status ("%s audio…".printf (action),
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+        log_line ("[Audio] %s audio from: %s".printf (action, audio_file));
+        log_line ("[Audio] Into: " + input_file);
+
+        progress_offset = 0.0;
+        progress_duration = total_duration;
+        refresh_progress_mode ();
+
+        string[] cmd = AudioBuilder.build_add_audio_cmd (
+            input_file, audio_file, primary_output_path,
+            replace_audio, existing_audio_streams,
+            keep_subtitles, strip_metadata,
+            audio_codec_args);
+
+        show_command (cmd);
+
+        int exit_code = runner.execute (cmd, handle_ffmpeg_line);
+
+        if (runner.is_cancelled ()) {
+            report_status ("Audio muxing cancelled.",
+                StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+            emit_failed ("Cancelled");
+            return;
+        }
+
+        if (exit_code != 0) {
+            report_error ("Audio muxing failed (exit %d).".printf (exit_code));
+            return;
+        }
+
+        string done_msg = replace_audio
+            ? "Audio replaced successfully!"
+            : "Audio added successfully!";
+        report_status (done_msg,
+            StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+        emit_done_file (primary_output_path);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
