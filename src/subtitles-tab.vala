@@ -461,7 +461,7 @@ public class SubtitlesTab : Box {
         var track_row = new Adw.ActionRow ();
         track_row.set_title ("Track");
         track_row.set_subtitle ("Choose which subtitle stream to extract");
-        extract_track_combo = new DropDown (new StringList ({ "No tracks available" }), null);
+        extract_track_combo = new DropDown (CodecUtils.build_dropdown_string_list ({ "No tracks available" }), null);
         extract_track_combo.set_valign (Align.CENTER);
         extract_track_combo.set_sensitive (false);
         track_row.add_suffix (extract_track_combo);
@@ -471,7 +471,7 @@ public class SubtitlesTab : Box {
         var fmt_row = new Adw.ActionRow ();
         fmt_row.set_title ("Output Format");
         fmt_row.set_subtitle ("Target subtitle file format");
-        extract_format_combo = new DropDown (new StringList (
+        extract_format_combo = new DropDown (CodecUtils.build_dropdown_string_list (
             { "SRT (.srt)", "ASS (.ass)", "WebVTT (.vtt)", "SubStation Alpha (.ssa)", "Copy Original" }
         ), null);
         extract_format_combo.set_valign (Align.CENTER);
@@ -706,7 +706,7 @@ public class SubtitlesTab : Box {
         var mode_row = new Adw.ActionRow ();
         mode_row.set_title ("Mode");
         mode_row.set_subtitle ("Remux is fast (no re-encode) — Burn In draws text onto every frame");
-        mode_combo = new DropDown (new StringList (
+        mode_combo = new DropDown (CodecUtils.build_dropdown_string_list (
             { "Remux (soft subtitles)", "Burn In (hardcode into video)" }
         ), null);
         mode_combo.set_valign (Align.CENTER);
@@ -718,7 +718,7 @@ public class SubtitlesTab : Box {
         var container_row = new Adw.ActionRow ();
         container_row.set_title ("Output Container");
         container_row.set_subtitle ("Source preserves the original container format");
-        container_combo = new DropDown (new StringList (
+        container_combo = new DropDown (CodecUtils.build_dropdown_string_list (
             { "Source (original format)", "MKV (.mkv)", "MP4 (.mp4)", "WebM (.webm)" }
         ), null);
         container_combo.set_valign (Align.CENTER);
@@ -762,7 +762,7 @@ public class SubtitlesTab : Box {
         var track_row = new Adw.ActionRow ();
         track_row.set_title ("Subtitle Track");
         track_row.set_subtitle ("Which subtitle to hardcode into the video");
-        burn_track_combo = new DropDown (new StringList ({ "No tracks available" }), null);
+        burn_track_combo = new DropDown (CodecUtils.build_dropdown_string_list ({ "No tracks available" }), null);
         burn_track_combo.set_valign (Align.CENTER);
         burn_track_combo.set_sensitive (false);
         track_row.add_suffix (burn_track_combo);
@@ -772,7 +772,7 @@ public class SubtitlesTab : Box {
         var codec_row = new Adw.ActionRow ();
         codec_row.set_title ("Video Codec");
         codec_row.set_subtitle ("Encoding settings are taken from the selected codec tab");
-        burn_codec_combo = new DropDown (new StringList (
+        burn_codec_combo = new DropDown (CodecUtils.build_dropdown_string_list (
             { "SVT-AV1", "x265", "x264", "VP9" }
         ), null);
         burn_codec_combo.set_valign (Align.CENTER);
@@ -1726,7 +1726,7 @@ public class SubtitlesTab : Box {
 
     private void rebuild_extract_combo () {
         if (detected_streams.length == 0) {
-            extract_track_combo.set_model (new StringList ({ "No tracks available" }));
+            extract_track_combo.set_model (CodecUtils.build_dropdown_string_list ({ "No tracks available" }));
             extract_track_combo.set_sensitive (false);
             return;
         }
@@ -1742,7 +1742,7 @@ public class SubtitlesTab : Box {
             labels += lbl;
         }
 
-        extract_track_combo.set_model (new StringList (labels));
+        extract_track_combo.set_model (CodecUtils.build_dropdown_string_list (labels));
         extract_track_combo.set_selected (0);
         extract_track_combo.set_sensitive (true);
     }
@@ -1754,7 +1754,7 @@ public class SubtitlesTab : Box {
     private void rebuild_burn_track_combo () {
         int total = detected_streams.length + added_subtitles.length;
         if (total == 0) {
-            burn_track_combo.set_model (new StringList ({ "No tracks available" }));
+            burn_track_combo.set_model (CodecUtils.build_dropdown_string_list ({ "No tracks available" }));
             burn_track_combo.set_sensitive (false);
             return;
         }
@@ -1780,12 +1780,12 @@ public class SubtitlesTab : Box {
         }
 
         if (labels.length == 0) {
-            burn_track_combo.set_model (new StringList ({ "No tracks available" }));
+            burn_track_combo.set_model (CodecUtils.build_dropdown_string_list ({ "No tracks available" }));
             burn_track_combo.set_sensitive (false);
             return;
         }
 
-        burn_track_combo.set_model (new StringList (labels));
+        burn_track_combo.set_model (CodecUtils.build_dropdown_string_list (labels));
         burn_track_combo.set_selected (0);
         burn_track_combo.set_sensitive (true);
     }
