@@ -145,7 +145,10 @@ public class TrimTab : Box, ICodecTab {
     // ── Mode ─────────────────────────────────────────────────────────────────
     public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
     private Mode current_mode = Mode.TRIM_ONLY;
-    private DropDown mode_dropdown;
+    private ToggleButton trim_mode_btn;
+    private ToggleButton crop_mode_btn;
+    private ToggleButton crop_trim_mode_btn;
+    private ToggleButton chapter_mode_btn;
 
     // ── Video Player ─────────────────────────────────────────────────────────
     private VideoPlayer player;
@@ -1204,31 +1207,48 @@ public class TrimTab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_mode_selector () {
-        var group = new Adw.PreferencesGroup ();
-        group.set_title ("Mode");
-        group.set_description ("Choose what you would like to do");
+        var mode_box = new Box (Orientation.HORIZONTAL, 0);
+        mode_box.add_css_class ("linked");
+        mode_box.set_halign (Align.CENTER);
 
-        var mode_row = new Adw.ActionRow ();
-        mode_row.set_title ("Operation");
-        mode_row.set_subtitle ("Select between trimming, cropping, or both");
-        mode_row.add_prefix (new Image.from_icon_name ("applications-multimedia-symbolic"));
+        trim_mode_btn = new ToggleButton.with_label ("Trim Only");
+        trim_mode_btn.set_active (true);
 
-        mode_dropdown = new DropDown (new StringList (
-            { "Trim Only", "Crop Only", "Crop & Trim", "Chapter Split" }
-        ), null);
-        mode_dropdown.set_valign (Align.CENTER);
-        mode_dropdown.set_selected (0);
-        mode_dropdown.notify["selected"].connect (() => {
-            int sel = (int) mode_dropdown.get_selected ();
-            Mode m = (sel == 0) ? Mode.TRIM_ONLY :
-                     (sel == 1) ? Mode.CROP_ONLY :
-                     (sel == 2) ? Mode.TRIM_AND_CROP : Mode.CHAPTER_SPLIT;
-            apply_mode (m);
-        });
-        mode_row.add_suffix (mode_dropdown);
-        group.add (mode_row);
+        crop_mode_btn = new ToggleButton.with_label ("Crop Only");
+        crop_mode_btn.set_group (trim_mode_btn);
 
-        append (group);
+        crop_trim_mode_btn = new ToggleButton.with_label ("Crop & Trim");
+        crop_trim_mode_btn.set_group (trim_mode_btn);
+
+        chapter_mode_btn = new ToggleButton.with_label ("Chapter Split");
+        chapter_mode_btn.set_group (trim_mode_btn);
+
+        mode_box.append (trim_mode_btn);
+        mode_box.append (crop_mode_btn);
+        mode_box.append (crop_trim_mode_btn);
+        mode_box.append (chapter_mode_btn);
+        append (mode_box);
+
+        trim_mode_btn.toggled.connect (on_mode_toggled);
+        crop_mode_btn.toggled.connect (on_mode_toggled);
+        crop_trim_mode_btn.toggled.connect (on_mode_toggled);
+        chapter_mode_btn.toggled.connect (on_mode_toggled);
+    }
+
+    private void on_mode_toggled () {
+        Mode new_mode;
+        if (crop_mode_btn.get_active ()) {
+            new_mode = Mode.CROP_ONLY;
+        } else if (crop_trim_mode_btn.get_active ()) {
+            new_mode = Mode.TRIM_AND_CROP;
+        } else if (chapter_mode_btn.get_active ()) {
+            new_mode = Mode.CHAPTER_SPLIT;
+        } else {
+            new_mode = Mode.TRIM_ONLY;
+        }
+        if (new_mode != current_mode) {
+            apply_mode (new_mode);
+        }
     }
 
     private void apply_mode (Mode m) {
@@ -2324,7 +2344,7 @@ public class TrimTab : Box, ICodecTab {
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
     internal void load_detected_chapters_for_widget_test (GenericArray<ChapterInfo> chapters) {
         detected_chapters = chapters;
-        apply_mode (Mode.CHAPTER_SPLIT);
+        chapter_mode_btn.set_active (true);
         rebuild_chapter_list ();
         rebuild_chapter_segments ();
     }
@@ -2345,7 +2365,7 @@ public class TrimTab : Box, ICodecTab {
 
     internal void load_segments_for_widget_test (GenericArray<TrimSegment> test_segments) {
         segments = test_segments;
-        apply_mode (Mode.TRIM_ONLY);
+        trim_mode_btn.set_active (true);
         rebuild_segment_rows ();
     }
 

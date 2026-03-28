@@ -248,7 +248,7 @@ public class AppController : Object {
             sync_general_tab_locks ();
         });
 
-        // ── Also re-apply whenever the mode dropdown changes inside TrimTab ──
+        // ── Also re-apply whenever the mode selector changes inside TrimTab ──
         // apply_mode() already calls general_tab.notify_trim_tab_mode, but
         // now that call is guarded in TrimTab only when in focus — handled
         // below via sync_general_tab_locks — so we hook mode changes here too.
