@@ -942,7 +942,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         output_dir_apply_btn = new Button.from_icon_name ("object-select-symbolic");
         output_dir_apply_btn.set_tooltip_text ("Save as default output directory");
         output_dir_apply_btn.add_css_class ("flat");
-        output_dir_apply_btn.add_css_class ("suggested-action");
+        output_dir_apply_btn.add_css_class ("success");
         output_dir_apply_btn.set_valign (Align.CENTER);
         output_dir_apply_btn.set_sensitive (false);
         output_dir_apply_btn.clicked.connect (() => {
