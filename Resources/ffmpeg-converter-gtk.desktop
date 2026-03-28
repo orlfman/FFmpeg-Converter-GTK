@@ -1,5 +1,4 @@
 [Desktop Entry]
-Version=1.5.3
 Type=Application
 Name=FFmpeg Converter GTK
 GenericName=Video Converter
@@ -8,6 +7,6 @@ Exec=ffmpeg-converter-gtk %U
 Icon=ffmpeg-converter-gtk
 Terminal=false
 StartupWMClass=com.github.pieman.FFmpegConverterGTK
-Categories=AudioVideo;Video;Utility;Converter;
+Categories=AudioVideo;Video;
 MimeType=video/*;audio/*;
 Keywords=ffmpeg;av1;x265;svt-av1;hevc;video;converter;encoder;color correction;crop;hdr;

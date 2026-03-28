@@ -2,9 +2,11 @@
 set -uo pipefail
 
 BINARY_NAME="ffmpeg-converter-gtk"
-INSTALL_DIR="/usr/local/bin"
-DESKTOP_DEST="/usr/share/applications/ffmpeg-converter-gtk.desktop"
-ICON_DEST="/usr/share/icons/hicolor/scalable/apps/ffmpeg-converter-gtk.svg"
+PREFIX="${PREFIX:-/usr}"
+INSTALL_DIR="$PREFIX/bin"
+LEGACY_INSTALL_DIR="/usr/local/bin"
+DESKTOP_DEST="$PREFIX/share/applications/ffmpeg-converter-gtk.desktop"
+ICON_DEST="$PREFIX/share/icons/hicolor/scalable/apps/ffmpeg-converter-gtk.svg"
 CONFIG_DIR="$HOME/.config/FFmpeg-Converter-GTK"
 
 # Track results
@@ -13,11 +15,12 @@ declare -a failed_items=()
 found_any=0
 
 echo "=== FFmpeg Converter GTK - Uninstaller ==="
+echo "Prefix: $PREFIX"
 echo
 
 # Check what's installed first
 echo "Checking installed files..."
-for path in "$INSTALL_DIR/$BINARY_NAME" "$DESKTOP_DEST" "$ICON_DEST" "$CONFIG_DIR"; do
+for path in "$INSTALL_DIR/$BINARY_NAME" "$LEGACY_INSTALL_DIR/$BINARY_NAME" "$DESKTOP_DEST" "$ICON_DEST" "$CONFIG_DIR"; do
     if [ -e "$path" ]; then
         echo "  Found: $path"
         found_any=1
@@ -67,6 +70,7 @@ remove_file() {
 }
 
 remove_file "$INSTALL_DIR/$BINARY_NAME" "binary"
+remove_file "$LEGACY_INSTALL_DIR/$BINARY_NAME" "legacy binary (/usr/local/bin)"
 remove_file "$DESKTOP_DEST" ".desktop entry"
 remove_file "$ICON_DEST" "application icon"
 
@@ -88,8 +92,8 @@ fi
 if [ ${#removed_items[@]} -gt 0 ]; then
     echo
     echo "Refreshing icon cache and desktop database..."
-    sudo gtk-update-icon-cache /usr/share/icons/hicolor -q 2>/dev/null || true
-    sudo update-desktop-database /usr/share/applications/ 2>/dev/null || true
+    sudo gtk-update-icon-cache "$PREFIX/share/icons/hicolor" -q 2>/dev/null || true
+    sudo update-desktop-database "$PREFIX/share/applications/" 2>/dev/null || true
 fi
 
 # Summary

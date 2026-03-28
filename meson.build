@@ -86,6 +86,16 @@ executable('ffmpeg-converter-gtk',
   install_dir : get_option('bindir')
 )
 
+install_data(
+  'Resources/ffmpeg-converter-gtk.desktop',
+  install_dir : get_option('datadir') / 'applications'
+)
+
+install_data(
+  'Resources/ffmpeg-converter-gtk.svg',
+  install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps'
+)
+
 if fs.exists('tests/subtitle-language-guesser-test.vala')
   subtitle_language_guesser_test = executable(
     'subtitle-language-guesser-test',
