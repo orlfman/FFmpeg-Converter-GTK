@@ -15,6 +15,16 @@ check_dependency() {
     fi
 }
 
+check_pkg_config_dependency() {
+    local dep="$1"
+    local label="$2"
+
+    if ! pkg-config --exists "$dep"; then
+        echo "❌ Error: '$label' development files are not installed. Please install them and try again."
+        exit 1
+    fi
+}
+
 echo "=== FFmpeg Converter GTK - Clean Fresh Build & Install ==="
 echo "Detected project directory: $PROJECT_DIR"
 echo
@@ -25,6 +35,12 @@ check_dependency meson
 check_dependency ninja
 check_dependency valac
 check_dependency pkg-config
+check_pkg_config_dependency gtk4 GTK4
+check_pkg_config_dependency libadwaita-1 libadwaita
+check_pkg_config_dependency json-glib-1.0 json-glib
+check_dependency ffmpeg
+check_dependency ffprobe
+check_dependency gst-inspect-1.0
 echo "✅ All dependencies found"
 echo
 

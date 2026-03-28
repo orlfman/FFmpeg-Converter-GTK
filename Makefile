@@ -18,6 +18,12 @@ setup:
 	@command -v ninja >/dev/null  || { echo "Error: ninja is not installed";    exit 1; }
 	@command -v valac >/dev/null  || { echo "Error: valac is not installed";    exit 1; }
 	@command -v pkg-config >/dev/null || { echo "Error: pkg-config is not installed"; exit 1; }
+	@pkg-config --exists gtk4 || { echo "Error: gtk4 development files are not installed"; exit 1; }
+	@pkg-config --exists libadwaita-1 || { echo "Error: libadwaita-1 development files are not installed"; exit 1; }
+	@pkg-config --exists json-glib-1.0 || { echo "Error: json-glib-1.0 development files are not installed"; exit 1; }
+	@command -v ffmpeg >/dev/null || { echo "Error: ffmpeg is not installed"; exit 1; }
+	@command -v ffprobe >/dev/null || { echo "Error: ffprobe is not installed"; exit 1; }
+	@command -v gst-inspect-1.0 >/dev/null || { echo "Error: GStreamer runtime tools are not installed (missing gst-inspect-1.0)"; exit 1; }
 	@if [ ! -d $(BUILDDIR) ]; then \
 		meson setup $(BUILDDIR) --prefix=$(PREFIX); \
 	else \
