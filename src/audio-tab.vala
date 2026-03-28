@@ -820,7 +820,7 @@ public class AudioTab : Box {
         bool add = current_mode == AudioTabMode.ADD;
 
         // Extract-mode controls
-        player.set_visible (visible && extract);
+        player.set_visible (visible);
         if (mark_group != null) mark_group.set_visible (visible && extract);
         if (seg_box != null) seg_box.set_visible (visible && extract);
         if (output_separator != null) output_separator.set_visible (visible && extract);
@@ -1948,7 +1948,7 @@ public class AudioTab : Box {
         flash_timeout_id = Timeout.add (3000, () => {
             mark_in_label.remove_css_class ("error");
             mark_out_label.remove_css_class ("error");
-            add_seg_row.set_subtitle ("Uses the Mark In / Mark Out points above");
+            add_seg_row.set_subtitle ("Create a new segment from the current In/Out marks");
             add_seg_row.remove_css_class ("error");
             flash_timeout_id = 0;
             return Source.REMOVE;
