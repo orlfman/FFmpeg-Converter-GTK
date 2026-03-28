@@ -678,15 +678,15 @@ namespace AudioBuilder {
         cmd.add ("0:v");
 
         if (replace_audio) {
-            // Only the new audio track
+            // Only the first audio stream from the new file
             cmd.add ("-map");
-            cmd.add ("1:a");
+            cmd.add ("1:a:0");
         } else {
-            // Keep existing audio, append new track
+            // Keep existing audio, append first stream from new file
             cmd.add ("-map");
             cmd.add ("0:a?");
             cmd.add ("-map");
-            cmd.add ("1:a");
+            cmd.add ("1:a:0");
         }
 
         // Subtitles
@@ -695,33 +695,27 @@ namespace AudioBuilder {
             cmd.add ("0:s?");
         }
 
-        // Copy video codec
-        cmd.add ("-c:v");
+        // Preserve attachments (fonts, cover art) and data streams
+        cmd.add ("-map");
+        cmd.add ("0:t?");
+        cmd.add ("-map");
+        cmd.add ("0:d?");
+
+        // Copy all streams by default (video, subtitles, attachments, data)
+        cmd.add ("-c");
         cmd.add ("copy");
 
-        // Subtitle codec (if kept)
-        if (keep_subtitles) {
-            cmd.add ("-c:s");
-            cmd.add ("copy");
-        }
-
-        // Audio codec: when keeping existing tracks, copy them and only
-        // re-encode the newly added track (last audio output stream)
+        // Audio codec: override the default copy for audio streams
         if (replace_audio || existing_audio_streams == 0) {
             // Only one audio stream in output — apply codec args to all
             if (audio_codec_args.length > 0) {
                 foreach (unowned string arg in audio_codec_args) {
                     cmd.add (arg);
                 }
-            } else {
-                cmd.add ("-c:a");
-                cmd.add ("copy");
             }
         } else {
-            // Copy existing audio streams
-            cmd.add ("-c:a");
-            cmd.add ("copy");
-            // Apply codec args only to the new track (output audio index N)
+            // Existing audio streams already covered by -c copy above;
+            // apply codec args only to the new track (output audio index N)
             if (audio_codec_args.length > 0) {
                 int new_idx = existing_audio_streams;
                 foreach (unowned string arg in audio_codec_args) {

@@ -133,6 +133,34 @@ if fs.exists('tests/audio-builder-test.vala')
   test('audio-builder', audio_builder_test)
 endif
 
+if fs.exists('tests/audio-add-builder-test.vala')
+  audio_add_builder_test = executable(
+    'audio-add-builder-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-settings.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-builder.vala',
+      'tests/audio-add-builder-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+    ],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('audio-add-builder', audio_add_builder_test)
+endif
+
 if fs.exists('tests/audio-settings-test.vala')
   audio_settings_test = executable(
     'audio-settings-test',

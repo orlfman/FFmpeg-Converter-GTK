@@ -155,6 +155,8 @@ public class AudioTab : Box {
     private Adw.PreferencesGroup? add_source_group;
     private Adw.ActionRow add_source_row;
     private string add_audio_file_path = "";
+    private bool add_audio_has_streams = false;
+    private uint add_audio_probe_generation = 0;
     private Adw.PreferencesGroup? add_options_group;
     private Adw.SwitchRow add_replace_row;
     private Adw.SwitchRow add_keep_subtitles_row;
@@ -560,7 +562,9 @@ public class AudioTab : Box {
      * Needs an input video file and a selected external audio file.
      */
     public bool can_add_audio () {
-        return current_input_file.length > 0 && add_audio_file_path.length > 0;
+        return current_input_file.length > 0
+            && add_audio_file_path.length > 0
+            && add_audio_has_streams;
     }
 
     /**
@@ -580,6 +584,12 @@ public class AudioTab : Box {
 
         if (add_audio_file_path.length == 0) {
             status_area.set_status ("Please select an audio file to add.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        if (!add_audio_has_streams) {
+            status_area.set_status ("Selected file has no audio streams.",
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
@@ -1434,6 +1444,8 @@ public class AudioTab : Box {
         clear_btn.set_valign (Align.CENTER);
         clear_btn.clicked.connect (() => {
             add_audio_file_path = "";
+            add_audio_has_streams = false;
+            add_audio_probe_generation++;
             add_source_row.set_title ("No file selected");
             add_source_row.set_subtitle ("Choose an audio file to add");
             set_controls_visible (current_input_file.length > 0);
@@ -1529,23 +1541,31 @@ public class AudioTab : Box {
 
     private void apply_add_audio_path (string path) {
         add_audio_file_path = path;
+        add_audio_has_streams = false;
+        add_audio_probe_generation++;
         string basename = Path.get_basename (path);
         add_source_row.set_title (basename);
         add_source_row.set_subtitle (path);
 
         // Probe the audio file for info
-        probe_add_audio_file.begin (path);
+        probe_add_audio_file.begin (path, add_audio_probe_generation);
 
         set_controls_visible (current_input_file.length > 0);
     }
 
-    private async void probe_add_audio_file (string path) {
+    private async void probe_add_audio_file (string path, uint generation) {
         var result = yield FfprobeUtils.probe_all_audio_streams_async (path, null);
+
+        // Stale probe — user already picked a different file or cleared
+        if (generation != add_audio_probe_generation) return;
+
         if (!result.success || result.streams.length == 0) {
+            add_audio_has_streams = false;
             add_source_row.set_subtitle ("No audio streams found in file");
             return;
         }
 
+        add_audio_has_streams = true;
         var info = result.streams[0];
         add_source_row.set_subtitle (info.display_label ());
     }
