@@ -50,6 +50,9 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
       <td align="center"><b>Smart Optimizer Crop & Trim Tab</b><br><img src="Screenshots/Screenshot-SmartOptimizer-CropTrimTab.png" width="400"></td>
       <td align="center"><b>Crop & Trim Chapter Exractation</b><br><img src="Screenshots/Screenshot-Chapter Split.png" width="400"></td>
     </tr>
+    <tr>
+      <td align="center"><b>Smart Optimizer Crop & Trim Tab</b><br><img src="Screenshots/Screenshot-Audio-Tab.png" width="400"></td>
+    </tr>
   </table>
 
 </details>
