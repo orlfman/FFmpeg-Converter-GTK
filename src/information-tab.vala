@@ -2,6 +2,19 @@ using Gtk;
 using Adw;
 using GLib;
 
+// Per-stream audio data for the Information tab
+internal class AudioTrackInfo : Object {
+    public string language          = "";
+    public string audio_codec       = "N/A";
+    public string audio_channels    = "N/A";
+    public string channel_layout    = "N/A";
+    public string sample_rate       = "N/A";
+    public string audio_bit_depth   = "N/A";
+    public string audio_bitrate     = "N/A";
+    public string audio_compression = "N/A";
+    public string audio_encoder     = "N/A";
+}
+
 // Internal data class to ferry parsed ffprobe results between threads
 internal class VideoInfo : Object {
     // File
@@ -25,15 +38,8 @@ internal class VideoInfo : Object {
     public string scan_type   = "N/A";
     public string keyframe_count = "N/A";
 
-    // Audio
-    public string audio_codec       = "N/A";
-    public string audio_channels    = "N/A";
-    public string channel_layout    = "N/A";
-    public string sample_rate       = "N/A";
-    public string audio_bit_depth   = "N/A";
-    public string audio_bitrate     = "N/A";
-    public string audio_compression = "N/A";
-    public string audio_encoder     = "N/A";
+    // Audio (all tracks)
+    public GenericArray<AudioTrackInfo> audio_tracks = new GenericArray<AudioTrackInfo> ();
 
     // Metadata tags
     public string artist       = "N/A";
@@ -76,20 +82,7 @@ public class InformationTab : Box {
     private Adw.ActionRow iv_scan_row;
     private Adw.ActionRow iv_keyframes_row;
 
-    private Label iv_acodec;
-    private Label iv_channels;
-    private Label iv_channel_layout;
-    private Label iv_samplerate;
-    private Label iv_a_depth;
-    private Label iv_a_bitrate;
-    private Label iv_a_compression;
-    private Label iv_a_encoder;
-
-    private Adw.ActionRow iv_channel_layout_row;
-    private Adw.ActionRow iv_a_depth_row;
-    private Adw.ActionRow iv_a_bitrate_row;
-    private Adw.ActionRow iv_a_compression_row;
-    private Adw.ActionRow iv_a_encoder_row;
+    private Box iv_audio_container;
 
     private Label iv_subtitle;
     private Adw.PreferencesGroup iv_subtitle_group;
@@ -136,20 +129,7 @@ public class InformationTab : Box {
     private Adw.ActionRow ov_scan_row;
     private Adw.ActionRow ov_keyframes_row;
 
-    private Label ov_acodec;
-    private Label ov_channels;
-    private Label ov_channel_layout;
-    private Label ov_samplerate;
-    private Label ov_a_depth;
-    private Label ov_a_bitrate;
-    private Label ov_a_compression;
-    private Label ov_a_encoder;
-
-    private Adw.ActionRow ov_channel_layout_row;
-    private Adw.ActionRow ov_a_depth_row;
-    private Adw.ActionRow ov_a_bitrate_row;
-    private Adw.ActionRow ov_a_compression_row;
-    private Adw.ActionRow ov_a_encoder_row;
+    private Box ov_audio_container;
 
     private Label ov_subtitle;
     private Adw.PreferencesGroup ov_video_group;
@@ -245,19 +225,9 @@ public class InformationTab : Box {
         iv_keyframes  = make_row_conditional (in_video_group, "Keyframes", out iv_keyframes_row);
         content.append (in_video_group);
 
-        // ────────────── Input: Audio ─────────────────────────────────────────
-        var in_audio_group = new Adw.PreferencesGroup ();
-        in_audio_group.set_title ("Audio Stream");
-
-        iv_acodec         = make_row (in_audio_group, "Codec");
-        iv_channels       = make_row (in_audio_group, "Channels");
-        iv_channel_layout = make_row_conditional (in_audio_group, "Channel Layout", out iv_channel_layout_row);
-        iv_samplerate     = make_row (in_audio_group, "Sample Rate");
-        iv_a_depth        = make_row_conditional (in_audio_group, "Bit Depth", out iv_a_depth_row);
-        iv_a_bitrate      = make_row_conditional (in_audio_group, "Bit Rate", out iv_a_bitrate_row);
-        iv_a_compression  = make_row_conditional (in_audio_group, "Compression Level", out iv_a_compression_row);
-        iv_a_encoder      = make_row_conditional (in_audio_group, "Encoder", out iv_a_encoder_row);
-        content.append (in_audio_group);
+        // ────────────── Input: Audio (dynamic — one group per stream) ────────
+        iv_audio_container = new Box (Orientation.VERTICAL, 20);
+        content.append (iv_audio_container);
 
         // ────────────── Input: Metadata (conditional group) ──────────────────
         iv_metadata_group = new Adw.PreferencesGroup ();
@@ -325,19 +295,9 @@ public class InformationTab : Box {
         ov_keyframes  = make_row_conditional (ov_video_group, "Keyframes", out ov_keyframes_row);
         single_output_box.append (ov_video_group);
 
-        // Output: Audio
-        var out_audio_group = new Adw.PreferencesGroup ();
-        out_audio_group.set_title ("Output Audio Stream");
-
-        ov_acodec         = make_row (out_audio_group, "Codec");
-        ov_channels       = make_row (out_audio_group, "Channels");
-        ov_channel_layout = make_row_conditional (out_audio_group, "Channel Layout", out ov_channel_layout_row);
-        ov_samplerate     = make_row (out_audio_group, "Sample Rate");
-        ov_a_depth        = make_row_conditional (out_audio_group, "Bit Depth", out ov_a_depth_row);
-        ov_a_bitrate      = make_row_conditional (out_audio_group, "Bit Rate", out ov_a_bitrate_row);
-        ov_a_compression  = make_row_conditional (out_audio_group, "Compression Level", out ov_a_compression_row);
-        ov_a_encoder      = make_row_conditional (out_audio_group, "Encoder", out ov_a_encoder_row);
-        single_output_box.append (out_audio_group);
+        // Output: Audio (dynamic — one group per stream)
+        ov_audio_container = new Box (Orientation.VERTICAL, 20);
+        single_output_box.append (ov_audio_container);
 
         // Output: Metadata (conditional group)
         ov_metadata_group = new Adw.PreferencesGroup ();
@@ -509,14 +469,7 @@ public class InformationTab : Box {
         iv_scan_row.set_visible (false);
         iv_keyframes_row.set_visible (false);
 
-        iv_acodec.set_text ("…");
-        iv_channels.set_text ("…");
-        iv_channel_layout_row.set_visible (false);
-        iv_samplerate.set_text ("…");
-        iv_a_depth_row.set_visible (false);
-        iv_a_bitrate_row.set_visible (false);
-        iv_a_compression_row.set_visible (false);
-        iv_a_encoder_row.set_visible (false);
+        set_audio_loading (iv_audio_container);
 
         iv_metadata_group.set_visible (false);
 
@@ -543,14 +496,7 @@ public class InformationTab : Box {
         show_conditional (iv_scan_row, iv_scan, i.scan_type);
         show_conditional (iv_keyframes_row, iv_keyframes, i.keyframe_count);
 
-        iv_acodec.set_text (i.audio_codec);
-        iv_channels.set_text (i.audio_channels);
-        show_conditional (iv_channel_layout_row, iv_channel_layout, i.channel_layout);
-        iv_samplerate.set_text (i.sample_rate);
-        show_conditional (iv_a_depth_row, iv_a_depth, i.audio_bit_depth);
-        show_conditional (iv_a_bitrate_row, iv_a_bitrate, i.audio_bitrate);
-        show_conditional (iv_a_compression_row, iv_a_compression, i.audio_compression);
-        show_conditional (iv_a_encoder_row, iv_a_encoder, i.audio_encoder);
+        populate_audio_groups (iv_audio_container, i.audio_tracks, false);
 
         // Metadata group — show only if at least one tag is present
         bool has_meta = (i.artist != "N/A" || i.album != "N/A" || i.date != "N/A"
@@ -594,14 +540,7 @@ public class InformationTab : Box {
             show_conditional (ov_keyframes_row, ov_keyframes, i.keyframe_count);
         }
 
-        ov_acodec.set_text (i.audio_codec);
-        ov_channels.set_text (i.audio_channels);
-        show_conditional (ov_channel_layout_row, ov_channel_layout, i.channel_layout);
-        ov_samplerate.set_text (i.sample_rate);
-        show_conditional (ov_a_depth_row, ov_a_depth, i.audio_bit_depth);
-        show_conditional (ov_a_bitrate_row, ov_a_bitrate, i.audio_bitrate);
-        show_conditional (ov_a_compression_row, ov_a_compression, i.audio_compression);
-        show_conditional (ov_a_encoder_row, ov_a_encoder, i.audio_encoder);
+        populate_audio_groups (ov_audio_container, i.audio_tracks, true);
 
         // Metadata group — show only if at least one tag is present
         bool has_meta = (i.artist != "N/A" || i.album != "N/A" || i.date != "N/A"
@@ -659,16 +598,19 @@ public class InformationTab : Box {
                 add_detail_row (expander, "Video Bit Rate", info.bit_rate);
             }
 
-            // Audio (if present)
-            if (info.audio_codec != "N/A") {
-                add_detail_row (expander, "Audio Codec", info.audio_codec);
-                add_detail_row (expander, "Channels", info.audio_channels);
-                add_detail_row (expander, "Channel Layout", info.channel_layout);
-                add_detail_row (expander, "Sample Rate", info.sample_rate);
-                add_detail_row (expander, "Bit Depth", info.audio_bit_depth);
-                add_detail_row (expander, "Audio Bit Rate", info.audio_bitrate);
-                add_detail_row (expander, "Compression", info.audio_compression);
-                add_detail_row (expander, "Encoder", info.audio_encoder);
+            // Audio tracks
+            for (int a = 0; a < info.audio_tracks.length; a++) {
+                var track = info.audio_tracks[a];
+                string pfx = info.audio_tracks.length > 1
+                    ? "Audio #%d ".printf (a + 1) : "";
+                add_detail_row (expander, pfx + "Audio Codec", track.audio_codec);
+                add_detail_row (expander, pfx + "Channels", track.audio_channels);
+                add_detail_row (expander, pfx + "Channel Layout", track.channel_layout);
+                add_detail_row (expander, pfx + "Sample Rate", track.sample_rate);
+                add_detail_row (expander, pfx + "Bit Depth", track.audio_bit_depth);
+                add_detail_row (expander, pfx + "Audio Bit Rate", track.audio_bitrate);
+                add_detail_row (expander, pfx + "Compression", track.audio_compression);
+                add_detail_row (expander, pfx + "Encoder", track.audio_encoder);
             }
 
             // Metadata (if present)
@@ -685,11 +627,12 @@ public class InformationTab : Box {
 
     private static string build_output_summary (VideoInfo info) {
         var parts = new GenericArray<string> ();
-        if (info.audio_codec != "N/A") {
-            parts.add (info.audio_codec);
-            if (info.audio_channels != "N/A") parts.add (info.audio_channels);
-            if (info.sample_rate != "N/A") parts.add (info.sample_rate);
-            if (info.audio_bitrate != "N/A") parts.add (info.audio_bitrate);
+        if (info.audio_tracks.length > 0) {
+            var t = info.audio_tracks[0];
+            parts.add (t.audio_codec);
+            if (t.audio_channels != "N/A") parts.add (t.audio_channels);
+            if (t.sample_rate != "N/A") parts.add (t.sample_rate);
+            if (t.audio_bitrate != "N/A") parts.add (t.audio_bitrate);
         } else if (info.video_codec != "N/A") {
             parts.add (info.video_codec);
             if (info.resolution != "N/A") parts.add (info.resolution);
@@ -716,12 +659,102 @@ public class InformationTab : Box {
     }
 
     private void clear_multi_output () {
-        var child = multi_output_box.get_first_child ();
+        clear_box (multi_output_box);
+    }
+
+    // ── Dynamic audio group helpers ──────────────────────────────────────────
+
+    /**
+     * Remove all children from a Box.
+     */
+    private static void clear_box (Box box) {
+        var child = box.get_first_child ();
         while (child != null) {
             var next = child.get_next_sibling ();
-            multi_output_box.remove (child);
+            box.remove (child);
             child = next;
         }
+    }
+
+    /**
+     * Show loading placeholders in an audio container.
+     */
+    private void set_audio_loading (Box container) {
+        clear_box (container);
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Audio Stream");
+        make_row (group, "Codec").set_text ("…");
+        make_row (group, "Channels").set_text ("…");
+        make_row (group, "Sample Rate").set_text ("…");
+        container.append (group);
+        container.set_visible (true);
+    }
+
+    /**
+     * Clear a container and populate it with one PreferencesGroup per audio track.
+     */
+    private void populate_audio_groups (Box container,
+                                         GenericArray<AudioTrackInfo> tracks,
+                                         bool is_output) {
+        clear_box (container);
+
+        if (tracks.length == 0) {
+            container.set_visible (false);
+            return;
+        }
+
+        container.set_visible (true);
+        string prefix = is_output ? "Output Audio Stream" : "Audio Stream";
+
+        for (int i = 0; i < tracks.length; i++) {
+            string title;
+            if (tracks.length == 1) {
+                title = prefix;
+            } else {
+                string lang = tracks[i].language;
+                if (lang.length > 0 && lang != "und")
+                    title = "%s #%d — %s".printf (prefix, i + 1, lang);
+                else
+                    title = "%s #%d".printf (prefix, i + 1);
+            }
+            build_audio_group (container, tracks[i], title);
+        }
+    }
+
+    /**
+     * Create a PreferencesGroup for a single audio track and append it.
+     */
+    private void build_audio_group (Box container, AudioTrackInfo track,
+                                     string title) {
+        var group = new Adw.PreferencesGroup ();
+        group.set_title (title);
+
+        make_row (group, "Codec").set_text (track.audio_codec);
+        make_row (group, "Channels").set_text (track.audio_channels);
+
+        Adw.ActionRow layout_row;
+        var layout = make_row_conditional (group, "Channel Layout", out layout_row);
+        show_conditional (layout_row, layout, track.channel_layout);
+
+        make_row (group, "Sample Rate").set_text (track.sample_rate);
+
+        Adw.ActionRow depth_row;
+        var depth = make_row_conditional (group, "Bit Depth", out depth_row);
+        show_conditional (depth_row, depth, track.audio_bit_depth);
+
+        Adw.ActionRow bitrate_row;
+        var bitrate = make_row_conditional (group, "Bit Rate", out bitrate_row);
+        show_conditional (bitrate_row, bitrate, track.audio_bitrate);
+
+        Adw.ActionRow compression_row;
+        var compression = make_row_conditional (group, "Compression Level", out compression_row);
+        show_conditional (compression_row, compression, track.audio_compression);
+
+        Adw.ActionRow encoder_row;
+        var encoder = make_row_conditional (group, "Encoder", out encoder_row);
+        show_conditional (encoder_row, encoder, track.audio_encoder);
+
+        container.append (group);
     }
 
     // ── ffprobe probing (runs on background thread) ───────────────────────────
@@ -773,7 +806,7 @@ public class InformationTab : Box {
         HashTable<string, string>? current_map    = null;
         HashTable<string, string>? current_stream = null;
         HashTable<string, string>? best_video     = null;
-        HashTable<string, string>? first_audio    = null;
+        GenericArray<HashTable<string, string>> audio_streams = new GenericArray<HashTable<string, string>> ();
         HashTable<string, string>? format_map     = null;
 
         bool current_is_video        = false;
@@ -812,8 +845,8 @@ public class InformationTab : Box {
                             best_video       = current_stream;
                             best_is_preferred = is_pref;
                         }
-                    } else if (current_is_audio && first_audio == null) {
-                        first_audio = current_stream;
+                    } else if (current_is_audio) {
+                        audio_streams.add (current_stream);
                     } else if (current_is_subtitle) {
                         subtitle_count++;
                         string lang = current_stream.get ("tag:language") ?? "";
@@ -933,74 +966,9 @@ public class InformationTab : Box {
         }
 
         // ── Extract audio stream data ─────────────────────────────────────────
-        if (first_audio != null) {
-            info.audio_codec = first_audio.get ("codec_name") ?? "N/A";
-
-            // Channels + channel layout
-            string layout = first_audio.get ("channel_layout") ?? "";
-            string ch_str = first_audio.get ("channels") ?? "";
-            if (layout.length > 0) {
-                info.audio_channels = format_channel_layout (layout);
-                // Show raw layout when it differs from the friendly name
-                // (e.g. "5.1(side)" → Channels shows "5.1 Surround", Layout shows "5.1(side)")
-                string raw = layout.strip ();
-                string friendly = info.audio_channels;
-                if (raw.down () != friendly.down ())
-                    info.channel_layout = raw;
-            } else if (ch_str.length > 0) {
-                int ch = int.parse (ch_str);
-                info.audio_channels = format_channel_count (ch);
-            }
-
-            string sr = first_audio.get ("sample_rate") ?? "N/A";
-            if (sr != "N/A" && sr.length > 0) {
-                int sr_int = int.parse (sr);
-                info.sample_rate = (sr_int >= 1000)
-                    ? "%.1f kHz".printf (sr_int / 1000.0)
-                    : sr + " Hz";
-            }
-
-            // Audio bit depth — prefer bits_per_raw_sample, fall back to
-            // sample_fmt only for lossless/PCM codecs where bit depth is
-            // meaningful.  Lossy codecs (opus, aac, mp3, vorbis, …) report
-            // the decoder's internal format (usually fltp) which is not a
-            // real bit depth, so the row stays hidden for those.
-            string bprs = first_audio.get ("bits_per_raw_sample") ?? "";
-            if (bprs.length > 0 && bprs != "0" && bprs != "N/A") {
-                info.audio_bit_depth = bprs + "-bit";
-            } else {
-                string codec_lo = info.audio_codec.down ();
-                if (is_lossless_audio_codec (codec_lo)) {
-                    string sfmt = first_audio.get ("sample_fmt") ?? "";
-                    if (sfmt.length > 0) {
-                        info.audio_bit_depth = format_sample_fmt (sfmt);
-                    }
-                }
-            }
-
-            // Audio bit rate — fall back to TAG:BPS (Matroska/WebM) for VBR codecs like Opus
-            string abr = first_audio.get ("bit_rate") ?? "N/A";
-            if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
-                abr = first_audio.get ("tag:bps") ?? "N/A";
-            if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
-                abr = first_audio.get ("tag:bps-eng") ?? "N/A";
-            if (abr != "N/A" && abr.length > 0) {
-                int64 abri = int64.parse (abr);
-                if (abri > 0)
-                    info.audio_bitrate = (abri / 1000).to_string () + " kbps";
-            }
-
-            // FLAC compression level (only present for FLAC streams)
-            string cl = first_audio.get ("compression_level") ?? "";
-            if (cl.length > 0 && cl != "N/A")
-                info.audio_compression = cl;
-
-            // Audio encoder — stream-level TAG:encoder (e.g. "Lavc62.28.100 pcm_s32le")
-            string aenc = first_audio.get ("tag:encoder") ?? "";
-            if (aenc.length > 0 && aenc != "N/A")
-                info.audio_encoder = aenc;
+        for (int a = 0; a < audio_streams.length; a++) {
+            info.audio_tracks.add (extract_audio_track (audio_streams[a]));
         }
-
         // ── Subtitle info ─────────────────────────────────────────────────────
         if (subtitle_count > 0) {
             if (subtitle_langs.length > 0) {
@@ -1036,8 +1004,8 @@ public class InformationTab : Box {
 
         // Some containers (Opus, Ogg) store metadata on the stream rather
         // than the format level — fill in any tags still missing.
-        if (first_audio != null) {
-            extract_metadata_tags (first_audio, info);
+        if (audio_streams.length > 0) {
+            extract_metadata_tags (audio_streams[0], info);
         }
 
         // Title fallback: if no tag was found, use filename stem
@@ -1090,6 +1058,75 @@ public class InformationTab : Box {
             if (track.strip ().length > 0)
                 info.track_number = track.strip ();
         }
+    }
+
+    /**
+     * Extract a single audio track's data from the ffprobe key-value map.
+     */
+    private static AudioTrackInfo extract_audio_track (HashTable<string, string> stream) {
+        var track = new AudioTrackInfo ();
+        track.language = stream.get ("tag:language") ?? "";
+        track.audio_codec = stream.get ("codec_name") ?? "N/A";
+
+        // Channels + channel layout
+        string layout = stream.get ("channel_layout") ?? "";
+        string ch_str = stream.get ("channels") ?? "";
+        if (layout.length > 0) {
+            track.audio_channels = format_channel_layout (layout);
+            string raw = layout.strip ();
+            string friendly = track.audio_channels;
+            if (raw.down () != friendly.down ())
+                track.channel_layout = raw;
+        } else if (ch_str.length > 0) {
+            int ch = int.parse (ch_str);
+            track.audio_channels = format_channel_count (ch);
+        }
+
+        string sr = stream.get ("sample_rate") ?? "N/A";
+        if (sr != "N/A" && sr.length > 0) {
+            int sr_int = int.parse (sr);
+            track.sample_rate = (sr_int >= 1000)
+                ? "%.1f kHz".printf (sr_int / 1000.0)
+                : sr + " Hz";
+        }
+
+        // Audio bit depth — prefer bits_per_raw_sample, fall back to
+        // sample_fmt only for lossless/PCM codecs where bit depth is meaningful.
+        string bprs = stream.get ("bits_per_raw_sample") ?? "";
+        if (bprs.length > 0 && bprs != "0" && bprs != "N/A") {
+            track.audio_bit_depth = bprs + "-bit";
+        } else {
+            string codec_lo = track.audio_codec.down ();
+            if (is_lossless_audio_codec (codec_lo)) {
+                string sfmt = stream.get ("sample_fmt") ?? "";
+                if (sfmt.length > 0)
+                    track.audio_bit_depth = format_sample_fmt (sfmt);
+            }
+        }
+
+        // Audio bit rate — fall back to TAG:BPS (Matroska/WebM) for VBR codecs like Opus
+        string abr = stream.get ("bit_rate") ?? "N/A";
+        if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
+            abr = stream.get ("tag:bps") ?? "N/A";
+        if (abr == "N/A" || abr == "0" || int64.parse (abr) <= 0)
+            abr = stream.get ("tag:bps-eng") ?? "N/A";
+        if (abr != "N/A" && abr.length > 0) {
+            int64 abri = int64.parse (abr);
+            if (abri > 0)
+                track.audio_bitrate = (abri / 1000).to_string () + " kbps";
+        }
+
+        // FLAC compression level
+        string cl = stream.get ("compression_level") ?? "";
+        if (cl.length > 0 && cl != "N/A")
+            track.audio_compression = cl;
+
+        // Audio encoder
+        string aenc = stream.get ("tag:encoder") ?? "";
+        if (aenc.length > 0 && aenc != "N/A")
+            track.audio_encoder = aenc;
+
+        return track;
     }
 
     // ── Keyframe counting ─────────────────────────────────────────────────────
