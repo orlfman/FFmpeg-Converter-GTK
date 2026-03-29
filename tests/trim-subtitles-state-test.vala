@@ -235,19 +235,25 @@ private void test_subtitles_reorder_move_remove_and_default_helpers () {
     assert_int_equal (detected[0].sub_index, 1, "subtitles move detected up");
     assert_int_equal (detected[1].sub_index, 0, "subtitles move detected up");
 
-    SubtitlesTab.reorder_detected_for_test (detected, 2, 1);
-    assert_int_equal (detected[1].sub_index, 2, "subtitles reorder detected");
-    assert_int_equal (detected[2].sub_index, 0, "subtitles reorder detected");
+    SubtitlesTab.reorder_detected_for_test (detected, 0, 2);
+    assert_int_equal (detected[0].sub_index, 2, "subtitles reorder detected swap");
+    assert_int_equal (detected[1].sub_index, 0, "subtitles reorder detected swap");
+    assert_int_equal (detected[2].sub_index, 1, "subtitles reorder detected swap");
 
     SubtitlesTab.move_added_for_test (added, 1, -1);
     assert_string_equal (added[0].file_path, "b.srt", "subtitles move added up");
 
-    SubtitlesTab.reorder_added_for_test (added, 0, 1);
-    assert_string_equal (added[1].file_path, "b.srt", "subtitles reorder added");
+    var e2 = make_external ("c.srt");
+    added.add (e2);
+    SubtitlesTab.reorder_added_for_test (added, 0, 2);
+    assert_string_equal (added[0].file_path, "c.srt", "subtitles reorder added swap");
+    assert_string_equal (added[1].file_path, "a.srt", "subtitles reorder added middle");
+    assert_string_equal (added[2].file_path, "b.srt", "subtitles reorder added swap");
 
     SubtitlesTab.remove_added_for_test (added, 0);
-    assert_int_equal (added.length, 1, "subtitles remove added count");
-    assert_string_equal (added[0].file_path, "b.srt", "subtitles remove added survivor");
+    assert_int_equal (added.length, 2, "subtitles remove added count");
+    assert_string_equal (added[0].file_path, "a.srt", "subtitles remove added survivor");
+    assert_string_equal (added[1].file_path, "b.srt", "subtitles remove added trailing");
 
     SubtitlesTab.set_detected_default_for_test (detected, added, detected[0], true);
     assert_true (detected[0].is_default, "subtitles detected default set");

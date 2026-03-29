@@ -739,4 +739,66 @@ namespace AudioBuilder {
         cmd.add (output_file);
         return StringArrayUtils.copy_generic_array (cmd);
     }
+
+    /**
+     * Build a command to reorder audio streams within a file.
+     *
+     * @param reorder_indices  Audio stream indices in the desired output order.
+     *                         E.g. {1, 0, 2} puts the second stream first.
+     */
+    public string[] build_reorder_audio_cmd (string input_file,
+                                              string output_file,
+                                              int[] reorder_indices,
+                                              bool keep_subtitles,
+                                              bool strip_metadata) {
+        var cmd = new GenericArray<string> ();
+        cmd.add (AppSettings.get_default ().ffmpeg_path);
+        cmd.add ("-y");
+        cmd.add ("-i");
+        cmd.add (input_file);
+
+        // Map video streams
+        cmd.add ("-map");
+        cmd.add ("0:v?");
+
+        // Map audio streams in the desired order
+        for (int i = 0; i < reorder_indices.length; i++) {
+            cmd.add ("-map");
+            cmd.add ("0:a:%d".printf (reorder_indices[i]));
+        }
+
+        // Subtitles
+        if (keep_subtitles) {
+            cmd.add ("-map");
+            cmd.add ("0:s?");
+        }
+
+        // Preserve attachments and data streams
+        cmd.add ("-map");
+        cmd.add ("0:t?");
+        cmd.add ("-map");
+        cmd.add ("0:d?");
+
+        // Stream copy everything
+        cmd.add ("-c");
+        cmd.add ("copy");
+
+        // Mark the first audio stream as default; remove default from the rest.
+        // Uses +/- prefixes to preserve other disposition flags (original,
+        // comment, hearing_impaired, etc.) on every stream.
+        for (int i = 0; i < reorder_indices.length; i++) {
+            cmd.add ("-disposition:a:%d".printf (i));
+            cmd.add (i == 0 ? "+default" : "-default");
+        }
+
+        if (strip_metadata) {
+            cmd.add ("-map_metadata");
+            cmd.add ("-1");
+        }
+
+        cmd.add ("-progress");
+        cmd.add ("pipe:2");
+        cmd.add (output_file);
+        return StringArrayUtils.copy_generic_array (cmd);
+    }
 }

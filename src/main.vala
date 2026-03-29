@@ -18,7 +18,8 @@ private enum ActiveOperation {
     SUBTITLE_APPLY,
     AUDIO_EXTRACT,
     AUDIO_REMOVE,
-    AUDIO_ADD
+    AUDIO_ADD,
+    AUDIO_REORDER
 }
 
 private enum AudioCopyUnknownPreflightResult {
@@ -284,6 +285,8 @@ public class MainWindow : Adw.ApplicationWindow {
                     toast_title = "Audio removed"; break;
                 case ActiveOperation.AUDIO_ADD:
                     toast_title = "Audio added"; break;
+                case ActiveOperation.AUDIO_REORDER:
+                    toast_title = "Audio streams reordered"; break;
                 default:
                     toast_title = "Audio extraction complete"; break;
                 }
@@ -486,6 +489,7 @@ public class MainWindow : Adw.ApplicationWindow {
         case ActiveOperation.AUDIO_EXTRACT:  return "audio extraction";
         case ActiveOperation.AUDIO_REMOVE:   return "audio removal";
         case ActiveOperation.AUDIO_ADD:      return "audio muxing";
+        case ActiveOperation.AUDIO_REORDER:  return "audio reorder";
         default:                             return idle_fallback;
         }
     }
@@ -497,9 +501,10 @@ public class MainWindow : Adw.ApplicationWindow {
     /** Resolve the current audio operation type for signal dispatch. */
     private ActiveOperation resolve_audio_operation () {
         switch (current_operation) {
-        case ActiveOperation.AUDIO_REMOVE: return ActiveOperation.AUDIO_REMOVE;
-        case ActiveOperation.AUDIO_ADD:    return ActiveOperation.AUDIO_ADD;
-        default:                           return ActiveOperation.AUDIO_EXTRACT;
+        case ActiveOperation.AUDIO_REMOVE:  return ActiveOperation.AUDIO_REMOVE;
+        case ActiveOperation.AUDIO_ADD:     return ActiveOperation.AUDIO_ADD;
+        case ActiveOperation.AUDIO_REORDER: return ActiveOperation.AUDIO_REORDER;
+        default:                            return ActiveOperation.AUDIO_EXTRACT;
         }
     }
 
@@ -589,6 +594,21 @@ public class MainWindow : Adw.ApplicationWindow {
                 if (!reserve_pending_operation (ActiveOperation.AUDIO_ADD, out operation_id))
                     return;
                 start_audio_add (operation_id);
+                return;
+            }
+
+            if (audio_tab.get_mode () == AudioTabMode.REORDER) {
+                string? reorder_problem = audio_tab.get_reorder_problem ();
+                if (reorder_problem != null) {
+                    status_area.set_status (reorder_problem,
+                        StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                    return;
+                }
+
+                uint64 operation_id;
+                if (!reserve_pending_operation (ActiveOperation.AUDIO_REORDER, out operation_id))
+                    return;
+                start_audio_reorder (operation_id);
                 return;
             }
 
@@ -1177,6 +1197,58 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         activate_cancel (ActiveOperation.AUDIO_ADD, operation_id);
+    }
+
+    // ── Audio reorder path ───────────────────────────────────────────────────
+
+    private void start_audio_reorder (uint64 operation_id) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id))
+            return;
+
+        string input_file = file_pickers.input_entry.get_text ();
+        string output_folder = file_pickers.output_entry.get_text ();
+        string expected = audio_tab.get_expected_reorder_output_path (
+            input_file, output_folder);
+
+        var settings = AppSettings.get_default ();
+
+        if (settings.overwrite_enabled) {
+            launch_audio_reorder (input_file, output_folder, operation_id, true);
+        } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
+            confirm_overwrite (expected, true,
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id))
+                        return;
+                    launch_audio_reorder (input_file, output_folder, operation_id, true);
+                },
+                () => {
+                    if (!is_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id))
+                        return;
+                    launch_audio_reorder (input_file, output_folder, operation_id, false);
+                },
+                () => {
+                    release_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id, true);
+                }
+            );
+        } else {
+            launch_audio_reorder (input_file, output_folder, operation_id);
+        }
+    }
+
+    private void launch_audio_reorder (string input_file, string output_folder,
+                                        uint64 operation_id,
+                                        bool allow_overwrite = false) {
+        if (!is_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id))
+            return;
+
+        if (!audio_tab.start_reorder (input_file, output_folder,
+                                       status_area, console_tab, operation_id,
+                                       allow_overwrite)) {
+            release_pending_operation (ActiveOperation.AUDIO_REORDER, operation_id, true);
+            return;
+        }
+
+        activate_cancel (ActiveOperation.AUDIO_REORDER, operation_id);
     }
 
     // ── Crop & Trim path ─────────────────────────────────────────────────────
@@ -1859,6 +1931,12 @@ public class MainWindow : Adw.ApplicationWindow {
                 case ActiveOperation.AUDIO_ADD:
                     audio_tab.cancel_extract ();
                     message = "Audio muxing cancelled by user.";
+                    should_release_operation = false;
+                    break;
+
+                case ActiveOperation.AUDIO_REORDER:
+                    audio_tab.cancel_extract ();
+                    message = "Audio reorder cancelled by user.";
                     should_release_operation = false;
                     break;
 

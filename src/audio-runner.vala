@@ -282,6 +282,54 @@ public class AudioRunner : Object {
         }
     }
 
+    /**
+     * Run audio stream reordering on a background thread.
+     * Remuxes the file with audio streams in a user-specified order.
+     */
+    public void run_reorder (int[] reorder_indices,
+                              bool keep_subtitles,
+                              bool strip_metadata) {
+        if (input_file == "" || primary_output_path == "") {
+            report_status ("Please select an input file first!",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
+
+        if (!try_begin_run ()) {
+            warning ("AudioRunner.run_reorder() ignored while another execution is active.");
+            return;
+        }
+
+        runner.set_event_logger (log_runner_event);
+        runner.prepare_for_new_execution ();
+
+        if (progress_bar != null) {
+            tracker = new ProgressTracker (progress_bar);
+            tracker.reset_throttle ();
+            tracker.show_pulse ();
+        }
+
+        // Snapshot parameters for thread safety
+        int[] ri = reorder_indices.copy ();
+        bool ks = keep_subtitles;
+        bool sm = strip_metadata;
+
+        try {
+            new Thread<void>.try ("audio-reorder-thread", () => {
+                try {
+                    run_reorder_internal (ri, ks, sm);
+                } finally {
+                    finish_progress ();
+                    end_run ();
+                }
+            });
+        } catch (Error e) {
+            reset_progress ();
+            end_run ();
+            report_error ("Failed to start audio reorder thread: " + e.message);
+        }
+    }
+
     public void cancel () {
         runner.cancel ();
     }
@@ -767,6 +815,47 @@ public class AudioRunner : Object {
             ? "Audio replaced successfully!"
             : "Audio added successfully!";
         report_status (done_msg,
+            StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+        emit_done_file (primary_output_path);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Reorder audio streams
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void run_reorder_internal (int[] reorder_indices,
+                                        bool keep_subtitles,
+                                        bool strip_metadata) {
+        report_status ("Reordering audio streams…",
+            StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+        log_line ("[Audio] Reordering audio streams in: " + input_file);
+
+        progress_offset = 0.0;
+        progress_duration = total_duration;
+        refresh_progress_mode ();
+
+        string[] cmd = AudioBuilder.build_reorder_audio_cmd (
+            input_file, primary_output_path,
+            reorder_indices,
+            keep_subtitles, strip_metadata);
+
+        show_command (cmd);
+
+        int exit_code = runner.execute (cmd, handle_ffmpeg_line);
+
+        if (runner.is_cancelled ()) {
+            report_status ("Audio reorder cancelled.",
+                StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+            emit_failed ("Cancelled");
+            return;
+        }
+
+        if (exit_code != 0) {
+            report_error ("Audio reorder failed (exit %d).".printf (exit_code));
+            return;
+        }
+
+        report_status ("Audio streams reordered successfully!",
             StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
         emit_done_file (primary_output_path);
     }

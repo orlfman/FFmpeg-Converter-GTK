@@ -3,13 +3,14 @@ using Adw;
 using GLib;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  AudioTabMode — Selects between Extract, Remove, and Add operations
+//  AudioTabMode — Selects between Extract, Remove, Add, and Reorder operations
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public enum AudioTabMode {
     EXTRACT,
     REMOVE,
-    ADD
+    ADD,
+    REORDER
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -61,6 +62,44 @@ public class AudioTab : Box {
 
         public void on_delete_clicked () {
             owner.delete_segment (idx);
+        }
+    }
+
+    private class ReorderRowBinding : Object {
+        public unowned AudioTab owner;
+        public Adw.ActionRow row;
+        public int pos;
+
+        public void on_move_up_clicked () {
+            owner.move_reorder_stream (pos, pos - 1);
+        }
+
+        public void on_move_down_clicked () {
+            owner.move_reorder_stream (pos, pos + 1);
+        }
+
+        public Gdk.ContentProvider? on_drag_prepare (double x, double y) {
+            return owner.begin_reorder_drag (pos);
+        }
+
+        public void on_drag_begin (DragSource source, Gdk.Drag drag) {
+            var paintable = new WidgetPaintable (row);
+            source.set_icon (paintable, 0, 0);
+        }
+
+        public bool on_drag_cancel (DragSource source, Gdk.Drag drag,
+                                     Gdk.DragCancelReason reason) {
+            owner.clear_reorder_drag_state ();
+            return false;
+        }
+
+        public void on_drag_end (DragSource source, Gdk.Drag drag,
+                                  bool delete_data) {
+            owner.clear_reorder_drag_state ();
+        }
+
+        public bool on_drop (Value value, double x, double y) {
+            return owner.complete_reorder_drop (pos, value);
         }
     }
 
@@ -144,6 +183,7 @@ public class AudioTab : Box {
     private ToggleButton extract_mode_btn;
     private ToggleButton remove_mode_btn;
     private ToggleButton add_mode_btn;
+    private ToggleButton reorder_mode_btn;
 
     // ── Remove mode ───────────────────────────────────────────────────────────
     private Adw.PreferencesGroup? remove_options_group;
@@ -165,6 +205,20 @@ public class AudioTab : Box {
     private Adw.PreferencesGroup? add_codec_group;
     private AudioSettings? add_audio_settings;
     private Adw.StatusPage? add_no_file_page;
+
+    // ── Reorder mode ────────────────────────────────────────────────────────
+    private Adw.PreferencesGroup? reorder_group;
+    private Gtk.ListBox reorder_listbox;
+    private Label reorder_count_label;
+    private Adw.StatusPage? reorder_need_multi_page;
+    private GenericArray<int> reorder_indices = new GenericArray<int> ();
+    private GenericArray<ReorderRowBinding> reorder_row_bindings =
+        new GenericArray<ReorderRowBinding> ();
+    private int _drag_from_reorder = -1;
+    private const string DRAG_ORIGIN_REORDER = "reorder-audio";
+    private Adw.SwitchRow reorder_keep_subtitles_row;
+    private Adw.SwitchRow reorder_strip_metadata_row;
+    private Adw.PreferencesGroup? reorder_options_group;
 
     // ── Runner ───────────────────────────────────────────────────────────────
     private AudioRunner? active_runner = null;
@@ -207,6 +261,8 @@ public class AudioTab : Box {
         build_remove_options ();
         build_add_audio_source ();
         build_add_audio_options ();
+        build_reorder_stream_list ();
+        build_reorder_options ();
 
         update_mode_visibility ();
     }
@@ -235,6 +291,7 @@ public class AudioTab : Box {
         selected_stream_index = 0;
 
         reset_segments ();
+        reorder_indices = new GenericArray<int> ();
         player.clear ();
         stream_info_row.set_title ("Detecting…");
         stream_info_row.set_subtitle ("");
@@ -664,6 +721,117 @@ public class AudioTab : Box {
             out_dir, "%s%s%s".printf (name_no_ext, suffix, ext));
     }
 
+    /**
+     * Whether the Reorder operation can run.
+     * Needs a file with at least 2 audio streams and a changed order.
+     */
+    public bool can_reorder () {
+        return has_audio
+            && current_input_file.length > 0
+            && all_audio_streams.length >= 2
+            && is_reorder_changed ();
+    }
+
+    /**
+     * Return a human-readable reason why reorder cannot run,
+     * or null if it can.  Used by the main start-button handler
+     * to show a specific message for each failure condition.
+     */
+    public string? get_reorder_problem () {
+        return resolve_reorder_problem (
+            current_input_file,
+            has_audio,
+            all_audio_streams.length,
+            is_reorder_changed ()
+        );
+    }
+
+    /**
+     * Start the audio reorder operation.
+     */
+    public bool start_reorder (string input_file,
+                                string output_folder,
+                                StatusArea status_area,
+                                ConsoleTab console_tab,
+                                uint64 operation_id,
+                                bool allow_overwrite = false) {
+        if (has_pending_or_active_extract ()) {
+            status_area.set_status ("An audio operation is already running.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        if (!has_audio || all_audio_streams.length < 2) {
+            status_area.set_status ("File must have at least two audio streams to reorder.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        if (!is_reorder_changed ()) {
+            status_area.set_status ("Audio streams are already in the original order. Rearrange them first.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+
+        // Output uses same container as input
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        string out_path = Path.build_filename (
+            out_dir, "%s-reordered%s".printf (name_no_ext, ext));
+        if (!allow_overwrite) {
+            string? unique = ConversionUtils.find_unique_path (out_path);
+            out_path = unique ?? out_path;
+        }
+
+        // Build the indices array
+        int[] indices = new int[reorder_indices.length];
+        for (int i = 0; i < reorder_indices.length; i++) {
+            indices[i] = reorder_indices[i];
+        }
+
+        var runner_inst = new AudioRunner ();
+        runner_inst.input_file = input_file;
+        runner_inst.status_area = status_area;
+        runner_inst.progress_bar = status_area.progress_bar;
+        runner_inst.console_tab = console_tab;
+        runner_inst.set_primary_output (out_path);
+        runner_inst.set_total_duration (loaded_duration);
+
+        activate_runner (runner_inst, operation_id);
+        runner_inst.run_reorder (
+            indices,
+            reorder_keep_subtitles_row.get_active (),
+            reorder_strip_metadata_row.get_active ()
+        );
+        return true;
+    }
+
+    /**
+     * Return the expected output path for Reorder Audio,
+     * without auto-rename.  Used by the overwrite protection dialog.
+     */
+    public string get_expected_reorder_output_path (string input_file,
+                                                     string output_folder) {
+        if (input_file.length == 0 || all_audio_streams.length < 2) return "";
+
+        string basename = Path.get_basename (input_file);
+        int dot = basename.last_index_of_char ('.');
+        string name_no_ext = (dot > 0) ? basename.substring (0, dot) : basename;
+        string ext = (dot > 0) ? basename.substring (dot) : ".mkv";
+        string out_dir = (output_folder != null && output_folder != "")
+            ? output_folder
+            : Path.get_dirname (input_file);
+
+        return Path.build_filename (
+            out_dir, "%s-reordered%s".printf (name_no_ext, ext));
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  0. MODE SELECTOR
     // ═════════════════════════════════════════════════════════════════════════
@@ -682,14 +850,19 @@ public class AudioTab : Box {
         add_mode_btn = new ToggleButton.with_label ("Add / Replace");
         add_mode_btn.set_group (extract_mode_btn);
 
+        reorder_mode_btn = new ToggleButton.with_label ("Reorder");
+        reorder_mode_btn.set_group (extract_mode_btn);
+
         mode_box.append (extract_mode_btn);
         mode_box.append (remove_mode_btn);
         mode_box.append (add_mode_btn);
+        mode_box.append (reorder_mode_btn);
         append (mode_box);
 
         extract_mode_btn.toggled.connect (on_mode_toggled);
         remove_mode_btn.toggled.connect (on_mode_toggled);
         add_mode_btn.toggled.connect (on_mode_toggled);
+        reorder_mode_btn.toggled.connect (on_mode_toggled);
     }
 
     private void on_mode_toggled () {
@@ -698,6 +871,8 @@ public class AudioTab : Box {
             new_mode = AudioTabMode.REMOVE;
         } else if (add_mode_btn.get_active ()) {
             new_mode = AudioTabMode.ADD;
+        } else if (reorder_mode_btn.get_active ()) {
+            new_mode = AudioTabMode.REORDER;
         } else {
             new_mode = AudioTabMode.EXTRACT;
         }
@@ -709,6 +884,7 @@ public class AudioTab : Box {
 
     private void update_tab_mode () {
         bool add = current_mode == AudioTabMode.ADD;
+        bool reorder = current_mode == AudioTabMode.REORDER;
 
         if (add) {
             // In Add mode, we need a loaded video file but not necessarily audio
@@ -719,6 +895,19 @@ public class AudioTab : Box {
                 no_audio_page.set_description (no_file_description ());
             }
             set_controls_visible (has_file);
+        } else if (reorder) {
+            // Reorder needs audio with multiple streams
+            no_audio_page.set_visible (!has_audio);
+            info_group.set_visible (has_audio);
+            if (!has_audio) {
+                no_audio_page.set_description (no_file_description ());
+            }
+            set_controls_visible (has_audio);
+            // Rebuild the reorder list when switching to this mode
+            if (has_audio) {
+                init_reorder_indices ();
+                rebuild_reorder_list ();
+            }
         } else {
             // Extract/Remove modes require audio
             no_audio_page.set_visible (!has_audio);
@@ -736,6 +925,8 @@ public class AudioTab : Box {
             return "Select a file with audio to remove audio tracks";
         case AudioTabMode.ADD:
             return "Select a video file to add audio";
+        case AudioTabMode.REORDER:
+            return "Select a file with multiple audio tracks to reorder";
         default:
             return "Select a file with audio to begin extraction";
         }
@@ -818,9 +1009,10 @@ public class AudioTab : Box {
         bool extract = current_mode == AudioTabMode.EXTRACT;
         bool remove = current_mode == AudioTabMode.REMOVE;
         bool add = current_mode == AudioTabMode.ADD;
+        bool reorder = current_mode == AudioTabMode.REORDER;
 
         // Extract-mode controls
-        player.set_visible (visible);
+        player.set_visible (visible && !reorder);
         if (mark_group != null) mark_group.set_visible (visible && extract);
         if (seg_box != null) seg_box.set_visible (visible && extract);
         if (output_separator != null) output_separator.set_visible (visible && extract);
@@ -854,6 +1046,15 @@ public class AudioTab : Box {
             add_codec_group.set_visible (visible && add
                 && add_audio_file_path.length > 0
                 && add_copy_mode_row != null && !add_copy_mode_row.get_active ());
+
+        // Reorder-mode controls
+        bool has_multi = all_audio_streams.length >= 2;
+        if (reorder_need_multi_page != null)
+            reorder_need_multi_page.set_visible (visible && reorder && !has_multi);
+        if (reorder_group != null)
+            reorder_group.set_visible (visible && reorder && has_multi);
+        if (reorder_options_group != null)
+            reorder_options_group.set_visible (visible && reorder && has_multi);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1671,6 +1872,242 @@ public class AudioTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  12. REORDER AUDIO STREAMS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_reorder_stream_list () {
+        // Status page shown when file has fewer than 2 audio streams
+        reorder_need_multi_page = new Adw.StatusPage ();
+        reorder_need_multi_page.set_icon_name ("view-list-ordered-symbolic");
+        reorder_need_multi_page.set_title ("Multiple Audio Tracks Required");
+        reorder_need_multi_page.set_description (
+            "Reordering requires a file with at least two audio streams");
+        reorder_need_multi_page.set_visible (false);
+        append (reorder_need_multi_page);
+
+        reorder_group = new Adw.PreferencesGroup ();
+        reorder_group.set_title ("Audio Stream Order");
+        reorder_group.set_description (
+            "Drag and drop or use the arrow buttons to rearrange audio streams");
+        reorder_group.set_visible (false);
+
+        reorder_count_label = new Label ("");
+        reorder_count_label.add_css_class ("dim-label");
+        reorder_group.set_header_suffix (reorder_count_label);
+
+        reorder_listbox = new Gtk.ListBox ();
+        reorder_listbox.set_selection_mode (SelectionMode.NONE);
+        reorder_listbox.add_css_class ("boxed-list");
+        reorder_group.add (reorder_listbox);
+
+        append (reorder_group);
+    }
+
+    private void build_reorder_options () {
+        reorder_options_group = new Adw.PreferencesGroup ();
+        reorder_options_group.set_title ("Options");
+        reorder_options_group.set_visible (false);
+
+        reorder_keep_subtitles_row = new Adw.SwitchRow ();
+        reorder_keep_subtitles_row.set_title ("Keep Subtitles");
+        reorder_keep_subtitles_row.set_subtitle ("Preserve subtitle tracks in the output");
+        reorder_keep_subtitles_row.set_active (true);
+        reorder_options_group.add (reorder_keep_subtitles_row);
+
+        reorder_strip_metadata_row = new Adw.SwitchRow ();
+        reorder_strip_metadata_row.set_title ("Strip Metadata");
+        reorder_strip_metadata_row.set_subtitle ("Remove all metadata tags from output");
+        reorder_strip_metadata_row.set_active (false);
+        reorder_options_group.add (reorder_strip_metadata_row);
+
+        append (reorder_options_group);
+    }
+
+    /**
+     * Initialize the reorder indices array to the natural order of audio streams.
+     * Only resets if the count changed (e.g. new file loaded).
+     */
+    private void init_reorder_indices () {
+        if (reorder_indices.length == all_audio_streams.length) return;
+        reorder_indices = new GenericArray<int> ();
+        reset_reorder_indices (reorder_indices, all_audio_streams.length);
+    }
+
+    private void rebuild_reorder_list () {
+        reorder_row_bindings = new GenericArray<ReorderRowBinding> ();
+
+        // Clear existing rows
+        var child = reorder_listbox.get_first_child ();
+        while (child != null) {
+            var next = child.get_next_sibling ();
+            reorder_listbox.remove (child);
+            child = next;
+        }
+
+        reorder_count_label.set_text ("%d tracks".printf (reorder_indices.length));
+
+        for (int pos = 0; pos < reorder_indices.length; pos++) {
+            int stream_idx = reorder_indices[pos];
+            var info = all_audio_streams[stream_idx];
+
+            var row = new Adw.ActionRow ();
+            row.set_title ("Position %d".printf (pos + 1));
+            row.set_subtitle (info.display_label ());
+            row.add_prefix (make_icon (icon_for_channels (info.channels)));
+
+            var binding = new ReorderRowBinding ();
+            binding.owner = this;
+            binding.row = row;
+            binding.pos = pos;
+            reorder_row_bindings.add (binding);
+
+            // Drag-and-drop reorder
+            var drag_source = new DragSource ();
+            drag_source.set_actions (Gdk.DragAction.MOVE);
+            drag_source.prepare.connect (binding.on_drag_prepare);
+            drag_source.drag_begin.connect (binding.on_drag_begin);
+            drag_source.drag_cancel.connect (binding.on_drag_cancel);
+            drag_source.drag_end.connect (binding.on_drag_end);
+            row.add_controller (drag_source);
+
+            var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
+            drop_target.drop.connect (binding.on_drop);
+            row.add_controller (drop_target);
+
+            // Move up
+            if (pos > 0) {
+                var up_btn = new Button.from_icon_name ("go-up-symbolic");
+                up_btn.add_css_class ("flat");
+                up_btn.set_valign (Align.CENTER);
+                up_btn.set_tooltip_text ("Move up");
+                up_btn.clicked.connect (binding.on_move_up_clicked);
+                row.add_suffix (up_btn);
+            }
+
+            // Move down
+            if (pos < reorder_indices.length - 1) {
+                var down_btn = new Button.from_icon_name ("go-down-symbolic");
+                down_btn.add_css_class ("flat");
+                down_btn.set_valign (Align.CENTER);
+                down_btn.set_tooltip_text ("Move down");
+                down_btn.clicked.connect (binding.on_move_down_clicked);
+                row.add_suffix (down_btn);
+            }
+
+            reorder_listbox.append (row);
+        }
+
+        // Reset row at the bottom (only when order differs from natural)
+        if (is_reorder_changed ()) {
+            var reset_row = new Adw.ActionRow ();
+            reset_row.set_title ("Reset to Original Order");
+            reset_row.add_prefix (make_icon ("edit-undo-symbolic"));
+            reset_row.set_activatable (true);
+            reset_row.add_css_class ("clear-segments-row");
+            reset_row.activated.connect (on_reorder_reset_clicked);
+            reorder_listbox.append (reset_row);
+        }
+    }
+
+    private void on_reorder_reset_clicked () {
+        reset_reorder_indices (reorder_indices, all_audio_streams.length);
+        rebuild_reorder_list ();
+    }
+
+    private void move_reorder_stream (int from, int to) {
+        move_reorder_indices (reorder_indices, from, to);
+        rebuild_reorder_list ();
+    }
+
+    /**
+     * Check whether the current reorder differs from the natural order.
+     */
+    private bool is_reorder_changed () {
+        return check_reorder_changed (reorder_indices, all_audio_streams.length);
+    }
+
+    /**
+     * Swap two elements within a reorder-indices array.
+     * Extracted as a static method so the test suite can exercise the
+     * exact production logic without instantiating the widget.
+     */
+    private static void move_reorder_indices (GenericArray<int> indices,
+                                               int from, int to) {
+        if (from < 0 || from >= indices.length
+            || to < 0 || to >= indices.length)
+            return;
+        int tmp = indices[from];
+        indices[from] = indices[to];
+        indices[to] = tmp;
+    }
+
+    /**
+     * Check whether the given indices differ from natural order [0..n-1].
+     */
+    private static bool check_reorder_changed (GenericArray<int> indices,
+                                                int stream_count) {
+        if (indices.length != stream_count) return false;
+        for (int i = 0; i < indices.length; i++) {
+            if (indices[i] != i) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Reset indices to natural order [0..stream_count-1].
+     */
+    private static void reset_reorder_indices (GenericArray<int> indices,
+                                                int stream_count) {
+        indices.remove_range (0, indices.length);
+        for (int i = 0; i < stream_count; i++) {
+            indices.add (i);
+        }
+    }
+
+    /**
+     * Resolve the validation message shown before starting reorder,
+     * or null when all prerequisites are satisfied.
+     */
+    private static string? resolve_reorder_problem (string input_file,
+                                                     bool has_audio,
+                                                     int audio_stream_count,
+                                                     bool reorder_changed) {
+        if (input_file.length == 0)
+            return "Load a file to begin reordering audio streams!";
+        if (!has_audio)
+            return "The selected file has no audio streams.";
+        if (audio_stream_count < 2)
+            return "Reordering requires a file with at least two audio streams.";
+        if (!reorder_changed)
+            return "Rearrange the audio stream order before starting!";
+        return null;
+    }
+
+    internal void clear_reorder_drag_state () {
+        _drag_from_reorder = -1;
+    }
+
+    internal Gdk.ContentProvider begin_reorder_drag (int pos) {
+        _drag_from_reorder = pos;
+        var val = Value (typeof (string));
+        val.set_string (DRAG_ORIGIN_REORDER);
+        return new Gdk.ContentProvider.for_value (val);
+    }
+
+    internal bool complete_reorder_drop (int drop_pos, Value value) {
+        string? origin = value.get_string ();
+        if (origin != DRAG_ORIGIN_REORDER) {
+            _drag_from_reorder = -1;
+            return false;
+        }
+        if (_drag_from_reorder >= 0 && _drag_from_reorder != drop_pos) {
+            move_reorder_stream (_drag_from_reorder, drop_pos);
+        }
+        _drag_from_reorder = -1;
+        return true;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  AUDIO STREAM PROBING
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -1786,6 +2223,12 @@ public class AudioTab : Box {
             extract_all_summary_row.set_title ("%d Audio Track%s".printf (
                 all_audio_streams.length,
                 all_audio_streams.length == 1 ? "" : "s"));
+        }
+
+        // Refresh reorder list if we're already in reorder mode
+        if (current_mode == AudioTabMode.REORDER) {
+            init_reorder_indices ();
+            rebuild_reorder_list ();
         }
 
         show_audio_found ();
@@ -2036,4 +2479,35 @@ public class AudioTab : Box {
         img.set_valign (Align.CENTER);
         return img;
     }
+
+#if AUDIO_REORDER_TEST_BUILD
+    // ── Test-only accessors — expose static logic for the test suite ────────
+
+    internal static void move_reorder_indices_for_test (GenericArray<int> indices,
+                                                         int from, int to) {
+        move_reorder_indices (indices, from, to);
+    }
+
+    internal static bool check_reorder_changed_for_test (GenericArray<int> indices,
+                                                          int stream_count) {
+        return check_reorder_changed (indices, stream_count);
+    }
+
+    internal static void reset_reorder_indices_for_test (GenericArray<int> indices,
+                                                          int stream_count) {
+        reset_reorder_indices (indices, stream_count);
+    }
+
+    internal static string? resolve_reorder_problem_for_test (string input_file,
+                                                               bool has_audio,
+                                                               int audio_stream_count,
+                                                               bool reorder_changed) {
+        return resolve_reorder_problem (
+            input_file,
+            has_audio,
+            audio_stream_count,
+            reorder_changed
+        );
+    }
+#endif
 }

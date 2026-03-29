@@ -1648,43 +1648,41 @@ public class SubtitlesTab : Box {
         rebuild_burn_track_combo ();
     }
 
-    /** Drag-and-drop: move a detected stream from one position to another. */
-    private void reorder_detected (int from, int to) {
+    private static void swap_detected_streams (GenericArray<SubtitleStream> detected_streams,
+                                               int from,
+                                               int to) {
         if (from == to) return;
         if (from < 0 || from >= detected_streams.length) return;
         if (to   < 0 || to   >= detected_streams.length) return;
 
-        var stream = detected_streams[from];
-        if (from < to) {
-            for (int i = from; i < to; i++)
-                detected_streams[i] = detected_streams[i + 1];
-        } else {
-            for (int i = from; i > to; i--)
-                detected_streams[i] = detected_streams[i - 1];
-        }
-        detected_streams[to] = stream;
+        var tmp = detected_streams[from];
+        detected_streams[from] = detected_streams[to];
+        detected_streams[to] = tmp;
+    }
 
+    private static void swap_added_subtitles (GenericArray<ExternalSubtitle> added_subtitles,
+                                              int from,
+                                              int to) {
+        if (from == to) return;
+        if (from < 0 || from >= added_subtitles.length) return;
+        if (to   < 0 || to   >= added_subtitles.length) return;
+
+        var tmp = added_subtitles[from];
+        added_subtitles[from] = added_subtitles[to];
+        added_subtitles[to] = tmp;
+    }
+
+    /** Drag-and-drop: swap two detected streams. */
+    private void reorder_detected (int from, int to) {
+        swap_detected_streams (detected_streams, from, to);
         rebuild_detected_group ();
         rebuild_extract_combo ();
         rebuild_burn_track_combo ();
     }
 
-    /** Drag-and-drop: move an added subtitle from one position to another. */
+    /** Drag-and-drop: swap two added subtitles. */
     private void reorder_added (int from, int to) {
-        if (from == to) return;
-        if (from < 0 || from >= added_subtitles.length) return;
-        if (to   < 0 || to   >= added_subtitles.length) return;
-
-        var ext = added_subtitles[from];
-        if (from < to) {
-            for (int i = from; i < to; i++)
-                added_subtitles[i] = added_subtitles[i + 1];
-        } else {
-            for (int i = from; i > to; i--)
-                added_subtitles[i] = added_subtitles[i - 1];
-        }
-        added_subtitles[to] = ext;
-
+        swap_added_subtitles (added_subtitles, from, to);
         rebuild_add_group ();
         rebuild_burn_track_combo ();
     }
@@ -1922,39 +1920,13 @@ public class SubtitlesTab : Box {
     internal static void reorder_detected_for_test (GenericArray<SubtitleStream> detected_streams,
                                                     int from,
                                                     int to) {
-        if (from == to)
-            return;
-        if (from < 0 || from >= detected_streams.length || to < 0 || to >= detected_streams.length)
-            return;
-
-        var stream = detected_streams[from];
-        if (from < to) {
-            for (int i = from; i < to; i++)
-                detected_streams[i] = detected_streams[i + 1];
-        } else {
-            for (int i = from; i > to; i--)
-                detected_streams[i] = detected_streams[i - 1];
-        }
-        detected_streams[to] = stream;
+        swap_detected_streams (detected_streams, from, to);
     }
 
     internal static void reorder_added_for_test (GenericArray<ExternalSubtitle> added_subtitles,
                                                  int from,
                                                  int to) {
-        if (from == to)
-            return;
-        if (from < 0 || from >= added_subtitles.length || to < 0 || to >= added_subtitles.length)
-            return;
-
-        var ext = added_subtitles[from];
-        if (from < to) {
-            for (int i = from; i < to; i++)
-                added_subtitles[i] = added_subtitles[i + 1];
-        } else {
-            for (int i = from; i > to; i--)
-                added_subtitles[i] = added_subtitles[i - 1];
-        }
-        added_subtitles[to] = ext;
+        swap_added_subtitles (added_subtitles, from, to);
     }
 
     internal static void remove_added_for_test (GenericArray<ExternalSubtitle> added_subtitles,
