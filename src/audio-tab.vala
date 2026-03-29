@@ -1012,7 +1012,7 @@ public class AudioTab : Box {
         bool reorder = current_mode == AudioTabMode.REORDER;
 
         // Extract-mode controls
-        player.set_visible (visible && !reorder);
+        player.set_visible (visible);
         if (mark_group != null) mark_group.set_visible (visible && extract);
         if (seg_box != null) seg_box.set_visible (visible && extract);
         if (output_separator != null) output_separator.set_visible (visible && extract);
@@ -1878,7 +1878,6 @@ public class AudioTab : Box {
     private void build_reorder_stream_list () {
         // Status page shown when file has fewer than 2 audio streams
         reorder_need_multi_page = new Adw.StatusPage ();
-        reorder_need_multi_page.set_icon_name ("view-list-ordered-symbolic");
         reorder_need_multi_page.set_title ("Multiple Audio Tracks Required");
         reorder_need_multi_page.set_description (
             "Reordering requires a file with at least two audio streams");
