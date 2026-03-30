@@ -99,6 +99,7 @@ public class TrimTab : Box, ICodecTab {
 
     private class SegmentRowBinding : Object {
         public unowned TrimTab owner;
+        public Adw.ActionRow row;
         public Entry start_entry;
         public Entry end_entry;
         public Button? move_up_button;
@@ -111,6 +112,30 @@ public class TrimTab : Box, ICodecTab {
 
         public void on_move_down_clicked () {
             owner.move_segment_down (idx);
+        }
+
+        public Gdk.ContentProvider? on_drag_prepare (double x, double y) {
+            return owner.begin_segment_drag (idx);
+        }
+
+        public void on_drag_begin (DragSource source, Gdk.Drag drag) {
+            var paintable = new WidgetPaintable (row);
+            source.set_icon (paintable, 0, 0);
+        }
+
+        public bool on_drag_cancel (DragSource source, Gdk.Drag drag,
+                                     Gdk.DragCancelReason reason) {
+            owner.clear_segment_drag_state ();
+            return false;
+        }
+
+        public void on_drag_end (DragSource source, Gdk.Drag drag,
+                                  bool delete_data) {
+            owner.clear_segment_drag_state ();
+        }
+
+        public bool on_drop (Value value, double x, double y) {
+            return owner.complete_segment_drop (idx, value);
         }
 
         public void on_start_changed () {
@@ -229,6 +254,8 @@ public class TrimTab : Box, ICodecTab {
         new GenericArray<ChapterRowBinding> ();
     private GenericArray<SegmentRowBinding> segment_row_bindings =
         new GenericArray<SegmentRowBinding> ();
+    private int _drag_from_segment = -1;
+    private const string DRAG_ORIGIN_SEGMENT = "segment-reorder";
 
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void trim_done (OperationOutputResult output_result);
@@ -2069,6 +2096,7 @@ public class TrimTab : Box, ICodecTab {
         segment_row_bindings.add (binding);
 
         var row = new Adw.ActionRow ();
+        binding.row = row;
         // Use chapter title as row title when available, fall back to number
         if (seg.label != null && seg.label.strip ().length > 0) {
             row.set_title ("#%d — %s".printf (index + 1, seg.label));
@@ -2086,6 +2114,19 @@ public class TrimTab : Box, ICodecTab {
             time_str += "  [crop: " + seg.crop_value + "]";
         }
         row.set_subtitle (time_str);
+
+        // ── Drag-and-drop reorder ────────────────────────────────────────────
+        var drag_source = new DragSource ();
+        drag_source.set_actions (Gdk.DragAction.MOVE);
+        drag_source.prepare.connect (binding.on_drag_prepare);
+        drag_source.drag_begin.connect (binding.on_drag_begin);
+        drag_source.drag_cancel.connect (binding.on_drag_cancel);
+        drag_source.drag_end.connect (binding.on_drag_end);
+        row.add_controller (drag_source);
+
+        var drop_target = new DropTarget (typeof (string), Gdk.DragAction.MOVE);
+        drop_target.drop.connect (binding.on_drop);
+        row.add_controller (drop_target);
 
         // ── Chapter mode: simplified rows with reorder controls ────────────────
         // In Chapter Split mode, segments are auto-generated from the chapter
@@ -2320,6 +2361,30 @@ public class TrimTab : Box, ICodecTab {
         rebuild_segment_rows ();
     }
 
+    internal void clear_segment_drag_state () {
+        _drag_from_segment = -1;
+    }
+
+    internal Gdk.ContentProvider begin_segment_drag (int idx) {
+        _drag_from_segment = idx;
+        var val = Value (typeof (string));
+        val.set_string (DRAG_ORIGIN_SEGMENT);
+        return new Gdk.ContentProvider.for_value (val);
+    }
+
+    internal bool complete_segment_drop (int drop_idx, Value value) {
+        string? origin = value.get_string ();
+        if (origin != DRAG_ORIGIN_SEGMENT) {
+            _drag_from_segment = -1;
+            return false;
+        }
+        if (_drag_from_segment >= 0 && _drag_from_segment != drop_idx) {
+            swap_segments (_drag_from_segment, drop_idx);
+        }
+        _drag_from_segment = -1;
+        return true;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
@@ -2467,6 +2532,13 @@ public class TrimTab : Box, ICodecTab {
     internal static bool export_failure_counts_as_cancelled_for_test (bool cancel_pending,
                                                                       bool runner_cancelled) {
         return cancel_pending || runner_cancelled;
+    }
+
+    internal bool simulate_segment_drag_drop_for_widget_test (int from, int to) {
+        begin_segment_drag (from);
+        var val = Value (typeof (string));
+        val.set_string (DRAG_ORIGIN_SEGMENT);
+        return complete_segment_drop (to, val);
     }
 #endif
 }

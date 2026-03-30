@@ -216,6 +216,35 @@ private void test_trim_move_button_reorders_segments () {
         "trim widget move-up reorders segments");
 }
 
+private void test_trim_drag_drop_reorders_segments () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var tab = new TrimTab ();
+    var segments = new GenericArray<TrimSegment> ();
+    segments.add (make_segment (0.0, 5.0, "First"));
+    segments.add (make_segment (5.0, 10.0, "Second"));
+    segments.add (make_segment (10.0, 15.0, "Third"));
+
+    tab.load_segments_for_widget_test (segments);
+
+    // Drag segment 0 ("First") onto segment 2 ("Third") — should swap
+    var result = tab.simulate_segment_drag_drop_for_widget_test (0, 2);
+    assert_true (result, "trim drag-drop returns true on valid drop");
+    assert_string_equal (
+        tab.get_segment_label_for_widget_test (0),
+        "Third",
+        "trim drag-drop swaps source to target position");
+    assert_string_equal (
+        tab.get_segment_label_for_widget_test (2),
+        "First",
+        "trim drag-drop swaps target to source position");
+    assert_string_equal (
+        tab.get_segment_label_for_widget_test (1),
+        "Second",
+        "trim drag-drop leaves other segments unchanged");
+}
+
 private void test_subtitles_reorder_move_remove_and_default_helpers () {
     var detected = new GenericArray<SubtitleStream> ();
     var s0 = make_stream (0, "English");
@@ -315,6 +344,7 @@ void main (string[] args) {
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
     Test.add_func ("/trim/widgets/chapter-checkbox", test_trim_chapter_checkbox_updates_model_and_segments);
     Test.add_func ("/trim/widgets/move-button", test_trim_move_button_reorders_segments);
+    Test.add_func ("/trim/widgets/drag-drop", test_trim_drag_drop_reorders_segments);
     Test.add_func ("/subtitles/state/reorder-move-remove-default", test_subtitles_reorder_move_remove_and_default_helpers);
     Test.add_func ("/subtitles/state/order-and-completion", test_subtitles_order_and_completion_helpers);
 
