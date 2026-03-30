@@ -177,6 +177,9 @@ public class TrimTab : Box, ICodecTab {
 
     // ── Video Player ─────────────────────────────────────────────────────────
     private VideoPlayer player;
+    private Box mode_box;
+    private Adw.Window? popout_window = null;
+    private Gtk.Label? popout_placeholder = null;
 
     // ── Mark In / Out state ──────────────────────────────────────────────────
     private double mark_in  = 0.0;
@@ -1234,7 +1237,7 @@ public class TrimTab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_mode_selector () {
-        var mode_box = new Box (Orientation.HORIZONTAL, 0);
+        mode_box = new Box (Orientation.HORIZONTAL, 0);
         mode_box.add_css_class ("linked");
         mode_box.set_halign (Align.CENTER);
 
@@ -1387,6 +1390,88 @@ public class TrimTab : Box, ICodecTab {
 
         // Wire crop overlay changes to our display
         player.crop_overlay.crop_changed.connect (on_crop_overlay_changed);
+
+        // Wire pop-out button
+        player.popout_requested.connect (on_popout_requested);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  Pop-out Player — detach into a secondary window, reattach on close
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void on_popout_requested () {
+        if (popout_window != null) {
+            // Already popped out — toggle: reattach and close
+            var window = popout_window;
+            reattach_player ();
+            window.close ();
+            return;
+        }
+
+        // Remove player from TrimTab and insert a placeholder
+        player.unparent ();
+
+        popout_placeholder = new Gtk.Label ("Video player is in a separate window");
+        popout_placeholder.add_css_class ("dim-label");
+        popout_placeholder.set_margin_top (48);
+        popout_placeholder.set_margin_bottom (48);
+        insert_child_after (popout_placeholder, mode_box);
+
+        // Create the pop-out window as an independent top-level window
+        var root = get_root () as Gtk.Window;
+        popout_window = new Adw.Window ();
+        popout_window.set_title ("Video Preview");
+        popout_window.set_default_size (800, 540);
+        if (root != null && root.application != null) {
+            popout_window.application = root.application;
+        }
+
+        var toolbar_view = new Adw.ToolbarView ();
+        var header = new Adw.HeaderBar ();
+        toolbar_view.add_top_bar (header);
+        toolbar_view.set_content (player);
+        popout_window.set_content (toolbar_view);
+
+        player.set_popout_icon (true);
+        popout_window.close_request.connect (on_popout_close_request);
+        popout_window.present ();
+    }
+
+    private bool on_popout_close_request () {
+        reattach_player ();
+        return false;  // allow the window to close
+    }
+
+    private void reattach_player () {
+        if (popout_window == null) return;
+
+        // Remove player from the pop-out window's toolbar view
+        var toolbar_view = popout_window.content as Adw.ToolbarView;
+        if (toolbar_view != null) {
+            toolbar_view.set_content (null);
+        }
+
+        // Remove placeholder and reinsert player at the correct position
+        if (popout_placeholder != null) {
+            popout_placeholder.unparent ();
+            popout_placeholder = null;
+        }
+        insert_child_after (player, mode_box);
+        player.set_popout_icon (false);
+
+        popout_window = null;
+    }
+
+    /**
+     * Force-close the pop-out window and reattach the player.
+     * Called when the main window is closing.
+     */
+    public void close_popout () {
+        if (popout_window != null) {
+            var window = popout_window;
+            reattach_player ();   // sets popout_window = null
+            window.close ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -9,6 +9,7 @@ public class VideoPlayer : Box {
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
+    private Gtk.Button popout_btn;
     private Gtk.Overlay video_overlay;
 
     // ── Crop Overlay ─────────────────────────────────────────────────────────
@@ -39,6 +40,7 @@ public class VideoPlayer : Box {
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void position_changed (double seconds);
     public signal void media_ready (double duration_seconds);
+    public signal void popout_requested ();
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -155,6 +157,13 @@ public class VideoPlayer : Box {
 
         controls.append (time_box);
 
+        // Pop-out button — detach the player into its own window
+        popout_btn = new Button.from_icon_name ("view-fullscreen-symbolic");
+        popout_btn.set_tooltip_text ("Pop out video player into separate window");
+        popout_btn.set_margin_start (10);
+        popout_btn.clicked.connect (() => popout_requested ());
+        controls.append (popout_btn);
+
         append (controls);
     }
 
@@ -240,6 +249,18 @@ public class VideoPlayer : Box {
         if (active && _intrinsic_width > 0) {
             _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
         }
+    }
+
+    /**
+     * Update the pop-out button icon to reflect the current state.
+     */
+    public void set_popout_icon (bool is_popped_out) {
+        popout_btn.set_icon_name (is_popped_out
+            ? "view-restore-symbolic"
+            : "view-fullscreen-symbolic");
+        popout_btn.set_tooltip_text (is_popped_out
+            ? "Return video player to main window"
+            : "Pop out video player into separate window");
     }
 
     /**

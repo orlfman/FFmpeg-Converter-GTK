@@ -1978,6 +1978,7 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
+            trim_tab.close_popout ();
             audio_tab.cleanup_player ();
             return false;  // No operation running — allow close
         }
@@ -2024,6 +2025,7 @@ public class MainWindow : Adw.ApplicationWindow {
      */
     private void force_cancel_and_close () {
         cancel_current_operation ();
+        trim_tab.close_popout ();
         audio_tab.cleanup_player ();
         close_after_cancellation = true;
         maybe_finish_close_after_cancellation ();
