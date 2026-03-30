@@ -503,7 +503,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
                     "Checking system %s → %s".printf (default_name, display_path),
                     "Using system %s → %s".printf (default_name, display_path),
                     "System %s at %s failed to run".printf (default_name, display_path),
-                    check_codec_support
+                    check_codec_support,
+                    default_name
                 );
             } else {
                 set_status (status,
@@ -533,7 +534,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
                         "Checking: %s".printf (display_path),
                         "Ready: %s".printf (display_path),
                         "Cannot run on this system: %s".printf (display_path),
-                        check_codec_support
+                        check_codec_support,
+                        default_name
                     );
                 }
             } else if (FileUtils.test (normalized, FileTest.EXISTS)) {
@@ -566,7 +568,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
                     "Checking PATH entry \"%s\" → %s".printf (path, display_found),
                     "Found in PATH → %s".printf (display_found),
                     "\"%s\" resolves to %s but failed to run".printf (path, display_found),
-                    check_codec_support
+                    check_codec_support,
+                    default_name
                 );
             }
         } else {
@@ -610,7 +613,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
                                               string pending_text,
                                               string success_prefix,
                                               string failure_prefix,
-                                              bool check_codec_support) {
+                                              bool check_codec_support,
+                                              string expected_tool) {
         var cancellable = new Cancellable ();
         validation_state.cancellable = cancellable;
 
@@ -632,6 +636,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
                 success_prefix,
                 failure_prefix,
                 check_codec_support,
+                expected_tool,
                 cancellable
             );
             return Source.REMOVE;
@@ -645,10 +650,12 @@ public class SettingsDialog : Adw.PreferencesDialog {
                                                string success_prefix,
                                                string failure_prefix,
                                                bool check_codec_support,
+                                               string expected_tool,
                                                Cancellable cancellable) {
         BinaryProbeResult result;
         try {
-            result = yield probe_binary_runtime (binary_path, check_codec_support, cancellable);
+            result = yield probe_binary_runtime (binary_path, check_codec_support,
+                                                 expected_tool, cancellable);
         } catch (IOError.CANCELLED e) {
             if (validation_state.cancellable == cancellable) {
                 validation_state.cancellable = null;
@@ -692,6 +699,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     private async BinaryProbeResult probe_binary_runtime (string binary_path,
                                                           bool check_codec_support,
+                                                          string expected_tool,
                                                           Cancellable cancellable) throws Error {
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
@@ -700,9 +708,11 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         bool timed_out = false;
         uint timeout_id = 0;
+        var local_cancel = new Cancellable ();
+        ulong parent_id = cancellable.connect (() => { local_cancel.cancel (); });
         timeout_id = Timeout.add (2000, () => {
             timed_out = true;
-            cancellable.cancel ();
+            local_cancel.cancel ();
             timeout_id = 0;
             return Source.REMOVE;
         });
@@ -710,12 +720,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
         string stdout_buf;
         string stderr_buf;
         try {
-            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+            yield proc.communicate_utf8_async (null, local_cancel, out stdout_buf, out stderr_buf);
         } catch (Error e) {
             proc.force_exit ();
             if (timeout_id != 0) {
                 Source.remove (timeout_id);
             }
+            cancellable.disconnect (parent_id);
             if (timed_out) {
                 throw new IOError.TIMED_OUT ("Version probe timed out");
             }
@@ -725,6 +736,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         if (timeout_id != 0) {
             Source.remove (timeout_id);
         }
+        cancellable.disconnect (parent_id);
 
         if (!proc.get_successful ()) {
             string? detail = first_nonempty_line (stderr_buf);
@@ -739,6 +751,10 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         var result = new BinaryProbeResult ();
         result.runtime_summary = describe_runtime_success (stdout_buf, stderr_buf);
+
+        // Identity probe: verify the binary is actually the expected tool
+        yield probe_binary_identity (binary_path, expected_tool, cancellable);
+
         if (check_codec_support) {
             result.codec_warning = yield probe_ffmpeg_codec_support (binary_path, cancellable);
         }
@@ -777,6 +793,45 @@ public class SettingsDialog : Adw.PreferencesDialog {
             detail = detail.substring (0, 157) + "...";
         }
         return detail;
+    }
+
+    /**
+     * Verify a binary is actually the expected FFmpeg tool by running
+     * a capability-specific probe that only the correct tool accepts.
+     */
+    private async void probe_binary_identity (string binary_path,
+                                              string expected_tool,
+                                              Cancellable cancellable) throws Error {
+        string[] cmd;
+        switch (expected_tool) {
+            case "ffmpeg":
+                // -filter_complex_threads is ffmpeg-only; ffprobe/ffplay reject it at option parsing
+                cmd = { binary_path, "-filter_complex_threads", "1", "-version" };
+                break;
+            case "ffprobe":
+                cmd = { binary_path, "-v", "error",
+                        "-show_program_version", "-of", "json" };
+                break;
+            case "ffplay":
+                cmd = { binary_path, "-showmode", "waves", "-version" };
+                break;
+            default:
+                return;
+        }
+
+        try {
+            yield run_subprocess_capture (cmd, cancellable);
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (IOError.TIMED_OUT e) {
+            throw new IOError.FAILED (
+                "This does not appear to be %s — identity probe timed out."
+                    .printf (expected_tool));
+        } catch (Error e) {
+            throw new IOError.FAILED (
+                "This does not appear to be %s — identity probe failed."
+                    .printf (expected_tool));
+        }
     }
 
     private async string? probe_ffmpeg_codec_support (string binary_path,
@@ -819,9 +874,11 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         bool timed_out = false;
         uint timeout_id = 0;
+        var local_cancel = new Cancellable ();
+        ulong parent_id = cancellable.connect (() => { local_cancel.cancel (); });
         timeout_id = Timeout.add (2000, () => {
             timed_out = true;
-            cancellable.cancel ();
+            local_cancel.cancel ();
             timeout_id = 0;
             return Source.REMOVE;
         });
@@ -829,12 +886,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
         string stdout_buf;
         string stderr_buf;
         try {
-            yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
+            yield proc.communicate_utf8_async (null, local_cancel, out stdout_buf, out stderr_buf);
         } catch (Error e) {
             proc.force_exit ();
             if (timeout_id != 0) {
                 Source.remove (timeout_id);
             }
+            cancellable.disconnect (parent_id);
             if (timed_out) {
                 throw new IOError.TIMED_OUT ("Subprocess probe timed out");
             }
@@ -844,6 +902,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         if (timeout_id != 0) {
             Source.remove (timeout_id);
         }
+        cancellable.disconnect (parent_id);
 
         if (!proc.get_successful ()) {
             string? detail = first_nonempty_line (stderr_buf);
