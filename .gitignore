@@ -61,6 +61,9 @@ builddir-debug/
 # Release archives
 releases/
 
+# Claude Code
+.claude/
+
 # Local planning notes
 AUDIO-TAB-PLAN.md
 DISK-CACHE-TEMP-ROOT.md
