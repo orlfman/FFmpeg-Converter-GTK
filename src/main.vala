@@ -293,15 +293,7 @@ public class MainWindow : Adw.ApplicationWindow {
             }
             post_success_toast (toast_title, output_result);
 
-            if (output_result.kind == OperationOutputKind.FILE) {
-                string primary_file = output_result.primary_file_path;
-                if (primary_file.length > 0
-                    && FileUtils.test (primary_file, FileTest.EXISTS)) {
-                    info_tab.load_output_info (primary_file);
-                }
-            } else if (output_result.output_paths.length > 0) {
-                info_tab.load_output_info_multiple (output_result.output_paths);
-            }
+            controller.apply_operation_output (output_result);
 
             maybe_finish_close_after_cancellation ();
         });

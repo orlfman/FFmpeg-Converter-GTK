@@ -437,14 +437,24 @@ public class SubtitlesRunner : Object {
 
             string msg = @"Extracted $success of $(snap.length) subtitle tracks";
             if (failed > 0) msg += @" ($failed failed)";
-            msg += @"\n\nSaved to:\n$output_dir";
+            if (extracted_paths.length == 1) {
+                msg += @"\n\nSaved to:\n$(extracted_paths[0])";
+            } else {
+                msg += @"\n\nSaved to:\n$output_dir";
+            }
             report_status (msg, StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
 
             Idle.add (() => {
-                operation_done (OperationOutputResult.from_paths (
-                    OperationOutputResult.copy_paths (extracted_paths),
-                    output_dir
-                ));
+                OperationOutputResult result;
+                if (extracted_paths.length == 1) {
+                    result = new OperationOutputResult.for_file (extracted_paths[0]);
+                } else {
+                    result = OperationOutputResult.from_paths (
+                        OperationOutputResult.copy_paths (extracted_paths),
+                        output_dir
+                    );
+                }
+                operation_done (result);
                 return Source.REMOVE;
             });
         });

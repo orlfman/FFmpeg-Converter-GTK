@@ -356,7 +356,11 @@ public class TrimRunner : Object {
             }
 
             // ── Phase 2: Concatenate (copy-mode multi-segment only) ──────────
-            if (export_separate) {
+            if (export_separate && segment_files.length == 1) {
+                last_output = segment_files[0];
+                report_status (@"$(operation_label) completed!\n\nSaved to:\n$(segment_files[0])",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+            } else if (export_separate) {
                 last_output = segment_files[0];
                 report_status (@"$(operation_label) completed — exported $(segments.length) files to:\n$out_dir",
                     StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
@@ -396,7 +400,9 @@ public class TrimRunner : Object {
             update_progress (100.0);
 
             OperationOutputResult done_result;
-            if (export_separate) {
+            if (export_separate && segment_files.length == 1) {
+                done_result = new OperationOutputResult.for_file (segment_files[0]);
+            } else if (export_separate) {
                 done_result = OperationOutputResult.from_paths (
                     OperationOutputResult.copy_paths (segment_files),
                     out_dir

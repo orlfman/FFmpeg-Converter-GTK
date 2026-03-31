@@ -216,7 +216,7 @@ public class AppController : Object {
 
     private void wire_conversion_done () {
         converter.conversion_done.connect ((output_result) => {
-            handle_operation_output (output_result);
+            apply_operation_output (output_result);
         });
     }
 
@@ -224,7 +224,7 @@ public class AppController : Object {
 
     private void wire_trim_done () {
         trim_tab.trim_done.connect ((output_result) => {
-            handle_operation_output (output_result);
+            apply_operation_output (output_result);
         });
     }
 
@@ -280,16 +280,19 @@ public class AppController : Object {
 
     private void wire_subtitle_done () {
         subtitles_tab.subtitle_done.connect ((output_result) => {
-            handle_operation_output (output_result);
+            apply_operation_output (output_result);
         });
     }
 
-    private void handle_operation_output (OperationOutputResult output_result) {
+    internal void apply_operation_output (OperationOutputResult output_result) {
         string primary_file = output_result.primary_file_path;
         if (output_result.kind == OperationOutputKind.FILE
             && primary_file.length > 0
             && FileUtils.test (primary_file, FileTest.EXISTS)) {
             info_tab.load_output_info (primary_file);
+        } else if (output_result.kind == OperationOutputKind.MULTIPLE_FILES
+            && output_result.output_paths.length > 0) {
+            info_tab.load_output_info_multiple (output_result.output_paths);
         } else {
             info_tab.reset_output ();
         }
