@@ -27,6 +27,7 @@ public class HamburgerMenu {
         quit_section.append ("Quit", "app.quit");
 
         var menu_model = new GLib.Menu ();
+        menu_model.append ("Combine Videos\u2026", "app.combine-videos");
         menu_model.append_submenu ("Playback", playback_menu);
         menu_model.append ("Preferences", "app.preferences");
         menu_model.append ("About FFmpeg Converter GTK", "app.about");

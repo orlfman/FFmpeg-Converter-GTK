@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '1.5.4',
+  version : '1.5.5',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -76,7 +76,10 @@ sources = files(
   'src/audio-player.vala',
   'src/player-styles.vala',
   'src/audio-builder.vala',
-  'src/audio-runner.vala'
+  'src/audio-runner.vala',
+  'src/video-file-constants.vala',
+  'src/combine-window.vala',
+  'src/combine-runner.vala'
 )
 executable('ffmpeg-converter-gtk',
   sources,
@@ -347,6 +350,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/player-styles.vala',
       'src/audio-builder.vala',
       'src/audio-runner.vala',
+      'src/video-file-constants.vala',
       'tests/trim-subtitles-state-test.vala',
     ),
     dependencies : dependencies,
@@ -356,6 +360,80 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
   )
 
   test('trim-subtitles-state', trim_subtitles_state_test)
+endif
+
+if fs.exists('tests/combine-window-state-test.vala')
+  combine_window_state_test = executable(
+    'combine-window-state-test',
+    files(
+      'src/subprocess-compat.c',
+      'src/process-runner.vala',
+      'src/conversion-utils.vala',
+      'src/operation-output-result.vala',
+      'src/progress-tracker.vala',
+      'src/constants.vala',
+      'src/svt-av1-tab.vala',
+      'src/general-tab.vala',
+      'src/converter.vala',
+      'src/file-pickers.vala',
+      'src/path-breadcrumb.vala',
+      'src/status-area.vala',
+      'src/console-tab.vala',
+      'src/filter-builder.vala',
+      'src/video-filters.vala',
+      'src/svt-av1-builder.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-settings.vala',
+      'src/conversion-runner.vala',
+      'src/codec-builder.vala',
+      'src/x265-tab.vala',
+      'src/x265-builder.vala',
+      'src/codec-tab.vala',
+      'src/base-codec-tab.vala',
+      'src/color-correction-dialog.vala',
+      'src/information-tab.vala',
+      'src/about-dialog.vala',
+      'src/hamburger-menu.vala',
+      'src/video-player.vala',
+      'src/crop-overlay.vala',
+      'src/trim-tab.vala',
+      'src/trim-builder.vala',
+      'src/trim-runner.vala',
+      'src/x264-tab.vala',
+      'src/x264-builder.vala',
+      'src/vp9-tab.vala',
+      'src/vp9-builder.vala',
+      'src/codec-presets.vala',
+      'src/app-settings.vala',
+      'src/settings-dialog.vala',
+      'src/subtitle-language-guesser.vala',
+      'src/subtitles-tab.vala',
+      'src/subtitles-runner.vala',
+      'src/ffprobe-utils.vala',
+      'src/codec-utils.vala',
+      'src/smart-optimizer.vala',
+      'src/audio-tab.vala',
+      'src/audio-player.vala',
+      'src/player-styles.vala',
+      'src/audio-builder.vala',
+      'src/audio-runner.vala',
+      'src/video-file-constants.vala',
+      'src/combine-window.vala',
+      'src/combine-runner.vala',
+      'tests/combine-window-state-test.vala',
+    ),
+    dependencies : dependencies,
+    vala_args : ['--define=COMBINE_WINDOW_TEST_BUILD'],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('combine-window-state', combine_window_state_test)
 endif
 
 if fs.exists('tests/audio-reorder-state-test.vala')
@@ -418,6 +496,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/player-styles.vala',
       'src/audio-builder.vala',
       'src/audio-runner.vala',
+      'src/video-file-constants.vala',
       'tests/audio-reorder-state-test.vala',
     ),
     dependencies : dependencies,

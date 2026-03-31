@@ -10,14 +10,7 @@ public class FilePickers : Box {
     private Box output_row;
     private SizeGroup label_size_group;
 
-    // Known video file extensions for validating text/URI drops
-    private const string[] VIDEO_EXTENSIONS = {
-        ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".wmv",
-        ".m4v", ".ts", ".mts", ".m2ts", ".m2v", ".vob", ".mpg",
-        ".mpeg", ".mp2", ".mxf", ".3gp", ".ogv", ".rm", ".rmvb",
-        ".asf", ".divx", ".f4v", ".y4m", ".ivf", ".av1", ".hevc",
-        ".vp9"
-    };
+    // Video file extensions are in VideoFileConstants.VIDEO_EXTENSIONS
 
     public FilePickers () {
         Object (orientation: Orientation.VERTICAL, spacing: 0);
@@ -241,7 +234,7 @@ public class FilePickers : Box {
      */
     private static bool is_video_file (string path) {
         string lower = path.down ();
-        foreach (unowned string ext in VIDEO_EXTENSIONS) {
+        foreach (unowned string ext in VideoFileConstants.VIDEO_EXTENSIONS) {
             if (lower.has_suffix (ext)) return true;
         }
         return false;

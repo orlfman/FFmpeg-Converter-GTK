@@ -74,6 +74,15 @@ public class EncodeProfileSnapshot : Object {
     public bool remove_chapters = false;
 }
 
+public class CombineEncodeProfileSnapshot : Object {
+    public string container = ContainerExt.MKV;
+    public string[] codec_args = {};
+    public KeyframeSettingsSnapshot? keyframe_settings { get; set; default = null; }
+    public string[] audio_args = {};
+    public bool preserve_metadata = false;
+    public bool remove_chapters = false;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  CodecUtils — Shared helpers for all codec tabs and builders
 //
@@ -436,8 +445,65 @@ namespace CodecUtils {
         return snapshot;
     }
 
+    public CombineEncodeProfileSnapshot snapshot_combine_encode_profile (
+        ICodecBuilder builder,
+        ICodecTab codec_tab,
+        GeneralSettingsSnapshot? general_settings) {
+        var snapshot = new CombineEncodeProfileSnapshot ();
+        CodecTabSettingsSnapshot codec_settings = codec_tab.snapshot_settings (general_settings);
+        if (general_settings != null) {
+            general_settings.pixel_format = codec_settings.pixel_format.copy ();
+        }
+        Object? builder_snapshot = builder.snapshot_settings (general_settings);
+
+        snapshot.codec_args = builder.build_codec_args_from_snapshot (builder_snapshot);
+        snapshot.keyframe_settings = codec_settings.keyframe_settings;
+
+        string container = codec_settings.container;
+        if (container.length > 0) {
+            snapshot.container = container;
+        }
+
+        AudioSettings.coerce_copy_selection_for_container (
+            codec_settings.audio_settings,
+            snapshot.container
+        );
+        var audio_args = new GenericArray<string> ();
+        foreach (string arg in AudioSettings.build_audio_args_from_snapshot (
+            codec_settings.audio_settings,
+            codec_settings.audio_processing.channel_downmix)) {
+            audio_args.add (arg);
+        }
+        foreach (string arg in AudioProcessingSettings.build_output_args_from_snapshot (
+            codec_settings.audio_processing)) {
+            audio_args.add (arg);
+        }
+        snapshot.audio_args = StringArrayUtils.copy_generic_array (audio_args);
+
+        if (general_settings != null) {
+            snapshot.preserve_metadata = general_settings.preserve_metadata;
+            snapshot.remove_chapters = general_settings.remove_chapters;
+        }
+
+        return snapshot;
+    }
+
     public string[] build_codec_args_from_snapshot (EncodeProfileSnapshot? snapshot,
                                                     string input_file) {
+        if (snapshot == null)
+            return {};
+
+        string[] codec_args = snapshot.codec_args;
+        foreach (string arg in resolve_custom_keyframe_args_from_snapshot (
+                     snapshot.keyframe_settings, input_file)) {
+            codec_args += arg;
+        }
+        return codec_args;
+    }
+
+    public string[] build_combine_codec_args_from_snapshot (
+        CombineEncodeProfileSnapshot? snapshot,
+        string input_file) {
         if (snapshot == null)
             return {};
 

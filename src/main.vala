@@ -14,6 +14,7 @@ private enum ActiveOperation {
     IDLE,
     CONVERTING,
     TRIMMING,
+    COMBINING,
     SUBTITLE_EXTRACT,
     SUBTITLE_APPLY,
     AUDIO_EXTRACT,
@@ -47,7 +48,7 @@ private class MainWindowToastFolderBinding : Object {
 //  MainWindow — Application window layout and user action handlers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-public class MainWindow : Adw.ApplicationWindow {
+public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     private FilePickers file_pickers;
     private SvtAv1Tab svt_tab;
     private X265Tab x265_tab;
@@ -95,6 +96,9 @@ public class MainWindow : Adw.ApplicationWindow {
     private bool smart_optimizer_active = false;
     private bool close_after_cancellation = false;
 
+    // Combine window (lazy-created from hamburger menu action)
+    private CombineWindow? combine_window = null;
+
     // Guard against re-entrant close_request during the confirmation dialog
     private bool close_dialog_open = false;
 
@@ -119,11 +123,20 @@ public class MainWindow : Adw.ApplicationWindow {
         );
 
         // Smart Optimizer lifecycle: enable cancel button while running.
-        // Tracked separately from ActiveOperation since analysis can run
-        // concurrently with a conversion/trim/subtitle operation.
+        // Tracked separately from ActiveOperation, but it still blocks
+        // starting primary operations through is_effectively_idle().
         controller.smart_optimizer_running.connect ((running) => {
             smart_optimizer_active = running;
+
+            // Auto-convert now queues while optimization is active, so drain
+            // it as soon as the optimizer returns to an effectively idle state.
+            if (!running) {
+                drain_pending_auto_convert ();
+            }
+
             update_cancel_button_state ();
+            update_convert_sensitivity ();
+            operation_state_changed (is_effectively_idle ());
             maybe_finish_close_after_cancellation ();
         });
 
@@ -194,6 +207,14 @@ public class MainWindow : Adw.ApplicationWindow {
                 StatusIcon.CANCELLED_CSS
             );
         });
+
+        // ── Combine Videos action ────────────────────────────────────────────
+        if (app.lookup_action ("combine-videos") == null) {
+            var combine_action = new GLib.SimpleAction ("combine-videos", null);
+            combine_action.activate.connect (on_combine_videos_action);
+            app.add_action (combine_action);
+        }
+
         subtitles_tab.subtitle_extract_requested.connect ((input_file, stream, output_path) => {
             uint64 operation_id;
             if (!reserve_pending_operation (ActiveOperation.SUBTITLE_EXTRACT, out operation_id)) {
@@ -467,8 +488,12 @@ public class MainWindow : Adw.ApplicationWindow {
         convert_button.set_sensitive (active && can_start_primary_operation ());
     }
 
+    private bool is_effectively_idle () {
+        return current_operation == ActiveOperation.IDLE && !smart_optimizer_active;
+    }
+
     private bool can_start_primary_operation () {
-        return current_operation == ActiveOperation.IDLE;
+        return is_effectively_idle ();
     }
 
     private string get_operation_label (ActiveOperation operation,
@@ -476,6 +501,7 @@ public class MainWindow : Adw.ApplicationWindow {
         switch (operation) {
         case ActiveOperation.CONVERTING:     return "conversion";
         case ActiveOperation.TRIMMING:       return "export";
+        case ActiveOperation.COMBINING:      return "combine";
         case ActiveOperation.SUBTITLE_EXTRACT: return "subtitle extraction";
         case ActiveOperation.SUBTITLE_APPLY: return "subtitle apply";
         case ActiveOperation.AUDIO_EXTRACT:  return "audio extraction";
@@ -488,6 +514,10 @@ public class MainWindow : Adw.ApplicationWindow {
 
     private string get_operation_activity_phrase () {
         return operation_launch_pending ? "is already being prepared" : "is already running";
+    }
+
+    public bool is_operation_idle () {
+        return is_effectively_idle ();
     }
 
     /** Resolve the current audio operation type for signal dispatch. */
@@ -1751,7 +1781,7 @@ public class MainWindow : Adw.ApplicationWindow {
                                             out uint64 operation_id) {
         operation_id = 0;
 
-        if (current_operation != ActiveOperation.IDLE) {
+        if (!is_effectively_idle ()) {
             return false;
         }
 
@@ -1762,6 +1792,7 @@ public class MainWindow : Adw.ApplicationWindow {
         update_subtitle_operation_lock ();
         update_cancel_button_state ();
         update_convert_sensitivity ();
+        operation_state_changed (false);
         return true;
     }
 
@@ -1820,6 +1851,7 @@ public class MainWindow : Adw.ApplicationWindow {
         update_subtitle_operation_lock ();
         update_cancel_button_state ();
         update_convert_sensitivity ();
+        operation_state_changed (true);
     }
 
     private void maybe_finish_close_after_cancellation () {
@@ -1887,6 +1919,11 @@ public class MainWindow : Adw.ApplicationWindow {
         dismiss_active_preflight_dialog ();
 
         if (operation_launch_pending) {
+            // Invalidate CombineWindow's pending reservation so the async
+            // overwrite-dialog callback won't launch a stale combine.
+            if (current_operation == ActiveOperation.COMBINING && combine_window != null) {
+                combine_window.cancel_pending_combine ();
+            }
             message = @"Pending $(get_operation_label (current_operation)) cancelled by user.";
         } else {
             switch (current_operation) {
@@ -1905,6 +1942,14 @@ public class MainWindow : Adw.ApplicationWindow {
 
                 case ActiveOperation.CONVERTING:
                     converter.cancel ();
+                    should_release_operation = false;
+                    break;
+
+                case ActiveOperation.COMBINING:
+                    if (combine_window != null) {
+                        combine_window.cancel_combine ();
+                    }
+                    message = "Combine cancelled by user.";
                     should_release_operation = false;
                     break;
 
@@ -1946,14 +1991,65 @@ public class MainWindow : Adw.ApplicationWindow {
         }
 
         if (should_release_operation) {
-            current_operation = ActiveOperation.IDLE;
-            active_operation_id = 0;
-            operation_launch_pending = false;
-            update_cancel_button_state ();
-            update_convert_sensitivity ();
+            reset_tracked_operation_state ();
         }
         pending_auto_convert_codec = null;
         return message;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COMBINE VIDEOS — Lazy-create CombineWindow from hamburger menu action
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void on_combine_videos_action (GLib.Variant? parameter) {
+        if (combine_window == null) {
+            combine_window = new CombineWindow (
+                svt_tab, x265_tab, x264_tab, vp9_tab,
+                general_tab,
+                file_pickers.output_entry.get_text (),
+                status_area,
+                console_tab,
+                (out operation_id) => {
+                    return reserve_pending_operation (ActiveOperation.COMBINING, out operation_id);
+                },
+                this
+            );
+
+            // Wire operation lifecycle signals
+            combine_window.combine_started.connect ((operation_id) => {
+                activate_cancel (ActiveOperation.COMBINING, operation_id);
+            });
+            combine_window.combine_succeeded.connect ((operation_id, result) => {
+                if (!complete_tracked_operation (
+                        ActiveOperation.COMBINING, operation_id, true)) {
+                    return;
+                }
+                post_success_toast ("Combine complete", result);
+                maybe_finish_close_after_cancellation ();
+            });
+            combine_window.combine_failed.connect ((operation_id, message) => {
+                complete_tracked_operation_with_close (
+                    ActiveOperation.COMBINING, operation_id, true);
+            });
+            combine_window.combine_cancelled.connect ((operation_id) => {
+                if (!complete_tracked_operation_with_close (
+                        ActiveOperation.COMBINING, operation_id, true)) {
+                    return;
+                }
+                status_area.set_status (
+                    "Combine cancelled.",
+                    StatusIcon.CANCELLED_ICON,
+                    StatusIcon.CANCELLED_CSS
+                );
+            });
+
+            // Clear reference when the window is closing
+            combine_window.window_closing.connect (() => {
+                combine_window = null;
+            });
+        }
+
+        combine_window.present ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
