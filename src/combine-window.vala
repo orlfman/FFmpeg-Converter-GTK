@@ -22,7 +22,7 @@ public class CombineWindow : Adw.Window {
         public bool copy_mode { get; set; default = true; }
         public string output_path { get; set; default = ""; }
         public GenericArray<CombineFile> files { get; set; default = new GenericArray<CombineFile> (); }
-        public CombineEncodeProfileSnapshot? reencode_profile { get; set; default = null; }
+        public EncodeProfileSnapshot? reencode_profile { get; set; default = null; }
         public bool generate_chapters { get; set; default = false; }
         public bool remove_source_chapters { get; set; default = false; }
         public bool crossfade_enabled { get; set; default = false; }
@@ -177,6 +177,14 @@ public class CombineWindow : Adw.Window {
     // ── Preview ─────────────────────────────────────────────────────────────
     private Adw.Window? preview_window = null;
     private VideoPlayer? preview_player = null;
+
+    // ── Crossfade/fade constraint ──────────────────────────────────────────
+    private BaseCodecTab? constrained_codec_tab = null;
+    private AudioProcessingSettingsSnapshot? saved_fade_snapshot = null;
+    private bool general_speed_constrained = false;
+    private GeneralSpeedSettingsSnapshot? saved_general_speed_snapshot = null;
+    private bool general_crop_constrained = false;
+    private GeneralCropSettingsSnapshot? saved_general_crop_snapshot = null;
 
     // ── Drag-and-drop reorder ───────────────────────────────────────────────
     private int _drag_from_idx = -1;
@@ -334,7 +342,7 @@ public class CombineWindow : Adw.Window {
 
         reencode_codec_row = new Adw.ActionRow ();
         reencode_codec_row.set_title ("Re-encode Codec");
-        reencode_codec_row.set_subtitle ("Uses the selected codec tab plus shared General metadata and chapter settings");
+        reencode_codec_row.set_subtitle ("Uses the selected codec tab and compatible shared General settings");
 
         var codec_list = new StringList (null);
         codec_list.append ("SVT-AV1");
@@ -344,6 +352,9 @@ public class CombineWindow : Adw.Window {
         codec_choice = new DropDown (codec_list, null);
         codec_choice.set_valign (Align.CENTER);
         codec_choice.set_selected (0);
+        codec_choice.notify["selected"].connect (() => {
+            sync_crossfade_fade_constraint ();
+        });
         reencode_codec_row.add_suffix (codec_choice);
         reencode_codec_row.set_visible (false);
         options_group.add (reencode_codec_row);
@@ -372,6 +383,7 @@ public class CombineWindow : Adw.Window {
                 user_prefers_crossfade = crossfade_switch.active;
             }
             update_crossfade_visibility ();
+            sync_crossfade_fade_constraint ();
         });
         options_group.add (crossfade_switch);
 
@@ -505,6 +517,9 @@ public class CombineWindow : Adw.Window {
             return true;  // block close
         }
 
+        release_general_crop_constraint ();
+        release_general_speed_constraint ();
+        release_crossfade_fade_constraint ();
         cancel_probes_for_teardown ();
         close_preview_window ();
         window_closing ();
@@ -1077,6 +1092,9 @@ public class CombineWindow : Adw.Window {
         crossfade_updating = false;
 
         update_crossfade_visibility ();
+        sync_crossfade_fade_constraint ();
+        sync_general_speed_constraint ();
+        sync_general_crop_constraint ();
     }
 
     private void update_crossfade_visibility () {
@@ -1320,9 +1338,12 @@ public class CombineWindow : Adw.Window {
                 ? ((BaseCodecTab) codec_tab).snapshot_pixel_format_settings ()
                 : null;
             GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings (pixel_format);
-            var profile = CodecUtils.snapshot_combine_encode_profile (
+            var profile = CodecUtils.snapshot_encode_profile (
                 builder, codec_tab, general_settings);
 
+            // Combine re-encode audio always passes through filter_complex
+            // (concat or acrossfade), which is incompatible with -c:a copy.
+            // This fallback is unconditional regardless of audio processing state.
             if (has_audio_copy_args (profile.audio_args)) {
                 profile.audio_args = get_combine_audio_fallback_args (profile.container);
             }
@@ -1457,6 +1478,127 @@ public class CombineWindow : Adw.Window {
         status_label.set_visible (true);
         update_combine_sensitivity ();
         combine_cancelled (op_id);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  GENERAL CROP CONSTRAINT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private bool is_general_crop_constraint_active () {
+        return !copy_mode_switch.active;
+    }
+
+    private void sync_general_crop_constraint () {
+        if (is_general_crop_constraint_active ()) {
+            if (!general_crop_constrained) {
+                saved_general_crop_snapshot = general_tab.snapshot_crop_only ();
+            }
+            general_tab.set_combine_crop_constraint (true);
+            general_crop_constrained = true;
+        } else {
+            release_general_crop_constraint ();
+        }
+    }
+
+    private void release_general_crop_constraint () {
+        if (!general_crop_constrained) {
+            return;
+        }
+
+        general_tab.set_combine_crop_constraint (false);
+        if (saved_general_crop_snapshot != null) {
+            general_tab.restore_crop_only (saved_general_crop_snapshot);
+            saved_general_crop_snapshot = null;
+        }
+        general_crop_constrained = false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  GENERAL SPEED CONSTRAINT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private bool is_general_speed_constraint_active () {
+        return !copy_mode_switch.active;
+    }
+
+    private void sync_general_speed_constraint () {
+        if (is_general_speed_constraint_active ()) {
+            if (!general_speed_constrained) {
+                saved_general_speed_snapshot = general_tab.snapshot_speeds_only ();
+            }
+            general_tab.set_combine_speed_constraint (true);
+            general_speed_constrained = true;
+        } else {
+            release_general_speed_constraint ();
+        }
+    }
+
+    private void release_general_speed_constraint () {
+        if (!general_speed_constrained) {
+            return;
+        }
+
+        general_tab.set_combine_speed_constraint (false);
+        if (saved_general_speed_snapshot != null) {
+            general_tab.restore_speeds_only (saved_general_speed_snapshot);
+            saved_general_speed_snapshot = null;
+        }
+        general_speed_constrained = false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CROSSFADE / FADE CONSTRAINT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private BaseCodecTab? get_selected_base_codec_tab () {
+        int sel = (int) codec_choice.get_selected ();
+        ICodecBuilder builder;
+        ICodecTab codec_tab;
+        get_selected_codec (sel, out builder, out codec_tab);
+        return codec_tab as BaseCodecTab;
+    }
+
+    private bool is_crossfade_constraint_active () {
+        return crossfade_switch.active && !copy_mode_switch.active;
+    }
+
+    private void sync_crossfade_fade_constraint () {
+        BaseCodecTab? current_tab = get_selected_base_codec_tab ();
+
+        // Release old tab if it's different from the new one
+        if (constrained_codec_tab != null && constrained_codec_tab != current_tab) {
+            restore_and_release_constrained_tab ();
+        }
+
+        if (is_crossfade_constraint_active () && current_tab != null) {
+            // Snapshot current fade state before clearing, but only if we're
+            // not already constraining this same tab (avoid re-snapshotting
+            // the already-cleared state)
+            if (constrained_codec_tab != current_tab) {
+                saved_fade_snapshot = current_tab.audio_processing_settings.snapshot_fades_only ();
+            }
+            current_tab.set_combine_crossfade_fade_constraint (true);
+            constrained_codec_tab = current_tab;
+        } else {
+            release_crossfade_fade_constraint ();
+        }
+    }
+
+    private void release_crossfade_fade_constraint () {
+        if (constrained_codec_tab != null) {
+            restore_and_release_constrained_tab ();
+        }
+    }
+
+    private void restore_and_release_constrained_tab () {
+        if (constrained_codec_tab == null) return;
+
+        constrained_codec_tab.set_combine_crossfade_fade_constraint (false);
+        if (saved_fade_snapshot != null) {
+            constrained_codec_tab.audio_processing_settings.restore_fades_only (saved_fade_snapshot);
+            saved_fade_snapshot = null;
+        }
+        constrained_codec_tab = null;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1684,6 +1826,10 @@ public class CombineWindow : Adw.Window {
         return copy_mode_switch.get_subtitle () ?? "";
     }
 
+    internal string get_reencode_codec_subtitle_for_widget_test () {
+        return reencode_codec_row.get_subtitle () ?? "";
+    }
+
     internal void simulate_runner_cancelled_for_widget_test (uint64 op_id,
                                                              string cancel_message = "Cancelled") {
         var runner = new CombineRunner ();
@@ -1722,7 +1868,7 @@ public class CombineWindow : Adw.Window {
     private string[] last_launched_paths_for_widget_test = {};
     private string last_launched_output_for_widget_test = "";
     private bool last_launched_copy_mode_for_widget_test = false;
-    private CombineEncodeProfileSnapshot? last_launched_profile_for_widget_test = null;
+    private EncodeProfileSnapshot? last_launched_profile_for_widget_test = null;
 
     internal void enable_launch_capture_for_widget_test () {
         capture_launch_request_for_widget_test = true;
@@ -1798,6 +1944,46 @@ public class CombineWindow : Adw.Window {
 
     internal uint64 get_active_operation_id_for_widget_test () {
         return active_operation_id;
+    }
+
+    internal EncodeProfileSnapshot? get_last_launched_profile_for_widget_test () {
+        return last_launched_profile_for_widget_test;
+    }
+
+    internal bool get_crossfade_switch_active_for_widget_test () {
+        return crossfade_switch.active;
+    }
+
+    internal void set_crossfade_switch_active_for_widget_test (bool active) {
+        crossfade_switch.set_active (active);
+    }
+
+    internal void set_copy_mode_switch_active_for_widget_test (bool active) {
+        copy_mode_switch.set_active (active);
+    }
+
+    internal void set_codec_choice_selected_for_widget_test (uint sel) {
+        codec_choice.set_selected (sel);
+    }
+
+    internal BaseCodecTab? get_constrained_codec_tab_for_widget_test () {
+        return constrained_codec_tab;
+    }
+
+    internal BaseCodecTab? get_selected_base_codec_tab_for_widget_test () {
+        return get_selected_base_codec_tab ();
+    }
+
+    internal GeneralTab get_general_tab_for_widget_test () {
+        return general_tab;
+    }
+
+    internal bool get_general_speed_constrained_for_widget_test () {
+        return general_speed_constrained;
+    }
+
+    internal bool get_general_crop_constrained_for_widget_test () {
+        return general_crop_constrained;
     }
 #endif
 }

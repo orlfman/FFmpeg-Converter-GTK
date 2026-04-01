@@ -355,6 +355,15 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
     }
 
+    public void set_combine_crossfade_fade_constraint (bool constrained) {
+        if (constrained) {
+            audio_processing_settings.clear_fades ();
+            audio_processing_settings.set_fade_controls_sensitive (false);
+        } else {
+            audio_processing_settings.set_fade_controls_sensitive (true);
+        }
+    }
+
     protected void build_shared_audio_groups () {
         audio_settings = new AudioSettings ();
         append (audio_settings.get_widget ());

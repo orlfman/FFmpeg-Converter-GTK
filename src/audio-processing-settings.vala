@@ -143,6 +143,15 @@ public class AudioProcessingSettings : Object {
         return snapshot;
     }
 
+    public AudioProcessingSettingsSnapshot snapshot_fades_only () {
+        var snapshot = new AudioProcessingSettingsSnapshot ();
+        snapshot.fade_in_enabled = fade_in_switch.active;
+        snapshot.fade_in_duration = fade_in_spin.get_value ();
+        snapshot.fade_out_enabled = fade_out_switch.active;
+        snapshot.fade_out_duration = fade_out_spin.get_value ();
+        return snapshot;
+    }
+
     public void apply_snapshot (AudioProcessingSettingsSnapshot snapshot) {
         normalize_row_switch.set_active (snapshot.normalize_enabled);
         if (allow_peak_normalization) {
@@ -158,12 +167,32 @@ public class AudioProcessingSettings : Object {
         channel_combo.set_selected ((uint) snapshot.channel_downmix);
     }
 
+    public void restore_fades_only (AudioProcessingSettingsSnapshot snapshot) {
+        fade_in_switch.set_active (snapshot.fade_in_enabled);
+        fade_in_spin.set_value (snapshot.fade_in_duration);
+        fade_out_switch.set_active (snapshot.fade_out_enabled);
+        fade_out_spin.set_value (snapshot.fade_out_duration);
+    }
+
     public void reset_defaults () {
         apply_snapshot (new AudioProcessingSettingsSnapshot ());
     }
 
     public bool requires_audio_reencode () {
         return snapshot_settings ().requires_audio_reencode ();
+    }
+
+    public void clear_fades () {
+        fade_in_switch.set_active (false);
+        fade_out_switch.set_active (false);
+        changed ();
+    }
+
+    public void set_fade_controls_sensitive (bool sensitive) {
+        fade_in_switch.set_sensitive (sensitive);
+        fade_out_switch.set_sensitive (sensitive);
+        fade_in_spin.set_sensitive (sensitive && fade_in_switch.active);
+        fade_out_spin.set_sensitive (sensitive && fade_out_switch.active);
     }
 
     public static string build_normalization_filter_from_snapshot (

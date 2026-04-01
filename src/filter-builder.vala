@@ -59,12 +59,11 @@ namespace FilterBuilder {
             tab.snapshot_settings (pixel_format_settings), skip_crop, codec_name);
     }
 
-    public string build_video_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot,
-                                                          bool skip_crop = false,
-                                                          string codec_name = "") {
+    private string[] get_rotation_crop_processing_hdr_filters (
+        GeneralSettingsSnapshot snapshot,
+        bool skip_crop,
+        string codec_name) {
         string[] filters = {};
-
-        // 1. Rotation / Flip
         string[] rot_filters = get_rotation_filters_from_snapshot (snapshot);
         bool has_vflip = false;
         foreach (string f in rot_filters) {
@@ -73,16 +72,15 @@ namespace FilterBuilder {
         }
 
         // SVT-AV1 workaround: vflip produces frames with negative line strides
-        // which SVT-AV1's API rejects (EB_ErrorBadParameter).  A format=
+        // which SVT-AV1's API rejects (EB_ErrorBadParameter). A format=
         // filter alone is not enough — ffmpeg's format filter is a no-op when
         // the input already matches (e.g. yuv420p→yuv420p), so negative strides
-        // pass through.  scale=iw:ih forces swscale to allocate a new buffer
+        // pass through. scale=iw:ih forces swscale to allocate a new buffer
         // with positive strides regardless of pixel format.
         if (has_vflip && codec_name.down ().contains ("svt")) {
             filters += "scale=iw:ih";
         }
 
-        // 2. Crop (skipped when the Crop & Trim tab provides its own)
         if (!skip_crop && snapshot.crop_enabled) {
             string c = snapshot.crop_value;
             if (c.length > 0 && c != "w:h:x:y") {
@@ -91,16 +89,18 @@ namespace FilterBuilder {
             }
         }
 
-        // 3. Video Processing Filters
         foreach (string f in snapshot.video_filters.processing_filters) {
             filters += f;
         }
 
-        // 4. HDR to SDR Tonemap
         string hdr = snapshot.video_filters.hdr_filter;
         if (hdr.length > 0) filters += hdr;
 
-        // 5. Scale
+        return filters;
+    }
+
+    private string[] get_scale_filters (GeneralSettingsSnapshot snapshot) {
+        string[] filters = {};
         string scale_mode = snapshot.scale_mode;
         string? scale_w = null;
         string? scale_h = null;
@@ -143,23 +143,22 @@ namespace FilterBuilder {
             if (range != "input") filters += @"zscale=range=$range";
         }
 
-        // 6. Frame Rate
+        return filters;
+    }
+
+    private string[] get_frame_rate_filters (GeneralSettingsSnapshot snapshot) {
+        string[] filters = {};
         string fr = snapshot.frame_rate_text;
         if (fr != FrameRateLabel.ORIGINAL) {
             string fps = (fr == FrameRateLabel.CUSTOM) ? snapshot.custom_frame_rate_text : fr;
             if (fps.length > 0) filters += "fps=" + fps;
         }
 
-        // 7. Video Speed
-        if (snapshot.video_speed_enabled) {
-            double mult;
-            if (try_get_speed_multiplier (snapshot.video_speed_percent, "video", out mult)) {
-                double factor = 1.0 / mult;
-                filters += "setpts=" + ConversionUtils.format_ffmpeg_double (factor, "%.6f") + "*PTS";
-            }
-        }
+        return filters;
+    }
 
-        // 8. Pixel Format
+    private string[] get_pixel_format_filters (GeneralSettingsSnapshot snapshot) {
+        string[] filters = {};
         string pixfmt = "";
 
         PixelFormatSettingsSnapshot pixel_format = snapshot.pixel_format;
@@ -181,11 +180,77 @@ namespace FilterBuilder {
             filters += "format=" + pixfmt;
         }
 
+        return filters;
+    }
+
+    public string build_video_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot,
+                                                          bool skip_crop = false,
+                                                          string codec_name = "") {
+        string[] filters = {};
+
+        foreach (string f in get_rotation_crop_processing_hdr_filters (
+                     snapshot, skip_crop, codec_name)) {
+            filters += f;
+        }
+        foreach (string f in get_scale_filters (snapshot)) {
+            filters += f;
+        }
+        foreach (string f in get_frame_rate_filters (snapshot)) {
+            filters += f;
+        }
+
+        // 7. Video Speed
+        if (snapshot.video_speed_enabled) {
+            double mult;
+            if (try_get_speed_multiplier (snapshot.video_speed_percent, "video", out mult)) {
+                double factor = 1.0 / mult;
+                filters += "setpts=" + ConversionUtils.format_ffmpeg_double (factor, "%.6f") + "*PTS";
+            }
+        }
+
+        // 8. Pixel Format
+        foreach (string f in get_pixel_format_filters (snapshot)) {
+            filters += f;
+        }
+
         // 9. Color Correction
         string cc = snapshot.color_filter;
         if (cc.length > 0)
             filters += cc;
 
+        return filters.length > 0 ? string.joinv (",", filters) : "";
+    }
+
+    public string build_combine_per_input_video_filters_from_snapshot (
+        GeneralSettingsSnapshot snapshot,
+        bool skip_crop = true,
+        string codec_name = "") {
+        string[] filters = {};
+        foreach (string f in get_rotation_crop_processing_hdr_filters (
+                     snapshot, skip_crop, codec_name)) {
+            filters += f;
+        }
+
+        string cc = snapshot.color_filter;
+        if (cc.length > 0) {
+            filters += cc;
+        }
+
+        return filters.length > 0 ? string.joinv (",", filters) : "";
+    }
+
+    public string build_combine_post_output_video_filters_from_snapshot (
+        GeneralSettingsSnapshot snapshot) {
+        string[] filters = {};
+        foreach (string f in get_scale_filters (snapshot)) {
+            filters += f;
+        }
+        foreach (string f in get_frame_rate_filters (snapshot)) {
+            filters += f;
+        }
+        foreach (string f in get_pixel_format_filters (snapshot)) {
+            filters += f;
+        }
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 

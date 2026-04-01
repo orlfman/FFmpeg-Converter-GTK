@@ -106,6 +106,125 @@ private CombineRunner make_capture_runner (GenericArray<CombineFile> files,
     return runner;
 }
 
+private int count_directories_in_path (string path) {
+    if (!FileUtils.test (path, FileTest.IS_DIR)) {
+        return 0;
+    }
+
+    int count = 0;
+    try {
+        var dir = Dir.open (path);
+        string? name;
+        while ((name = dir.read_name ()) != null) {
+            string child = Path.build_filename (path, name);
+            if (FileUtils.test (child, FileTest.IS_DIR)) {
+                count++;
+            }
+        }
+    } catch (FileError e) {
+        Test.fail_printf ("failed to inspect directory '%s': %s", path, e.message);
+    }
+
+    return count;
+}
+
+private int run_command_for_test (string[] cmd,
+                                  out string stdout_buf,
+                                  out string stderr_buf,
+                                  string context) {
+    stdout_buf = "";
+    stderr_buf = "";
+    int status = -1;
+
+    try {
+        Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
+            null, out stdout_buf, out stderr_buf, out status);
+    } catch (Error e) {
+        Test.fail_printf ("%s failed to launch command: %s", context, e.message);
+    }
+
+    return status;
+}
+
+private string make_exec_test_media_file (string dir, string filename) {
+    string path = Path.build_filename (dir, filename);
+    string[] cmd = {
+        AppSettings.get_default ().ffmpeg_path,
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=16x16:rate=1:d=1.0",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=1.0",
+        "-shortest",
+        "-c:v", "ffv1",
+        "-c:a", "pcm_s16le",
+        path
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf,
+        "make exec test media file");
+    if (status != 0) {
+        Test.fail_printf ("failed to create exec test media file '%s': %s",
+            path, stderr_buf.strip ());
+    }
+
+    return path;
+}
+
+private void cleanup_exec_test_dir (string dir) {
+    try {
+        var d = Dir.open (dir);
+        string? name;
+        while ((name = d.read_name ()) != null) {
+            FileUtils.unlink (Path.build_filename (dir, name));
+        }
+    } catch (FileError e) {
+        // Best-effort cleanup for test temp files.
+    }
+    DirUtils.remove (dir);
+}
+
+private void assert_filter_complex_executes_with_media_inputs (string[] input_paths,
+                                                               string filter_complex,
+                                                               bool map_video,
+                                                               bool map_audio,
+                                                               string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffmpeg_path,
+        "-hide_banner", "-loglevel", "error", "-y"
+    };
+
+    foreach (string input_path in input_paths) {
+        cmd += "-i";
+        cmd += input_path;
+    }
+
+    cmd += "-filter_complex";
+    cmd += filter_complex;
+
+    if (map_video) {
+        cmd += "-map";
+        cmd += "[outv]";
+    }
+    if (map_audio) {
+        cmd += "-map";
+        cmd += "[outa]";
+    }
+
+    cmd += "-t";
+    cmd += "0.5";
+
+    cmd += "-f";
+    cmd += "null";
+    cmd += "-";
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s expected ffmpeg to accept filter_complex, stderr: %s",
+            context, stderr_buf.strip ());
+    }
+}
+
 private bool gtk_widget_tests_ready = false;
 private bool gtk_widget_tests_available = false;
 
@@ -366,7 +485,7 @@ private void test_reencode_command_normalizes_sample_aspect_ratio () {
         "25/1", "yuv420p", "1:1"));
 
     var runner = make_capture_runner (files);
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -399,7 +518,7 @@ private void test_reencode_command_generates_expected_filter_and_flags () {
         "30/1", "yuv420p", "1:1", false));
 
     var runner = make_capture_runner (files);
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -546,6 +665,21 @@ private void test_copy_mode_disables_on_sample_aspect_ratio_mismatch () {
         harness.window.get_copy_mode_subtitle_for_widget_test (),
         "pixel aspect ratios",
         "copy mode explains sar mismatch in subtitle");
+
+    harness.window.close ();
+}
+
+private void test_reencode_codec_subtitle_describes_supported_general_settings () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    assert_string_equal (
+        harness.window.get_reencode_codec_subtitle_for_widget_test (),
+        "Uses the selected codec tab and compatible shared General settings",
+        "re-encode subtitle describes the supported General settings scope");
 
     harness.window.close ();
 }
@@ -703,7 +837,7 @@ private void test_chapters_reencode_mode_args () {
 
     var runner = make_capture_runner (files);
     runner.generate_chapters = true;
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -747,7 +881,7 @@ private void test_chapters_disabled_remove_chapters_reencode () {
     var runner = make_capture_runner (files);
     runner.generate_chapters = false;
     runner.remove_source_chapters = true;
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -769,7 +903,7 @@ private void test_chapters_generate_overrides_remove () {
     var runner = make_capture_runner (files);
     runner.generate_chapters = true;
     runner.remove_source_chapters = true;
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -818,7 +952,7 @@ private void test_crossfade_two_files_filter () {
     runner.crossfade_enabled = true;
     runner.crossfade_duration = 0.5;
     runner.crossfade_type = "fade";
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -856,7 +990,7 @@ private void test_crossfade_three_files_filter () {
     runner.crossfade_enabled = true;
     runner.crossfade_duration = 0.5;
     runner.crossfade_type = "fade";
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -897,7 +1031,7 @@ private void test_crossfade_disabled_uses_concat () {
 
     var runner = make_capture_runner (files);
     runner.crossfade_enabled = false;
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -932,7 +1066,7 @@ private void test_crossfade_no_audio () {
     runner.crossfade_enabled = true;
     runner.crossfade_duration = 0.5;
     runner.crossfade_type = "dissolve";
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     runner.reencode_profile = profile;
@@ -964,7 +1098,7 @@ private void test_crossfade_settb_in_filter () {
     files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
 
     var runner = make_capture_runner (files);
-    var profile = new CombineEncodeProfileSnapshot ();
+    var profile = new EncodeProfileSnapshot ();
     profile.container = ContainerExt.MKV;
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
@@ -1009,6 +1143,1323 @@ private void test_crossfade_with_chapters () {
     assert_contains (content, "END=22000", "crossfade+chapters ch3 end");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  HELPER: Extract filter_complex from argv
+// ═════════════════════════════════════════════════════════════════════════════
+
+private string extract_filter_complex (string[] argv) {
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            return argv[i + 1];
+        }
+    }
+    return "";
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  FULL PROFILE TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_reencode_applies_general_video_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.combine_video_filters_per_input = "transpose=1";
+    profile.combine_video_filters_post_output = "fps=24";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "video filters apply exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "transpose=1,setsar=1,settb=AVTB,setpts=PTS-STARTPTS",
+        "clip-local video filters stay in the per-input chain");
+    assert_contains (fc, "[outv_pre]fps=24[outv]",
+        "output-shaping video filters apply once after combine");
+}
+
+private void test_combine_reencode_post_output_scale_is_separate_from_input_normalization () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 640, 480));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.combine_video_filters_post_output = "scale=w=1280:h=720:flags=point";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "post-output scale separation exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc,
+        "[1:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1:color=black,setsar=1,settb=AVTB,setpts=PTS-STARTPTS[v1];",
+        "non-first inputs still normalize to file[0] dimensions before combine");
+    assert_contains (fc, "[outv_pre]scale=w=1280:h=720:flags=point[outv]",
+        "final output scale is applied once after combine");
+}
+
+private void test_combine_crossfade_applies_post_output_video_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.combine_video_filters_post_output = "fps=24";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade post-output video filters exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "xfade=transition=fade:duration=0.500000:offset=9.500000[outv_pre]",
+        "crossfade video output is rewired through outv_pre before final shaping");
+    assert_contains (fc, "[outv_pre]fps=24[outv]",
+        "crossfade path applies output-shaping filters after combine");
+}
+
+private void test_combine_reencode_without_post_output_filters_keeps_direct_outv_label () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.combine_video_filters_per_input = "transpose=1";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "direct outv label exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "concat=n=2:v=1:a=1[outv][outa]",
+        "combine keeps direct outv output when no post-output video shaping is needed");
+    assert_true (fc.index_of ("[outv_pre]") < 0,
+        "combine does not introduce outv_pre when no post-output video filters are present");
+}
+
+private void test_combine_reencode_strips_speed_setpts_from_video_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    // Simulates a speed filter that setpts would produce — should be stripped
+    profile.video_filters_skip_crop = "setpts=0.500000*PTS";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "speed filter strip exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    // Speed setpts should be stripped; only the timestamp reset remains
+    assert_true (fc.index_of ("0.500000*PTS") < 0,
+        "speed setpts is stripped from combine video filters");
+    assert_contains (fc, "setsar=1,settb=AVTB,setpts=PTS-STARTPTS",
+        "timestamp reset still present after speed strip");
+}
+
+private void test_combine_reencode_applies_audio_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    // Use a non-speed audio filter (speed filters are stripped in combine)
+    profile.audio_filters = "aecho=0.8:0.88:60:0.4";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "audio filters apply exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "aecho=0.8:0.88:60:0.4,asetpts=PTS-STARTPTS",
+        "general audio filters are applied per input before asetpts");
+}
+
+private void test_combine_reencode_applies_audio_processing_chain () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.fade_in_enabled = true;
+    ap.fade_in_duration = 1.0;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "audio processing apply exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "afade=t=in:d=1.00",
+        "audio processing fade-in is applied per input");
+}
+
+private void test_combine_reencode_preserves_audio_copy_fallback () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    // Simulates the audio-copy fallback already applied by CombineWindow
+    profile.audio_args = { "-c:a", "aac", "-b:a", "192k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "audio copy fallback exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (argv, "-c:a", "aac",
+        "combine always uses audio re-encode, never copy");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  GENERAL SPEED CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void configure_general_speed_state (GeneralTab general,
+                                            bool video_enabled,
+                                            double video_percent,
+                                            bool audio_enabled,
+                                            double audio_percent) {
+    general.video_speed.set_value (video_percent);
+    general.audio_speed.set_value (audio_percent);
+    general.video_speed_check.set_active (video_enabled);
+    general.audio_speed_check.set_active (audio_enabled);
+}
+
+private void test_reencode_mode_applies_general_speed_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_speed_state (general, true, 25.0, true, -15.0);
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    assert_true (harness.window.get_general_speed_constrained_for_widget_test (),
+        "re-encode mode applies general speed constraint");
+    assert_false (general.video_speed_check.active,
+        "video speed toggle cleared while constrained");
+    assert_false (general.audio_speed_check.active,
+        "audio speed toggle cleared while constrained");
+    assert_false (general.get_video_speed_expander_sensitive_for_widget_test (),
+        "video speed expander disabled while constrained");
+    assert_false (general.get_audio_speed_expander_sensitive_for_widget_test (),
+        "audio speed expander disabled while constrained");
+    assert_contains (general.get_video_speed_subtitle_for_widget_test (),
+        "Disabled while Combine re-encode is active",
+        "video speed subtitle explains constraint");
+    assert_contains (general.get_audio_speed_subtitle_for_widget_test (),
+        "Disabled while Combine re-encode is active",
+        "audio speed subtitle explains constraint");
+
+    harness.window.close ();
+}
+
+private void test_copy_mode_releases_general_speed_constraint_and_restores_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_speed_state (general, true, 25.0, true, -15.0);
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    assert_false (harness.window.get_general_speed_constrained_for_widget_test (),
+        "copy mode releases general speed constraint");
+    assert_true (general.video_speed_check.active,
+        "video speed toggle restored after releasing constraint");
+    assert_true (general.audio_speed_check.active,
+        "audio speed toggle restored after releasing constraint");
+    assert_true (Math.fabs (general.video_speed.get_value () - 25.0) < 0.01,
+        "video speed value restored after releasing constraint");
+    assert_true (Math.fabs (general.audio_speed.get_value () - (-15.0)) < 0.01,
+        "audio speed value restored after releasing constraint");
+    assert_true (general.get_video_speed_expander_sensitive_for_widget_test (),
+        "video speed expander re-enabled after releasing constraint");
+    assert_true (general.get_audio_speed_expander_sensitive_for_widget_test (),
+        "audio speed expander re-enabled after releasing constraint");
+    assert_string_equal (general.get_video_speed_subtitle_for_widget_test (),
+        "Adjust playback speed of the video stream",
+        "video speed subtitle restored after releasing constraint");
+    assert_string_equal (general.get_audio_speed_subtitle_for_widget_test (),
+        "Adjust playback speed of the audio stream",
+        "audio speed subtitle restored after releasing constraint");
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_restores_general_speed_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_speed_state (general, true, 25.0, true, -15.0);
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.invoke_close_request_for_widget_test ();
+
+    assert_false (harness.window.get_general_speed_constrained_for_widget_test (),
+        "closing combine releases general speed constraint");
+    assert_true (general.video_speed_check.active,
+        "video speed toggle restored after window close");
+    assert_true (general.audio_speed_check.active,
+        "audio speed toggle restored after window close");
+    assert_true (Math.fabs (general.video_speed.get_value () - 25.0) < 0.01,
+        "video speed value restored after window close");
+    assert_true (Math.fabs (general.audio_speed.get_value () - (-15.0)) < 0.01,
+        "audio speed value restored after window close");
+
+    harness.window.close ();
+}
+
+private void test_general_speed_constraint_preserves_unrelated_general_settings () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_speed_state (general, true, 25.0, true, -15.0);
+
+    // Configure unrelated General settings that should survive the constraint cycle.
+    general.scale_mode.set_selected (1);  // Resolution
+    general.resolution_preset.set_selected (18);  // 1280x720
+    general.rotate_combo.set_selected (1);  // Clockwise 90
+
+    GeneralSettingsSnapshot before = general.snapshot_settings ();
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    GeneralSettingsSnapshot after = general.snapshot_settings ();
+    assert_string_equal (after.scale_mode, before.scale_mode,
+        "scale mode is preserved across speed constraint");
+    assert_string_equal (after.resolution_preset_value, before.resolution_preset_value,
+        "resolution preset is preserved across speed constraint");
+    assert_string_equal (after.rotate, before.rotate,
+        "rotation setting is preserved across speed constraint");
+
+    harness.window.close ();
+}
+
+private void test_combine_launch_snapshot_omits_general_speed_filters_when_constrained () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    configure_general_speed_state (general, true, 25.0, true, -15.0);
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    harness.window.enable_launch_capture_for_widget_test ();
+    harness.window.arm_pending_overwrite_snapshot_for_widget_test (
+        77, false, "/tmp/constrained-speed.mkv");
+    harness.window.replay_pending_overwrite_launch_for_widget_test (77, "overwrite");
+
+    EncodeProfileSnapshot? profile =
+        harness.window.get_last_launched_profile_for_widget_test ();
+    assert_true (profile != null, "captured combine launch profile exists");
+    assert_true (profile.video_filters.index_of ("*PTS") < 0,
+        "captured combine launch profile omits general video speed filter");
+    assert_true (profile.video_filters_skip_crop.index_of ("*PTS") < 0,
+        "captured combine launch profile omits general video speed filter from skip-crop chain");
+    assert_true (profile.audio_filters.index_of ("atempo=") < 0,
+        "captured combine launch profile omits general audio speed filter");
+
+    harness.window.close ();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  GENERAL CROP CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void configure_general_crop_state (GeneralTab general,
+                                           bool enabled,
+                                           string crop_text) {
+    general.crop_value.set_text (crop_text);
+    general.crop_check.set_active (enabled);
+}
+
+private void test_reencode_mode_applies_general_crop_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_crop_state (general, true, "100:100:0:0");
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    assert_true (harness.window.get_general_crop_constrained_for_widget_test (),
+        "re-encode mode applies general crop constraint");
+    assert_false (general.crop_check.active,
+        "crop toggle cleared while constrained");
+    assert_false (general.get_crop_expander_sensitive_for_widget_test (),
+        "crop expander disabled while constrained");
+    assert_contains (general.get_crop_subtitle_for_widget_test (),
+        "Disabled while Combine re-encode is active",
+        "crop subtitle explains constraint");
+
+    harness.window.close ();
+}
+
+private void test_copy_mode_releases_general_crop_constraint_and_restores_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_crop_state (general, true, "100:100:0:0");
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    assert_false (harness.window.get_general_crop_constrained_for_widget_test (),
+        "copy mode releases general crop constraint");
+    assert_true (general.crop_check.active,
+        "crop toggle restored after releasing constraint");
+    assert_string_equal (general.crop_value.text, "100:100:0:0",
+        "crop value restored after releasing constraint");
+    assert_true (general.get_crop_expander_sensitive_for_widget_test (),
+        "crop expander re-enabled after releasing constraint");
+    assert_string_equal (general.get_crop_subtitle_for_widget_test (),
+        "Remove black bars or unwanted borders",
+        "crop subtitle restored after releasing constraint");
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_restores_general_crop_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_crop_state (general, true, "100:100:0:0");
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.invoke_close_request_for_widget_test ();
+
+    assert_false (harness.window.get_general_crop_constrained_for_widget_test (),
+        "closing combine releases general crop constraint");
+    assert_true (general.crop_check.active,
+        "crop toggle restored after window close");
+    assert_string_equal (general.crop_value.text, "100:100:0:0",
+        "crop value restored after window close");
+
+    harness.window.close ();
+}
+
+private void test_combine_crop_constraint_does_not_override_trim_crop_lock () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_general_crop_state (general, true, "100:100:0:0");
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    general.notify_trim_tab_mode (1);  // Trim crop lock active
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    assert_false (harness.window.get_general_crop_constrained_for_widget_test (),
+        "combine crop constraint released");
+    assert_false (general.crop_check.active,
+        "crop remains disabled while trim crop lock is active");
+    assert_false (general.get_crop_expander_sensitive_for_widget_test (),
+        "trim crop lock remains in effect after combine releases");
+
+    general.notify_trim_tab_mode (-1);
+    harness.window.close ();
+}
+
+private void test_combine_launch_snapshot_omits_general_crop_filter_when_constrained () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    configure_general_crop_state (general, true, "100:100:0:0");
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    harness.window.enable_launch_capture_for_widget_test ();
+    harness.window.arm_pending_overwrite_snapshot_for_widget_test (
+        88, false, "/tmp/constrained-crop.mkv");
+    harness.window.replay_pending_overwrite_launch_for_widget_test (88, "overwrite");
+
+    EncodeProfileSnapshot? profile =
+        harness.window.get_last_launched_profile_for_widget_test ();
+    assert_true (profile != null, "captured combine launch profile exists for crop constraint");
+    assert_true (profile.video_filters.index_of ("crop=") < 0,
+        "captured combine launch profile omits general crop filter");
+    assert_true (profile.video_filters_skip_crop.index_of ("crop=") < 0,
+        "captured combine launch profile omits general crop filter from skip-crop chain");
+
+    harness.window.close ();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  FADE / CROSSFADE CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_crossfade_enabling_clears_and_disables_fades () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    // Set up fades on the default codec tab (SVT-AV1, index 0)
+    BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+    assert_true (tab != null, "selected base codec tab is not null");
+    tab.audio_processing_settings.apply_snapshot (create_fade_snapshot ());
+
+    // Enter re-encode mode
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    // Enable crossfade
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    // Fades should be cleared and controls disabled
+    var snapshot = tab.audio_processing_settings.snapshot_settings ();
+    assert_false (snapshot.fade_in_enabled,
+        "crossfade enabling clears fade-in");
+    assert_false (snapshot.fade_out_enabled,
+        "crossfade enabling clears fade-out");
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () == tab,
+        "constrained tab tracks the selected tab");
+
+    harness.window.close ();
+}
+
+private void test_crossfade_disabling_reenables_fades () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+    harness.window.set_crossfade_switch_active_for_widget_test (false);
+
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () == null,
+        "disabling crossfade releases constraint");
+
+    harness.window.close ();
+}
+
+private void test_crossfade_codec_switch_moves_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    BaseCodecTab? tab0 = harness.window.get_selected_base_codec_tab_for_widget_test ();
+
+    // Switch to x265 (index 1)
+    harness.window.set_codec_choice_selected_for_widget_test (1);
+
+    BaseCodecTab? tab1 = harness.window.get_selected_base_codec_tab_for_widget_test ();
+
+    // Old tab should be released, new tab should be constrained
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () == tab1,
+        "codec switch moves constraint to new tab");
+    assert_true (tab0 != tab1, "tabs are different objects");
+
+    harness.window.close ();
+}
+
+private void test_copy_mode_on_releases_crossfade_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () != null,
+        "constraint is active before copy mode on");
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () == null,
+        "copy mode on releases crossfade constraint");
+
+    harness.window.close ();
+}
+
+private void test_copy_mode_off_reapplies_crossfade_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    // Enable re-encode + crossfade, then switch to copy, then back
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    // Crossfade was user-preferred, so it should come back along with the constraint
+    assert_true (harness.window.get_crossfade_switch_active_for_widget_test (),
+        "crossfade restored when returning to re-encode mode");
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () != null,
+        "constraint reapplied when copy mode off");
+
+    harness.window.close ();
+}
+
+private void test_crossfade_disabling_restores_fade_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+    assert_true (tab != null, "tab not null");
+
+    // Set up fades on the codec tab
+    tab.audio_processing_settings.apply_snapshot (create_fade_snapshot ());
+    var before = tab.audio_processing_settings.snapshot_settings ();
+    assert_true (before.fade_in_enabled, "fade-in set before constraint");
+    assert_true (before.fade_out_enabled, "fade-out set before constraint");
+
+    // Enable re-encode + crossfade (clears fades)
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    var during = tab.audio_processing_settings.snapshot_settings ();
+    assert_false (during.fade_in_enabled, "fade-in cleared during constraint");
+    assert_false (during.fade_out_enabled, "fade-out cleared during constraint");
+
+    // Disable crossfade — should restore
+    harness.window.set_crossfade_switch_active_for_widget_test (false);
+
+    var after = tab.audio_processing_settings.snapshot_settings ();
+    assert_true (after.fade_in_enabled,
+        "fade-in restored after constraint released");
+    assert_true (after.fade_out_enabled,
+        "fade-out restored after constraint released");
+    assert_true (Math.fabs (after.fade_in_duration - 1.5) < 0.01,
+        "fade-in duration restored after constraint released");
+    assert_true (Math.fabs (after.fade_out_duration - 2.0) < 0.01,
+        "fade-out duration restored after constraint released");
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_restores_fade_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+    tab.audio_processing_settings.apply_snapshot (create_fade_snapshot ());
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    // Close window while crossfade is active
+    harness.window.invoke_close_request_for_widget_test ();
+
+    // Fade state should be restored on the shared tab
+    var after = tab.audio_processing_settings.snapshot_settings ();
+    assert_true (after.fade_in_enabled,
+        "fade-in restored after window close");
+    assert_true (after.fade_out_enabled,
+        "fade-out restored after window close");
+
+    harness.window.close ();
+}
+
+private void test_crossfade_release_preserves_non_fade_changes () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+    assert_true (tab != null, "tab not null");
+
+    tab.audio_processing_settings.apply_snapshot (create_fade_snapshot ());
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    var during = tab.audio_processing_settings.snapshot_settings ();
+    during.normalize_enabled = true;
+    during.normalize_ebu = false;
+    during.channel_downmix = 1;
+    tab.audio_processing_settings.apply_snapshot (during);
+
+    harness.window.set_crossfade_switch_active_for_widget_test (false);
+
+    var after = tab.audio_processing_settings.snapshot_settings ();
+    assert_true (after.normalize_enabled,
+        "normalization change made during constraint is preserved");
+    assert_false (after.normalize_ebu,
+        "normalization mode change made during constraint is preserved");
+    assert_true (after.channel_downmix == 1,
+        "channel layout change made during constraint is preserved");
+    assert_true (after.fade_in_enabled,
+        "fade-in restored after releasing constraint");
+    assert_true (after.fade_out_enabled,
+        "fade-out restored after releasing constraint");
+    assert_true (Math.fabs (after.fade_in_duration - 1.5) < 0.01,
+        "fade-in duration restored after releasing constraint");
+    assert_true (Math.fabs (after.fade_out_duration - 2.0) < 0.01,
+        "fade-out duration restored after releasing constraint");
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_releases_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.set_crossfade_switch_active_for_widget_test (true);
+
+    BaseCodecTab? tab = harness.window.get_constrained_codec_tab_for_widget_test ();
+    assert_true (tab != null, "constraint exists before close");
+
+    // Simulate close
+    harness.window.invoke_close_request_for_widget_test ();
+
+    // The window's constrained_codec_tab should be null after close
+    assert_true (harness.window.get_constrained_codec_tab_for_widget_test () == null,
+        "closing window releases fade constraint");
+
+    harness.window.close ();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  RUNNER FADE BEHAVIOR TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_runner_allows_fades_when_crossfade_off () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = false;
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.fade_in_enabled = true;
+    ap.fade_in_duration = 1.0;
+    ap.fade_out_enabled = true;
+    ap.fade_out_duration = 2.0;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "fades when crossfade off exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "afade=t=in:d=1.00",
+        "fade-in allowed when crossfade is off");
+    assert_contains (fc, "afade=t=out",
+        "fade-out allowed when crossfade is off");
+}
+
+private void test_combine_runner_suppresses_afade_when_crossfade_on () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.fade_in_enabled = true;
+    ap.fade_in_duration = 1.0;
+    ap.fade_out_enabled = true;
+    ap.fade_out_duration = 2.0;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "suppress fades when crossfade on exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_true (fc.index_of ("afade") < 0,
+        "afade is suppressed when crossfade is enabled");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  NORMALIZATION TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_peak_normalization_triggers_analysis () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;  // peak normalization
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak analysis exit code");
+
+    assert_true (runner.get_peak_analysis_ran_for_widget_test (),
+        "peak normalization triggers analysis pass");
+
+    string[] peak_argv = runner.get_last_peak_analysis_argv_for_widget_test ();
+    string peak_fc = extract_filter_complex (peak_argv);
+    assert_contains (peak_fc, "volumedetect",
+        "peak analysis uses volumedetect");
+    assert_contains (peak_fc, "concat=",
+        "peak analysis uses concat when crossfade off");
+}
+
+private void test_combine_peak_normalization_skips_when_audio_disabled () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080,
+        "30/1", "yuv420p", "1:1", false));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080,
+        "30/1", "yuv420p", "1:1", false));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak skip no audio exit code");
+
+    assert_false (runner.get_peak_analysis_ran_for_widget_test (),
+        "peak normalization skips when no audio");
+}
+
+private void test_combine_peak_normalization_skips_when_profile_audio_disabled () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-an" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak skip -an exit code");
+
+    assert_false (runner.get_peak_analysis_ran_for_widget_test (),
+        "peak normalization skips when profile has -an");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string fc = extract_filter_complex (argv);
+    assert_array_contains (argv, "-an",
+        "profile -an disables audio output");
+    assert_array_not_contains (argv, "[outa]",
+        "profile -an does not map audio output");
+    assert_contains (fc, "concat=n=2:v=1:a=0[outv]",
+        "profile -an concat graph disables audio output");
+    assert_true (fc.index_of ("[0:a:0]") < 0,
+        "profile -an does not build per-input audio chains");
+}
+
+private void test_combine_peak_analysis_cleanup_on_cancel_with_chapters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    string reencode_root = Path.build_filename (
+        ConversionUtils.get_app_temp_root (), "combine", "reencode");
+    int before_count = count_directories_in_path (reencode_root);
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = true;
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    runner.cancel ();
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 1, "cancelled peak-analysis path exit code");
+
+    int after_count = count_directories_in_path (reencode_root);
+    if (after_count != before_count) {
+        Test.fail_printf (
+            "cancelled peak-analysis path leaked temp dirs: before=%d after=%d",
+            before_count, after_count);
+    }
+}
+
+private void test_combine_chapter_write_failure_cleans_temp_dir () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    string reencode_root = Path.build_filename (
+        ConversionUtils.get_app_temp_root (), "combine", "reencode");
+    int before_count = count_directories_in_path (reencode_root);
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = true;
+    runner.force_write_chapters_file_failure_for_widget_test ();
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == -1, "chapter write failure exit code");
+
+    int after_count = count_directories_in_path (reencode_root);
+    if (after_count != before_count) {
+        Test.fail_printf (
+            "chapter write failure leaked temp dirs: before=%d after=%d",
+            before_count, after_count);
+    }
+}
+
+private void test_combine_peak_normalization_uses_acrossfade_when_crossfade_on () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak crossfade exit code");
+
+    string[] peak_argv = runner.get_last_peak_analysis_argv_for_widget_test ();
+    string peak_fc = extract_filter_complex (peak_argv);
+    assert_contains (peak_fc, "acrossfade",
+        "peak analysis uses acrossfade when crossfade on");
+}
+
+private void test_combine_peak_normalization_includes_output_args () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k", "-ac", "2" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak output args exit code");
+
+    string[] peak_argv = runner.get_last_peak_analysis_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (peak_argv, "-ac", "2",
+        "peak analysis includes -ac output arg for accurate measurement");
+}
+
+private void test_combine_peak_analysis_filter_complex_executes () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = false;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "peak exec smoke exit code");
+
+    string[] peak_argv = runner.get_last_peak_analysis_argv_for_widget_test ();
+    string peak_fc = extract_filter_complex (peak_argv);
+
+    string? dir = null;
+    try {
+        dir = DirUtils.make_tmp ("combine-peak-exec-XXXXXX");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create peak exec temp dir: %s", e.message);
+    }
+
+    string first = make_exec_test_media_file (dir, "first.mkv");
+    string second = make_exec_test_media_file (dir, "second.mkv");
+    try {
+        assert_filter_complex_executes_with_media_inputs (
+            { first, second }, peak_fc, false, true,
+            "peak analysis filter_complex executes");
+    } finally {
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_combine_ebu_normalization_applies_post_concat () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = true;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "ebu post concat exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "loudnorm=",
+        "EBU normalization present in filter_complex");
+    assert_contains (fc, "[outa_pre]",
+        "EBU normalization applied post-combine via outa_pre");
+}
+
+private void test_combine_ebu_filter_complex_executes () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = true;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "ebu exec smoke exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+
+    string? dir = null;
+    try {
+        dir = DirUtils.make_tmp ("combine-ebu-exec-XXXXXX");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create ebu exec temp dir: %s", e.message);
+    }
+
+    string first = make_exec_test_media_file (dir, "first.mkv");
+    string second = make_exec_test_media_file (dir, "second.mkv");
+    try {
+        assert_filter_complex_executes_with_media_inputs (
+            { first, second }, fc, true, true,
+            "EBU filter_complex executes");
+    } finally {
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_combine_ebu_normalization_applies_post_acrossfade () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = true;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "ebu post acrossfade exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "acrossfade",
+        "crossfade is present");
+    assert_contains (fc, "loudnorm=",
+        "EBU normalization present post-acrossfade");
+    assert_contains (fc, "[outa_pre]",
+        "EBU normalization applied post-acrossfade via outa_pre");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SILENCE INPUT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_reencode_silence_input_excludes_normalization () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 3.0, 1920, 1080,
+        "30/1", "yuv420p", "1:1", false));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    var ap = new AudioProcessingSettingsSnapshot ();
+    ap.normalize_enabled = true;
+    ap.normalize_ebu = true;
+    profile.audio_processing = ap;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "silence excludes normalization exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    // Silence input should use anullsrc, not normalization
+    assert_contains (fc, "anullsrc=channel_layout=stereo:sample_rate=48000[silence1]",
+        "silence input still uses anullsrc");
+    assert_contains (fc, "[silence1]atrim=duration=3.000000,asetpts=PTS-STARTPTS[a1]",
+        "silence input keeps simple atrim chain without normalization");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  CROSSFADE WITH FULL PROFILE TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_reencode_strips_video_speed_filter () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    // Simulates General tab with hflip + speed filter
+    profile.video_filters_skip_crop = "hflip,setpts=0.500000*PTS";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "strip video speed exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    // hflip should be kept, speed setpts should be stripped
+    assert_contains (fc, "hflip,setsar=1",
+        "non-speed video filters are kept");
+    assert_true (fc.index_of ("0.500000*PTS") < 0,
+        "video speed setpts filter is stripped from combine");
+}
+
+private void test_combine_reencode_strips_audio_speed_filter () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.audio_filters = "atempo=1.500000";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "strip audio speed exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_true (fc.index_of ("atempo") < 0,
+        "audio speed atempo filter is stripped from combine");
+}
+
+private void test_strip_video_speed_filters_unit () {
+    assert_string_equal (
+        CombineRunner.strip_video_speed_filters ("hflip,setpts=0.500000*PTS,format=yuv420p"),
+        "hflip,format=yuv420p",
+        "strips setpts speed and keeps other filters");
+    assert_string_equal (
+        CombineRunner.strip_video_speed_filters ("setpts=0.500000*PTS"),
+        "",
+        "strips lone speed filter to empty");
+    assert_string_equal (
+        CombineRunner.strip_video_speed_filters ("hflip"),
+        "hflip",
+        "preserves non-speed filter unchanged");
+    assert_string_equal (
+        CombineRunner.strip_video_speed_filters (""),
+        "",
+        "handles empty string");
+}
+
+private void test_strip_audio_speed_filters_unit () {
+    assert_string_equal (
+        CombineRunner.strip_audio_speed_filters ("atempo=1.500000"),
+        "",
+        "strips lone atempo to empty");
+    assert_string_equal (
+        CombineRunner.strip_audio_speed_filters ("atempo=2.0,atempo=1.250000"),
+        "",
+        "strips chained atempo filters");
+    assert_string_equal (
+        CombineRunner.strip_audio_speed_filters (""),
+        "",
+        "handles empty string");
+}
+
+private void test_combine_crossfade_with_full_profile_video_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.video_filters_skip_crop = "hflip";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade video filters exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "hflip,setsar=1",
+        "video filters applied in crossfade mode");
+    assert_contains (fc, "xfade=",
+        "crossfade still works with video filters");
+}
+
+private void test_combine_crossfade_with_full_profile_audio_filters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    // Use a non-speed audio filter (speed filters are stripped in combine)
+    profile.audio_filters = "aecho=0.8:0.88:60:0.4";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade audio filters exit code");
+
+    string fc = extract_filter_complex (runner.get_last_ffmpeg_argv_for_widget_test ());
+    assert_contains (fc, "aecho=0.8:0.88:60:0.4",
+        "non-speed audio filters applied in crossfade mode");
+    assert_contains (fc, "acrossfade",
+        "acrossfade still works with audio filters");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  HELPER: Create a fade snapshot for constraint tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+private AudioProcessingSettingsSnapshot create_fade_snapshot () {
+    var snapshot = new AudioProcessingSettingsSnapshot ();
+    snapshot.fade_in_enabled = true;
+    snapshot.fade_in_duration = 1.5;
+    snapshot.fade_out_enabled = true;
+    snapshot.fade_out_duration = 2.0;
+    return snapshot;
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -1032,6 +2483,8 @@ void main (string[] args) {
         test_remove_file_cancels_inflight_probe_and_unblocks_combine);
     Test.add_func ("/combine/window/copy-mode-sar-mismatch",
         test_copy_mode_disables_on_sample_aspect_ratio_mismatch);
+    Test.add_func ("/combine/window/reencode-subtitle-describes-compatible-general-settings",
+        test_reencode_codec_subtitle_describes_supported_general_settings);
     Test.add_func ("/combine/overwrite/freezes-launch-file-list",
         test_pending_overwrite_freezes_launch_file_list);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
@@ -1070,6 +2523,118 @@ void main (string[] args) {
         test_crossfade_settb_in_filter);
     Test.add_func ("/combine/crossfade/with-chapters",
         test_crossfade_with_chapters);
+
+    // Full profile tests
+    Test.add_func ("/combine/profile/video-filters",
+        test_combine_reencode_applies_general_video_filters);
+    Test.add_func ("/combine/profile/post-output-scale-separation",
+        test_combine_reencode_post_output_scale_is_separate_from_input_normalization);
+    Test.add_func ("/combine/profile/crossfade-post-output-video-filters",
+        test_combine_crossfade_applies_post_output_video_filters);
+    Test.add_func ("/combine/profile/direct-outv-without-post-output-filters",
+        test_combine_reencode_without_post_output_filters_keeps_direct_outv_label);
+    Test.add_func ("/combine/profile/strips-speed-setpts",
+        test_combine_reencode_strips_speed_setpts_from_video_filters);
+    Test.add_func ("/combine/profile/audio-filters",
+        test_combine_reencode_applies_audio_filters);
+    Test.add_func ("/combine/profile/audio-processing-chain",
+        test_combine_reencode_applies_audio_processing_chain);
+    Test.add_func ("/combine/profile/audio-copy-fallback",
+        test_combine_reencode_preserves_audio_copy_fallback);
+
+    // General speed constraint tests
+    Test.add_func ("/combine/general-speed/reencode-applies-constraint",
+        test_reencode_mode_applies_general_speed_constraint);
+    Test.add_func ("/combine/general-speed/copy-releases-and-restores",
+        test_copy_mode_releases_general_speed_constraint_and_restores_state);
+    Test.add_func ("/combine/general-speed/close-restores-state",
+        test_closing_combine_window_restores_general_speed_state);
+    Test.add_func ("/combine/general-speed/preserves-unrelated-general-settings",
+        test_general_speed_constraint_preserves_unrelated_general_settings);
+    Test.add_func ("/combine/general-speed/launch-omits-speed-filters",
+        test_combine_launch_snapshot_omits_general_speed_filters_when_constrained);
+
+    // General crop constraint tests
+    Test.add_func ("/combine/general-crop/reencode-applies-constraint",
+        test_reencode_mode_applies_general_crop_constraint);
+    Test.add_func ("/combine/general-crop/copy-releases-and-restores",
+        test_copy_mode_releases_general_crop_constraint_and_restores_state);
+    Test.add_func ("/combine/general-crop/close-restores-state",
+        test_closing_combine_window_restores_general_crop_state);
+    Test.add_func ("/combine/general-crop/trim-lock-survives-release",
+        test_combine_crop_constraint_does_not_override_trim_crop_lock);
+    Test.add_func ("/combine/general-crop/launch-omits-crop-filter",
+        test_combine_launch_snapshot_omits_general_crop_filter_when_constrained);
+
+    // Fade/crossfade UI constraint tests
+    Test.add_func ("/combine/constraint/crossfade-clears-and-disables-fades",
+        test_crossfade_enabling_clears_and_disables_fades);
+    Test.add_func ("/combine/constraint/crossfade-disabling-reenables",
+        test_crossfade_disabling_reenables_fades);
+    Test.add_func ("/combine/constraint/codec-switch-moves-constraint",
+        test_crossfade_codec_switch_moves_constraint);
+    Test.add_func ("/combine/constraint/copy-mode-on-releases",
+        test_copy_mode_on_releases_crossfade_constraint);
+    Test.add_func ("/combine/constraint/copy-mode-off-reapplies",
+        test_copy_mode_off_reapplies_crossfade_constraint);
+    Test.add_func ("/combine/constraint/disabling-restores-fade-state",
+        test_crossfade_disabling_restores_fade_state);
+    Test.add_func ("/combine/constraint/close-restores-fade-state",
+        test_closing_combine_window_restores_fade_state);
+    Test.add_func ("/combine/constraint/release-preserves-non-fade-changes",
+        test_crossfade_release_preserves_non_fade_changes);
+    Test.add_func ("/combine/constraint/close-releases",
+        test_closing_combine_window_releases_constraint);
+
+    // Runner fade behavior
+    Test.add_func ("/combine/runner/allows-fades-when-crossfade-off",
+        test_combine_runner_allows_fades_when_crossfade_off);
+    Test.add_func ("/combine/runner/suppresses-afade-when-crossfade-on",
+        test_combine_runner_suppresses_afade_when_crossfade_on);
+
+    // Normalization tests
+    Test.add_func ("/combine/normalization/peak-triggers-analysis",
+        test_combine_peak_normalization_triggers_analysis);
+    Test.add_func ("/combine/normalization/peak-skips-no-audio",
+        test_combine_peak_normalization_skips_when_audio_disabled);
+    Test.add_func ("/combine/normalization/peak-skips-profile-audio-disabled",
+        test_combine_peak_normalization_skips_when_profile_audio_disabled);
+    Test.add_func ("/combine/normalization/peak-cleanup-on-cancel-with-chapters",
+        test_combine_peak_analysis_cleanup_on_cancel_with_chapters);
+    Test.add_func ("/combine/chapters/write-failure-cleans-temp-dir",
+        test_combine_chapter_write_failure_cleans_temp_dir);
+    Test.add_func ("/combine/normalization/peak-uses-acrossfade",
+        test_combine_peak_normalization_uses_acrossfade_when_crossfade_on);
+    Test.add_func ("/combine/normalization/peak-includes-output-args",
+        test_combine_peak_normalization_includes_output_args);
+    Test.add_func ("/combine/normalization/peak-filter-complex-executes",
+        test_combine_peak_analysis_filter_complex_executes);
+    Test.add_func ("/combine/normalization/ebu-post-concat",
+        test_combine_ebu_normalization_applies_post_concat);
+    Test.add_func ("/combine/normalization/ebu-filter-complex-executes",
+        test_combine_ebu_filter_complex_executes);
+    Test.add_func ("/combine/normalization/ebu-post-acrossfade",
+        test_combine_ebu_normalization_applies_post_acrossfade);
+
+    // Silence input tests
+    Test.add_func ("/combine/silence/excludes-normalization",
+        test_combine_reencode_silence_input_excludes_normalization);
+
+    // Speed filter stripping
+    Test.add_func ("/combine/speed/strip-video-speed-filter",
+        test_combine_reencode_strips_video_speed_filter);
+    Test.add_func ("/combine/speed/strip-audio-speed-filter",
+        test_combine_reencode_strips_audio_speed_filter);
+    Test.add_func ("/combine/speed/strip-video-speed-unit",
+        test_strip_video_speed_filters_unit);
+    Test.add_func ("/combine/speed/strip-audio-speed-unit",
+        test_strip_audio_speed_filters_unit);
+
+    // Crossfade with full profile
+    Test.add_func ("/combine/crossfade/with-video-filters",
+        test_combine_crossfade_with_full_profile_video_filters);
+    Test.add_func ("/combine/crossfade/with-audio-filters",
+        test_combine_crossfade_with_full_profile_audio_filters);
 
     Test.run ();
 }

@@ -2,11 +2,33 @@ using Gtk;
 using Adw;
 using GLib;
 
+public class GeneralSpeedSettingsSnapshot : Object {
+    public bool video_speed_enabled = false;
+    public double video_speed_percent = 0.0;
+    public bool audio_speed_enabled = false;
+    public double audio_speed_percent = 0.0;
+}
+
+public class GeneralCropSettingsSnapshot : Object {
+    public bool crop_enabled = false;
+    public string crop_value = "";
+}
+
 public class GeneralTab : Box {
     private const double SPEED_MIN_PERCENT = -99.0;
     private const double SPEED_MAX_PERCENT = 100.0;
     private const double SPEED_STEP_PERCENT = 1.0;
     private const double SPEED_EPSILON = 1e-9;
+    private const string VIDEO_SPEED_SUBTITLE_DEFAULT =
+        "Adjust playback speed of the video stream";
+    private const string AUDIO_SPEED_SUBTITLE_DEFAULT =
+        "Adjust playback speed of the audio stream";
+    private const string LOCK_REASON_SPEED =
+        "Disabled while Combine re-encode is active — Combine does not support General speed changes";
+    private const string CROP_SUBTITLE_DEFAULT =
+        "Remove black bars or unwanted borders";
+    private const string LOCK_REASON_CROP_COMBINE =
+        "Disabled while Combine re-encode is active — Combine does not support General crop";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -34,6 +56,8 @@ public class GeneralTab : Box {
     private uint    crop_detect_gen    = 0;
 
     public Adw.ExpanderRow crop_expander;
+    private bool trim_crop_locked = false;
+    private bool combine_crop_locked = false;
 
     // ── Timing ───────────────────────────────────────────────────────────────
     public Switch     seek_check       { get; private set; }
@@ -347,7 +371,7 @@ public class GeneralTab : Box {
 
         crop_expander = new Adw.ExpanderRow ();
         crop_expander.set_title ("Crop");
-        crop_expander.set_subtitle ("Remove black bars or unwanted borders");
+        crop_expander.set_subtitle (CROP_SUBTITLE_DEFAULT);
         crop_expander.set_show_enable_switch (true);
         crop_expander.set_enable_expansion (false);
 
@@ -547,7 +571,7 @@ public class GeneralTab : Box {
 
         video_speed_expander = new Adw.ExpanderRow ();
         video_speed_expander.set_title ("Video Speed");
-        video_speed_expander.set_subtitle ("Adjust playback speed of the video stream");
+        video_speed_expander.set_subtitle (VIDEO_SPEED_SUBTITLE_DEFAULT);
         video_speed_expander.set_show_enable_switch (true);
         video_speed_expander.set_enable_expansion (false);
 
@@ -568,7 +592,7 @@ public class GeneralTab : Box {
 
         audio_speed_expander = new Adw.ExpanderRow ();
         audio_speed_expander.set_title ("Audio Speed");
-        audio_speed_expander.set_subtitle ("Adjust playback speed of the audio stream");
+        audio_speed_expander.set_subtitle (AUDIO_SPEED_SUBTITLE_DEFAULT);
         audio_speed_expander.set_show_enable_switch (true);
         audio_speed_expander.set_enable_expansion (false);
 
@@ -735,6 +759,49 @@ public class GeneralTab : Box {
         return snapshot;
     }
 
+    public GeneralSpeedSettingsSnapshot snapshot_speeds_only () {
+        var snapshot = new GeneralSpeedSettingsSnapshot ();
+        snapshot.video_speed_enabled = video_speed_check.active;
+        snapshot.video_speed_percent = video_speed.get_value ();
+        snapshot.audio_speed_enabled = audio_speed_check.active;
+        snapshot.audio_speed_percent = audio_speed.get_value ();
+        return snapshot;
+    }
+
+    public void restore_speeds_only (GeneralSpeedSettingsSnapshot snapshot) {
+        video_speed.set_value (snapshot.video_speed_percent);
+        audio_speed.set_value (snapshot.audio_speed_percent);
+        video_speed_check.set_active (snapshot.video_speed_enabled);
+        audio_speed_check.set_active (snapshot.audio_speed_enabled);
+    }
+
+    public void set_combine_speed_constraint (bool constrained) {
+        if (constrained) {
+            video_speed_check.set_active (false);
+            audio_speed_check.set_active (false);
+            set_speed_locked (true);
+        } else {
+            set_speed_locked (false);
+        }
+    }
+
+    public GeneralCropSettingsSnapshot snapshot_crop_only () {
+        var snapshot = new GeneralCropSettingsSnapshot ();
+        snapshot.crop_enabled = crop_check.active;
+        snapshot.crop_value = crop_value.text;
+        return snapshot;
+    }
+
+    public void restore_crop_only (GeneralCropSettingsSnapshot snapshot) {
+        crop_value.set_text (snapshot.crop_value);
+        crop_check.set_active (snapshot.crop_enabled && !is_crop_locked_effective ());
+    }
+
+    public void set_combine_crop_constraint (bool constrained) {
+        combine_crop_locked = constrained;
+        update_crop_lock_state ();
+    }
+
     private void update_scaling_visibility () {
         string mode = get_scale_mode_text ();
         bool is_resolution  = (mode == ScaleMode.RESOLUTION);
@@ -790,7 +857,8 @@ public class GeneralTab : Box {
             // Crop & Trim tab is not the active tab — unlock everything so
             // the General tab can be used freely with any codec tab.
             set_timing_locked (false);
-            set_crop_locked (false);
+            trim_crop_locked = false;
+            update_crop_lock_state ();
             return;
         }
 
@@ -802,7 +870,8 @@ public class GeneralTab : Box {
         bool lock_crop   = (mode == 1 || mode == 2);   // CROP_ONLY or TRIM_AND_CROP
 
         set_timing_locked (lock_timing);
-        set_crop_locked (lock_crop);
+        trim_crop_locked = lock_crop;
+        update_crop_lock_state ();
     }
 
     private void set_timing_locked (bool locked) {
@@ -827,17 +896,58 @@ public class GeneralTab : Box {
         }
     }
 
-    private void set_crop_locked (bool locked) {
+    private bool is_crop_locked_effective () {
+        return trim_crop_locked || combine_crop_locked;
+    }
+
+    private void update_crop_lock_state () {
+        bool locked = is_crop_locked_effective ();
         if (locked) {
             // Collapse and deactivate so the crop value doesn't reach ffmpeg
             crop_check.set_active (false);
             crop_expander.set_enable_expansion (false);
-
             crop_expander.set_sensitive (false);
-            crop_expander.set_tooltip_text (LOCK_REASON_CROP);
         } else {
             crop_expander.set_sensitive (true);
+        }
+
+        if (combine_crop_locked) {
+            crop_expander.set_subtitle (LOCK_REASON_CROP_COMBINE);
+            crop_expander.set_tooltip_text (LOCK_REASON_CROP_COMBINE);
+        } else if (trim_crop_locked) {
+            crop_expander.set_subtitle (CROP_SUBTITLE_DEFAULT);
+            crop_expander.set_tooltip_text (LOCK_REASON_CROP);
+        } else {
+            crop_expander.set_subtitle (CROP_SUBTITLE_DEFAULT);
             crop_expander.set_tooltip_text (null);
+        }
+    }
+
+    private void set_speed_locked (bool locked) {
+        set_speed_expander_locked (
+            video_speed_expander,
+            VIDEO_SPEED_SUBTITLE_DEFAULT,
+            locked
+        );
+        set_speed_expander_locked (
+            audio_speed_expander,
+            AUDIO_SPEED_SUBTITLE_DEFAULT,
+            locked
+        );
+    }
+
+    private void set_speed_expander_locked (Adw.ExpanderRow expander,
+                                            string default_subtitle,
+                                            bool locked) {
+        if (locked) {
+            expander.set_enable_expansion (false);
+            expander.set_sensitive (false);
+            expander.set_subtitle (LOCK_REASON_SPEED);
+            expander.set_tooltip_text (LOCK_REASON_SPEED);
+        } else {
+            expander.set_sensitive (true);
+            expander.set_subtitle (default_subtitle);
+            expander.set_tooltip_text (null);
         }
     }
 
@@ -1016,6 +1126,32 @@ public class GeneralTab : Box {
             "audio"
         );
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool get_video_speed_expander_sensitive_for_widget_test () {
+        return video_speed_expander.get_sensitive ();
+    }
+
+    internal bool get_audio_speed_expander_sensitive_for_widget_test () {
+        return audio_speed_expander.get_sensitive ();
+    }
+
+    internal string get_video_speed_subtitle_for_widget_test () {
+        return video_speed_expander.get_subtitle () ?? "";
+    }
+
+    internal string get_audio_speed_subtitle_for_widget_test () {
+        return audio_speed_expander.get_subtitle () ?? "";
+    }
+
+    internal bool get_crop_expander_sensitive_for_widget_test () {
+        return crop_expander.get_sensitive ();
+    }
+
+    internal string get_crop_subtitle_for_widget_test () {
+        return crop_expander.get_subtitle () ?? "";
+    }
+#endif
 
     // ── Crop ─────────────────────────────────────────────────────────────────
 
