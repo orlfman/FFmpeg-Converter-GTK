@@ -23,6 +23,7 @@ public class CombineWindow : Adw.Window {
         public string output_path { get; set; default = ""; }
         public GenericArray<CombineFile> files { get; set; default = new GenericArray<CombineFile> (); }
         public EncodeProfileSnapshot? reencode_profile { get; set; default = null; }
+        public bool preserve_metadata { get; set; default = false; }
         public bool generate_chapters { get; set; default = false; }
         public bool remove_source_chapters { get; set; default = false; }
         public bool crossfade_enabled { get; set; default = false; }
@@ -1317,6 +1318,7 @@ public class CombineWindow : Adw.Window {
         var request = new CombineLaunchRequest ();
         request.copy_mode = is_copy;
         request.output_path = output;
+        request.preserve_metadata = general_tab.is_preserve_metadata ();
         request.generate_chapters = generate_chapters_switch.active;
         request.remove_source_chapters = general_tab.is_remove_chapters ();
         request.crossfade_enabled = crossfade_switch.active && !is_copy;
@@ -1410,6 +1412,7 @@ public class CombineWindow : Adw.Window {
         runner.progress_bar = progress_bar;
         runner.status_area = main_status_area;
         runner.console_tab = main_console_tab;
+        runner.preserve_metadata = request.preserve_metadata;
         runner.generate_chapters = request.generate_chapters;
         runner.remove_source_chapters = request.remove_source_chapters;
         runner.crossfade_enabled = request.crossfade_enabled;

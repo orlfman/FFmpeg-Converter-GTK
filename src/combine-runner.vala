@@ -37,6 +37,7 @@ public class CombineRunner : Object {
     public bool copy_mode { get; set; default = true; }
     public string output_path { get; set; default = ""; }
     public EncodeProfileSnapshot? reencode_profile { get; set; default = null; }
+    public bool preserve_metadata { get; set; default = false; }
 
     // ── Chapter generation ──────────────────────────────────────────────────
     public bool generate_chapters { get; set; default = false; }
@@ -265,8 +266,10 @@ public class CombineRunner : Object {
             cmd += "-an";
         }
 
-        cmd += "-map_metadata";
-        cmd += "0";
+        if (preserve_metadata) {
+            cmd += "-map_metadata";
+            cmd += "0";
+        }
 
         // Chapter policy
         if (generate_chapters) {

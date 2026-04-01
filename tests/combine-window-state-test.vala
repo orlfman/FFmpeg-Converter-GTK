@@ -439,6 +439,7 @@ private void test_copy_command_maps_primary_video_and_audio () {
     files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
 
     var runner = make_capture_runner (files);
+    runner.preserve_metadata = true;
     int exit_code = runner.run_copy_mode_for_widget_test ();
     assert_true (exit_code == 0, "copy command test exit code");
 
@@ -455,6 +456,22 @@ private void test_copy_command_maps_primary_video_and_audio () {
         "copy mode keeps audio enabled when any input has audio");
     assert_string_equal (argv[argv.length - 1], "/tmp/out.mkv",
         "copy mode appends output path last");
+}
+
+private void test_copy_command_omits_metadata_when_preserve_metadata_disabled () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.preserve_metadata = false;
+
+    int exit_code = runner.run_copy_mode_for_widget_test ();
+    assert_true (exit_code == 0, "copy command metadata disabled exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_not_contains (argv, "-map_metadata",
+        "copy mode omits metadata mapping when preserve metadata is disabled");
 }
 
 private void test_copy_command_disables_audio_when_inputs_have_no_audio () {
@@ -2473,6 +2490,8 @@ void main (string[] args) {
         test_probe_completion_updates_reordered_file_row);
     Test.add_func ("/combine/runner/copy-command-maps-primary-streams",
         test_copy_command_maps_primary_video_and_audio);
+    Test.add_func ("/combine/runner/copy-command-omits-metadata-when-disabled",
+        test_copy_command_omits_metadata_when_preserve_metadata_disabled);
     Test.add_func ("/combine/runner/copy-command-no-audio",
         test_copy_command_disables_audio_when_inputs_have_no_audio);
     Test.add_func ("/combine/runner/reencode-command-sar-normalization",
