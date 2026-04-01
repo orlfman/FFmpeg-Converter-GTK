@@ -63,6 +63,7 @@ releases/
 
 # Claude Code
 .claude/
+.codex
 
 # Local planning notes
 AUDIO-TAB-PLAN.md

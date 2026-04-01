@@ -23,6 +23,11 @@ public class CombineWindow : Adw.Window {
         public string output_path { get; set; default = ""; }
         public GenericArray<CombineFile> files { get; set; default = new GenericArray<CombineFile> (); }
         public CombineEncodeProfileSnapshot? reencode_profile { get; set; default = null; }
+        public bool generate_chapters { get; set; default = false; }
+        public bool remove_source_chapters { get; set; default = false; }
+        public bool crossfade_enabled { get; set; default = false; }
+        public double crossfade_duration { get; set; default = 0.5; }
+        public string crossfade_type { get; set; default = "fade"; }
     }
 
     // ── Binding helpers (replace captured lambdas to avoid -Wcast-function-type) ─
@@ -134,6 +139,14 @@ public class CombineWindow : Adw.Window {
     private Adw.ActionRow reencode_codec_row;
     private DropDown codec_choice;
     private Label audio_reencode_note;
+    private Adw.SwitchRow generate_chapters_switch;
+    private Adw.SwitchRow crossfade_switch;
+    private Adw.ActionRow crossfade_duration_row;
+    private SpinButton crossfade_duration_spin;
+    private Adw.ActionRow crossfade_type_row;
+    private DropDown crossfade_type_choice;
+    private bool user_prefers_crossfade = false;
+    private bool crossfade_updating = false;
 
     // ── Output folder ───────────────────────────────────────────────────────
     private PathBreadcrumb output_entry;
@@ -342,6 +355,53 @@ public class CombineWindow : Adw.Window {
         audio_reencode_note.set_xalign (0);
         audio_reencode_note.set_margin_start (12);
         audio_reencode_note.set_visible (false);
+
+        generate_chapters_switch = new Adw.SwitchRow ();
+        generate_chapters_switch.set_title ("Generate Chapter Markers");
+        generate_chapters_switch.set_subtitle ("Creates a chapter at each file boundary");
+        generate_chapters_switch.set_active (false);
+        options_group.add (generate_chapters_switch);
+
+        crossfade_switch = new Adw.SwitchRow ();
+        crossfade_switch.set_title ("Crossfade Transitions");
+        crossfade_switch.set_subtitle ("Blend between clips");
+        crossfade_switch.set_active (false);
+        crossfade_switch.set_visible (false);  // hidden until re-encode mode
+        crossfade_switch.notify["active"].connect (() => {
+            if (!crossfade_updating) {
+                user_prefers_crossfade = crossfade_switch.active;
+            }
+            update_crossfade_visibility ();
+        });
+        options_group.add (crossfade_switch);
+
+        crossfade_duration_row = new Adw.ActionRow ();
+        crossfade_duration_row.set_title ("Crossfade Duration");
+        crossfade_duration_spin = new SpinButton.with_range (0.1, 5.0, 0.1);
+        crossfade_duration_spin.set_value (0.5);
+        crossfade_duration_spin.set_digits (1);
+        crossfade_duration_spin.set_valign (Align.CENTER);
+        crossfade_duration_row.add_suffix (crossfade_duration_spin);
+        crossfade_duration_row.set_visible (false);
+        options_group.add (crossfade_duration_row);
+
+        crossfade_type_row = new Adw.ActionRow ();
+        crossfade_type_row.set_title ("Transition Type");
+        var transition_list = new StringList (null);
+        transition_list.append ("Fade");
+        transition_list.append ("Dissolve");
+        transition_list.append ("Wipe Left");
+        transition_list.append ("Wipe Right");
+        transition_list.append ("Wipe Up");
+        transition_list.append ("Wipe Down");
+        transition_list.append ("Slide Left");
+        transition_list.append ("Slide Right");
+        crossfade_type_choice = new DropDown (transition_list, null);
+        crossfade_type_choice.set_valign (Align.CENTER);
+        crossfade_type_choice.set_selected (0);
+        crossfade_type_row.add_suffix (crossfade_type_choice);
+        crossfade_type_row.set_visible (false);
+        options_group.add (crossfade_type_row);
 
         content.append (options_group);
         content.append (audio_reencode_note);
@@ -1005,6 +1065,24 @@ public class CombineWindow : Adw.Window {
         bool reencode = !copy_mode_switch.active;
         reencode_codec_row.set_visible (reencode);
         audio_reencode_note.set_visible (reencode);
+
+        crossfade_updating = true;
+        crossfade_switch.set_visible (reencode);
+        if (!reencode && crossfade_switch.active) {
+            crossfade_switch.set_active (false);
+        }
+        if (reencode && user_prefers_crossfade && !crossfade_switch.active) {
+            crossfade_switch.set_active (true);
+        }
+        crossfade_updating = false;
+
+        update_crossfade_visibility ();
+    }
+
+    private void update_crossfade_visibility () {
+        bool show = crossfade_switch.active && !copy_mode_switch.active;
+        crossfade_duration_row.set_visible (show);
+        crossfade_type_row.set_visible (show);
     }
 
     private void update_combine_sensitivity () {
@@ -1102,6 +1180,21 @@ public class CombineWindow : Adw.Window {
 
     private void on_combine_clicked () {
         if (files.length < 2) return;
+
+        // Validate crossfade duration against shortest clip
+        if (crossfade_switch.active && !copy_mode_switch.active) {
+            double xfade_dur = crossfade_duration_spin.get_value ();
+            double min_dur = double.MAX;
+            for (int i = 0; i < files.length; i++) {
+                if (files[i].duration < min_dur) {
+                    min_dur = files[i].duration;
+                }
+            }
+            if (xfade_dur >= min_dur) {
+                show_toast ("Crossfade duration exceeds the shortest clip");
+                return;
+            }
+        }
 
         // Try to reserve the operation
         uint64 op_id;
@@ -1206,6 +1299,11 @@ public class CombineWindow : Adw.Window {
         var request = new CombineLaunchRequest ();
         request.copy_mode = is_copy;
         request.output_path = output;
+        request.generate_chapters = generate_chapters_switch.active;
+        request.remove_source_chapters = general_tab.is_remove_chapters ();
+        request.crossfade_enabled = crossfade_switch.active && !is_copy;
+        request.crossfade_duration = crossfade_duration_spin.get_value ();
+        request.crossfade_type = get_crossfade_type_name ((int) crossfade_type_choice.get_selected ());
 
         for (int i = 0; i < files.length; i++) {
             request.files.add (copy_combine_file (files[i]));
@@ -1291,6 +1389,11 @@ public class CombineWindow : Adw.Window {
         runner.progress_bar = progress_bar;
         runner.status_area = main_status_area;
         runner.console_tab = main_console_tab;
+        runner.generate_chapters = request.generate_chapters;
+        runner.remove_source_chapters = request.remove_source_chapters;
+        runner.crossfade_enabled = request.crossfade_enabled;
+        runner.crossfade_duration = request.crossfade_duration;
+        runner.crossfade_type = request.crossfade_type;
 
         // Set files
         var file_list = new GenericArray<CombineFile> ();
@@ -1379,6 +1482,24 @@ public class CombineWindow : Adw.Window {
             // Fallback
             builder = svt_tab.get_codec_builder ();
             codec_tab = svt_tab;
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CROSSFADE HELPERS
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private static string get_crossfade_type_name (int index) {
+        switch (index) {
+            case 0: return "fade";
+            case 1: return "dissolve";
+            case 2: return "wipeleft";
+            case 3: return "wiperight";
+            case 4: return "wipeup";
+            case 5: return "wipedown";
+            case 6: return "slideleft";
+            case 7: return "slideright";
+            default: return "fade";
         }
     }
 

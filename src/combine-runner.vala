@@ -38,6 +38,15 @@ public class CombineRunner : Object {
     public string output_path { get; set; default = ""; }
     public CombineEncodeProfileSnapshot? reencode_profile { get; set; default = null; }
 
+    // ── Chapter generation ──────────────────────────────────────────────────
+    public bool generate_chapters { get; set; default = false; }
+    public bool remove_source_chapters { get; set; default = false; }
+
+    // ── Crossfade ───────────────────────────────────────────────────────────
+    public bool crossfade_enabled { get; set; default = false; }
+    public double crossfade_duration { get; set; default = 0.5; }
+    public string crossfade_type { get; set; default = "fade"; }
+
     // UI references
     public StatusArea? status_area { get; set; default = null; }
     public Gtk.ProgressBar? progress_bar { get; set; default = null; }
@@ -89,6 +98,9 @@ public class CombineRunner : Object {
         for (int i = 0; i < files.length; i++) {
             total_duration += files[i].duration;
         }
+        if (crossfade_enabled && files.length > 1) {
+            total_duration -= (files.length - 1) * crossfade_duration;
+        }
 
         if (progress_bar != null) {
             tracker = new ProgressTracker (progress_bar);
@@ -123,6 +135,19 @@ public class CombineRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void run_internal () {
+        // Validate crossfade duration against shortest clip
+        if (crossfade_enabled) {
+            double min_dur = double.MAX;
+            for (int i = 0; i < files.length; i++) {
+                if (files[i].duration < min_dur) min_dur = files[i].duration;
+            }
+            if (crossfade_duration >= min_dur) {
+                report_error ("Crossfade duration (%.1fs) must be less than the shortest clip (%.1fs).".printf (
+                    crossfade_duration, min_dur));
+                return;
+            }
+        }
+
         report_status ("Combining files...",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
@@ -167,12 +192,10 @@ public class CombineRunner : Object {
             }
         }
 
-        // Write concat list to temp file
-        string tmp_dir;
-        try {
-            tmp_dir = DirUtils.make_tmp ("combine-XXXXXX");
-        } catch (Error e) {
-            log_line ("Failed to create temp directory: " + e.message);
+        // Write concat list to managed temp dir
+        string? tmp_dir = ConversionUtils.create_managed_temp_run_dir ("combine", "copy");
+        if (tmp_dir == null) {
+            log_line ("Failed to create temp directory for combine");
             return -1;
         }
 
@@ -198,13 +221,34 @@ public class CombineRunner : Object {
             return -1;
         }
 
+        // Write chapter metadata if enabled
+        string? chapters_path = null;
+        if (generate_chapters) {
+            string cp;
+            if (!write_chapters_file (tmp_dir, out cp)) {
+                cleanup_dir (tmp_dir);
+                return -1;
+            }
+            chapters_path = cp;
+        }
+
         string[] cmd = {
             AppSettings.get_default ().ffmpeg_path, "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", list_path,
-            "-map", "0:v:0"
+            "-i", list_path
         };
+
+        // Chapter metadata input (index 1)
+        if (chapters_path != null) {
+            cmd += "-f";
+            cmd += "ffmetadata";
+            cmd += "-i";
+            cmd += chapters_path;
+        }
+
+        cmd += "-map";
+        cmd += "0:v:0";
 
         if (any_audio) {
             cmd += "-map";
@@ -220,6 +264,15 @@ public class CombineRunner : Object {
 
         cmd += "-map_metadata";
         cmd += "0";
+
+        // Chapter policy
+        if (generate_chapters) {
+            cmd += "-map_chapters";
+            cmd += "1";
+        } else if (remove_source_chapters) {
+            cmd += "-map_chapters";
+            cmd += "-1";
+        }
 
         cmd += "-progress";
         cmd += "pipe:2";
@@ -237,12 +290,41 @@ public class CombineRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private int run_reencode_mode () {
+        // ── Create managed temp dir for chapter metadata if needed ──────────
+        string? reencode_tmp_dir = null;
+        string? chapters_path = null;
+        int chapters_input_idx = -1;
+
+        if (generate_chapters) {
+            reencode_tmp_dir = ConversionUtils.create_managed_temp_run_dir ("combine", "reencode");
+            if (reencode_tmp_dir == null) {
+                log_line ("Failed to create temp directory for re-encode chapters");
+                return -1;
+            }
+
+            string cp;
+            if (!write_chapters_file (reencode_tmp_dir, out cp)) {
+                cleanup_dir (reencode_tmp_dir);
+                return -1;
+            }
+            chapters_path = cp;
+            chapters_input_idx = files.length;  // metadata input comes after all video inputs
+        }
+
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         // ── Add each file as a separate input ───────────────────────────────
         for (int i = 0; i < files.length; i++) {
             cmd += "-i";
             cmd += files[i].path;
+        }
+
+        // ── Chapter metadata input ──────────────────────────────────────────
+        if (chapters_path != null) {
+            cmd += "-f";
+            cmd += "ffmetadata";
+            cmd += "-i";
+            cmd += chapters_path;
         }
 
         // ── Determine normalization targets ─────────────────────────────────
@@ -316,7 +398,7 @@ public class CombineRunner : Object {
             }
 
             if (vf.len > 0) vf.append (",");
-            vf.append ("setsar=1,setpts=PTS-STARTPTS");
+            vf.append ("setsar=1,settb=AVTB,setpts=PTS-STARTPTS");
 
             fc.append ("[%d:v:0]%s[v%d]; ".printf (i, vf.str, i));
 
@@ -349,18 +431,22 @@ public class CombineRunner : Object {
             }
         }
 
-        // ── Concat filter ───────────────────────────────────────────────────
-        for (int i = 0; i < files.length; i++) {
-            fc.append (@"[v$i]");
-            if (has_audio_target) {
-                fc.append (@"[a$i]");
+        // ── Combine filter (concat or crossfade) ────────────────────────────
+        if (crossfade_enabled && files.length > 1) {
+            build_crossfade_filters (fc, has_audio_target);
+        } else {
+            for (int i = 0; i < files.length; i++) {
+                fc.append (@"[v$i]");
+                if (has_audio_target) {
+                    fc.append (@"[a$i]");
+                }
             }
-        }
 
-        int a_streams = has_audio_target ? 1 : 0;
-        fc.append ("concat=n=%d:v=1:a=%d[outv]".printf (files.length, a_streams));
-        if (has_audio_target) {
-            fc.append ("[outa]");
+            int a_streams = has_audio_target ? 1 : 0;
+            fc.append ("concat=n=%d:v=1:a=%d[outv]".printf (files.length, a_streams));
+            if (has_audio_target) {
+                fc.append ("[outa]");
+            }
         }
 
         cmd += "-filter_complex";
@@ -405,7 +491,12 @@ public class CombineRunner : Object {
             cmd += "-map_metadata";
             cmd += "0";
         }
-        if (reencode_profile != null && reencode_profile.remove_chapters) {
+
+        // Chapter policy (request-level, not from reencode_profile)
+        if (generate_chapters && chapters_input_idx >= 0) {
+            cmd += "-map_chapters";
+            cmd += chapters_input_idx.to_string ();
+        } else if (remove_source_chapters) {
             cmd += "-map_chapters";
             cmd += "-1";
         }
@@ -415,7 +506,13 @@ public class CombineRunner : Object {
         cmd += output_path;
 
         log_line (@"Using filter concat for $(files.length) files (re-encode mode)");
-        return execute_ffmpeg (cmd);
+        int exit = execute_ffmpeg (cmd);
+
+        if (reencode_tmp_dir != null) {
+            cleanup_dir (reencode_tmp_dir);
+        }
+
+        return exit;
     }
 
     private static int get_square_pixel_width (CombineFile file) {
@@ -454,6 +551,130 @@ public class CombineRunner : Object {
         }
 
         return (double) numerator / (double) denominator;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Crossfade filter construction
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_crossfade_filters (StringBuilder fc, bool has_audio_target) {
+        string dur_str = ConversionUtils.format_ffmpeg_double (crossfade_duration, "%.6f");
+
+        // Video: chained xfade filters
+        double cumulative = 0.0;
+        for (int i = 0; i < files.length - 1; i++) {
+            string in_v = (i == 0) ? "[v0]" : "[xv%d]".printf (i);
+            string out_v = (i == files.length - 2) ? "[outv]" : "[xv%d]".printf (i + 1);
+            cumulative += files[i].duration;
+            double xfade_offset = cumulative - (i + 1) * crossfade_duration;
+            string offset_str = ConversionUtils.format_ffmpeg_double (xfade_offset, "%.6f");
+            fc.append ("%s[v%d]xfade=transition=%s:duration=%s:offset=%s%s; ".printf (
+                in_v, i + 1, crossfade_type, dur_str, offset_str, out_v));
+        }
+
+        // Audio: chained acrossfade filters
+        if (has_audio_target) {
+            for (int i = 0; i < files.length - 1; i++) {
+                string in_a = (i == 0) ? "[a0]" : "[xa%d]".printf (i);
+                string out_a = (i == files.length - 2) ? "[outa]" : "[xa%d]".printf (i + 1);
+                fc.append ("%s[a%d]acrossfade=d=%s:c1=tri:c2=tri%s; ".printf (
+                    in_a, i + 1, dur_str, out_a));
+            }
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Chapter metadata generation
+    // ═════════════════════════════════════════════════════════════════════════
+
+    internal static string escape_ffmetadata_value (string value) {
+        var sb = new StringBuilder ();
+        for (int i = 0; i < value.length; i++) {
+            char c = value[i];
+            switch (c) {
+                case '=':
+                case ';':
+                case '#':
+                case '\\':
+                    sb.append_c ('\\');
+                    sb.append_c (c);
+                    break;
+                case '\n':
+                case '\r':
+                    // FFMETADATA1 has no escape form for newlines — bare newlines
+                    // terminate the field. Normalize to spaces to keep a valid
+                    // single-line value.
+                    sb.append_c (' ');
+                    break;
+                default:
+                    sb.append_c (c);
+                    break;
+            }
+        }
+        return sb.str;
+    }
+
+    internal string? build_chapters_metadata_content (double crossfade_dur = 0.0) {
+        if (files.length < 1) return null;
+
+        var sb = new StringBuilder ();
+        sb.append (";FFMETADATA1\n");
+
+        double cursor = 0.0;
+        for (int i = 0; i < files.length; i++) {
+            double start = cursor;
+            double end;
+            if (i < files.length - 1 && crossfade_dur > 0.0) {
+                end = start + files[i].duration - crossfade_dur;
+            } else {
+                end = start + files[i].duration;
+            }
+
+            int start_ms = (int) Math.round (start * 1000.0);
+            int end_ms = (int) Math.round (end * 1000.0);
+
+            // Strip extension from filename for chapter title
+            string title = files[i].filename;
+            int dot = title.last_index_of_char ('.');
+            if (dot > 0) {
+                title = title.substring (0, dot);
+            }
+
+            sb.append ("\n[CHAPTER]\n");
+            sb.append ("TIMEBASE=1/1000\n");
+            sb.append ("START=%d\n".printf (start_ms));
+            sb.append ("END=%d\n".printf (end_ms));
+            sb.append ("title=%s\n".printf (escape_ffmetadata_value (title)));
+
+            cursor = end;
+        }
+
+        return sb.str;
+    }
+
+    private bool write_chapters_file (string dir, out string chapters_path) {
+        chapters_path = Path.build_filename (dir, "chapters.ffmeta");
+        double xfade_dur = crossfade_enabled ? crossfade_duration : 0.0;
+        string? content = build_chapters_metadata_content (xfade_dur);
+        if (content == null) {
+            log_line ("Failed to build chapter metadata content");
+            return false;
+        }
+
+        try {
+            var file = File.new_for_path (chapters_path);
+            file.replace_contents (
+                content.data,
+                null, false,
+                FileCreateFlags.REPLACE_DESTINATION,
+                null, null
+            );
+        } catch (Error e) {
+            log_line ("Failed to write chapter metadata: " + e.message);
+            return false;
+        }
+
+        return true;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -594,6 +815,13 @@ public class CombineRunner : Object {
             // ignore
         }
         DirUtils.remove (dir);
+
+        string managed_root = ConversionUtils.get_app_temp_root ();
+        if (ConversionUtils.is_same_or_descendant_path (dir, managed_root)) {
+            ConversionUtils.try_remove_empty_dir_chain (
+                Path.get_dirname (dir), managed_root
+            );
+        }
     }
 
 #if COMBINE_WINDOW_TEST_BUILD

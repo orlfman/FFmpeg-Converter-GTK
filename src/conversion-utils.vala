@@ -705,7 +705,8 @@ namespace ConversionUtils {
             "conversion",
             "audio-player",
             "audio-runner",
-            "smart-optimizer"
+            "smart-optimizer",
+            "combine"
         };
     }
 

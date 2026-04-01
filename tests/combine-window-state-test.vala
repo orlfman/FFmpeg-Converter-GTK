@@ -385,10 +385,10 @@ private void test_reencode_command_normalizes_sample_aspect_ratio () {
     }
 
     assert_contains (filter_complex,
-        "[0:v:0]scale=768:576:force_original_aspect_ratio=decrease,pad=768:576:-1:-1:color=black,setsar=1,setpts=PTS-STARTPTS[v0]",
+        "[0:v:0]scale=768:576:force_original_aspect_ratio=decrease,pad=768:576:-1:-1:color=black,setsar=1,settb=AVTB,setpts=PTS-STARTPTS[v0]",
         "reencode mode rescales anamorphic first input to square pixels");
     assert_contains (filter_complex,
-        "[1:v:0]setsar=1,setpts=PTS-STARTPTS[v1]",
+        "[1:v:0]setsar=1,settb=AVTB,setpts=PTS-STARTPTS[v1]",
         "reencode mode normalizes sar even when resolution already matches");
 }
 
@@ -404,8 +404,8 @@ private void test_reencode_command_generates_expected_filter_and_flags () {
     profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
     profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
     profile.preserve_metadata = true;
-    profile.remove_chapters = true;
     runner.reencode_profile = profile;
+    runner.remove_source_chapters = true;
 
     int exit_code = runner.run_reencode_mode_for_widget_test ();
     assert_true (exit_code == 0, "reencode command test exit code");
@@ -608,6 +608,407 @@ private void test_idle_close_request_cancels_pending_probes () {
         "idle close request clears pending probe count");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  CHAPTER METADATA TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_escape_ffmetadata_value () {
+    assert_string_equal (
+        CombineRunner.escape_ffmetadata_value ("simple"),
+        "simple",
+        "plain text passes through unchanged");
+    assert_string_equal (
+        CombineRunner.escape_ffmetadata_value ("key=value"),
+        "key\\=value",
+        "equals sign is escaped");
+    assert_string_equal (
+        CombineRunner.escape_ffmetadata_value ("a;b#c\\d"),
+        "a\\;b\\#c\\\\d",
+        "semicolons, hashes and backslashes are escaped");
+    assert_string_equal (
+        CombineRunner.escape_ffmetadata_value ("line1\nline2\rline3"),
+        "line1 line2 line3",
+        "newlines and carriage returns are replaced with spaces");
+}
+
+private void test_chapters_metadata_content_basic () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/intro.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/main.mkv", 5.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/credits.mkv", 8.0, 1920, 1080));
+
+    var runner = new CombineRunner ();
+    runner.generate_chapters = true;
+    runner.set_files (files);
+
+    string? content = runner.build_chapters_metadata_content ();
+    assert_true (content != null, "chapters metadata not null");
+    assert_contains (content, ";FFMETADATA1", "metadata header present");
+    assert_contains (content, "START=0", "first chapter starts at 0");
+    assert_contains (content, "END=10000", "first chapter ends at 10000ms");
+    assert_contains (content, "title=intro", "first chapter title from filename");
+    assert_contains (content, "START=10000", "second chapter starts at 10000ms");
+    assert_contains (content, "END=15000", "second chapter ends at 15000ms");
+    assert_contains (content, "title=main", "second chapter title from filename");
+    assert_contains (content, "START=15000", "third chapter starts at 15000ms");
+    assert_contains (content, "END=23000", "third chapter ends at 23000ms");
+    assert_contains (content, "title=credits", "third chapter title from filename");
+}
+
+private void test_chapters_metadata_content_with_crossfade () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/a.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/b.mkv", 5.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/c.mkv", 8.0, 1920, 1080));
+
+    var runner = new CombineRunner ();
+    runner.generate_chapters = true;
+    runner.set_files (files);
+
+    string? content = runner.build_chapters_metadata_content (0.5);
+    assert_true (content != null, "crossfade chapters metadata not null");
+    // Chapter 1: 0 to 10.0 - 0.5 = 9.5s → 9500ms
+    assert_contains (content, "START=0", "crossfade ch1 starts at 0");
+    assert_contains (content, "END=9500", "crossfade ch1 ends at 9500ms");
+    // Chapter 2: 9500 to 9500 + 5.0 - 0.5 = 14000ms
+    assert_contains (content, "START=9500", "crossfade ch2 starts at 9500ms");
+    assert_contains (content, "END=14000", "crossfade ch2 ends at 14000ms");
+    // Chapter 3: 14000 to 14000 + 8.0 = 22000ms (last file, no crossfade subtracted)
+    assert_contains (content, "START=14000", "crossfade ch3 starts at 14000ms");
+    assert_contains (content, "END=22000", "crossfade ch3 ends at 22000ms");
+}
+
+private void test_chapters_copy_mode_args () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = true;
+
+    int exit_code = runner.run_copy_mode_for_widget_test ();
+    assert_true (exit_code == 0, "chapters copy mode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (argv, "-f", "ffmetadata",
+        "chapters copy mode includes ffmetadata format");
+    assert_array_has_adjacent_pair (argv, "-map_chapters", "1",
+        "chapters copy mode maps chapters to metadata input");
+}
+
+private void test_chapters_reencode_mode_args () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = true;
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "chapters reencode mode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (argv, "-f", "ffmetadata",
+        "chapters reencode mode includes ffmetadata format");
+    // Metadata input index = number of video files = 2
+    assert_array_has_adjacent_pair (argv, "-map_chapters", "2",
+        "chapters reencode mode maps chapters to correct input index");
+}
+
+private void test_chapters_disabled_remove_chapters_copy () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = false;
+    runner.remove_source_chapters = true;
+
+    int exit_code = runner.run_copy_mode_for_widget_test ();
+    assert_true (exit_code == 0, "remove chapters copy mode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (argv, "-map_chapters", "-1",
+        "remove chapters in copy mode strips source chapters");
+    assert_array_not_contains (argv, "ffmetadata",
+        "remove chapters without generate does not add ffmetadata input");
+}
+
+private void test_chapters_disabled_remove_chapters_reencode () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = false;
+    runner.remove_source_chapters = true;
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "remove chapters reencode mode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_has_adjacent_pair (argv, "-map_chapters", "-1",
+        "remove chapters in reencode mode strips source chapters");
+}
+
+private void test_chapters_generate_overrides_remove () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = true;
+    runner.remove_source_chapters = true;
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "generate overrides remove exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    // Should map to generated chapters input (index 2), not -1
+    assert_array_has_adjacent_pair (argv, "-map_chapters", "2",
+        "generate_chapters overrides remove_source_chapters");
+    assert_array_has_adjacent_pair (argv, "-f", "ffmetadata",
+        "generate_chapters adds ffmetadata input even when remove is also set");
+}
+
+private void test_chapters_both_disabled () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.generate_chapters = false;
+    runner.remove_source_chapters = false;
+
+    int exit_code = runner.run_copy_mode_for_widget_test ();
+    assert_true (exit_code == 0, "both disabled copy mode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    assert_array_not_contains (argv, "-map_chapters",
+        "no -map_chapters when both chapter options disabled");
+    assert_array_not_contains (argv, "ffmetadata",
+        "no ffmetadata when both chapter options disabled");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  CROSSFADE TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_crossfade_two_files_filter () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade two files exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex,
+        "xfade=transition=fade:duration=0.500000:offset=9.500000[outv]",
+        "crossfade two files produces correct xfade filter");
+    assert_contains (filter_complex,
+        "acrossfade=d=0.500000:c1=tri:c2=tri[outa]",
+        "crossfade two files produces correct acrossfade filter");
+    assert_true (filter_complex.index_of ("concat=") < 0,
+        "crossfade mode does not use concat filter");
+}
+
+private void test_crossfade_three_files_filter () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/third.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "fade";
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade three files exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    // offset0 = 10.0 - 0.5 = 9.5
+    assert_contains (filter_complex,
+        "xfade=transition=fade:duration=0.500000:offset=9.500000[xv1]",
+        "crossfade three files first xfade offset correct");
+    // offset1 = (10.0 + 5.0) - 2 * 0.5 = 14.0
+    assert_contains (filter_complex,
+        "xfade=transition=fade:duration=0.500000:offset=14.000000[outv]",
+        "crossfade three files second xfade offset correct");
+    assert_contains (filter_complex,
+        "acrossfade=d=0.500000:c1=tri:c2=tri[xa1]",
+        "crossfade three files first acrossfade chained");
+    assert_contains (filter_complex,
+        "acrossfade=d=0.500000:c1=tri:c2=tri[outa]",
+        "crossfade three files final acrossfade outputs outa");
+}
+
+private void test_crossfade_disabled_uses_concat () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = false;
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade disabled exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex, "concat=n=2:v=1:a=1",
+        "crossfade disabled still uses concat filter");
+    assert_true (filter_complex.index_of ("xfade") < 0,
+        "crossfade disabled does not use xfade filter");
+}
+
+private void test_crossfade_no_audio () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080,
+        "30/1", "yuv420p", "1:1", false));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080,
+        "30/1", "yuv420p", "1:1", false));
+
+    var runner = make_capture_runner (files);
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.crossfade_type = "dissolve";
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "crossfade no audio exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex,
+        "xfade=transition=dissolve",
+        "crossfade no audio has xfade filter");
+    assert_true (filter_complex.index_of ("acrossfade") < 0,
+        "crossfade no audio does not have acrossfade filter");
+    assert_array_contains (argv, "-an",
+        "crossfade no audio disables audio output");
+}
+
+private void test_crossfade_settb_in_filter () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 8.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new CombineEncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "settb filter exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex, "settb=AVTB",
+        "video normalization chain includes settb=AVTB for timebase normalization");
+}
+
+private void test_crossfade_with_chapters () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/a.mkv", 10.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/b.mkv", 5.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/c.mkv", 8.0, 1920, 1080));
+
+    var runner = new CombineRunner ();
+    runner.generate_chapters = true;
+    runner.crossfade_enabled = true;
+    runner.crossfade_duration = 0.5;
+    runner.set_files (files);
+
+    string? content = runner.build_chapters_metadata_content (0.5);
+    assert_true (content != null, "crossfade+chapters metadata not null");
+
+    // Ch1: 0 to 9500ms, Ch2: 9500 to 14000ms, Ch3: 14000 to 22000ms
+    assert_contains (content, "END=9500", "crossfade+chapters ch1 end");
+    assert_contains (content, "START=9500", "crossfade+chapters ch2 start");
+    assert_contains (content, "END=14000", "crossfade+chapters ch2 end");
+    assert_contains (content, "START=14000", "crossfade+chapters ch3 start");
+    assert_contains (content, "END=22000", "crossfade+chapters ch3 end");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -635,6 +1036,40 @@ void main (string[] args) {
         test_pending_overwrite_freezes_launch_file_list);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
         test_idle_close_request_cancels_pending_probes);
+
+    // Chapter metadata tests
+    Test.add_func ("/combine/chapters/escape-ffmetadata-value",
+        test_escape_ffmetadata_value);
+    Test.add_func ("/combine/chapters/metadata-content-basic",
+        test_chapters_metadata_content_basic);
+    Test.add_func ("/combine/chapters/metadata-content-with-crossfade",
+        test_chapters_metadata_content_with_crossfade);
+    Test.add_func ("/combine/chapters/copy-mode-args",
+        test_chapters_copy_mode_args);
+    Test.add_func ("/combine/chapters/reencode-mode-args",
+        test_chapters_reencode_mode_args);
+    Test.add_func ("/combine/chapters/disabled-remove-chapters-copy",
+        test_chapters_disabled_remove_chapters_copy);
+    Test.add_func ("/combine/chapters/disabled-remove-chapters-reencode",
+        test_chapters_disabled_remove_chapters_reencode);
+    Test.add_func ("/combine/chapters/generate-overrides-remove",
+        test_chapters_generate_overrides_remove);
+    Test.add_func ("/combine/chapters/both-disabled",
+        test_chapters_both_disabled);
+
+    // Crossfade tests
+    Test.add_func ("/combine/crossfade/two-files-filter",
+        test_crossfade_two_files_filter);
+    Test.add_func ("/combine/crossfade/three-files-filter",
+        test_crossfade_three_files_filter);
+    Test.add_func ("/combine/crossfade/disabled-uses-concat",
+        test_crossfade_disabled_uses_concat);
+    Test.add_func ("/combine/crossfade/no-audio",
+        test_crossfade_no_audio);
+    Test.add_func ("/combine/crossfade/settb-in-filter",
+        test_crossfade_settb_in_filter);
+    Test.add_func ("/combine/crossfade/with-chapters",
+        test_crossfade_with_chapters);
 
     Test.run ();
 }
