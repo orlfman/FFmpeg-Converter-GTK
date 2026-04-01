@@ -252,7 +252,6 @@ public class CombineWindow : Adw.Window {
         // ── Files group ─────────────────────────────────────────────────────
         files_group = new Adw.PreferencesGroup ();
         files_group.set_title ("Files");
-        files_group.set_description ("Combined in order listed");
 
         var add_button = new Button.with_label ("Add Files");
         add_button.add_css_class ("flat");
@@ -1023,6 +1022,36 @@ public class CombineWindow : Adw.Window {
             && operation_idle
             && !combining;
         combine_button.set_sensitive (can_combine);
+        update_files_description ();
+    }
+
+    private void update_files_description () {
+        if (files.length == 0) {
+            files_group.set_description (null);
+            return;
+        }
+
+        int duplicate_count = count_duplicate_paths ();
+        var sb = new StringBuilder ();
+        sb.append ("%d file%s".printf (files.length, files.length == 1 ? "" : "s"));
+        if (duplicate_count > 0) {
+            sb.append (" \u00b7 %d duplicate%s".printf (
+                duplicate_count, duplicate_count == 1 ? "" : "s"));
+        }
+        files_group.set_description (sb.str);
+    }
+
+    private int count_duplicate_paths () {
+        int duplicates = 0;
+        for (int i = 0; i < files.length; i++) {
+            for (int j = 0; j < i; j++) {
+                if (files[i].path == files[j].path) {
+                    duplicates++;
+                    break;
+                }
+            }
+        }
+        return duplicates;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
