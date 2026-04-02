@@ -281,6 +281,38 @@ private class CombineWindowHarness : Object {
     }
 }
 
+private void test_file_pickers_combine_lock_clears_and_disables_input () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var file_pickers = new FilePickers ();
+    file_pickers.input_entry.set_text ("/tmp/source.mkv");
+
+    file_pickers.set_input_locked_for_combine (true);
+
+    assert_true (file_pickers.is_input_locked_for_combine_for_widget_test (),
+        "combine lock flag enabled on file pickers");
+    assert_string_equal (file_pickers.input_entry.get_text (), "",
+        "combine lock clears the main input path");
+    assert_false (file_pickers.is_input_row_sensitive_for_widget_test (),
+        "combine lock disables the input row");
+    assert_false (file_pickers.input_entry.get_sensitive (),
+        "combine lock disables the input path widget");
+    assert_false (file_pickers.is_input_browse_sensitive_for_widget_test (),
+        "combine lock disables the input browse button");
+
+    file_pickers.set_input_locked_for_combine (false);
+
+    assert_false (file_pickers.is_input_locked_for_combine_for_widget_test (),
+        "combine lock flag disabled on file pickers");
+    assert_true (file_pickers.is_input_row_sensitive_for_widget_test (),
+        "unlock restores input row sensitivity");
+    assert_true (file_pickers.input_entry.get_sensitive (),
+        "unlock restores input path widget sensitivity");
+    assert_true (file_pickers.is_input_browse_sensitive_for_widget_test (),
+        "unlock restores input browse button sensitivity");
+}
+
 private void test_move_up_button_reorders_files () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -310,6 +342,20 @@ private void test_move_up_button_reorders_files () {
         harness.window.get_file_name_for_widget_test (1),
         "first.mkv",
         "combine widget move-up reorders second slot");
+
+    harness.window.close ();
+}
+
+private void test_combine_preview_hides_popout_button () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.create_preview_player_for_widget_test ();
+
+    assert_false (
+        harness.window.is_preview_popout_visible_for_widget_test (),
+        "combine preview hides the popout button");
 
     harness.window.close ();
 }
@@ -2611,6 +2657,10 @@ void main (string[] args) {
 
     Test.add_func ("/combine/widgets/move-up-button",
         test_move_up_button_reorders_files);
+    Test.add_func ("/combine/widgets/preview-hides-popout-button",
+        test_combine_preview_hides_popout_button);
+    Test.add_func ("/combine/file-pickers/combine-lock-clears-and-disables-input",
+        test_file_pickers_combine_lock_clears_and_disables_input);
     Test.add_func ("/combine/runner/cancelled-relay",
         test_runner_binding_relays_cancelled_signal);
     Test.add_func ("/combine/overwrite/main-window-cancel-ignores-stale-callback",

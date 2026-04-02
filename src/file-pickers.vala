@@ -9,6 +9,8 @@ public class FilePickers : Box {
     private Box input_row;
     private Box output_row;
     private SizeGroup label_size_group;
+    private Button input_browse;
+    private bool input_locked_for_combine = false;
 
     // Video file extensions are in VideoFileConstants.VIDEO_EXTENSIONS
 
@@ -22,7 +24,7 @@ public class FilePickers : Box {
         // ── Input File row ───────────────────────────────────────────────────
         input_entry = new PathBreadcrumb ("No file selected", true);
 
-        var input_browse = new Button.from_icon_name ("document-open-symbolic");
+        input_browse = new Button.from_icon_name ("document-open-symbolic");
         input_browse.set_tooltip_text ("Select a file");
         input_browse.add_css_class ("flat");
         input_browse.set_valign (Align.CENTER);
@@ -105,6 +107,8 @@ public class FilePickers : Box {
         file_drop.drop.connect ((val, x, y) => {
             hide_drop_highlight ();
 
+            if (input_locked_for_combine) return false;
+
             var file = val.get_object () as File;
             if (file == null) return false;
 
@@ -135,6 +139,8 @@ public class FilePickers : Box {
 
         text_drop.drop.connect ((val, x, y) => {
             hide_drop_highlight ();
+
+            if (input_locked_for_combine) return false;
 
             string? text = val.get_string ();
             if (text == null) return false;
@@ -203,6 +209,19 @@ public class FilePickers : Box {
     private void hide_drop_highlight () {
         remove_css_class ("drop-active");
         input_entry.remove_css_class ("drop-highlight");
+    }
+
+    public void set_input_locked_for_combine (bool locked) {
+        input_locked_for_combine = locked;
+
+        if (locked) {
+            input_entry.set_text ("");
+            hide_drop_highlight ();
+        }
+
+        input_row.set_sensitive (!locked);
+        input_entry.set_sensitive (!locked);
+        input_browse.set_sensitive (!locked);
     }
 
     /**
@@ -359,6 +378,10 @@ public class FilePickers : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_input_browse_clicked () {
+        if (input_locked_for_combine) {
+            return;
+        }
+
         var dialog = new FileDialog ();
         dialog.title = "Select Input Video";
 
@@ -394,4 +417,18 @@ public class FilePickers : Box {
             }
         });
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool is_input_locked_for_combine_for_widget_test () {
+        return input_locked_for_combine;
+    }
+
+    internal bool is_input_row_sensitive_for_widget_test () {
+        return input_row.get_sensitive ();
+    }
+
+    internal bool is_input_browse_sensitive_for_widget_test () {
+        return input_browse.get_sensitive ();
+    }
+#endif
 }

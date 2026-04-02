@@ -2047,10 +2047,12 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
             // Clear reference when the window is closing
             combine_window.window_closing.connect (() => {
+                file_pickers.set_input_locked_for_combine (false);
                 combine_window = null;
             });
         }
 
+        file_pickers.set_input_locked_for_combine (true);
         combine_window.present ();
     }
 

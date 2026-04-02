@@ -264,6 +264,13 @@ public class VideoPlayer : Box {
     }
 
     /**
+     * Show or hide the pop-out button for contexts that do not support it.
+     */
+    public void set_popout_visible (bool visible) {
+        popout_btn.set_visible (visible);
+    }
+
+    /**
      * Stop playback and release timer resources.
      */
     public void cleanup () {
@@ -274,6 +281,12 @@ public class VideoPlayer : Box {
         cleanup ();
         base.dispose ();
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool is_popout_visible_for_widget_test () {
+        return popout_btn.get_visible ();
+    }
+#endif
 
     // ═════════════════════════════════════════════════════════════════════════
     //  TIME FORMATTING (public static for reuse)

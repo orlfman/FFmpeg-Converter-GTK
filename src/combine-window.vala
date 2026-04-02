@@ -1132,12 +1132,10 @@ public class CombineWindow : Adw.Window {
     //  PREVIEW
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void show_preview (int idx) {
-        if (idx < 0 || idx >= files.length) return;
-        string path = files[idx].path;
-
+    private void ensure_preview_window () {
         if (preview_window == null) {
             preview_player = new VideoPlayer ();
+            preview_player.set_popout_visible (false);
             preview_window = new Adw.Window ();
             preview_window.set_title ("Preview");
             preview_window.set_default_size (800, 540);
@@ -1155,6 +1153,13 @@ public class CombineWindow : Adw.Window {
                 return false;
             });
         }
+    }
+
+    private void show_preview (int idx) {
+        if (idx < 0 || idx >= files.length) return;
+        string path = files[idx].path;
+
+        ensure_preview_window ();
 
         preview_player.load_file (path);
         preview_window.set_title (@"Preview \u2014 $(files[idx].filename)");
@@ -1772,6 +1777,15 @@ public class CombineWindow : Adw.Window {
         if (button != null) {
             button.clicked ();
         }
+    }
+
+    internal void create_preview_player_for_widget_test () {
+        ensure_preview_window ();
+    }
+
+    internal bool is_preview_popout_visible_for_widget_test () {
+        return preview_player != null
+            && preview_player.is_popout_visible_for_widget_test ();
     }
 
     internal string get_file_name_for_widget_test (int idx) {
