@@ -159,7 +159,6 @@ public class CombineWindow : Adw.Window {
     private Button cancel_button;
 
     // ── Status area ─────────────────────────────────────────────────────────
-    private ProgressBar progress_bar;
     private Label status_label;
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -419,12 +418,6 @@ public class CombineWindow : Adw.Window {
         action_box.append (cancel_button);
         action_box.append (combine_button);
         content.append (action_box);
-
-        // ── Status area ─────────────────────────────────────────────────────
-        progress_bar = new ProgressBar ();
-        progress_bar.set_show_text (true);
-        progress_bar.set_visible (false);
-        content.append (progress_bar);
 
         status_label = new Label ("");
         status_label.set_wrap (true);
@@ -1384,7 +1377,6 @@ public class CombineWindow : Adw.Window {
         combining = true;
         combine_started (op_id);
         cancel_button.set_visible (true);
-        progress_bar.set_visible (true);
         status_label.set_visible (false);
         status_label.set_text ("");
         update_combine_sensitivity ();
@@ -1393,7 +1385,7 @@ public class CombineWindow : Adw.Window {
         var runner = new CombineRunner ();
         runner.copy_mode = request.copy_mode;
         runner.output_path = request.output_path;
-        runner.progress_bar = progress_bar;
+        runner.progress_bar = get_shared_progress_bar ();
         runner.status_area = main_status_area;
         runner.console_tab = main_console_tab;
         runner.preserve_metadata = request.preserve_metadata;
@@ -1699,6 +1691,14 @@ public class CombineWindow : Adw.Window {
 
         string? output_folder = get_output_folder ();
         return output_folder ?? "";
+    }
+
+    private Gtk.ProgressBar? get_shared_progress_bar () {
+        if (main_status_area == null) {
+            return null;
+        }
+
+        return main_status_area.progress_bar;
     }
 
     private static bool is_video_file (string path) {
