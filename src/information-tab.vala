@@ -57,6 +57,11 @@ public class InformationTab : Box {
     // ── Stack controls which "page" is visible ────────────────────────────────
     private Stack main_stack;
 
+    // ── Source context / input visibility ────────────────────────────────────
+    private Box input_sections_box;
+    private Adw.PreferencesGroup source_summary_group;
+    private Label source_summary_label;
+
     // ── Input section value labels ────────────────────────────────────────────
     private Label iv_filename;
     private Label iv_size;
@@ -195,6 +200,9 @@ public class InformationTab : Box {
         content.set_margin_start (12);
         content.set_margin_end (12);
 
+        input_sections_box = new Box (Orientation.VERTICAL, 20);
+        content.append (input_sections_box);
+
         // ────────────── Input: File ──────────────────────────────────────────
         var in_file_group = new Adw.PreferencesGroup ();
         in_file_group.set_title ("Input File");
@@ -205,7 +213,7 @@ public class InformationTab : Box {
         iv_container = make_row (in_file_group, "Container");
         iv_duration  = make_row (in_file_group, "Duration");
         iv_title     = make_row (in_file_group, "Title");
-        content.append (in_file_group);
+        input_sections_box.append (in_file_group);
 
         // ────────────── Input: Video ─────────────────────────────────────────
         var in_video_group = new Adw.PreferencesGroup ();
@@ -223,11 +231,11 @@ public class InformationTab : Box {
         iv_hdr        = make_row_conditional (in_video_group, "HDR", out iv_hdr_row);
         iv_scan       = make_row_conditional (in_video_group, "Scan Type", out iv_scan_row);
         iv_keyframes  = make_row_conditional (in_video_group, "Keyframes", out iv_keyframes_row);
-        content.append (in_video_group);
+        input_sections_box.append (in_video_group);
 
         // ────────────── Input: Audio (dynamic — one group per stream) ────────
         iv_audio_container = new Box (Orientation.VERTICAL, 20);
-        content.append (iv_audio_container);
+        input_sections_box.append (iv_audio_container);
 
         // ────────────── Input: Metadata (conditional group) ──────────────────
         iv_metadata_group = new Adw.PreferencesGroup ();
@@ -239,14 +247,23 @@ public class InformationTab : Box {
         iv_date         = make_row_conditional (iv_metadata_group, "Date", out iv_date_row);
         iv_genre        = make_row_conditional (iv_metadata_group, "Genre", out iv_genre_row);
         iv_track_number = make_row_conditional (iv_metadata_group, "Track", out iv_track_number_row);
-        content.append (iv_metadata_group);
+        input_sections_box.append (iv_metadata_group);
 
         // ────────────── Input: Subtitles (conditional group) ─────────────────
         iv_subtitle_group = new Adw.PreferencesGroup ();
         iv_subtitle_group.set_title ("Subtitle Streams");
         iv_subtitle_group.set_visible (false);
         iv_subtitle = make_row (iv_subtitle_group, "Tracks");
-        content.append (iv_subtitle_group);
+        input_sections_box.append (iv_subtitle_group);
+
+        source_summary_group = new Adw.PreferencesGroup ();
+        source_summary_group.set_title ("Input Summary");
+        source_summary_group.set_description (
+            "Output was created from multiple files."
+        );
+        source_summary_group.set_visible (false);
+        source_summary_label = make_row (source_summary_group, "Source");
+        content.append (source_summary_group);
 
         // ────────────── Output (hidden until conversion done) ────────────────
         output_revealer = new Revealer ();
@@ -374,7 +391,9 @@ public class InformationTab : Box {
 
     // Call when the input file path changes (even to "")
     public void load_input_info (string file_path) {
+        apply_output_source_context (OperationOutputSource.GENERIC, "");
         if (file_path.strip () == "") {
+            clear_input_display ();
             main_stack.set_visible_child_name ("empty");
             return;
         }
@@ -392,10 +411,13 @@ public class InformationTab : Box {
     }
 
     // Call after a successful conversion with the output file path
-    public void load_output_info (string file_path) {
+    public void load_output_info (string file_path,
+                                  OperationOutputSource source = OperationOutputSource.GENERIC,
+                                  string source_summary = "") {
         if (file_path.strip () == "") return;
 
         main_stack.set_visible_child_name ("info");
+        apply_output_source_context (source, source_summary);
         single_output_box.set_visible (true);
         multi_output_box.set_visible (false);
         clear_multi_output ();
@@ -413,6 +435,7 @@ public class InformationTab : Box {
     // Call when a new input file is selected so stale output data is hidden
     public void reset_output () {
         Idle.add (() => {
+            apply_output_source_context (OperationOutputSource.GENERIC, "");
             output_revealer.set_reveal_child (false);
             clear_multi_output ();
             return Source.REMOVE;
@@ -420,9 +443,13 @@ public class InformationTab : Box {
     }
 
     // Call after a multi-file operation (e.g. Extract All) with all output paths
-    public void load_output_info_multiple (string[] file_paths) {
+    public void load_output_info_multiple (string[] file_paths,
+                                           OperationOutputSource source = OperationOutputSource.GENERIC,
+                                           string source_summary = "") {
         if (file_paths.length == 0) return;
 
+        main_stack.set_visible_child_name ("info");
+        apply_output_source_context (source, source_summary);
         single_output_box.set_visible (false);
         clear_multi_output ();
         multi_output_box.set_visible (true);
@@ -449,6 +476,61 @@ public class InformationTab : Box {
     }
 
     // ── Internal label helpers ────────────────────────────────────────────────
+
+    private void apply_output_source_context (OperationOutputSource source,
+                                              string source_summary) {
+        bool combine_output = (source == OperationOutputSource.COMBINE);
+        input_sections_box.set_visible (!combine_output);
+        source_summary_group.set_visible (combine_output);
+
+        if (combine_output) {
+            string summary = source_summary.strip ();
+            source_summary_label.set_text (
+                summary.length > 0 ? summary : "Combined multiple files"
+            );
+        } else {
+            source_summary_label.set_text ("—");
+        }
+    }
+
+    private void clear_input_display () {
+        iv_filename.set_text ("—");
+        iv_size.set_text ("—");
+        iv_container.set_text ("—");
+        iv_duration.set_text ("—");
+        iv_title.set_text ("—");
+
+        iv_resolution.set_text ("—");
+        iv_aspect.set_text ("—");
+        iv_vcodec.set_text ("—");
+        iv_profile_row.set_visible (false);
+        iv_fps.set_text ("—");
+        iv_bitrate.set_text ("—");
+        iv_pixfmt.set_text ("—");
+        iv_depth.set_text ("—");
+        iv_colorspace.set_text ("—");
+        iv_hdr_row.set_visible (false);
+        iv_scan_row.set_visible (false);
+        iv_keyframes_row.set_visible (false);
+
+        clear_box (iv_audio_container);
+        iv_audio_container.set_visible (false);
+
+        iv_metadata_group.set_visible (false);
+        iv_artist_row.set_visible (false);
+        iv_album_row.set_visible (false);
+        iv_date_row.set_visible (false);
+        iv_genre_row.set_visible (false);
+        iv_track_number_row.set_visible (false);
+        iv_artist.set_text ("—");
+        iv_album.set_text ("—");
+        iv_date.set_text ("—");
+        iv_genre.set_text ("—");
+        iv_track_number.set_text ("—");
+
+        iv_subtitle_group.set_visible (false);
+        iv_subtitle.set_text ("—");
+    }
 
     private void set_input_loading () {
         iv_filename.set_text ("…");
@@ -757,6 +839,37 @@ public class InformationTab : Box {
 
         container.append (group);
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal void seed_input_values_for_widget_test (string filename) {
+        iv_filename.set_text (filename);
+        iv_size.set_text ("123 MiB");
+        iv_container.set_text ("MKV");
+        iv_duration.set_text ("00:01:00");
+        iv_title.set_text ("Stale Title");
+    }
+
+    internal string get_input_filename_for_widget_test () {
+        return iv_filename.get_text ();
+    }
+
+    internal void apply_output_source_context_for_widget_test (OperationOutputSource source,
+                                                               string source_summary) {
+        apply_output_source_context (source, source_summary);
+    }
+
+    internal bool is_input_sections_visible_for_widget_test () {
+        return input_sections_box.get_visible ();
+    }
+
+    internal bool is_source_summary_visible_for_widget_test () {
+        return source_summary_group.get_visible ();
+    }
+
+    internal string get_source_summary_for_widget_test () {
+        return source_summary_label.get_text ();
+    }
+#endif
 
     // ── ffprobe probing (runs on background thread) ───────────────────────────
 

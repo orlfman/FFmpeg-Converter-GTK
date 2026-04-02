@@ -313,6 +313,89 @@ private void test_file_pickers_combine_lock_clears_and_disables_input () {
         "unlock restores input browse button sensitivity");
 }
 
+private void test_information_tab_clears_stale_input_when_input_removed () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var info_tab = new InformationTab ();
+    info_tab.seed_input_values_for_widget_test ("stale-source.mkv");
+
+    info_tab.load_input_info ("");
+
+    assert_string_equal (
+        info_tab.get_input_filename_for_widget_test (),
+        "—",
+        "clearing input resets cached input filename"
+    );
+    assert_true (
+        info_tab.is_input_sections_visible_for_widget_test (),
+        "empty input restores the standard input layout"
+    );
+    assert_false (
+        info_tab.is_source_summary_visible_for_widget_test (),
+        "empty input does not show combine summary"
+    );
+}
+
+private void test_information_tab_combine_output_hides_input_and_shows_summary () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var info_tab = new InformationTab ();
+
+    info_tab.apply_output_source_context_for_widget_test (
+        OperationOutputSource.COMBINE,
+        "Combined 3 files"
+    );
+
+    assert_false (
+        info_tab.is_input_sections_visible_for_widget_test (),
+        "combine output hides single-file input sections"
+    );
+    assert_true (
+        info_tab.is_source_summary_visible_for_widget_test (),
+        "combine output shows a source summary"
+    );
+    assert_string_equal (
+        info_tab.get_source_summary_for_widget_test (),
+        "Combined 3 files",
+        "combine output summary text"
+    );
+
+    info_tab.apply_output_source_context_for_widget_test (
+        OperationOutputSource.GENERIC,
+        ""
+    );
+
+    assert_true (
+        info_tab.is_input_sections_visible_for_widget_test (),
+        "generic output restores input sections"
+    );
+    assert_false (
+        info_tab.is_source_summary_visible_for_widget_test (),
+        "generic output hides combine summary"
+    );
+}
+
+private void test_combine_done_result_marks_source_and_summary () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 5.0, 1920, 1080));
+
+    var runner = make_capture_runner (files, "/tmp/combined.mkv");
+    OperationOutputResult result = runner.build_done_result_for_widget_test ();
+
+    assert_true (
+        result.source == OperationOutputSource.COMBINE,
+        "combine result marks its output source"
+    );
+    assert_string_equal (
+        result.source_summary,
+        "Combined 2 files",
+        "combine result summary records input count"
+    );
+}
+
 private void test_move_up_button_reorders_files () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -2661,6 +2744,12 @@ void main (string[] args) {
         test_combine_preview_hides_popout_button);
     Test.add_func ("/combine/file-pickers/combine-lock-clears-and-disables-input",
         test_file_pickers_combine_lock_clears_and_disables_input);
+    Test.add_func ("/combine/information/clears-stale-input-when-removed",
+        test_information_tab_clears_stale_input_when_input_removed);
+    Test.add_func ("/combine/information/output-hides-input-and-shows-summary",
+        test_information_tab_combine_output_hides_input_and_shows_summary);
+    Test.add_func ("/combine/runner/done-result-marks-source-and-summary",
+        test_combine_done_result_marks_source_and_summary);
     Test.add_func ("/combine/runner/cancelled-relay",
         test_runner_binding_relays_cancelled_signal);
     Test.add_func ("/combine/overwrite/main-window-cancel-ignores-stale-callback",

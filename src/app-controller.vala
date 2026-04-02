@@ -289,10 +289,18 @@ public class AppController : Object {
         if (output_result.kind == OperationOutputKind.FILE
             && primary_file.length > 0
             && FileUtils.test (primary_file, FileTest.EXISTS)) {
-            info_tab.load_output_info (primary_file);
+            info_tab.load_output_info (
+                primary_file,
+                output_result.source,
+                output_result.source_summary
+            );
         } else if (output_result.kind == OperationOutputKind.MULTIPLE_FILES
             && output_result.output_paths.length > 0) {
-            info_tab.load_output_info_multiple (output_result.output_paths);
+            info_tab.load_output_info_multiple (
+                output_result.output_paths,
+                output_result.source,
+                output_result.source_summary
+            );
         } else {
             info_tab.reset_output ();
         }

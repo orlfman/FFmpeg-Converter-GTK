@@ -1,5 +1,10 @@
 using GLib;
 
+public enum OperationOutputSource {
+    GENERIC,
+    COMBINE
+}
+
 public enum OperationOutputKind {
     FILE,
     DIRECTORY,
@@ -8,58 +13,86 @@ public enum OperationOutputKind {
 
 public class OperationOutputResult : Object {
     public OperationOutputKind kind { get; construct set; default = OperationOutputKind.FILE; }
+    public OperationOutputSource source { get; construct set; default = OperationOutputSource.GENERIC; }
     public string[] output_paths { get; construct set; default = {}; }
     public string primary_file_path { get; construct set; default = ""; }
     public string open_folder_path { get; construct set; default = ""; }
+    public string source_summary { get; construct set; default = ""; }
     public string summary { get; set; default = ""; }
 
-    public OperationOutputResult.for_file (string path) {
+    public OperationOutputResult.for_file (string path,
+                                           OperationOutputSource source = OperationOutputSource.GENERIC,
+                                           string source_summary = "") {
         string[] paths = { path };
         Object (
             kind: OperationOutputKind.FILE,
+            source: source,
             output_paths: paths,
             primary_file_path: path,
-            open_folder_path: Path.get_dirname (path)
+            open_folder_path: Path.get_dirname (path),
+            source_summary: source_summary
         );
     }
 
-    public OperationOutputResult.for_directory (string path) {
+    public OperationOutputResult.for_directory (string path,
+                                                OperationOutputSource source = OperationOutputSource.GENERIC,
+                                                string source_summary = "") {
         string[] paths = new string[0];
         Object (
             kind: OperationOutputKind.DIRECTORY,
+            source: source,
             output_paths: paths,
             primary_file_path: "",
-            open_folder_path: path
+            open_folder_path: path,
+            source_summary: source_summary
         );
     }
 
     public OperationOutputResult.for_multiple_files (owned string[] paths,
                                                      string open_folder_path,
-                                                     string primary_file_path = "") {
+                                                     string primary_file_path = "",
+                                                     OperationOutputSource source = OperationOutputSource.GENERIC,
+                                                     string source_summary = "") {
         Object (
             kind: OperationOutputKind.MULTIPLE_FILES,
+            source: source,
             output_paths: (owned) paths,
             primary_file_path: primary_file_path,
-            open_folder_path: open_folder_path
+            open_folder_path: open_folder_path,
+            source_summary: source_summary
         );
     }
 
     public static OperationOutputResult from_paths (owned string[] paths,
-                                                    string open_folder_path = "") {
+                                                    string open_folder_path = "",
+                                                    OperationOutputSource source = OperationOutputSource.GENERIC,
+                                                    string source_summary = "") {
         if (paths.length == 1) {
             string primary_path = paths[0];
             return new OperationOutputResult.for_multiple_files (
                 (owned) paths,
                 open_folder_path,
-                primary_path
+                primary_path,
+                source,
+                source_summary
             );
         }
 
         if (paths.length == 0 && open_folder_path.length > 0) {
-            return new OperationOutputResult.for_directory (open_folder_path);
+            return new OperationOutputResult.for_directory (
+                open_folder_path,
+                source,
+                source_summary
+            );
         }
 
-        return new OperationOutputResult.for_multiple_files ((owned) paths, open_folder_path);
+        return new OperationOutputResult.for_multiple_files (
+            (owned) paths,
+            open_folder_path,
+            "",
+            source,
+            source_summary
+        );
     }
 
     public int get_output_count () {

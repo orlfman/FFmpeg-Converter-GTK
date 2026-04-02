@@ -175,11 +175,20 @@ public class CombineRunner : Object {
             StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
         update_progress (100.0);
 
-        var done = new OperationOutputResult.for_file (output_path);
+        var done = build_done_result ();
         Idle.add (() => {
             combine_done (done);
             return Source.REMOVE;
         });
+    }
+
+    private OperationOutputResult build_done_result () {
+        string source_summary = "Combined %d files".printf (files.length);
+        return new OperationOutputResult.for_file (
+            output_path,
+            OperationOutputSource.COMBINE,
+            source_summary
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1229,6 +1238,10 @@ public class CombineRunner : Object {
     }
 
 #if COMBINE_WINDOW_TEST_BUILD
+    internal OperationOutputResult build_done_result_for_widget_test () {
+        return build_done_result ();
+    }
+
     internal void enable_ffmpeg_capture_for_widget_test (int exit_code = 0) {
         capture_ffmpeg_argv_for_test = true;
         captured_ffmpeg_exit_code_for_test = exit_code;
