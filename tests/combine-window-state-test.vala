@@ -2735,6 +2735,142 @@ private AudioProcessingSettingsSnapshot create_fade_snapshot () {
     return snapshot;
 }
 
+private void assert_codec_tab_container_defaults (ContainerDefaultMode mode,
+                                                  string expected_svt,
+                                                  string expected_vp9,
+                                                  string expected_x264,
+                                                  string expected_x265,
+                                                  string context) {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = AppSettings.get_default ();
+    ContainerDefaultMode previous_mode = settings.container_default_mode;
+
+    try {
+        settings.container_default_mode = mode;
+
+        var svt = new SvtAv1Tab ();
+        var vp9 = new Vp9Tab ();
+        var x264 = new X264Tab ();
+        var x265 = new X265Tab ();
+
+        assert_string_equal (svt.get_container (), expected_svt,
+            @"$context initial svt-av1 container");
+        assert_string_equal (vp9.get_container (), expected_vp9,
+            @"$context initial vp9 container");
+        assert_string_equal (x264.get_container (), expected_x264,
+            @"$context initial x264 container");
+        assert_string_equal (x265.get_container (), expected_x265,
+            @"$context initial x265 container");
+
+        svt.container_combo.set_selected (0);
+        vp9.container_combo.set_selected (1);
+        x264.container_combo.set_selected (0);
+        x265.container_combo.set_selected (0);
+
+        svt.reset_defaults ();
+        vp9.reset_defaults ();
+        x264.reset_defaults ();
+        x265.reset_defaults ();
+
+        assert_string_equal (svt.get_container (), expected_svt,
+            @"$context reset svt-av1 container");
+        assert_string_equal (vp9.get_container (), expected_vp9,
+            @"$context reset vp9 container");
+        assert_string_equal (x264.get_container (), expected_x264,
+            @"$context reset x264 container");
+        assert_string_equal (x265.get_container (), expected_x265,
+            @"$context reset x265 container");
+    } finally {
+        settings.container_default_mode = previous_mode;
+    }
+}
+
+private void test_codec_tab_container_preference_applies_on_construction_and_reset () {
+    assert_codec_tab_container_defaults (
+        ContainerDefaultMode.DEFAULT,
+        ContainerExt.MKV,
+        ContainerExt.WEBM,
+        ContainerExt.MKV,
+        ContainerExt.MKV,
+        "default mode"
+    );
+
+    assert_codec_tab_container_defaults (
+        ContainerDefaultMode.MKV,
+        ContainerExt.MKV,
+        ContainerExt.MKV,
+        ContainerExt.MKV,
+        ContainerExt.MKV,
+        "mkv mode"
+    );
+
+    assert_codec_tab_container_defaults (
+        ContainerDefaultMode.CODEC_SPECIFIC,
+        ContainerExt.WEBM,
+        ContainerExt.WEBM,
+        ContainerExt.MP4,
+        ContainerExt.MP4,
+        "codec-specific mode"
+    );
+}
+
+private void test_codec_tab_container_preference_updates_live_on_settings_change () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = AppSettings.get_default ();
+    ContainerDefaultMode previous_mode = settings.container_default_mode;
+
+    try {
+        settings.container_default_mode = ContainerDefaultMode.DEFAULT;
+
+        var svt = new SvtAv1Tab ();
+        var vp9 = new Vp9Tab ();
+        var x264 = new X264Tab ();
+        var x265 = new X265Tab ();
+
+        assert_string_equal (svt.get_container (), ContainerExt.MKV,
+            "live update initial svt-av1 container");
+        assert_string_equal (vp9.get_container (), ContainerExt.WEBM,
+            "live update initial vp9 container");
+        assert_string_equal (x264.get_container (), ContainerExt.MKV,
+            "live update initial x264 container");
+        assert_string_equal (x265.get_container (), ContainerExt.MKV,
+            "live update initial x265 container");
+
+        settings.container_default_mode = ContainerDefaultMode.CODEC_SPECIFIC;
+        settings.settings_changed ();
+
+        assert_string_equal (svt.get_container (), ContainerExt.WEBM,
+            "live update svt-av1 container");
+        assert_string_equal (vp9.get_container (), ContainerExt.WEBM,
+            "live update vp9 container");
+        assert_string_equal (x264.get_container (), ContainerExt.MP4,
+            "live update x264 container");
+        assert_string_equal (x265.get_container (), ContainerExt.MP4,
+            "live update x265 container");
+
+        settings.container_default_mode = ContainerDefaultMode.MKV;
+        settings.settings_changed ();
+
+        assert_string_equal (svt.get_container (), ContainerExt.MKV,
+            "live update mkv svt-av1 container");
+        assert_string_equal (vp9.get_container (), ContainerExt.MKV,
+            "live update mkv vp9 container");
+        assert_string_equal (x264.get_container (), ContainerExt.MKV,
+            "live update mkv x264 container");
+        assert_string_equal (x265.get_container (), ContainerExt.MKV,
+            "live update mkv x265 container");
+    } finally {
+        settings.container_default_mode = previous_mode;
+        settings.settings_changed ();
+    }
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -2778,6 +2914,10 @@ void main (string[] args) {
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
         test_idle_close_request_cancels_pending_probes);
+    Test.add_func ("/combine/codec-tabs/container-preference-defaults",
+        test_codec_tab_container_preference_applies_on_construction_and_reset);
+    Test.add_func ("/combine/codec-tabs/container-preference-live-update",
+        test_codec_tab_container_preference_updates_live_on_settings_change);
 
     // Chapter metadata tests
     Test.add_func ("/combine/chapters/escape-ffmetadata-value",

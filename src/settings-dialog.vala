@@ -55,6 +55,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
     // ── General settings ────────────────────────────────────────────────────
     private Adw.ComboRow name_mode_combo;
+    private Adw.ComboRow container_default_combo;
     private Adw.EntryRow custom_name_entry;
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
@@ -242,6 +243,31 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_group.add (overwrite_warning_row);
         page.add (overwrite_group);
 
+        var container_group = new Adw.PreferencesGroup ();
+        container_group.set_title ("Default Container");
+        container_group.set_description (
+            "Choose which container each codec tab starts with and returns to when Reset is pressed."
+        );
+
+        container_default_combo = new Adw.ComboRow ();
+        container_default_combo.set_title ("Mode");
+        container_default_combo.set_subtitle (ContainerDefaultMode.DEFAULT.get_description ());
+
+        var container_mode_model = new Gtk.StringList (null);
+        container_mode_model.append (ContainerDefaultMode.DEFAULT.get_label ());
+        container_mode_model.append (ContainerDefaultMode.MKV.get_label ());
+        container_mode_model.append (ContainerDefaultMode.CODEC_SPECIFIC.get_label ());
+        container_default_combo.set_model (container_mode_model);
+
+        container_default_combo.notify["selected"].connect (() => {
+            ContainerDefaultMode mode =
+                index_to_container_default_mode (container_default_combo.get_selected ());
+            container_default_combo.set_subtitle (mode.get_description ());
+        });
+
+        container_group.add (container_default_combo);
+        page.add (container_group);
+
         var compatibility_group = new Adw.PreferencesGroup ();
         compatibility_group.set_title ("Audio Copy Verification");
         compatibility_group.set_description (
@@ -286,6 +312,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
             case OutputNameMode.DATE:     return 3;
             case OutputNameMode.METADATA: return 4;
             default:                      return 0;
+        }
+    }
+
+    private static ContainerDefaultMode index_to_container_default_mode (uint idx) {
+        switch (idx) {
+            case 1:  return ContainerDefaultMode.MKV;
+            case 2:  return ContainerDefaultMode.CODEC_SPECIFIC;
+            default: return ContainerDefaultMode.DEFAULT;
+        }
+    }
+
+    private static uint container_default_mode_to_index (ContainerDefaultMode mode) {
+        switch (mode) {
+            case ContainerDefaultMode.MKV:            return 1;
+            case ContainerDefaultMode.CODEC_SPECIFIC: return 2;
+            default:                                  return 0;
         }
     }
 
@@ -1195,6 +1237,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // General settings
         name_mode_combo.set_selected (mode_to_index (s.output_name_mode));
+        container_default_combo.set_selected (
+            container_default_mode_to_index (s.container_default_mode)
+        );
         custom_name_entry.set_text (s.output_custom_name);
         custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
         overwrite_switch.set_active (s.overwrite_enabled);
@@ -1206,6 +1251,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         // because set_selected(0) on a fresh combo (already at 0) won't
         // fire notify["selected"], leaving the subtitle at its default.
         name_mode_combo.set_subtitle (s.output_name_mode.get_description ());
+        container_default_combo.set_subtitle (s.container_default_mode.get_description ());
         overwrite_warning_row.set_visible (s.overwrite_enabled);
 
         // Initialize preview
@@ -1235,6 +1281,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // General settings
         s.output_name_mode = index_to_mode (name_mode_combo.get_selected ());
+        s.container_default_mode =
+            index_to_container_default_mode (container_default_combo.get_selected ());
         s.output_custom_name = custom_name_entry.get_text ().strip ();
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =

@@ -193,6 +193,77 @@ public enum OutputNameMode {
     }
 }
 
+public enum ContainerDefaultMode {
+    DEFAULT,
+    MKV,
+    CODEC_SPECIFIC;
+
+    public string to_string () {
+        switch (this) {
+            case MKV:            return "mkv";
+            case CODEC_SPECIFIC: return "codec_specific";
+            default:             return "default";
+        }
+    }
+
+    public static ContainerDefaultMode from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "mkv":            return MKV;
+            case "codec_specific": return CODEC_SPECIFIC;
+            default:               return DEFAULT;
+        }
+    }
+
+    public string get_label () {
+        switch (this) {
+            case MKV:            return "MKV";
+            case CODEC_SPECIFIC: return "Codec";
+            default:             return "Default";
+        }
+    }
+
+    public string get_description () {
+        switch (this) {
+            case MKV:
+                return "Prefer MKV on every codec tab";
+            case CODEC_SPECIFIC:
+                return "WebM for SVT-AV1 and VP9, and MP4 for x264 and x265";
+            default:
+                return "Use each codec tab's built-in default container";
+        }
+    }
+
+    public string resolve_container_for_codec (string codec) {
+        string normalized = codec.down ().strip ();
+        switch (this) {
+            case MKV:
+                return ContainerExt.MKV;
+            case CODEC_SPECIFIC:
+                switch (normalized) {
+                    case "svt-av1":
+                    case "vp9":
+                        return ContainerExt.WEBM;
+                    case "x264":
+                    case "x265":
+                        return ContainerExt.MP4;
+                    default:
+                        break;
+                }
+                break;
+            case DEFAULT:
+            default:
+                break;
+        }
+
+        switch (normalized) {
+            case "vp9":
+                return ContainerExt.WEBM;
+            default:
+                return ContainerExt.MKV;
+        }
+    }
+}
+
 // ── Scaling Mode Labels ──────────────────────────────────────────────────────
 
 namespace ScaleMode {

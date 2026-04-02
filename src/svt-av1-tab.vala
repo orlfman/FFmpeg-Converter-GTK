@@ -91,6 +91,8 @@ public class SvtAv1Tab : BaseCodecTab {
         build_reset_button ();
 
         connect_signals ();
+        apply_preferred_default_container ("svt-av1");
+        bind_container_default_preference ("svt-av1");
         audio_settings.update_for_container (get_container ());
     }
 
@@ -844,7 +846,7 @@ public class SvtAv1Tab : BaseCodecTab {
         reset_target_mb ();
 
         // Encoding
-        container_combo.set_selected (0);
+        apply_preferred_default_container ("svt-av1");
         preset_spin.set_value (8);
         profile_combo.set_selected (0);
         reset_pixel_format_defaults ();

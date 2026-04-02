@@ -98,6 +98,8 @@ public class X264Tab : BaseCodecTab {
         build_reset_button ();
 
         connect_signals ();
+        apply_preferred_default_container ("x264");
+        bind_container_default_preference ("x264");
         audio_settings.update_for_container (get_container ());
     }
 
@@ -920,7 +922,7 @@ public class X264Tab : BaseCodecTab {
         reset_target_mb ();
 
         // Encoding
-        container_combo.set_selected (0);
+        apply_preferred_default_container ("x264");
         preset_combo.set_selected (5);
         profile_combo.set_selected (0);
         reset_pixel_format_defaults ();

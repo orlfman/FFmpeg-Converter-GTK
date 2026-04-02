@@ -21,6 +21,11 @@ using GLib;
     //    output_name_mode  = default             (default|custom|random|date|metadata)
     //    output_custom_name = my_video           (default: "" → used when mode=custom)
     //    overwrite_enabled = false               (default: false → prompt before overwriting)
+    //    container_default_mode = default        (default|mkv|codec_specific)
+    //                                           (default: keep current tab defaults when
+    //                                            resetting codec tabs; mkv: prefer MKV;
+    //                                            codec_specific: prefer WebM for SVT-AV1/VP9
+    //                                            and MP4 for x264/x265)
     //    verify_unknown_audio_copy_preflight = true
     //                                           (default: true → verify audio copy compatibility
     //                                            for MP4/WebM before conversion starts)
@@ -60,6 +65,7 @@ public class AppSettings : Object {
     private string _ffplay_path  = "ffplay";
     private string _default_output_dir = "";
     private OutputNameMode _output_name_mode = OutputNameMode.DEFAULT;
+    private ContainerDefaultMode _container_default_mode = ContainerDefaultMode.DEFAULT;
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
     private bool   _verify_unknown_audio_copy_preflight = true;
@@ -277,6 +283,27 @@ public class AppSettings : Object {
         }
     }
 
+    public ContainerDefaultMode container_default_mode {
+        get {
+            ContainerDefaultMode container_default_mode;
+            mutex.lock ();
+            try {
+                container_default_mode = _container_default_mode;
+            } finally {
+                mutex.unlock ();
+            }
+            return container_default_mode;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _container_default_mode = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public bool overwrite_enabled {
         get {
             bool overwrite_enabled;
@@ -408,6 +435,8 @@ public class AppSettings : Object {
         string default_output_dir = read_string (kf, GROUP_OUTPUT, "default_directory", "");
         OutputNameMode output_name_mode = OutputNameMode.from_string (
             read_string (kf, GROUP_GENERAL, "output_name_mode", "default"));
+        ContainerDefaultMode container_default_mode = ContainerDefaultMode.from_string (
+            read_string (kf, GROUP_GENERAL, "container_default_mode", "default"));
         string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
         bool verify_unknown_audio_copy_preflight = read_bool (
@@ -424,6 +453,7 @@ public class AppSettings : Object {
             _ffplay_path = ffplay_path;
             _default_output_dir = default_output_dir;
             _output_name_mode = output_name_mode;
+            _container_default_mode = container_default_mode;
             _output_custom_name = output_custom_name;
             _overwrite_enabled = overwrite_enabled;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
@@ -457,6 +487,7 @@ public class AppSettings : Object {
         string ffplay_path;
         string default_output_dir;
         OutputNameMode output_name_mode;
+        ContainerDefaultMode container_default_mode;
         string output_custom_name;
         bool overwrite_enabled;
         bool verify_unknown_audio_copy_preflight;
@@ -471,6 +502,7 @@ public class AppSettings : Object {
             ffplay_path = _ffplay_path;
             default_output_dir = _default_output_dir;
             output_name_mode = _output_name_mode;
+            container_default_mode = _container_default_mode;
             output_custom_name = _output_custom_name;
             overwrite_enabled = _overwrite_enabled;
             verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
@@ -486,6 +518,7 @@ public class AppSettings : Object {
         kf.set_string (GROUP_PATHS, "ffplay", ffplay_path);
         kf.set_string (GROUP_OUTPUT, "default_directory", default_output_dir);
         kf.set_string (GROUP_GENERAL, "output_name_mode", output_name_mode.to_string ());
+        kf.set_string (GROUP_GENERAL, "container_default_mode", container_default_mode.to_string ());
         kf.set_string (GROUP_GENERAL, "output_custom_name", output_custom_name);
         kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", overwrite_enabled);
         kf.set_boolean (
@@ -521,6 +554,7 @@ public class AppSettings : Object {
             _ffplay_path        = "ffplay";
             _default_output_dir = "";
             _output_name_mode   = OutputNameMode.DEFAULT;
+            _container_default_mode = ContainerDefaultMode.DEFAULT;
             _output_custom_name = "";
             _overwrite_enabled  = false;
             _verify_unknown_audio_copy_preflight = true;

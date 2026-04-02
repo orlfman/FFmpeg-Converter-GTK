@@ -247,6 +247,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // ── Per-Tab Target Size ────────────────────────────────────────────────
     private SpinButton target_mb_spin;
     private int last_synced_target_mb;
+    private ContainerDefaultMode last_synced_container_default_mode =
+        ContainerDefaultMode.DEFAULT;
 
     // ── Source File Size Status ──────────────────────────────────────────────
     private Image  file_size_icon;
@@ -353,6 +355,30 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
                                          string[] options,
                                          string fallback_option) {
         CodecUtils.set_dropdown_options (dropdown, options, fallback_option);
+    }
+
+    protected void apply_preferred_default_container (string codec_name) {
+        string preferred_container =
+            AppSettings.get_default ().container_default_mode.resolve_container_for_codec (codec_name);
+        CodecUtils.set_dropdown_selection_by_text (
+            container_combo,
+            preferred_container,
+            container_combo.get_selected ()
+        );
+    }
+
+    protected void bind_container_default_preference (string codec_name) {
+        last_synced_container_default_mode = AppSettings.get_default ().container_default_mode;
+        AppSettings.get_default ().settings_changed.connect (() => {
+            ContainerDefaultMode new_mode = AppSettings.get_default ().container_default_mode;
+            if (new_mode == last_synced_container_default_mode) {
+                return;
+            }
+
+            last_synced_container_default_mode = new_mode;
+            apply_preferred_default_container (codec_name);
+            audio_settings.update_for_container (get_container ());
+        });
     }
 
     public void set_combine_crossfade_fade_constraint (bool constrained) {

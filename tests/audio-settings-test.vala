@@ -220,6 +220,71 @@ private void test_standard_mode_uses_initial_container_policy_on_construction ()
     );
 }
 
+private void test_container_default_mode_resolves_expected_container_per_codec () {
+    assert_equal_string (
+        ContainerDefaultMode.DEFAULT.resolve_container_for_codec ("svt-av1"),
+        ContainerExt.MKV,
+        "default mode svt-av1 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.DEFAULT.resolve_container_for_codec ("vp9"),
+        ContainerExt.WEBM,
+        "default mode vp9 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.DEFAULT.resolve_container_for_codec ("x264"),
+        ContainerExt.MKV,
+        "default mode x264 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.DEFAULT.resolve_container_for_codec ("x265"),
+        ContainerExt.MKV,
+        "default mode x265 container"
+    );
+
+    assert_equal_string (
+        ContainerDefaultMode.MKV.resolve_container_for_codec ("svt-av1"),
+        ContainerExt.MKV,
+        "mkv mode svt-av1 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.MKV.resolve_container_for_codec ("vp9"),
+        ContainerExt.MKV,
+        "mkv mode vp9 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.MKV.resolve_container_for_codec ("x264"),
+        ContainerExt.MKV,
+        "mkv mode x264 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.MKV.resolve_container_for_codec ("x265"),
+        ContainerExt.MKV,
+        "mkv mode x265 container"
+    );
+
+    assert_equal_string (
+        ContainerDefaultMode.CODEC_SPECIFIC.resolve_container_for_codec ("svt-av1"),
+        ContainerExt.WEBM,
+        "codec-specific mode svt-av1 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.CODEC_SPECIFIC.resolve_container_for_codec ("vp9"),
+        ContainerExt.WEBM,
+        "codec-specific mode vp9 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.CODEC_SPECIFIC.resolve_container_for_codec ("x264"),
+        ContainerExt.MP4,
+        "codec-specific mode x264 container"
+    );
+    assert_equal_string (
+        ContainerDefaultMode.CODEC_SPECIFIC.resolve_container_for_codec ("x265"),
+        ContainerExt.MP4,
+        "codec-specific mode x265 container"
+    );
+}
+
 private void test_unknown_probe_result_stays_neutral () {
     if (AudioSettings.map_probe_presence_to_display_state_for_test (
         MediaStreamPresence.UNKNOWN) != AudioProbeDisplayState.UNKNOWN) {
@@ -527,6 +592,8 @@ void main (string[] args) {
         test_transcode_only_mode_reuses_mkv_codec_set_without_copy);
     Test.add_func ("/audio-settings/standard-mode-uses-initial-container-policy",
         test_standard_mode_uses_initial_container_policy_on_construction);
+    Test.add_func ("/audio-settings/container-default-mode-resolves-per-codec",
+        test_container_default_mode_resolves_expected_container_per_codec);
     Test.add_func ("/audio-settings/unknown-probe-stays-neutral",
         test_unknown_probe_result_stays_neutral);
     Test.add_func ("/audio-settings/error-probe-maps-to-error",

@@ -81,6 +81,8 @@ public class X265Tab : BaseCodecTab {
         build_reset_button ();
 
         connect_signals ();
+        apply_preferred_default_container ("x265");
+        bind_container_default_preference ("x265");
         audio_settings.update_for_container (get_container ());
     }
 
@@ -696,7 +698,7 @@ public class X265Tab : BaseCodecTab {
         reset_target_mb ();
 
         // Encoding
-        container_combo.set_selected (0);
+        apply_preferred_default_container ("x265");
         preset_combo.set_selected (5);
         profile_combo.set_selected (0);
         reset_pixel_format_defaults ();
