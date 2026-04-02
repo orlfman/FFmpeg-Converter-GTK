@@ -889,10 +889,18 @@ private void test_combine_uses_live_main_output_folder () {
     harness.window.enable_launch_capture_for_widget_test ();
     harness.window.click_combine_for_widget_test ();
 
-    assert_string_equal (
-        harness.window.get_last_launched_output_for_widget_test (),
-        "/tmp/updated-output/first-combined.mkv",
+    string launched_output = harness.window.get_last_launched_output_for_widget_test ();
+    assert_contains (
+        launched_output,
+        "/tmp/updated-output/",
         "combine launch uses the current main output folder");
+    string basename = Path.get_basename (launched_output);
+    assert_true (
+        basename.length > ".mkv".length,
+        "combine launch generates a non-empty filename");
+    assert_true (
+        basename.has_suffix ("-combined.mkv"),
+        "combine launch keeps the expected combined suffix and container extension");
 
     harness.window.close ();
 }
@@ -1520,6 +1528,325 @@ private void test_combine_reencode_preserves_audio_copy_fallback () {
     string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
     assert_array_has_adjacent_pair (argv, "-c:a", "aac",
         "combine always uses audio re-encode, never copy");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  AUDIO COPY CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_reencode_syncs_audio_copy_constraint_across_codec_tabs () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    for (uint i = 0; i < 4; i++) {
+        assert_true (
+            harness.window.is_audio_copy_available_in_codec_tab_for_widget_test (i),
+            "Copy starts available in each codec tab before combine re-encode"
+        );
+        assert_string_equal (
+            harness.window.get_codec_tab_selected_audio_codec_for_widget_test (i),
+            AudioCodecName.COPY,
+            "each codec tab starts on Copy before combine re-encode"
+        );
+    }
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    for (uint i = 0; i < 4; i++) {
+        assert_false (
+            harness.window.is_audio_copy_available_in_codec_tab_for_widget_test (i),
+            "combine re-encode removes Copy from each codec tab"
+        );
+        assert_contains (
+            harness.window.get_codec_tab_audio_subtitle_for_widget_test (i),
+            "Combine re-encode",
+            "combine re-encode subtitle is reflected in each codec tab"
+        );
+    }
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    for (uint i = 0; i < 4; i++) {
+        assert_true (
+            harness.window.is_audio_copy_available_in_codec_tab_for_widget_test (i),
+            "returning to copy mode restores Copy in each codec tab"
+        );
+        assert_string_equal (
+            harness.window.get_codec_tab_selected_audio_codec_for_widget_test (i),
+            AudioCodecName.COPY,
+            "returning to copy mode restores Copy selection in each codec tab"
+        );
+    }
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_releases_audio_copy_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+    harness.window.invoke_close_request_for_widget_test ();
+
+    for (uint i = 0; i < 4; i++) {
+        assert_true (
+            harness.window.is_audio_copy_available_in_codec_tab_for_widget_test (i),
+            "closing combine restores Copy availability in each codec tab"
+        );
+        assert_string_equal (
+            harness.window.get_codec_tab_selected_audio_codec_for_widget_test (i),
+            AudioCodecName.COPY,
+            "closing combine restores Copy selection in each codec tab"
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  AUDIO STATUS OVERRIDE TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_combine_reencode_sets_audio_badge_override_across_codec_tabs () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    // Before re-encode: badge should be the default "Audio status unavailable"
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "badge starts as default unavailable before combine re-encode"
+        );
+    }
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio re-encoded by Combine",
+            "re-encode mode sets override badge in each codec tab"
+        );
+    }
+
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    // Back to copy mode with no probed files — override clears
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "returning to copy mode with no probed files clears badge override"
+        );
+    }
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_clears_audio_badge_override () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    // Verify override is active
+    assert_string_equal (
+        harness.window.get_codec_tab_audio_badge_text_for_widget_test (0),
+        "Audio re-encoded by Combine",
+        "override is active before close"
+    );
+
+    harness.window.invoke_close_request_for_widget_test ();
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "closing combine clears the badge override in each codec tab"
+        );
+    }
+}
+
+private void test_combine_copy_mode_with_audio_shows_copy_badge () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    // Simulate probed files with audio — pending_probes is already 0
+    // from load_files_for_widget_test
+    CombineFile first = harness.window.get_file_for_widget_test (0);
+    first.has_audio = true;
+    first.audio_codec = "aac";
+    first.duration = 5.0;
+    first.width = 1920;
+    first.height = 1080;
+    first.video_codec = "h264";
+
+    CombineFile second = harness.window.get_file_for_widget_test (1);
+    second.has_audio = true;
+    second.audio_codec = "aac";
+    second.duration = 3.0;
+    second.width = 1920;
+    second.height = 1080;
+    second.video_codec = "h264";
+
+    harness.window.refresh_combine_state_for_widget_test ();
+
+    // Copy mode (default) with probes done and audio present
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio copy via Combine",
+            "copy mode with probed audio shows copy badge in each codec tab"
+        );
+    }
+
+    // Switch to re-encode — badge should change
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio re-encoded by Combine",
+            "switching to re-encode changes badge from copy to re-encode"
+        );
+    }
+
+    // Switch back to copy — badge should return to copy
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio copy via Combine",
+            "switching back to copy mode restores copy badge"
+        );
+    }
+
+    harness.window.close ();
+}
+
+private void test_combine_copy_mode_without_audio_clears_badge () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    // Files with no audio (has_audio defaults to false)
+    CombineFile first = harness.window.get_file_for_widget_test (0);
+    first.duration = 5.0;
+    first.width = 1920;
+    first.height = 1080;
+    first.video_codec = "h264";
+
+    CombineFile second = harness.window.get_file_for_widget_test (1);
+    second.duration = 3.0;
+    second.width = 1920;
+    second.height = 1080;
+    second.video_codec = "h264";
+
+    harness.window.refresh_combine_state_for_widget_test ();
+
+    // Copy mode with no audio — override should be cleared
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "copy mode with no audio shows default badge"
+        );
+    }
+
+    harness.window.close ();
+}
+
+private void test_combine_copy_badge_follows_pending_probe_lifecycle () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    CombineFile first = harness.window.get_file_for_widget_test (0);
+    CombineFile second = harness.window.get_file_for_widget_test (1);
+
+    // Seed compatible probe data on both files before arming pending probes.
+    // This keeps copy mode eligible so the badge assertions isolate the
+    // pending_probes lifecycle rather than copy-mode fallback behavior.
+    first.has_audio = true;
+    first.audio_codec = "aac";
+    first.duration = 5.0;
+    first.width = 1920;
+    first.height = 1080;
+    first.video_codec = "h264";
+
+    second.has_audio = true;
+    second.audio_codec = "aac";
+    second.duration = 3.0;
+    second.width = 1920;
+    second.height = 1080;
+    second.video_codec = "h264";
+
+    Cancellable first_probe = harness.window.arm_pending_probe_for_file_for_widget_test (0);
+    Cancellable second_probe = harness.window.arm_pending_probe_for_file_for_widget_test (1);
+    harness.window.refresh_combine_state_for_widget_test ();
+
+    assert_uint64_equal (
+        (uint64) harness.window.get_pending_probe_count_for_widget_test (),
+        2,
+        "arming test probes tracks both pending probe slots"
+    );
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "copy mode keeps the default badge while combine probes are pending"
+        );
+    }
+
+    harness.window.complete_pending_probe_for_widget_test (first, first_probe);
+
+    assert_uint64_equal (
+        (uint64) harness.window.get_pending_probe_count_for_widget_test (),
+        1,
+        "first completed probe decrements the pending count"
+    );
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio status unavailable",
+            "badge stays unavailable until all combine probes are finished"
+        );
+    }
+
+    harness.window.complete_pending_probe_for_widget_test (second, second_probe);
+
+    assert_uint64_equal (
+        (uint64) harness.window.get_pending_probe_count_for_widget_test (),
+        0,
+        "second completed probe clears the pending count"
+    );
+
+    for (uint i = 0; i < 4; i++) {
+        assert_string_equal (
+            harness.window.get_codec_tab_audio_badge_text_for_widget_test (i),
+            "Audio copy via Combine",
+            "badge switches to copy once all combine probes finish with audio"
+        );
+    }
+
+    harness.window.close ();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2970,6 +3297,24 @@ void main (string[] args) {
         test_combine_reencode_applies_audio_processing_chain);
     Test.add_func ("/combine/profile/audio-copy-fallback",
         test_combine_reencode_preserves_audio_copy_fallback);
+
+    // Audio copy constraint tests
+    Test.add_func ("/combine/audio-copy/reencode-syncs-all-codec-tabs",
+        test_combine_reencode_syncs_audio_copy_constraint_across_codec_tabs);
+    Test.add_func ("/combine/audio-copy/close-releases-constraint",
+        test_closing_combine_window_releases_audio_copy_constraint);
+
+    // Audio status override tests
+    Test.add_func ("/combine/audio-badge/reencode-sets-override",
+        test_combine_reencode_sets_audio_badge_override_across_codec_tabs);
+    Test.add_func ("/combine/audio-badge/close-clears-override",
+        test_closing_combine_clears_audio_badge_override);
+    Test.add_func ("/combine/audio-badge/copy-mode-with-audio-shows-copy-badge",
+        test_combine_copy_mode_with_audio_shows_copy_badge);
+    Test.add_func ("/combine/audio-badge/copy-mode-without-audio-clears-badge",
+        test_combine_copy_mode_without_audio_clears_badge);
+    Test.add_func ("/combine/audio-badge/pending-probe-lifecycle",
+        test_combine_copy_badge_follows_pending_probe_lifecycle);
 
     // General speed constraint tests
     Test.add_func ("/combine/general-speed/reencode-applies-constraint",

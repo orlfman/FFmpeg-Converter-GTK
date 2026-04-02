@@ -93,6 +93,26 @@ private void assert_string_array_equals (string[] actual,
     }
 }
 
+private bool gtk_widget_tests_ready = false;
+private bool gtk_widget_tests_available = false;
+
+private bool ensure_gtk_widget_tests_available () {
+    if (!gtk_widget_tests_ready) {
+        gtk_widget_tests_available = Gtk.init_check ();
+        if (gtk_widget_tests_available) {
+            Adw.init ();
+        }
+        gtk_widget_tests_ready = true;
+    }
+
+    if (!gtk_widget_tests_available) {
+        Test.message ("Skipping widget test: GTK could not initialize");
+        return false;
+    }
+
+    return true;
+}
+
 private string[] filter_out_copy (string[] codecs) {
     string[] filtered = {};
     foreach (unowned string codec in codecs) {
@@ -571,6 +591,151 @@ private void test_flac_source_s32_without_raw_bits_avoids_guessing_depth () {
     assert_not_contains (args, "-bits_per_raw_sample", "flac conservative s32 fallback");
 }
 
+private void test_combine_reencode_constraint_restores_copy_selection_after_release () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+
+    assert_equal_string (
+        settings.get_selected_codec_for_test (),
+        AudioCodecName.COPY,
+        "standard audio settings start on Copy"
+    );
+
+    settings.update_for_combine_reencode (true);
+
+    assert_false (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "combine constraint removes Copy from the live codec list"
+    );
+    assert_equal_string (
+        settings.get_codec_row_subtitle_for_test (),
+        "Copy disabled by Combine re-encode because audio must pass through filter_complex",
+        "combine constraint subtitle explains the active blocker"
+    );
+
+    settings.update_for_combine_reencode (false);
+
+    assert_true (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "releasing combine constraint restores Copy to the live codec list"
+    );
+    assert_equal_string (
+        settings.get_selected_codec_for_test (),
+        AudioCodecName.COPY,
+        "releasing combine constraint restores the user's Copy preference"
+    );
+}
+
+private void test_manual_codec_choice_during_combine_constraint_persists_after_release () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+
+    settings.update_for_combine_reencode (true);
+    settings.select_codec_for_test (AudioCodecName.AAC);
+    settings.update_for_combine_reencode (false);
+
+    assert_equal_string (
+        settings.get_selected_codec_for_test (),
+        AudioCodecName.AAC,
+        "manual codec selection during combine constraint survives release"
+    );
+}
+
+private void test_pipeline_constraint_subtitle_takes_priority_over_source_incompatibility () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MP4);
+    settings.apply_source_audio_state ("vorbis", AudioProbeDisplayState.FOUND);
+
+    assert_false (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "source incompatibility removes Copy for unsupported MP4 audio"
+    );
+    assert_contains (
+        settings.get_codec_row_subtitle_for_test (),
+        "source Vorbis audio is not supported in MP4",
+        "source incompatibility subtitle explains the persistent blocker"
+    );
+
+    settings.update_for_combine_reencode (true);
+
+    assert_contains (
+        settings.get_codec_row_subtitle_for_test (),
+        "Combine re-encode",
+        "active combine constraint takes subtitle priority over source incompatibility"
+    );
+}
+
+private void test_audio_status_override_replaces_badge_when_probe_unknown () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+
+    assert_equal_string (
+        settings.get_audio_status_badge_text_for_test (),
+        "Audio status unavailable",
+        "badge starts with default unknown text"
+    );
+
+    settings.set_audio_status_override (
+        "media-playlist-consecutive-symbolic",
+        "Audio re-encoded by Combine",
+        "audio-status-neutral"
+    );
+
+    assert_equal_string (
+        settings.get_audio_status_badge_text_for_test (),
+        "Audio re-encoded by Combine",
+        "override replaces badge when probe state is UNKNOWN"
+    );
+
+    settings.clear_audio_status_override ();
+
+    assert_equal_string (
+        settings.get_audio_status_badge_text_for_test (),
+        "Audio status unavailable",
+        "clearing override restores the normal probe badge"
+    );
+}
+
+private void test_audio_status_override_does_not_replace_real_probe_state () {
+    if (!ensure_gtk_widget_tests_available ()) {
+        return;
+    }
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+
+    settings.apply_source_audio_state ("aac", AudioProbeDisplayState.FOUND);
+
+    assert_equal_string (
+        settings.get_audio_status_badge_text_for_test (),
+        "Audio found",
+        "badge shows real probe state"
+    );
+
+    settings.set_audio_status_override (
+        "media-playlist-consecutive-symbolic",
+        "Audio re-encoded by Combine",
+        "audio-status-neutral"
+    );
+
+    assert_equal_string (
+        settings.get_audio_status_badge_text_for_test (),
+        "Audio found",
+        "override does not replace badge when real probe state exists"
+    );
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -612,6 +777,16 @@ void main (string[] args) {
         test_wav_source_preserves_probed_pcm_depth_when_known);
     Test.add_func ("/audio-settings/flac-source-preserves-compatible-probed-depth-when-known",
         test_flac_source_preserves_compatible_probed_depth_when_known);
+    Test.add_func ("/audio-settings/combine-constraint-restores-copy-selection",
+        test_combine_reencode_constraint_restores_copy_selection_after_release);
+    Test.add_func ("/audio-settings/combine-constraint-preserves-manual-codec-selection",
+        test_manual_codec_choice_during_combine_constraint_persists_after_release);
+    Test.add_func ("/audio-settings/combine-constraint-subtitle-priority",
+        test_pipeline_constraint_subtitle_takes_priority_over_source_incompatibility);
+    Test.add_func ("/audio-settings/audio-status-override-replaces-badge-when-unknown",
+        test_audio_status_override_replaces_badge_when_probe_unknown);
+    Test.add_func ("/audio-settings/audio-status-override-does-not-replace-real-probe",
+        test_audio_status_override_does_not_replace_real_probe_state);
     Test.add_func ("/audio-settings/audio-compatibility-model-preserves-mp4-alac-copy",
         test_audio_compatibility_model_preserves_mp4_alac_copy);
     Test.add_func ("/audio-settings/audio-compatibility-model-preserves-mp4-eac3-copy-extension",

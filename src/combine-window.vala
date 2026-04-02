@@ -498,6 +498,8 @@ public class CombineWindow : Adw.Window {
         release_general_crop_constraint ();
         release_general_speed_constraint ();
         release_crossfade_fade_constraint ();
+        release_audio_copy_constraint ();
+        clear_audio_status_override_from_all_tabs ();
         cancel_probes_for_teardown ();
         close_preview_window ();
         window_closing ();
@@ -589,6 +591,7 @@ public class CombineWindow : Adw.Window {
         probe_cancellables.add (probe_cancellable);
         pending_probes++;
         update_combine_sensitivity ();
+        sync_audio_status_override ();
         probe_file_async.begin (cf, probe_cancellable);
     }
 
@@ -607,6 +610,7 @@ public class CombineWindow : Adw.Window {
         rebuild_file_rows ();
         update_copy_mode_eligibility ();
         update_combine_sensitivity ();
+        sync_audio_status_override ();
     }
 
     private void swap_files (int from, int to) {
@@ -815,6 +819,7 @@ public class CombineWindow : Adw.Window {
         update_copy_mode_eligibility ();
         update_mismatch_warnings ();
         update_combine_sensitivity ();
+        sync_audio_status_override ();
     }
 
     private bool remove_probe_cancellable (Cancellable probe_cancellable) {
@@ -1058,6 +1063,8 @@ public class CombineWindow : Adw.Window {
         bool reencode = !copy_mode_switch.active;
         reencode_codec_row.set_visible (reencode);
         audio_reencode_note.set_visible (reencode);
+        sync_audio_copy_constraint ();
+        sync_audio_status_override ();
 
         crossfade_updating = true;
         crossfade_switch.set_visible (reencode);
@@ -1575,6 +1582,68 @@ public class CombineWindow : Adw.Window {
         return codec_tab as BaseCodecTab;
     }
 
+    private void sync_audio_copy_constraint () {
+        bool constrained = !copy_mode_switch.active;
+        if (svt_tab != null)  svt_tab.audio_settings.update_for_combine_reencode (constrained);
+        if (x265_tab != null) x265_tab.audio_settings.update_for_combine_reencode (constrained);
+        if (x264_tab != null) x264_tab.audio_settings.update_for_combine_reencode (constrained);
+        if (vp9_tab != null)  vp9_tab.audio_settings.update_for_combine_reencode (constrained);
+    }
+
+    private void release_audio_copy_constraint () {
+        if (svt_tab != null)  svt_tab.audio_settings.update_for_combine_reencode (false);
+        if (x265_tab != null) x265_tab.audio_settings.update_for_combine_reencode (false);
+        if (x264_tab != null) x264_tab.audio_settings.update_for_combine_reencode (false);
+        if (vp9_tab != null)  vp9_tab.audio_settings.update_for_combine_reencode (false);
+    }
+
+    private void sync_audio_status_override () {
+        bool reencode = !copy_mode_switch.active;
+
+        if (reencode) {
+            apply_audio_status_override_to_all_tabs (
+                "media-playlist-consecutive-symbolic",
+                "Audio re-encoded by Combine",
+                "audio-status-neutral");
+            return;
+        }
+
+        // Copy mode: only show override if probes are done and audio exists
+        if (pending_probes == 0 && has_any_audio_in_files ()) {
+            apply_audio_status_override_to_all_tabs (
+                "emblem-default-symbolic",
+                "Audio copy via Combine",
+                "audio-status-found");
+            return;
+        }
+
+        // Probes pending or no audio — clear override, fall back to normal badge
+        clear_audio_status_override_from_all_tabs ();
+    }
+
+    private bool has_any_audio_in_files () {
+        for (int i = 0; i < files.length; i++) {
+            if (files[i].has_audio) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void apply_audio_status_override_to_all_tabs (string icon, string text, string css) {
+        if (svt_tab != null)  svt_tab.audio_settings.set_audio_status_override (icon, text, css);
+        if (x265_tab != null) x265_tab.audio_settings.set_audio_status_override (icon, text, css);
+        if (x264_tab != null) x264_tab.audio_settings.set_audio_status_override (icon, text, css);
+        if (vp9_tab != null)  vp9_tab.audio_settings.set_audio_status_override (icon, text, css);
+    }
+
+    private void clear_audio_status_override_from_all_tabs () {
+        if (svt_tab != null)  svt_tab.audio_settings.clear_audio_status_override ();
+        if (x265_tab != null) x265_tab.audio_settings.clear_audio_status_override ();
+        if (x264_tab != null) x264_tab.audio_settings.clear_audio_status_override ();
+        if (vp9_tab != null)  vp9_tab.audio_settings.clear_audio_status_override ();
+    }
+
     private bool is_crossfade_constraint_active () {
         return crossfade_switch.active && !copy_mode_switch.active;
     }
@@ -1804,10 +1873,33 @@ public class CombineWindow : Adw.Window {
         update_probe_row (cf);
     }
 
+    internal void complete_pending_probe_for_widget_test (CombineFile cf,
+                                                          Cancellable probe_cancellable,
+                                                          bool success = true) {
+        bool probe_was_tracked = remove_probe_cancellable (probe_cancellable);
+        if (probe_was_tracked && pending_probes > 0) {
+            pending_probes--;
+        }
+        if (cf.probe_cancellable == probe_cancellable) {
+            cf.probe_cancellable = null;
+        }
+
+        if (!success && !(probe_cancellable.is_cancelled ())) {
+            cf.probe_failed = true;
+        }
+
+        update_probe_row (cf);
+        update_copy_mode_eligibility ();
+        update_mismatch_warnings ();
+        update_combine_sensitivity ();
+        sync_audio_status_override ();
+    }
+
     internal void refresh_combine_state_for_widget_test () {
         update_copy_mode_eligibility ();
         update_mismatch_warnings ();
         update_combine_sensitivity ();
+        sync_audio_status_override ();
     }
 
     internal Cancellable arm_pending_probe_for_widget_test () {
@@ -1987,6 +2079,50 @@ public class CombineWindow : Adw.Window {
 
     internal void set_codec_choice_selected_for_widget_test (uint sel) {
         codec_choice.set_selected (sel);
+    }
+
+    internal bool is_audio_copy_available_in_codec_tab_for_widget_test (uint sel) {
+        BaseCodecTab? tab = get_codec_tab_for_widget_test ((int) sel);
+        return tab != null && tab.audio_settings.is_codec_available_for_test (AudioCodecName.COPY);
+    }
+
+    internal string get_codec_tab_selected_audio_codec_for_widget_test (uint sel) {
+        BaseCodecTab? tab = get_codec_tab_for_widget_test ((int) sel);
+        if (tab == null) {
+            return "";
+        }
+        return tab.audio_settings.get_selected_codec_for_test ();
+    }
+
+    internal string get_codec_tab_audio_subtitle_for_widget_test (uint sel) {
+        BaseCodecTab? tab = get_codec_tab_for_widget_test ((int) sel);
+        if (tab == null) {
+            return "";
+        }
+        return tab.audio_settings.get_codec_row_subtitle_for_test ();
+    }
+
+    internal string get_codec_tab_audio_badge_text_for_widget_test (uint sel) {
+        BaseCodecTab? tab = get_codec_tab_for_widget_test ((int) sel);
+        if (tab == null) {
+            return "";
+        }
+        return tab.audio_settings.get_audio_status_badge_text_for_test ();
+    }
+
+    private BaseCodecTab? get_codec_tab_for_widget_test (int sel) {
+        switch (sel) {
+        case 0:
+            return svt_tab;
+        case 1:
+            return x265_tab;
+        case 2:
+            return x264_tab;
+        case 3:
+            return vp9_tab;
+        default:
+            return null;
+        }
     }
 
     internal BaseCodecTab? get_constrained_codec_tab_for_widget_test () {

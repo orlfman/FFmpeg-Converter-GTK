@@ -18,6 +18,24 @@ public enum AudioProbeDisplayState {
     ERROR
 }
 
+public enum AudioCopyBlockerReason {
+    NONE,
+    COMBINE_REENCODE,
+    TRIM_CONCAT_FILTER,
+    AUDIO_SPEED,
+    AUDIO_PROCESSING,
+    SOURCE_CONTAINER_INCOMPATIBLE
+}
+
+public class AudioCopyAvailabilityResult : Object {
+    public bool copy_allowed { get; set; default = true; }
+    public AudioCopyBlockerReason primary_blocker { get; set; default = AudioCopyBlockerReason.NONE; }
+    public AudioCopyBlockerReason[] all_blockers = {};
+    public string fallback_codec { get; set; default = ""; }
+    public string source_codec_label { get; set; default = ""; }
+    public string container_label { get; set; default = ""; }
+}
+
 public class AudioSettings : Object {
     private const string SAMPLE_RATE_SOURCE = "Source";
     private AudioSettingsMode mode;
@@ -57,11 +75,20 @@ public class AudioSettings : Object {
     private bool   speed_active = false;
     private bool   processing_active = false;
     private bool   concat_filter_active = false;
+    private bool   combine_reencode_active = false;
     private bool   desired_audio_enabled = true;
     private bool   suppress_audio_enabled_tracking = false;
+    private bool   suppress_codec_tracking = false;
     private AudioProbeDisplayState audio_probe_state = AudioProbeDisplayState.UNKNOWN;
     private string current_status_css_class = "";
     private AudioSourceInfo source_audio = new AudioSourceInfo ();
+    private string desired_codec = "";
+
+    // Display-only badge override (set by Combine, shown only when probe state is UNKNOWN)
+    private bool   has_audio_status_override = false;
+    private string audio_status_override_icon = "";
+    private string audio_status_override_text = "";
+    private string audio_status_override_css = "";
 
     public signal void changed ();
 
@@ -76,6 +103,7 @@ public class AudioSettings : Object {
         inject_audio_status_css ();
         build_ui ();
         connect_signals ();
+        desired_codec = get_codec_text ();
         update_codec_visibility ();
         if (uses_probe_ui ()) {
             set_audio_probe_state (AudioProbeDisplayState.UNKNOWN);
@@ -366,7 +394,7 @@ public class AudioSettings : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
-        codec_combo.notify["selected"].connect (update_codec_visibility);
+        codec_combo.notify["selected"].connect (on_codec_combo_selected_notify);
         aac_quality_combo.notify["selected"].connect (update_codec_visibility);
         mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
         vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
@@ -374,6 +402,13 @@ public class AudioSettings : Object {
             audio_expander.notify["enable-expansion"].connect (
                 on_audio_expander_enable_expansion_notify);
         }
+    }
+
+    private void on_codec_combo_selected_notify () {
+        if (!suppress_codec_tracking) {
+            desired_codec = get_codec_text ();
+        }
+        update_codec_visibility ();
     }
 
     private void on_audio_expander_enable_expansion_notify () {
@@ -529,12 +564,44 @@ public class AudioSettings : Object {
         rebuild_codec_list ();
     }
 
+    public void update_for_combine_reencode (bool active) {
+        combine_reencode_active = active;
+        rebuild_codec_list ();
+    }
+
+    /**
+     * Sets a display-only badge override that replaces the normal probe badge
+     * when audio_probe_state is UNKNOWN.  Used by Combine to show meaningful
+     * status instead of "Audio status unavailable."
+     */
+    public void set_audio_status_override (string icon_name, string text, string css_class) {
+        has_audio_status_override = true;
+        audio_status_override_icon = icon_name;
+        audio_status_override_text = text;
+        audio_status_override_css = css_class;
+        refresh_audio_status_display ();
+    }
+
+    public void clear_audio_status_override () {
+        if (!has_audio_status_override) {
+            return;
+        }
+        has_audio_status_override = false;
+        audio_status_override_icon = "";
+        audio_status_override_text = "";
+        audio_status_override_css = "";
+        refresh_audio_status_display ();
+    }
+
     /**
      * True when audio filters (speed change, shared processing, concat) are
      * active and stream-copy is not possible — audio must be re-encoded.
      */
     public bool requires_audio_reencode () {
-        return speed_active || processing_active || concat_filter_active;
+        return speed_active
+            || processing_active
+            || concat_filter_active
+            || combine_reencode_active;
     }
 
     public void set_audio_enabled (bool enabled) {
@@ -616,9 +683,7 @@ public class AudioSettings : Object {
 
         switch (state) {
         case AudioProbeDisplayState.UNKNOWN:
-            set_audio_status ("dialog-question-symbolic",
-                              "Audio status unavailable",
-                              "audio-status-neutral");
+            render_unknown_audio_badge ();
             restore_user_audio_state ();
             break;
         case AudioProbeDisplayState.CHECKING:
@@ -671,6 +736,33 @@ public class AudioSettings : Object {
         suppress_audio_enabled_tracking = false;
     }
 
+    /**
+     * Re-evaluates which badge to show based on current probe state and
+     * override.  Called when the override changes so the display updates
+     * without re-running probe side effects.
+     */
+    private void refresh_audio_status_display () {
+        if (!uses_probe_ui ()) {
+            return;
+        }
+        if (audio_probe_state == AudioProbeDisplayState.UNKNOWN) {
+            render_unknown_audio_badge ();
+        }
+        // Non-UNKNOWN states are authoritative — override never applies.
+    }
+
+    private void render_unknown_audio_badge () {
+        if (has_audio_status_override) {
+            set_audio_status (audio_status_override_icon,
+                              audio_status_override_text,
+                              audio_status_override_css);
+        } else {
+            set_audio_status ("dialog-question-symbolic",
+                              "Audio status unavailable",
+                              "audio-status-neutral");
+        }
+    }
+
     private void set_audio_status (string icon_name, string text, string css_class) {
         if (!uses_probe_ui ()) {
             return;
@@ -692,6 +784,7 @@ public class AudioSettings : Object {
     private void rebuild_codec_list () {
         string current = get_codec_text ();
         string[] codecs;
+        AudioCopyAvailabilityResult? evaluation = null;
 
         if (is_transcode_only_mode ()) {
             codecs = get_permissive_transcode_codecs ();
@@ -699,16 +792,8 @@ public class AudioSettings : Object {
             ContainerAudioPolicy policy =
                 AudioCompatibilityLogic.get_container_audio_policy (current_container);
             codecs = policy.selectable_codecs;
-
-            if (speed_active || processing_active || concat_filter_active) {
-                string[] filtered = {};
-                foreach (string c in codecs) {
-                    if (c != AudioCodecName.COPY) filtered += c;
-                }
-                codecs = filtered;
-            }
-
-            if (!is_copy_available_for_current_source ()) {
+            evaluation = evaluate_audio_copy_availability ();
+            if (!evaluation.copy_allowed) {
                 string[] filtered = {};
                 foreach (string c in codecs) {
                     if (c != AudioCodecName.COPY) filtered += c;
@@ -718,21 +803,13 @@ public class AudioSettings : Object {
         }
 
         var new_list = CodecUtils.build_dropdown_string_list (codecs);
+        suppress_codec_tracking = true;
         codec_combo.set_model (new_list);
+        restore_codec_selection (new_list, desired_codec, current);
+        suppress_codec_tracking = false;
 
-        bool found = false;
-        for (uint i = 0; i < new_list.get_n_items (); i++) {
-            if (new_list.get_string (i) == current) {
-                codec_combo.set_selected (i);
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-            codec_combo.set_selected (0);
-
-        if (!is_transcode_only_mode ()) {
-            update_codec_row_subtitle ();
+        if (!is_transcode_only_mode () && evaluation != null) {
+            update_codec_row_subtitle (evaluation);
         }
         update_codec_visibility ();
     }
@@ -1128,30 +1205,197 @@ public class AudioSettings : Object {
         }
     }
 
-    private bool is_copy_available_for_current_source () {
-        if (audio_probe_state != AudioProbeDisplayState.FOUND)
-            return true;
+    private AudioCopyAvailabilityResult evaluate_audio_copy_availability () {
+        var result = new AudioCopyAvailabilityResult ();
+        result.fallback_codec =
+            AudioCompatibilityLogic.get_copy_fallback_codec_for_container (current_container);
 
-        return AudioCompatibilityLogic.evaluate (source_audio, current_container).can_copy;
-    }
+        AudioCopyBlockerReason[] blockers = {};
+        if (combine_reencode_active) {
+            blockers += AudioCopyBlockerReason.COMBINE_REENCODE;
+        }
+        if (concat_filter_active) {
+            blockers += AudioCopyBlockerReason.TRIM_CONCAT_FILTER;
+        }
+        if (speed_active) {
+            blockers += AudioCopyBlockerReason.AUDIO_SPEED;
+        }
+        if (processing_active) {
+            blockers += AudioCopyBlockerReason.AUDIO_PROCESSING;
+        }
 
-    private void update_codec_row_subtitle () {
         AudioCompatibility compatibility =
             AudioCompatibilityLogic.evaluate (source_audio, current_container);
         if (audio_probe_state == AudioProbeDisplayState.FOUND
             && !compatibility.can_copy) {
+            blockers += AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE;
+            result.source_codec_label = format_audio_codec_label (source_audio.codec_name);
+            result.container_label = format_container_label (current_container);
+        }
+
+        result.all_blockers = blockers;
+        result.primary_blocker = pick_primary_copy_blocker (blockers);
+        result.copy_allowed = blockers.length == 0;
+        return result;
+    }
+
+    private void update_codec_row_subtitle (AudioCopyAvailabilityResult evaluation) {
+        switch (evaluation.primary_blocker) {
+        case AudioCopyBlockerReason.COMBINE_REENCODE:
+            codec_row.set_subtitle (
+                "Copy disabled by Combine re-encode because audio must pass through filter_complex"
+            );
+            return;
+        case AudioCopyBlockerReason.TRIM_CONCAT_FILTER:
+            codec_row.set_subtitle (
+                "Copy disabled: multi-segment trim combine routes audio through filter_complex"
+            );
+            return;
+        case AudioCopyBlockerReason.AUDIO_SPEED:
+            codec_row.set_subtitle (
+                "Copy disabled by audio speed changes because filtered audio must be re-encoded"
+            );
+            return;
+        case AudioCopyBlockerReason.AUDIO_PROCESSING:
+            codec_row.set_subtitle (
+                "Copy disabled by audio processing filters because filtered audio must be re-encoded"
+            );
+            return;
+        case AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE:
             codec_row.set_subtitle (
                 "Copy unavailable: source %s audio is not supported in %s, so audio will be re-encoded"
                 .printf (
-                    format_audio_codec_label (source_audio.codec_name),
-                    format_container_label (current_container)
+                    evaluation.source_codec_label,
+                    evaluation.container_label
                 )
             );
             return;
+        case AudioCopyBlockerReason.NONE:
+        default:
+            break;
         }
 
         codec_row.set_subtitle ("Copy passes audio through without re-encoding");
     }
+
+    private static int get_copy_blocker_priority (AudioCopyBlockerReason reason) {
+        switch (reason) {
+        case AudioCopyBlockerReason.COMBINE_REENCODE:
+            return 0;
+        case AudioCopyBlockerReason.TRIM_CONCAT_FILTER:
+            return 10;
+        case AudioCopyBlockerReason.AUDIO_SPEED:
+            return 20;
+        case AudioCopyBlockerReason.AUDIO_PROCESSING:
+            return 30;
+        case AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE:
+            return 40;
+        case AudioCopyBlockerReason.NONE:
+        default:
+            return 100;
+        }
+    }
+
+    private static AudioCopyBlockerReason pick_primary_copy_blocker (
+        AudioCopyBlockerReason[] blockers) {
+        AudioCopyBlockerReason primary = AudioCopyBlockerReason.NONE;
+        int best_priority = get_copy_blocker_priority (primary);
+
+        foreach (AudioCopyBlockerReason blocker in blockers) {
+            int priority = get_copy_blocker_priority (blocker);
+            if (priority < best_priority) {
+                primary = blocker;
+                best_priority = priority;
+            }
+        }
+
+        return primary;
+    }
+
+    private void restore_codec_selection (StringList model,
+                                          string preferred_codec,
+                                          string current_codec) {
+        string[] candidates = {};
+        if (preferred_codec.length > 0) {
+            candidates += preferred_codec;
+        }
+        if (current_codec.length > 0 && current_codec != preferred_codec) {
+            candidates += current_codec;
+        }
+
+        foreach (string candidate in candidates) {
+            for (uint i = 0; i < model.get_n_items (); i++) {
+                if (model.get_string (i) == candidate) {
+                    set_codec_selection_suppressed (i);
+                    return;
+                }
+            }
+        }
+
+        set_codec_selection_suppressed (0);
+    }
+
+    private void set_codec_selection_suppressed (uint index) {
+        suppress_codec_tracking = true;
+        codec_combo.set_selected (index);
+        suppress_codec_tracking = false;
+    }
+
+#if AUDIO_SETTINGS_TEST_BUILD || COMBINE_WINDOW_TEST_BUILD
+    internal string[] get_available_codecs_for_test () {
+        string[] codecs = {};
+        var model = codec_combo.get_model () as StringList;
+        if (model == null) {
+            return codecs;
+        }
+
+        for (uint i = 0; i < model.get_n_items (); i++) {
+            codecs += model.get_string (i);
+        }
+        return codecs;
+    }
+
+    internal string get_selected_codec_for_test () {
+        return get_codec_text ();
+    }
+
+    internal string get_codec_row_subtitle_for_test () {
+        return codec_row.get_subtitle () ?? "";
+    }
+
+    internal bool is_codec_available_for_test (string codec) {
+        foreach (string candidate in get_available_codecs_for_test ()) {
+            if (candidate == codec) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    internal string get_audio_status_badge_text_for_test () {
+        if (audio_status_label == null) {
+            return "";
+        }
+        return audio_status_label.get_text () ?? "";
+    }
+#endif
+
+#if AUDIO_SETTINGS_TEST_BUILD
+    internal void select_codec_for_test (string codec) {
+        var model = codec_combo.get_model () as StringList;
+        if (model == null) {
+            return;
+        }
+
+        for (uint i = 0; i < model.get_n_items (); i++) {
+            if (model.get_string (i) == codec) {
+                desired_codec = codec;
+                codec_combo.set_selected (i);
+                return;
+            }
+        }
+    }
+#endif
 
     public static bool container_supports_audio_copy (string container,
                                                       string source_codec_name) {
