@@ -2027,6 +2027,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                     return;
                 }
                 post_success_toast ("Combine complete", result);
+                controller.apply_operation_output (result);
                 maybe_finish_close_after_cancellation ();
             });
             combine_window.combine_failed.connect ((operation_id, message) => {

@@ -395,6 +395,7 @@ public class InformationTab : Box {
     public void load_output_info (string file_path) {
         if (file_path.strip () == "") return;
 
+        main_stack.set_visible_child_name ("info");
         single_output_box.set_visible (true);
         multi_output_box.set_visible (false);
         clear_multi_output ();

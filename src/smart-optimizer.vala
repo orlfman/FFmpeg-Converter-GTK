@@ -2371,7 +2371,10 @@ public class SmartOptimizer : GLib.Object {
                 extra_list.add (candidate);
         }
 
-        int[] extra = new int[extra_list.length];
+        if (extra_list.length > int.MAX)
+            return {};
+
+        int[] extra = new int[(int) extra_list.length];
         for (int i = 0; i < extra_list.length; i++)
             extra[i] = extra_list[i];
         return extra;
@@ -2716,16 +2719,48 @@ public class SmartOptimizer : GLib.Object {
             if (yavg != null) yavg_list.add (yavg);
         }
 
-        satavg_out = new double[sat_list.length];
+        if (sat_list.length > int.MAX) {
+            satavg_out = {};
+            ydif_out = {};
+            ylow_out = {};
+            yavg_out = {};
+            return;
+        }
+
+        satavg_out = new double[(int) sat_list.length];
         for (int i = 0; i < sat_list.length; i++) satavg_out[i] = sat_list[i];
 
-        ydif_out = new double[ydif_list.length];
+        if (ydif_list.length > int.MAX) {
+            satavg_out = {};
+            ydif_out = {};
+            ylow_out = {};
+            yavg_out = {};
+            return;
+        }
+
+        ydif_out = new double[(int) ydif_list.length];
         for (int i = 0; i < ydif_list.length; i++) ydif_out[i] = ydif_list[i];
 
-        ylow_out = new double[ylow_list.length];
+        if (ylow_list.length > int.MAX) {
+            satavg_out = {};
+            ydif_out = {};
+            ylow_out = {};
+            yavg_out = {};
+            return;
+        }
+
+        ylow_out = new double[(int) ylow_list.length];
         for (int i = 0; i < ylow_list.length; i++) ylow_out[i] = ylow_list[i];
 
-        yavg_out = new double[yavg_list.length];
+        if (yavg_list.length > int.MAX) {
+            satavg_out = {};
+            ydif_out = {};
+            ylow_out = {};
+            yavg_out = {};
+            return;
+        }
+
+        yavg_out = new double[(int) yavg_list.length];
         for (int i = 0; i < yavg_list.length; i++) yavg_out[i] = yavg_list[i];
     }
 
@@ -2750,7 +2785,12 @@ public class SmartOptimizer : GLib.Object {
             if (val != null) list.add (val);
         }
 
-        values_out = new double[list.length];
+        if (list.length > int.MAX) {
+            values_out = {};
+            return;
+        }
+
+        values_out = new double[(int) list.length];
         for (int i = 0; i < list.length; i++) values_out[i] = list[i];
     }
 
