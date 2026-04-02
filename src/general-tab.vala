@@ -14,6 +14,17 @@ public class GeneralCropSettingsSnapshot : Object {
     public string crop_value = "";
 }
 
+public class GeneralTimingSettingsSnapshot : Object {
+    public bool seek_enabled = false;
+    public double seek_hours = 0.0;
+    public double seek_minutes = 0.0;
+    public double seek_seconds = 0.0;
+    public bool time_enabled = false;
+    public double time_hours = 0.0;
+    public double time_minutes = 0.0;
+    public double time_seconds = 0.0;
+}
+
 public class GeneralTab : Box {
     private const double SPEED_MIN_PERCENT = -99.0;
     private const double SPEED_MAX_PERCENT = 100.0;
@@ -29,6 +40,14 @@ public class GeneralTab : Box {
         "Remove black bars or unwanted borders";
     private const string LOCK_REASON_CROP_COMBINE =
         "Disabled while Combine re-encode is active — Combine does not support General crop";
+    private const string SEEK_SUBTITLE_DEFAULT =
+        "Start encoding from a specific timestamp";
+    private const string TIME_SUBTITLE_DEFAULT =
+        "Limit the output to a specific length";
+    private const string LOCK_REASON_TIMING_TRIM =
+        "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
+    private const string LOCK_REASON_TIMING_COMBINE =
+        "Disabled while Combine is open — trim clips before combining";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -72,6 +91,8 @@ public class GeneralTab : Box {
 
     private Adw.ExpanderRow seek_expander;
     private Adw.ExpanderRow time_expander;
+    private bool trim_timing_locked = false;
+    private bool combine_timing_locked = false;
 
     // ── Video Filters (separate panel) ───────────────────────────────────────
     public VideoFilters video_filters   { get; private set; }
@@ -418,7 +439,7 @@ public class GeneralTab : Box {
 
         seek_expander = new Adw.ExpanderRow ();
         seek_expander.set_title ("Seek");
-        seek_expander.set_subtitle ("Start encoding from a specific timestamp");
+        seek_expander.set_subtitle (SEEK_SUBTITLE_DEFAULT);
         seek_expander.set_show_enable_switch (true);
         seek_expander.set_enable_expansion (false);
 
@@ -443,7 +464,7 @@ public class GeneralTab : Box {
 
         time_expander = new Adw.ExpanderRow ();
         time_expander.set_title ("Duration");
-        time_expander.set_subtitle ("Limit the output to a specific length");
+        time_expander.set_subtitle (TIME_SUBTITLE_DEFAULT);
         time_expander.set_show_enable_switch (true);
         time_expander.set_enable_expansion (false);
 
@@ -802,6 +823,35 @@ public class GeneralTab : Box {
         update_crop_lock_state ();
     }
 
+    public GeneralTimingSettingsSnapshot snapshot_timing_only () {
+        var snapshot = new GeneralTimingSettingsSnapshot ();
+        snapshot.seek_enabled = seek_check.active;
+        snapshot.seek_hours = seek_hh.get_value ();
+        snapshot.seek_minutes = seek_mm.get_value ();
+        snapshot.seek_seconds = seek_ss.get_value ();
+        snapshot.time_enabled = time_check.active;
+        snapshot.time_hours = time_hh.get_value ();
+        snapshot.time_minutes = time_mm.get_value ();
+        snapshot.time_seconds = time_ss.get_value ();
+        return snapshot;
+    }
+
+    public void restore_timing_only (GeneralTimingSettingsSnapshot snapshot) {
+        seek_hh.set_value (snapshot.seek_hours);
+        seek_mm.set_value (snapshot.seek_minutes);
+        seek_ss.set_value (snapshot.seek_seconds);
+        time_hh.set_value (snapshot.time_hours);
+        time_mm.set_value (snapshot.time_minutes);
+        time_ss.set_value (snapshot.time_seconds);
+        seek_check.set_active (snapshot.seek_enabled && !is_timing_locked_effective ());
+        time_check.set_active (snapshot.time_enabled && !is_timing_locked_effective ());
+    }
+
+    public void set_combine_timing_constraint (bool constrained) {
+        combine_timing_locked = constrained;
+        update_timing_lock_state ();
+    }
+
     private void update_scaling_visibility () {
         string mode = get_scale_mode_text ();
         bool is_resolution  = (mode == ScaleMode.RESOLUTION);
@@ -840,7 +890,6 @@ public class GeneralTab : Box {
     //  re-expand or re-activate — the user may have intentionally left them off.
     // ═════════════════════════════════════════════════════════════════════════
 
-    private const string LOCK_REASON = "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
     private const string LOCK_REASON_CROP = "Disabled while using crop modes in the Crop & Trim tab — switch to Trim Only or Chapter Split mode to unlock";
 
     /**
@@ -856,7 +905,8 @@ public class GeneralTab : Box {
         if (mode == -1) {
             // Crop & Trim tab is not the active tab — unlock everything so
             // the General tab can be used freely with any codec tab.
-            set_timing_locked (false);
+            trim_timing_locked = false;
+            update_timing_lock_state ();
             trim_crop_locked = false;
             update_crop_lock_state ();
             return;
@@ -869,12 +919,18 @@ public class GeneralTab : Box {
         // Crop is conflicted when the interactive overlay is in play
         bool lock_crop   = (mode == 1 || mode == 2);   // CROP_ONLY or TRIM_AND_CROP
 
-        set_timing_locked (lock_timing);
+        trim_timing_locked = lock_timing;
+        update_timing_lock_state ();
         trim_crop_locked = lock_crop;
         update_crop_lock_state ();
     }
 
-    private void set_timing_locked (bool locked) {
+    private bool is_timing_locked_effective () {
+        return trim_timing_locked || combine_timing_locked;
+    }
+
+    private void update_timing_lock_state () {
+        bool locked = is_timing_locked_effective ();
         if (locked) {
             // Collapse and deactivate first so the values don't reach ffmpeg
             seek_check.set_active (false);
@@ -884,13 +940,24 @@ public class GeneralTab : Box {
 
             seek_expander.set_sensitive (false);
             time_expander.set_sensitive (false);
-
-            seek_expander.set_tooltip_text (LOCK_REASON);
-            time_expander.set_tooltip_text (LOCK_REASON);
         } else {
             seek_expander.set_sensitive (true);
             time_expander.set_sensitive (true);
+        }
 
+        if (combine_timing_locked) {
+            seek_expander.set_subtitle (LOCK_REASON_TIMING_COMBINE);
+            time_expander.set_subtitle (LOCK_REASON_TIMING_COMBINE);
+            seek_expander.set_tooltip_text (LOCK_REASON_TIMING_COMBINE);
+            time_expander.set_tooltip_text (LOCK_REASON_TIMING_COMBINE);
+        } else if (trim_timing_locked) {
+            seek_expander.set_subtitle (SEEK_SUBTITLE_DEFAULT);
+            time_expander.set_subtitle (TIME_SUBTITLE_DEFAULT);
+            seek_expander.set_tooltip_text (LOCK_REASON_TIMING_TRIM);
+            time_expander.set_tooltip_text (LOCK_REASON_TIMING_TRIM);
+        } else {
+            seek_expander.set_subtitle (SEEK_SUBTITLE_DEFAULT);
+            time_expander.set_subtitle (TIME_SUBTITLE_DEFAULT);
             seek_expander.set_tooltip_text (null);
             time_expander.set_tooltip_text (null);
         }
@@ -1150,6 +1217,22 @@ public class GeneralTab : Box {
 
     internal string get_crop_subtitle_for_widget_test () {
         return crop_expander.get_subtitle () ?? "";
+    }
+
+    internal bool get_seek_expander_sensitive_for_widget_test () {
+        return seek_expander.get_sensitive ();
+    }
+
+    internal bool get_time_expander_sensitive_for_widget_test () {
+        return time_expander.get_sensitive ();
+    }
+
+    internal string get_seek_subtitle_for_widget_test () {
+        return seek_expander.get_subtitle () ?? "";
+    }
+
+    internal string get_time_subtitle_for_widget_test () {
+        return time_expander.get_subtitle () ?? "";
     }
 #endif
 

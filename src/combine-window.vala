@@ -6,11 +6,16 @@ using GLib;
 //  CombineWindow — Standalone window for joining multiple video files
 //
 //  Supports copy mode (lossless, strict match) and re-encode mode with full
-//  normalization.  Participates in MainWindow's single-operation model via a
-//  bool-returning reservation delegate and completion signals.
+//  normalization. Uses MainWindow's output folder as the single output
+//  location source of truth, and participates in MainWindow's single-
+//  operation model via a bool-returning reservation delegate and completion
+//  signals.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public delegate bool ReserveOperationFunc (out uint64 operation_id);
+// Returns the current MainWindow output folder so Combine stays in sync even
+// after the window is already open.
+public delegate string GetOutputFolderFunc ();
 
 public interface IOperationStateSource : Object {
     public signal void operation_state_changed (bool is_idle);
@@ -112,7 +117,7 @@ public class CombineWindow : Adw.Window {
     private X264Tab x264_tab;
     private Vp9Tab vp9_tab;
     private GeneralTab general_tab;
-    private string initial_output_folder;
+    private GetOutputFolderFunc get_output_folder;
     private ReserveOperationFunc reserve_operation;
     private unowned IOperationStateSource op_state_source;
     private ulong op_state_handler_id = 0;
@@ -149,9 +154,6 @@ public class CombineWindow : Adw.Window {
     private bool user_prefers_crossfade = false;
     private bool crossfade_updating = false;
 
-    // ── Output folder ───────────────────────────────────────────────────────
-    private PathBreadcrumb output_entry;
-
     // ── Action area ─────────────────────────────────────────────────────────
     private Button combine_button;
     private Button cancel_button;
@@ -182,6 +184,8 @@ public class CombineWindow : Adw.Window {
     // ── Crossfade/fade constraint ──────────────────────────────────────────
     private BaseCodecTab? constrained_codec_tab = null;
     private AudioProcessingSettingsSnapshot? saved_fade_snapshot = null;
+    private bool general_timing_constrained = false;
+    private GeneralTimingSettingsSnapshot? saved_general_timing_snapshot = null;
     private bool general_speed_constrained = false;
     private GeneralSpeedSettingsSnapshot? saved_general_speed_snapshot = null;
     private bool general_crop_constrained = false;
@@ -200,7 +204,7 @@ public class CombineWindow : Adw.Window {
                           X264Tab x264_tab,
                           Vp9Tab vp9_tab,
                           GeneralTab general_tab,
-                          string output_folder,
+                          owned GetOutputFolderFunc get_output_folder,
                           StatusArea? status_area,
                           ConsoleTab? console_tab,
                           owned ReserveOperationFunc reserve_operation,
@@ -211,7 +215,7 @@ public class CombineWindow : Adw.Window {
         this.x264_tab = x264_tab;
         this.vp9_tab = vp9_tab;
         this.general_tab = general_tab;
-        this.initial_output_folder = output_folder;
+        this.get_output_folder = (owned) get_output_folder;
         this.main_status_area = status_area;
         this.main_console_tab = console_tab;
         this.reserve_operation = (owned) reserve_operation;
@@ -226,6 +230,7 @@ public class CombineWindow : Adw.Window {
         set_default_size (680, 720);
 
         build_ui ();
+        sync_general_timing_constraint ();
         set_operation_idle (op_state_source.is_operation_idle ());
         update_combine_sensitivity ();
     }
@@ -248,28 +253,6 @@ public class CombineWindow : Adw.Window {
         content.set_margin_bottom (12);
         content.set_margin_start (12);
         content.set_margin_end (12);
-
-        // ── Output folder row ───────────────────────────────────────────────
-        var output_group = new Adw.PreferencesGroup ();
-        output_group.set_title ("Output");
-
-        var output_row = new Box (Orientation.HORIZONTAL, 6);
-        output_entry = new PathBreadcrumb ("Same as first file");
-        output_entry.set_hexpand (true);
-        if (initial_output_folder.length > 0) {
-            output_entry.set_text (initial_output_folder);
-        }
-
-        var output_browse = new Button.from_icon_name ("folder-open-symbolic");
-        output_browse.set_tooltip_text ("Select output folder");
-        output_browse.add_css_class ("flat");
-        output_browse.set_valign (Align.CENTER);
-        output_browse.clicked.connect (on_output_browse_clicked);
-
-        output_row.append (output_entry);
-        output_row.append (output_browse);
-        output_group.add (output_row);
-        content.append (output_group);
 
         // ── Files group ─────────────────────────────────────────────────────
         files_group = new Adw.PreferencesGroup ();
@@ -518,6 +501,7 @@ public class CombineWindow : Adw.Window {
             return true;  // block close
         }
 
+        release_general_timing_constraint ();
         release_general_crop_constraint ();
         release_general_speed_constraint ();
         release_crossfade_fade_constraint ();
@@ -1227,8 +1211,8 @@ public class CombineWindow : Adw.Window {
 
         bool is_copy = copy_mode_switch.active;
 
-        // ── Compute output path ─────────────────────────────────────────────
-        string out_folder = output_entry.get_text ();
+        // ── Compute output path from the shared MainWindow output folder ───
+        string out_folder = get_current_output_folder ();
         string computed_output;
 
         if (is_copy) {
@@ -1484,6 +1468,39 @@ public class CombineWindow : Adw.Window {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  GENERAL TIMING CONSTRAINT
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private bool is_general_timing_constraint_active () {
+        return true;
+    }
+
+    private void sync_general_timing_constraint () {
+        if (is_general_timing_constraint_active ()) {
+            if (!general_timing_constrained) {
+                saved_general_timing_snapshot = general_tab.snapshot_timing_only ();
+            }
+            general_tab.set_combine_timing_constraint (true);
+            general_timing_constrained = true;
+        } else {
+            release_general_timing_constraint ();
+        }
+    }
+
+    private void release_general_timing_constraint () {
+        if (!general_timing_constrained) {
+            return;
+        }
+
+        general_tab.set_combine_timing_constraint (false);
+        if (saved_general_timing_snapshot != null) {
+            general_tab.restore_timing_only (saved_general_timing_snapshot);
+            saved_general_timing_snapshot = null;
+        }
+        general_timing_constrained = false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  GENERAL CROP CONSTRAINT
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -1672,28 +1689,17 @@ public class CombineWindow : Adw.Window {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  OUTPUT FOLDER
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private void on_output_browse_clicked () {
-        var dialog = new FileDialog ();
-        dialog.title = "Select Output Folder";
-
-        dialog.select_folder.begin (this, null, (obj, res) => {
-            try {
-                var folder = dialog.select_folder.end (res);
-                if (folder != null) output_entry.set_text (folder.get_path () ?? "");
-            } catch (Error e) {
-                if (!(e is Gtk.DialogError.DISMISSED)) {
-                    warning ("Output folder dialog error: %s", e.message);
-                }
-            }
-        });
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
+
+    private string get_current_output_folder () {
+        if (get_output_folder == null) {
+            return "";
+        }
+
+        string? output_folder = get_output_folder ();
+        return output_folder ?? "";
+    }
 
     private static bool is_video_file (string path) {
         string lower = path.down ();
@@ -1985,8 +1991,24 @@ public class CombineWindow : Adw.Window {
         return general_speed_constrained;
     }
 
+    internal bool get_general_timing_constrained_for_widget_test () {
+        return general_timing_constrained;
+    }
+
     internal bool get_general_crop_constrained_for_widget_test () {
         return general_crop_constrained;
+    }
+
+    internal void release_general_timing_constraint_for_widget_test () {
+        release_general_timing_constraint ();
+    }
+
+    internal void sync_general_timing_constraint_for_widget_test () {
+        sync_general_timing_constraint ();
+    }
+
+    internal void click_combine_for_widget_test () {
+        on_combine_clicked ();
     }
 #endif
 }

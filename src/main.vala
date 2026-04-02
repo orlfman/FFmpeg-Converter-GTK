@@ -2006,7 +2006,9 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             combine_window = new CombineWindow (
                 svt_tab, x265_tab, x264_tab, vp9_tab,
                 general_tab,
-                file_pickers.output_entry.get_text (),
+                () => {
+                    return file_pickers.output_entry.get_text ();
+                },
                 status_area,
                 console_tab,
                 (out operation_id) => {

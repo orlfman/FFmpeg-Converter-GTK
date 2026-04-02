@@ -256,6 +256,7 @@ private class TestOperationStateSource : Object, IOperationStateSource {
 private class CombineWindowHarness : Object {
     public TestOperationStateSource op_state { get; private set; }
     public CombineWindow window { get; private set; }
+    public string output_folder { get; set; default = "/tmp"; }
     private uint64 next_operation_id = 1;
 
     public CombineWindowHarness () {
@@ -266,7 +267,9 @@ private class CombineWindowHarness : Object {
             new X264Tab (),
             new Vp9Tab (),
             new GeneralTab (),
-            "/tmp",
+            () => {
+                return output_folder;
+            },
             new StatusArea (),
             new ConsoleTab (),
             (out operation_id) => {
@@ -737,6 +740,30 @@ private void test_pending_overwrite_freezes_launch_file_list () {
     assert_true (
         harness.window.get_last_launched_copy_mode_for_widget_test (),
         "overwrite launch preserves frozen copy mode");
+
+    harness.window.close ();
+}
+
+private void test_combine_uses_live_main_output_folder () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.load_files_for_widget_test ({
+        "/tmp/first.mkv",
+        "/tmp/second.mkv"
+    });
+
+    harness.output_folder = "/tmp/initial-output";
+    harness.output_folder = "/tmp/updated-output";
+
+    harness.window.enable_launch_capture_for_widget_test ();
+    harness.window.click_combine_for_widget_test ();
+
+    assert_string_equal (
+        harness.window.get_last_launched_output_for_widget_test (),
+        "/tmp/updated-output/first-combined.mkv",
+        "combine launch uses the current main output folder");
 
     harness.window.close ();
 }
@@ -1665,6 +1692,108 @@ private void test_combine_launch_snapshot_omits_general_crop_filter_when_constra
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  GENERAL TIMING CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void configure_general_timing_state (GeneralTab general,
+                                             bool seek_enabled,
+                                             int seek_h,
+                                             int seek_m,
+                                             int seek_s,
+                                             bool time_enabled,
+                                             int time_h,
+                                             int time_m,
+                                             int time_s) {
+    general.seek_hh.set_value (seek_h);
+    general.seek_mm.set_value (seek_m);
+    general.seek_ss.set_value (seek_s);
+    general.time_hh.set_value (time_h);
+    general.time_mm.set_value (time_m);
+    general.time_ss.set_value (time_s);
+    general.seek_check.set_active (seek_enabled);
+    general.time_check.set_active (time_enabled);
+}
+
+private void test_combine_open_applies_general_timing_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    assert_true (harness.window.get_general_timing_constrained_for_widget_test (),
+        "combine window applies general timing constraint on open");
+    assert_false (general.seek_check.active,
+        "seek toggle cleared while constrained");
+    assert_false (general.time_check.active,
+        "duration toggle cleared while constrained");
+    assert_false (general.get_seek_expander_sensitive_for_widget_test (),
+        "seek expander disabled while constrained");
+    assert_false (general.get_time_expander_sensitive_for_widget_test (),
+        "duration expander disabled while constrained");
+    assert_contains (general.get_seek_subtitle_for_widget_test (),
+        "Disabled while Combine is open",
+        "seek subtitle explains constraint");
+    assert_contains (general.get_time_subtitle_for_widget_test (),
+        "Disabled while Combine is open",
+        "duration subtitle explains constraint");
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_restores_general_timing_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    harness.window.release_general_timing_constraint_for_widget_test ();
+    configure_general_timing_state (general, true, 0, 1, 5, true, 0, 0, 30);
+    harness.window.sync_general_timing_constraint_for_widget_test ();
+    harness.window.invoke_close_request_for_widget_test ();
+
+    assert_false (harness.window.get_general_timing_constrained_for_widget_test (),
+        "closing combine releases general timing constraint");
+    assert_true (general.seek_check.active,
+        "seek toggle restored after window close");
+    assert_true (general.time_check.active,
+        "duration toggle restored after window close");
+    assert_true (general.get_seek_expander_sensitive_for_widget_test (),
+        "seek expander re-enabled after window close");
+    assert_true (general.get_time_expander_sensitive_for_widget_test (),
+        "duration expander re-enabled after window close");
+    assert_string_equal (general.get_seek_timestamp (), "00:01:05",
+        "seek timestamp restored after window close");
+    assert_string_equal (general.get_time_timestamp (), "00:00:30",
+        "duration restored after window close");
+
+    harness.window.close ();
+}
+
+private void test_combine_timing_constraint_does_not_override_trim_timing_lock () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    general.notify_trim_tab_mode (0);  // Trim timing lock active
+    harness.window.release_general_timing_constraint_for_widget_test ();
+
+    assert_false (harness.window.get_general_timing_constrained_for_widget_test (),
+        "combine timing constraint released");
+    assert_false (general.seek_check.active,
+        "seek remains disabled while trim timing lock is active");
+    assert_false (general.time_check.active,
+        "duration remains disabled while trim timing lock is active");
+    assert_false (general.get_seek_expander_sensitive_for_widget_test (),
+        "trim timing lock remains in effect for seek after combine releases");
+    assert_false (general.get_time_expander_sensitive_for_widget_test (),
+        "trim timing lock remains in effect for duration after combine releases");
+
+    general.notify_trim_tab_mode (-1);
+    harness.window.close ();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  FADE / CROSSFADE CONSTRAINT TESTS
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -2506,6 +2635,8 @@ void main (string[] args) {
         test_reencode_codec_subtitle_describes_supported_general_settings);
     Test.add_func ("/combine/overwrite/freezes-launch-file-list",
         test_pending_overwrite_freezes_launch_file_list);
+    Test.add_func ("/combine/window/uses-live-main-output-folder",
+        test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
         test_idle_close_request_cancels_pending_probes);
 
@@ -2584,6 +2715,14 @@ void main (string[] args) {
         test_combine_crop_constraint_does_not_override_trim_crop_lock);
     Test.add_func ("/combine/general-crop/launch-omits-crop-filter",
         test_combine_launch_snapshot_omits_general_crop_filter_when_constrained);
+
+    // General timing constraint tests
+    Test.add_func ("/combine/general-timing/open-applies-constraint",
+        test_combine_open_applies_general_timing_constraint);
+    Test.add_func ("/combine/general-timing/close-restores-state",
+        test_closing_combine_window_restores_general_timing_state);
+    Test.add_func ("/combine/general-timing/trim-lock-survives-release",
+        test_combine_timing_constraint_does_not_override_trim_timing_lock);
 
     // Fade/crossfade UI constraint tests
     Test.add_func ("/combine/constraint/crossfade-clears-and-disables-fades",
