@@ -453,14 +453,10 @@ public class CombineWindow : Adw.Window {
         active_operation_id = 0;
         operation_reserved = false;
 
-        Cancellable? cancellable = pending_overwrite_cancellable;
         Adw.AlertDialog? dialog = pending_overwrite_dialog;
         pending_overwrite_cancellable = null;
         pending_overwrite_dialog = null;
 
-        if (cancellable != null) {
-            cancellable.cancel ();
-        }
         if (dialog != null) {
             dialog.force_close ();
         }
@@ -1265,6 +1261,10 @@ public class CombineWindow : Adw.Window {
                 }
 
                 string response = dialog.choose.end (res);
+#if COMBINE_WINDOW_TEST_BUILD
+                pending_overwrite_response_count_for_widget_test++;
+                last_pending_overwrite_response_for_widget_test = response;
+#endif
                 handle_overwrite_dialog_response (op_id, request, response);
             });
             return;
@@ -1984,6 +1984,8 @@ public class CombineWindow : Adw.Window {
     private string last_launched_output_for_widget_test = "";
     private bool last_launched_copy_mode_for_widget_test = false;
     private EncodeProfileSnapshot? last_launched_profile_for_widget_test = null;
+    private uint pending_overwrite_response_count_for_widget_test = 0;
+    private string? last_pending_overwrite_response_for_widget_test = null;
 
     internal void enable_launch_capture_for_widget_test () {
         capture_launch_request_for_widget_test = true;
@@ -2051,6 +2053,19 @@ public class CombineWindow : Adw.Window {
 
     internal bool has_pending_overwrite_cancellable_for_widget_test () {
         return pending_overwrite_cancellable != null;
+    }
+
+    internal void reset_pending_overwrite_response_capture_for_widget_test () {
+        pending_overwrite_response_count_for_widget_test = 0;
+        last_pending_overwrite_response_for_widget_test = null;
+    }
+
+    internal uint get_pending_overwrite_response_count_for_widget_test () {
+        return pending_overwrite_response_count_for_widget_test;
+    }
+
+    internal string get_last_pending_overwrite_response_for_widget_test () {
+        return last_pending_overwrite_response_for_widget_test ?? "";
     }
 
     internal bool is_operation_reserved_for_widget_test () {

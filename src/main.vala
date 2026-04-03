@@ -1740,15 +1740,10 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     private void dismiss_active_preflight_dialog () {
-        Cancellable? cancellable = active_preflight_dialog_cancellable;
         Adw.AlertDialog? dialog = active_preflight_dialog;
 
         active_preflight_dialog_cancellable = null;
         active_preflight_dialog = null;
-
-        if (cancellable != null) {
-            cancellable.cancel ();
-        }
 
         if (dialog != null) {
             dialog.force_close ();

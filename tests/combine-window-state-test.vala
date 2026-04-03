@@ -34,6 +34,34 @@ private void assert_contains (string actual, string expected_fragment, string co
     }
 }
 
+private bool spin_main_context_until (owned SourceFunc done, int max_spins = 50) {
+    MainContext context = MainContext.default ();
+
+    for (int i = 0; i < max_spins; i++) {
+        while (context.pending ()) {
+            context.iteration (false);
+        }
+        if (done ()) {
+            return true;
+        }
+
+        Timeout.add (1, () => {
+            return Source.REMOVE;
+        });
+        context.iteration (true);
+
+        if (done ()) {
+            return true;
+        }
+    }
+
+    while (context.pending ()) {
+        context.iteration (false);
+    }
+
+    return done ();
+}
+
 private void assert_array_contains (string[] values, string expected, string context) {
     foreach (string value in values) {
         if (value == expected) {
@@ -520,6 +548,78 @@ private void test_pending_overwrite_cancelled_by_main_window_is_ignored () {
         "stale overwrite cancel callback is ignored after main-window cancel");
 
     harness.window.close ();
+}
+
+private void test_pending_overwrite_real_dialog_dismiss_returns_cancel_response () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var settings = AppSettings.get_default ();
+    bool previous_overwrite_enabled = settings.overwrite_enabled;
+    OutputNameMode previous_output_name_mode = settings.output_name_mode;
+    string temp_dir = "";
+    var harness = new CombineWindowHarness ();
+
+    try {
+        settings.overwrite_enabled = false;
+        settings.output_name_mode = OutputNameMode.DEFAULT;
+
+        temp_dir = DirUtils.make_tmp ("combine-overwrite-dialog-XXXXXX");
+        harness.output_folder = temp_dir;
+        harness.window.present ();
+
+        harness.window.load_files_for_widget_test ({
+            "/tmp/first.mkv",
+            "/tmp/second.mkv"
+        });
+        harness.window.reset_pending_overwrite_response_capture_for_widget_test ();
+
+        string existing_output = Path.build_filename (temp_dir, "first-combined.mkv");
+        FileUtils.set_contents (existing_output, "existing output");
+
+        harness.window.click_combine_for_widget_test ();
+
+        assert_true (
+            harness.window.has_pending_overwrite_dialog_for_widget_test (),
+            "real combine launch opens an overwrite dialog when output exists");
+        assert_true (
+            harness.window.has_pending_overwrite_cancellable_for_widget_test (),
+            "real combine launch tracks the overwrite cancellable");
+
+        harness.window.cancel_pending_combine ();
+
+        assert_true (
+            spin_main_context_until (() => {
+                return harness.window.get_pending_overwrite_response_count_for_widget_test () > 0;
+            }),
+            "real overwrite dialog callback completes after external dismiss");
+        assert_string_equal (
+            harness.window.get_last_pending_overwrite_response_for_widget_test (),
+            "cancel",
+            "external dialog dismiss resolves choose() with the close response");
+        assert_false (
+            harness.window.has_pending_overwrite_dialog_for_widget_test (),
+            "external dismiss clears the live overwrite dialog reference");
+        assert_false (
+            harness.window.has_pending_overwrite_cancellable_for_widget_test (),
+            "external dismiss clears the live overwrite cancellable reference");
+        assert_false (
+            harness.window.is_operation_reserved_for_widget_test (),
+            "external dismiss keeps the combine reservation cleared");
+        assert_uint64_equal (
+            harness.window.get_active_operation_id_for_widget_test (),
+            0,
+            "external dismiss keeps the active combine operation cleared");
+    } catch (Error e) {
+        Test.fail_printf ("real overwrite dialog widget test setup failed: %s", e.message);
+    } finally {
+        harness.window.close ();
+        settings.overwrite_enabled = previous_overwrite_enabled;
+        settings.output_name_mode = previous_output_name_mode;
+        if (temp_dir != "") {
+            cleanup_exec_test_dir (temp_dir);
+        }
+    }
 }
 
 private void test_probe_completion_updates_reordered_file_row () {
@@ -3217,6 +3317,8 @@ void main (string[] args) {
         test_runner_binding_relays_cancelled_signal);
     Test.add_func ("/combine/overwrite/main-window-cancel-ignores-stale-callback",
         test_pending_overwrite_cancelled_by_main_window_is_ignored);
+    Test.add_func ("/combine/overwrite/real-dialog-dismiss-returns-cancel-response",
+        test_pending_overwrite_real_dialog_dismiss_returns_cancel_response);
     Test.add_func ("/combine/probe/reordered-row-identity",
         test_probe_completion_updates_reordered_file_row);
     Test.add_func ("/combine/runner/copy-command-maps-primary-streams",
