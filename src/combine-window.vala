@@ -189,6 +189,7 @@ public class CombineWindow : Adw.Window {
     private GeneralSpeedSettingsSnapshot? saved_general_speed_snapshot = null;
     private bool general_crop_constrained = false;
     private GeneralCropSettingsSnapshot? saved_general_crop_snapshot = null;
+    private bool watermark_forces_reencode = false;
 
     // ── Drag-and-drop reorder ───────────────────────────────────────────────
     private int _drag_from_idx = -1;
@@ -232,6 +233,11 @@ public class CombineWindow : Adw.Window {
         sync_general_timing_constraint ();
         set_operation_idle (op_state_source.is_operation_idle ());
         update_combine_sensitivity ();
+
+        // React to watermark changes while Combine is open
+        general_tab.watermark_toggled.connect (() => {
+            sync_general_watermark_constraint ();
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1076,6 +1082,7 @@ public class CombineWindow : Adw.Window {
         sync_crossfade_fade_constraint ();
         sync_general_speed_constraint ();
         sync_general_crop_constraint ();
+        sync_general_watermark_constraint ();
     }
 
     private void update_crossfade_visibility () {
@@ -1568,6 +1575,35 @@ public class CombineWindow : Adw.Window {
             saved_general_speed_snapshot = null;
         }
         general_speed_constrained = false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  GENERAL WATERMARK CONSTRAINT
+    //
+    //  When watermark is effectively active and Combine is in re-encode mode,
+    //  watermark is applied post-output automatically via the filter chain.
+    //  When Combine is in copy mode, watermark cannot be applied — so if the
+    //  user has watermark active, force re-encode.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void sync_general_watermark_constraint () {
+        bool active = general_tab.is_watermark_effectively_enabled ();
+        bool was_active = watermark_forces_reencode;
+        watermark_forces_reencode = active;
+
+        if (active) {
+            if (copy_mode_switch.active) {
+                copy_mode_updating = true;
+                copy_mode_switch.set_active (false);
+                copy_mode_updating = false;
+            }
+            copy_mode_switch.set_sensitive (false);
+        } else if (was_active) {
+            // Watermark just became inactive — delegate to the central
+            // eligibility check so SAR mismatches, codec incompatibility,
+            // and other constraints are respected.
+            update_copy_mode_eligibility ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2166,6 +2202,10 @@ public class CombineWindow : Adw.Window {
 
     internal bool get_general_crop_constrained_for_widget_test () {
         return general_crop_constrained;
+    }
+
+    internal bool get_watermark_forces_reencode_for_widget_test () {
+        return watermark_forces_reencode;
     }
 
     internal void release_general_timing_constraint_for_widget_test () {

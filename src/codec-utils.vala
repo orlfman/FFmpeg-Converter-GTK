@@ -43,6 +43,13 @@ public class GeneralSettingsSnapshot : Object {
     public string color_filter = "";
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
+    public bool watermark_enabled = false;
+    public string watermark_text = "";
+    public string watermark_position = "Bottom Right";
+    public string watermark_color = "ffffff";
+    public double watermark_opacity = 0.5;
+    public int watermark_margin = 10;
+    public int watermark_font_size = 24;
 }
 
 public class CodecTabSettingsSnapshot : Object {

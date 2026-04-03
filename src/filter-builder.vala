@@ -218,6 +218,11 @@ namespace FilterBuilder {
         if (cc.length > 0)
             filters += cc;
 
+        // 10. Watermark (last — positioned against final output geometry)
+        string? wm = build_drawtext_filter (snapshot);
+        if (wm != null)
+            filters += wm;
+
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 
@@ -251,6 +256,12 @@ namespace FilterBuilder {
         foreach (string f in get_pixel_format_filters (snapshot)) {
             filters += f;
         }
+
+        // Watermark (last — positioned against final combined output geometry)
+        string? wm = build_drawtext_filter (snapshot);
+        if (wm != null)
+            filters += wm;
+
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 
@@ -497,6 +508,82 @@ namespace FilterBuilder {
         }
 
         return merged;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  WATERMARK (DRAWTEXT)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private string escape_drawtext_text (string text) {
+        // FFmpeg drawtext uses : as key-value separator and \ as escape.
+        // With expansion=none, % is safe, but we still escape the structural chars.
+        // Use get_char / next_char for proper UTF-8 iteration.
+        var escaped = new StringBuilder ();
+        int idx = 0;
+        unichar c;
+        while (text.get_next_char (ref idx, out c)) {
+            if (c == '\\' || c == ':' || c == '\'' || c == '[' || c == ']') {
+                escaped.append_unichar ('\\');
+            }
+            escaped.append_unichar (c);
+        }
+        return escaped.str;
+    }
+
+    private bool is_color_bright (string hex) {
+        // Relative luminance check (ITU-R BT.601):
+        //   L = 0.299*R + 0.587*G + 0.114*B
+        // Bright colors get a dark shadow; dark colors get a light shadow.
+        uint64 val;
+        if (!uint64.try_parse ("0x" + hex, out val)) return true;
+        double r = ((val >> 16) & 0xff) / 255.0;
+        double g = ((val >> 8) & 0xff) / 255.0;
+        double b = (val & 0xff) / 255.0;
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 0.5;
+    }
+
+    private string? build_drawtext_filter (GeneralSettingsSnapshot snapshot) {
+        if (!snapshot.watermark_enabled) return null;
+
+        string text = snapshot.watermark_text;
+        if (text.length == 0) return null;
+
+        double opacity = snapshot.watermark_opacity.clamp (0.05, 1.0);
+        int margin = int.max (0, snapshot.watermark_margin);
+        int font_size = int.max (8, snapshot.watermark_font_size);
+        string position = snapshot.watermark_position;
+
+        string x_expr;
+        string y_expr;
+
+        // Map position presets to FFmpeg expressions
+        if (position == "Top Left") {
+            x_expr = "%d".printf (margin);
+            y_expr = "%d".printf (margin);
+        } else if (position == "Top Right") {
+            x_expr = "w-text_w-%d".printf (margin);
+            y_expr = "%d".printf (margin);
+        } else if (position == "Bottom Left") {
+            x_expr = "%d".printf (margin);
+            y_expr = "h-text_h-%d".printf (margin);
+        } else if (position == "Bottom Right") {
+            x_expr = "w-text_w-%d".printf (margin);
+            y_expr = "h-text_h-%d".printf (margin);
+        } else {
+            // Center
+            x_expr = "(w-text_w)/2";
+            y_expr = "(h-text_h)/2";
+        }
+
+        string escaped_text = escape_drawtext_text (text);
+        string color_hex = snapshot.watermark_color;
+        if (color_hex.length != 6) color_hex = "ffffff";
+
+        string alpha_str = ConversionUtils.format_ffmpeg_double (opacity, "%.2f");
+        string shadow_color = is_color_bright (color_hex) ? "black" : "white";
+
+        return "drawtext=text='%s':fontsize=%d:fontcolor=0x%s@%s:shadowcolor=%s@0.5:shadowx=2:shadowy=2:x=%s:y=%s:expansion=none".printf (
+            escaped_text, font_size, color_hex, alpha_str, shadow_color, x_expr, y_expr);
     }
 
     // Detect Crop helper

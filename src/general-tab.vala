@@ -48,6 +48,10 @@ public class GeneralTab : Box {
         "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
     private const string LOCK_REASON_TIMING_COMBINE =
         "Disabled while Combine is open — trim clips before combining";
+    private const string WATERMARK_SUBTITLE_DEFAULT =
+        "Overlay text on the video";
+    private const string WATERMARK_DRAWTEXT_UNAVAILABLE =
+        "Unavailable — the selected FFmpeg build does not include the drawtext filter";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -122,6 +126,19 @@ public class GeneralTab : Box {
     public Switch preserve_metadata    { get; private set; }
     public Switch remove_chapters      { get; private set; }
 
+    // ── Watermark ───────────────────────────────────────────────────────────
+    public Switch     watermark_check    { get; private set; }
+    public Entry      watermark_text     { get; private set; }
+    public DropDown   watermark_position { get; private set; }
+    public SpinButton watermark_opacity  { get; private set; }
+    public SpinButton watermark_margin   { get; private set; }
+    public SpinButton watermark_font_size { get; private set; }
+    public Gtk.ColorDialogButton watermark_color_button { get; private set; }
+
+    private Adw.ExpanderRow watermark_expander;
+    private bool last_watermark_effective = false;
+    private bool drawtext_available = true;
+
     // ── Forwarding Signals ─────────────────────────────────────────────────
     //    Emitted when the corresponding effective feature state changes.
     //    For speed controls, that means the toggle is on and the percent is
@@ -134,6 +151,8 @@ public class GeneralTab : Box {
     public signal void video_speed_toggled (bool active);
     /** Fired when the Detect Crop button is clicked. */
     public signal void crop_detect_clicked ();
+    /** Fired when effective watermark state changes. */
+    public signal void watermark_toggled (bool active);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -162,7 +181,10 @@ public class GeneralTab : Box {
         // 5. Frame rate & speed adjustments
         build_frame_rate_speed_group ();
 
-        // 6. Metadata controls
+        // 6. Watermark
+        build_watermark_group ();
+
+        // 7. Metadata controls
         build_metadata_group ();
 
         connect_signals ();
@@ -224,6 +246,16 @@ public class GeneralTab : Box {
 
         last_video_speed_effective = active;
         video_speed_toggled (active);
+    }
+
+    private void emit_watermark_if_changed () {
+        bool active = is_watermark_effectively_enabled ();
+        if (active == last_watermark_effective) {
+            return;
+        }
+
+        last_watermark_effective = active;
+        watermark_toggled (active);
     }
 
     private SpinButton create_speed_spin () {
@@ -632,7 +664,103 @@ public class GeneralTab : Box {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  6. METADATA
+    //  6. WATERMARK
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void build_watermark_group () {
+        var group = new Adw.PreferencesGroup ();
+        group.set_title ("Watermark");
+        group.set_description ("Overlay text on the output video");
+
+        watermark_check = new Switch ();
+        watermark_check.set_active (false);
+
+        watermark_expander = new Adw.ExpanderRow ();
+        watermark_expander.set_title ("Watermark");
+        watermark_expander.set_subtitle (WATERMARK_SUBTITLE_DEFAULT);
+        watermark_expander.set_show_enable_switch (true);
+        watermark_expander.set_enable_expansion (false);
+
+        watermark_check.bind_property ("active", watermark_expander, "enable-expansion",
+            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
+
+        // ── Text ─────────────────────────────────────────────────────────────
+        var text_row = new Adw.ActionRow ();
+        text_row.set_title ("Text");
+        text_row.set_subtitle ("The text to display on the video");
+        watermark_text = new Entry ();
+        watermark_text.set_placeholder_text ("e.g. © My Video");
+        watermark_text.set_valign (Align.CENTER);
+        watermark_text.set_width_chars (20);
+        text_row.add_suffix (watermark_text);
+        watermark_expander.add_row (text_row);
+
+        // ── Position ─────────────────────────────────────────────────────────
+        var pos_row = new Adw.ActionRow ();
+        pos_row.set_title ("Position");
+        pos_row.set_subtitle ("Where to place the watermark");
+        watermark_position = new DropDown (new StringList (
+            { "Top Left", "Top Right", "Bottom Left", "Bottom Right", "Center" }
+        ), null);
+        watermark_position.set_valign (Align.CENTER);
+        watermark_position.set_selected (3);  // default: Bottom Right
+        pos_row.add_suffix (watermark_position);
+        watermark_expander.add_row (pos_row);
+
+        // ── Color ─────────────────────────────────────────────────────────────
+        var color_row_wm = new Adw.ActionRow ();
+        color_row_wm.set_title ("Color");
+        color_row_wm.set_subtitle ("Text color — shadow adapts automatically");
+        var color_dialog = new Gtk.ColorDialog ();
+        color_dialog.set_with_alpha (false);
+        watermark_color_button = new Gtk.ColorDialogButton (color_dialog);
+        var default_color = Gdk.RGBA ();
+        default_color.red = 1.0f;
+        default_color.green = 1.0f;
+        default_color.blue = 1.0f;
+        default_color.alpha = 1.0f;
+        watermark_color_button.set_rgba (default_color);
+        watermark_color_button.set_valign (Align.CENTER);
+        color_row_wm.add_suffix (watermark_color_button);
+        watermark_expander.add_row (color_row_wm);
+
+        // ── Opacity ──────────────────────────────────────────────────────────
+        var opacity_row = new Adw.ActionRow ();
+        opacity_row.set_title ("Opacity");
+        opacity_row.set_subtitle ("0.05 = nearly invisible, 1.0 = fully opaque");
+        watermark_opacity = new SpinButton.with_range (0.05, 1.0, 0.05);
+        watermark_opacity.set_value (0.5);
+        watermark_opacity.set_digits (2);
+        watermark_opacity.set_valign (Align.CENTER);
+        opacity_row.add_suffix (watermark_opacity);
+        watermark_expander.add_row (opacity_row);
+
+        // ── Margin ───────────────────────────────────────────────────────────
+        var margin_row = new Adw.ActionRow ();
+        margin_row.set_title ("Margin");
+        margin_row.set_subtitle ("Distance from the edge in pixels");
+        watermark_margin = new SpinButton.with_range (0, 500, 1);
+        watermark_margin.set_value (10);
+        watermark_margin.set_valign (Align.CENTER);
+        margin_row.add_suffix (watermark_margin);
+        watermark_expander.add_row (margin_row);
+
+        // ── Font Size ────────────────────────────────────────────────────────
+        var font_row = new Adw.ActionRow ();
+        font_row.set_title ("Font Size");
+        font_row.set_subtitle ("Text size in pixels");
+        watermark_font_size = new SpinButton.with_range (8, 200, 1);
+        watermark_font_size.set_value (24);
+        watermark_font_size.set_valign (Align.CENTER);
+        font_row.add_suffix (watermark_font_size);
+        watermark_expander.add_row (font_row);
+
+        group.add (watermark_expander);
+        append (group);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  7. METADATA
     // ═════════════════════════════════════════════════════════════════════════
 
     private void build_metadata_group () {
@@ -703,6 +831,14 @@ public class GeneralTab : Box {
         });
         detect_crop_button.clicked.connect (() => {
             crop_detect_clicked ();
+        });
+
+        // ── Watermark forwarding ────────────────────────────────────────────
+        watermark_check.notify["active"].connect (() => {
+            emit_watermark_if_changed ();
+        });
+        watermark_text.changed.connect (() => {
+            emit_watermark_if_changed ();
         });
     }
 
@@ -777,6 +913,13 @@ public class GeneralTab : Box {
         snapshot.remove_chapters = remove_chapters.active;
         snapshot.video_filters = video_filters.snapshot_settings (
             snapshot.pixel_format.ten_bit_selected);
+        snapshot.watermark_enabled = is_watermark_effectively_enabled ();
+        snapshot.watermark_text = watermark_text.text.strip ();
+        snapshot.watermark_position = get_watermark_position_text ();
+        snapshot.watermark_color = get_watermark_color_hex ();
+        snapshot.watermark_opacity = watermark_opacity.get_value ();
+        snapshot.watermark_margin = (int) watermark_margin.get_value ();
+        snapshot.watermark_font_size = (int) watermark_font_size.get_value ();
         return snapshot;
     }
 
@@ -1251,4 +1394,55 @@ public class GeneralTab : Box {
     // ── Frame Rate ───────────────────────────────────────────────────────────
 
     public string get_custom_frame_rate_text () { return custom_frame_rate.text.strip (); }
+
+    // ── Watermark ────────────────────────────────────────────────────────────
+
+    public bool is_watermark_effectively_enabled () {
+        return drawtext_available
+            && watermark_check.active
+            && watermark_text.text.strip ().length > 0;
+    }
+
+    public void set_drawtext_available (bool available, string? reason = null) {
+        drawtext_available = available;
+
+        if (!available) {
+            watermark_check.set_active (false);
+            watermark_expander.set_enable_expansion (false);
+            watermark_expander.set_sensitive (false);
+            watermark_expander.set_subtitle (
+                reason ?? WATERMARK_DRAWTEXT_UNAVAILABLE);
+            watermark_expander.set_tooltip_text (
+                reason ?? WATERMARK_DRAWTEXT_UNAVAILABLE);
+        } else {
+            watermark_expander.set_sensitive (true);
+            watermark_expander.set_subtitle (WATERMARK_SUBTITLE_DEFAULT);
+            watermark_expander.set_tooltip_text (null);
+        }
+
+        emit_watermark_if_changed ();
+    }
+
+    private string get_watermark_position_text () {
+        var item = watermark_position.selected_item as StringObject;
+        return item != null ? item.string : "Bottom Right";
+    }
+
+    private string get_watermark_color_hex () {
+        Gdk.RGBA rgba = watermark_color_button.get_rgba ();
+        int r = (int) Math.round (rgba.red * 255.0).clamp (0, 255);
+        int g = (int) Math.round (rgba.green * 255.0).clamp (0, 255);
+        int b = (int) Math.round (rgba.blue * 255.0).clamp (0, 255);
+        return "%02x%02x%02x".printf (r, g, b);
+    }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool get_watermark_expander_sensitive_for_widget_test () {
+        return watermark_expander.get_sensitive ();
+    }
+
+    internal string get_watermark_subtitle_for_widget_test () {
+        return watermark_expander.get_subtitle () ?? "";
+    }
+#endif
 }

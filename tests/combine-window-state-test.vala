@@ -3307,6 +3307,210 @@ private void test_codec_tab_container_preference_updates_live_on_settings_change
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  WATERMARK CONSTRAINT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void configure_watermark_state (GeneralTab general,
+                                        bool enabled,
+                                        string text) {
+    general.watermark_text.set_text (text);
+    general.watermark_check.set_active (enabled);
+}
+
+private void test_active_watermark_forces_reencode () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_watermark_state (general, true, "Test Watermark");
+
+    // Switch to re-encode to trigger constraint sync
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    assert_true (harness.window.get_watermark_forces_reencode_for_widget_test (),
+        "watermark forces re-encode when active");
+    assert_false (harness.window.is_copy_mode_sensitive_for_widget_test (),
+        "copy mode switch disabled when watermark active");
+
+    harness.window.close ();
+}
+
+private void test_clearing_watermark_text_releases_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    configure_watermark_state (general, true, "Test Watermark");
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    // Clear the text — watermark becomes effectively inactive
+    general.watermark_text.set_text ("");
+    spin_main_context_until (() => {
+        return !harness.window.get_watermark_forces_reencode_for_widget_test ();
+    });
+
+    assert_false (harness.window.get_watermark_forces_reencode_for_widget_test (),
+        "watermark constraint released after clearing text");
+
+    harness.window.close ();
+}
+
+private void test_watermark_effective_state_requires_text () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+    GeneralTab general = harness.window.get_general_tab_for_widget_test ();
+
+    // Switch on but no text — should not be effectively enabled
+    general.watermark_check.set_active (true);
+    assert_false (general.is_watermark_effectively_enabled (),
+        "watermark not effective with empty text");
+
+    // Add text — now effective
+    general.watermark_text.set_text ("Hello");
+    assert_true (general.is_watermark_effectively_enabled (),
+        "watermark effective with switch on and text present");
+
+    // Switch off — not effective
+    general.watermark_check.set_active (false);
+    assert_false (general.is_watermark_effectively_enabled (),
+        "watermark not effective when switch is off");
+
+    harness.window.close ();
+}
+
+private void test_drawtext_unavailable_disables_watermark_ui () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+    general.watermark_text.set_text ("Sample");
+    general.watermark_check.set_active (true);
+
+    general.set_drawtext_available (false, "Unavailable — missing drawtext");
+
+    assert_false (general.get_watermark_expander_sensitive_for_widget_test (),
+        "watermark UI disabled when drawtext is unavailable");
+    assert_false (general.is_watermark_effectively_enabled (),
+        "watermark is not effective when drawtext is unavailable");
+    assert_contains (general.get_watermark_subtitle_for_widget_test (),
+        "missing drawtext",
+        "watermark subtitle explains drawtext unavailability");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  FILTERBUILDER DRAWTEXT TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private GeneralSettingsSnapshot make_watermark_snapshot (
+    string text,
+    string position = "Bottom Right",
+    double opacity = 0.5,
+    int margin = 10,
+    int font_size = 24,
+    string color = "ffffff") {
+    var snap = new GeneralSettingsSnapshot ();
+    snap.watermark_enabled = true;
+    snap.watermark_text = text;
+    snap.watermark_position = position;
+    snap.watermark_color = color;
+    snap.watermark_opacity = opacity;
+    snap.watermark_margin = margin;
+    snap.watermark_font_size = font_size;
+    return snap;
+}
+
+private void test_drawtext_basic_output () {
+    var snap = make_watermark_snapshot ("Hello World");
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+
+    assert_contains (chain, "drawtext=", "chain contains drawtext filter");
+    assert_contains (chain, "text='Hello World'", "drawtext includes text");
+    assert_contains (chain, "fontsize=24", "drawtext includes font size");
+    assert_contains (chain, "fontcolor=0xffffff@0.50", "drawtext includes fontcolor with opacity");
+    assert_contains (chain, "shadowcolor=black@0.5", "drawtext includes dark shadow for bright text");
+    assert_contains (chain, "expansion=none", "drawtext sets expansion=none");
+}
+
+private void test_drawtext_position_presets () {
+    // Bottom Right (default)
+    var snap = make_watermark_snapshot ("X", "Bottom Right", 0.5, 10, 24);
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "x=w-text_w-10", "bottom right x");
+    assert_contains (chain, "y=h-text_h-10", "bottom right y");
+
+    // Top Left
+    snap = make_watermark_snapshot ("X", "Top Left", 0.5, 15, 24);
+    chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "x=15", "top left x");
+    assert_contains (chain, "y=15", "top left y");
+
+    // Center
+    snap = make_watermark_snapshot ("X", "Center", 0.5, 10, 24);
+    chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "x=(w-text_w)/2", "center x");
+    assert_contains (chain, "y=(h-text_h)/2", "center y");
+}
+
+private void test_drawtext_escaping () {
+    var snap = make_watermark_snapshot ("test:colon\\slash'quote[bracket]");
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "test\\:colon\\\\slash\\'quote\\[bracket\\]",
+        "special characters are escaped");
+}
+
+private void test_drawtext_disabled_produces_nothing () {
+    var snap = new GeneralSettingsSnapshot ();
+    snap.watermark_enabled = false;
+    snap.watermark_text = "Should not appear";
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+
+    // Should not contain drawtext at all
+    if (chain.contains ("drawtext")) {
+        Test.fail_printf ("disabled watermark should not produce drawtext filter, got: %s", chain);
+    }
+
+    // Also test empty text with enabled flag
+    snap.watermark_enabled = true;
+    snap.watermark_text = "";
+    chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    if (chain.contains ("drawtext")) {
+        Test.fail_printf ("empty watermark text should not produce drawtext filter, got: %s", chain);
+    }
+}
+
+private void test_combine_post_output_includes_watermark () {
+    var snap = make_watermark_snapshot ("Combined Video");
+    string chain = FilterBuilder.build_combine_post_output_video_filters_from_snapshot (snap);
+    assert_contains (chain, "drawtext=", "combine post-output includes drawtext");
+    assert_contains (chain, "text='Combined Video'", "combine post-output includes watermark text");
+}
+
+private void test_drawtext_utf8_text_preserved () {
+    var snap = make_watermark_snapshot ("\u00a9 My Video \u2014 \u00e9l\u00e8ve");
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "\u00a9 My Video \u2014 \u00e9l\u00e8ve",
+        "UTF-8 text preserved through escaping");
+}
+
+private void test_drawtext_custom_color () {
+    // Yellow text — luminance ~0.886, bright, should get dark shadow
+    var snap = make_watermark_snapshot ("Yellow Text", "Center", 0.8, 10, 24, "ffff00");
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "fontcolor=0xffff00@0.80", "custom yellow color in drawtext");
+    assert_contains (chain, "shadowcolor=black@0.5", "bright yellow gets dark shadow");
+}
+
+private void test_drawtext_dark_color_gets_light_shadow () {
+    // Dark blue — below luminance threshold, should get light shadow
+    var snap = make_watermark_snapshot ("Dark", "Center", 0.5, 10, 24, "000033");
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+    assert_contains (chain, "fontcolor=0x000033@0.50", "dark color in drawtext");
+    assert_contains (chain, "shadowcolor=white@0.5", "dark color gets light shadow");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -3528,6 +3732,34 @@ void main (string[] args) {
         test_combine_crossfade_with_full_profile_video_filters);
     Test.add_func ("/combine/crossfade/with-audio-filters",
         test_combine_crossfade_with_full_profile_audio_filters);
+
+    // Watermark constraint tests
+    Test.add_func ("/combine/watermark/active-watermark-forces-reencode",
+        test_active_watermark_forces_reencode);
+    Test.add_func ("/combine/watermark/clearing-text-releases-constraint",
+        test_clearing_watermark_text_releases_constraint);
+    Test.add_func ("/combine/watermark/effective-state-requires-text",
+        test_watermark_effective_state_requires_text);
+    Test.add_func ("/combine/watermark/drawtext-unavailable-disables-ui",
+        test_drawtext_unavailable_disables_watermark_ui);
+
+    // FilterBuilder drawtext tests
+    Test.add_func ("/combine/drawtext/basic-drawtext-output",
+        test_drawtext_basic_output);
+    Test.add_func ("/combine/drawtext/position-presets",
+        test_drawtext_position_presets);
+    Test.add_func ("/combine/drawtext/escaping-special-chars",
+        test_drawtext_escaping);
+    Test.add_func ("/combine/drawtext/disabled-produces-no-filter",
+        test_drawtext_disabled_produces_nothing);
+    Test.add_func ("/combine/drawtext/combine-post-output-includes-watermark",
+        test_combine_post_output_includes_watermark);
+    Test.add_func ("/combine/drawtext/utf8-text-preserved",
+        test_drawtext_utf8_text_preserved);
+    Test.add_func ("/combine/drawtext/custom-color",
+        test_drawtext_custom_color);
+    Test.add_func ("/combine/drawtext/dark-color-gets-light-shadow",
+        test_drawtext_dark_color_gets_light_shadow);
 
     Test.run ();
 }

@@ -251,7 +251,8 @@ public class TrimTab : Box, ICodecTab {
     private TrimRunner? active_runner = null;
     private uint64 active_operation_id = 0;
     private bool cancel_pending = false;
-    private bool speed_locked = false;  // true when speed filters force re-encode
+    private bool speed_locked = false;      // true when speed filters force re-encode
+    private bool watermark_locked = false;  // true when watermark forces re-encode
     private RunnerBinding? active_runner_binding = null;
     private GenericArray<ChapterRowBinding> chapter_row_bindings =
         new GenericArray<ChapterRowBinding> ();
@@ -1332,13 +1333,9 @@ public class TrimTab : Box, ICodecTab {
         } else if (m == Mode.CHAPTER_SPLIT) {
             // Chapter Split defaults to copy mode (lossless, fast)
             copy_mode_switch.set_active (true);
-            copy_mode_switch.set_sensitive (true);
-        } else if (speed_locked) {
-            // Speed filters are active — keep re-encode forced
-            copy_mode_switch.set_active (false);
-            copy_mode_switch.set_sensitive (false);
+            update_copy_mode_constraints ();
         } else {
-            copy_mode_switch.set_sensitive (true);
+            update_copy_mode_constraints ();
         }
 
         update_codec_row_visibility ();
@@ -1998,20 +1995,31 @@ public class TrimTab : Box, ICodecTab {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  SPEED CONSTRAINT — force re-encode when speed filters are active
+    //  COPY-MODE CONSTRAINTS
+    //
+    //  Multiple features can force re-encode: speed, watermark, crop modes.
+    //  This central helper ensures disabling one constraint doesn't accidentally
+    //  re-enable copy mode while another constraint still applies.
     // ═════════════════════════════════════════════════════════════════════════
+
+    private void update_copy_mode_constraints () {
+        bool forced_reencode = speed_locked || watermark_locked;
+        if (forced_reencode) {
+            copy_mode_switch.set_active (false);
+            copy_mode_switch.set_sensitive (false);
+        } else if (current_mode != Mode.CROP_ONLY && current_mode != Mode.TRIM_AND_CROP) {
+            copy_mode_switch.set_sensitive (true);
+        }
+    }
 
     public void update_for_speed (bool video_speed_on, bool audio_speed_on) {
         speed_locked = video_speed_on || audio_speed_on;
-        if (speed_locked) {
-            copy_mode_switch.set_active (false);
-            copy_mode_switch.set_sensitive (false);
-        } else {
-            // Restore sensitivity unless crop-only mode overrides
-            if (current_mode != Mode.CROP_ONLY && current_mode != Mode.TRIM_AND_CROP) {
-                copy_mode_switch.set_sensitive (true);
-            }
-        }
+        update_copy_mode_constraints ();
+    }
+
+    public void update_for_watermark (bool watermark_on) {
+        watermark_locked = watermark_on;
+        update_copy_mode_constraints ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════

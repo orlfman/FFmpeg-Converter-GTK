@@ -12,6 +12,7 @@ using GLib;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class AppController : Object {
+    private const uint DRAWTEXT_PROBE_TIMEOUT_MS = 2000;
 
     // ── Signals ──────────────────────────────────────────────────────────────
     /** Emitted when Smart Optimizer finishes and auto-convert is enabled.
@@ -44,6 +45,14 @@ public class AppController : Object {
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
     private int smart_opt_generation = 0;
+
+    // ── FFmpeg capability probing ────────────────────────────────────────────
+    private Cancellable? drawtext_probe_cancel = null;
+    private int drawtext_probe_generation = 0;
+    private bool drawtext_probe_cache_valid = false;
+    private string drawtext_probe_cache_path = "";
+    private bool drawtext_probe_cache_available = true;
+    private string? drawtext_probe_cache_reason = null;
 
     // ── Codec Registry ───────────────────────────────────────────────────────
     //    Maps ViewStack page names to their ISmartCodecTab, eliminating
@@ -102,6 +111,10 @@ public class AppController : Object {
             smart_opt_cancel.cancel ();
             smart_opt_cancel = null;
         }
+        if (drawtext_probe_cancel != null) {
+            drawtext_probe_cancel.cancel ();
+            drawtext_probe_cancel = null;
+        }
         base.dispose ();
     }
 
@@ -118,6 +131,8 @@ public class AppController : Object {
         wire_crop_detection ();
         wire_audio_speed_constraint ();
         wire_video_speed_constraint ();
+        wire_watermark_constraint ();
+        wire_drawtext_availability ();
         wire_conversion_done ();
         wire_trim_done ();
         wire_trim_tab_focus ();
@@ -135,6 +150,190 @@ public class AppController : Object {
             default:         return null;
         }
     }
+
+    // ── FFmpeg drawtext support → enable/disable watermark UI ───────────────
+
+    private void wire_drawtext_availability () {
+        AppSettings.get_default ().settings_changed.connect (() => {
+            refresh_drawtext_availability.begin ();
+        });
+        refresh_drawtext_availability.begin ();
+    }
+
+    private async void refresh_drawtext_availability () {
+        string ffmpeg_path = AppSettings.get_default ().ffmpeg_path;
+
+        if (drawtext_probe_cache_valid && ffmpeg_path == drawtext_probe_cache_path) {
+            general_tab.set_drawtext_available (
+                drawtext_probe_cache_available,
+                drawtext_probe_cache_reason
+            );
+            return;
+        }
+
+        if (drawtext_probe_cancel != null) {
+            drawtext_probe_cancel.cancel ();
+        }
+
+        var cancellable = new Cancellable ();
+        drawtext_probe_cancel = cancellable;
+        int generation = ++drawtext_probe_generation;
+
+        bool available = false;
+        string? reason = null;
+
+        try {
+            string filters_output = yield run_subprocess_capture (
+                { ffmpeg_path, "-hide_banner", "-filters" },
+                cancellable
+            );
+
+            available = filters_output_supports_drawtext (filters_output);
+            if (!available) {
+                reason = "Unavailable — the selected FFmpeg build does not include the drawtext filter";
+            }
+        } catch (IOError.CANCELLED e) {
+            if (drawtext_probe_cancel == cancellable) {
+                drawtext_probe_cancel = null;
+            }
+            return;
+        } catch (Error e) {
+            if (drawtext_probe_cancel == cancellable) {
+                drawtext_probe_cancel = null;
+            }
+            if (generation != drawtext_probe_generation || cancellable.is_cancelled ()) {
+                return;
+            }
+
+            string failure_reason =
+                "Unavailable — failed to inspect the selected FFmpeg build: "
+                + describe_subprocess_error (e.message);
+            apply_drawtext_probe_result (ffmpeg_path, false, failure_reason);
+            return;
+        }
+
+        if (drawtext_probe_cancel == cancellable) {
+            drawtext_probe_cancel = null;
+        }
+        if (generation != drawtext_probe_generation || cancellable.is_cancelled ()) {
+            return;
+        }
+
+        apply_drawtext_probe_result (ffmpeg_path, available, reason);
+    }
+
+    private void apply_drawtext_probe_result (string ffmpeg_path,
+                                              bool available,
+                                              string? reason) {
+        drawtext_probe_cache_valid = true;
+        drawtext_probe_cache_path = ffmpeg_path;
+        drawtext_probe_cache_available = available;
+        drawtext_probe_cache_reason = reason;
+        general_tab.set_drawtext_available (available, reason);
+    }
+
+    private static bool filters_output_supports_drawtext (string output) {
+        foreach (string line in output.split ("\n")) {
+            string clean = line.strip ();
+            if (clean.length == 0 || clean.has_prefix ("Filters:")) {
+                continue;
+            }
+
+            string[] fields = Regex.split_simple ("\\s+", clean);
+            if (fields.length >= 2 && fields[1] == "drawtext") {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async string run_subprocess_capture (string[] cmd,
+                                                 Cancellable cancellable) throws Error {
+        var launcher = new SubprocessLauncher (
+            SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
+
+        bool timed_out = false;
+        uint timeout_id = 0;
+        var local_cancel = new Cancellable ();
+        ulong parent_id = cancellable.connect (() => { local_cancel.cancel (); });
+        timeout_id = Timeout.add (DRAWTEXT_PROBE_TIMEOUT_MS, () => {
+            timed_out = true;
+            local_cancel.cancel ();
+            timeout_id = 0;
+            return Source.REMOVE;
+        });
+
+        string stdout_buf;
+        string stderr_buf;
+        try {
+            yield proc.communicate_utf8_async (null, local_cancel, out stdout_buf, out stderr_buf);
+        } catch (Error e) {
+            proc.force_exit ();
+            if (timeout_id != 0) {
+                Source.remove (timeout_id);
+            }
+            cancellable.disconnect (parent_id);
+            if (timed_out) {
+                throw new IOError.TIMED_OUT ("Subprocess probe timed out");
+            }
+            throw e;
+        }
+
+        if (timeout_id != 0) {
+            Source.remove (timeout_id);
+        }
+        cancellable.disconnect (parent_id);
+
+        if (!proc.get_successful ()) {
+            string? detail = first_nonempty_line (stderr_buf);
+            if (detail == null) {
+                detail = first_nonempty_line (stdout_buf);
+            }
+            if (detail == null) {
+                detail = "Subprocess probe exited with status %d".printf (proc.get_exit_status ());
+            }
+            throw new IOError.FAILED (detail);
+        }
+
+        return (stdout_buf ?? "") + "\n" + (stderr_buf ?? "");
+    }
+
+    private static string describe_subprocess_error (string message) {
+        string detail = first_nonempty_line (message) ?? message.strip ();
+        if (detail.index_of ("timed out") >= 0) {
+            return "the ffmpeg process did not answer a quick filter probe";
+        }
+        if (detail.index_of ("Permission denied") >= 0) {
+            return "permission was denied while starting ffmpeg";
+        }
+        if (detail.index_of ("No such file or directory") >= 0) {
+            return "the configured ffmpeg path could not be started";
+        }
+        return detail;
+    }
+
+    private static string? first_nonempty_line (string? text) {
+        if (text == null) {
+            return null;
+        }
+
+        foreach (string line in text.split ("\n")) {
+            string clean = line.strip ();
+            if (clean.length > 0) {
+                return clean;
+            }
+        }
+
+        return null;
+    }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal static bool filters_output_supports_drawtext_for_widget_test (string output) {
+        return filters_output_supports_drawtext (output);
+    }
+#endif
 
     // ── Input file changed → probe info, load trim preview, load subtitles ──
 
@@ -209,6 +408,14 @@ public class AppController : Object {
         });
         general_tab.audio_speed_toggled.connect ((on) => {
             trim_tab.update_for_speed (general_tab.is_video_speed_enabled (), on);
+        });
+    }
+
+    // ── Watermark → force re-encode in Trim tab ─────────────────────────────
+
+    private void wire_watermark_constraint () {
+        general_tab.watermark_toggled.connect ((on) => {
+            trim_tab.update_for_watermark (on);
         });
     }
 
