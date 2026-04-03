@@ -2029,13 +2029,13 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                 complete_tracked_operation_with_close (
                     ActiveOperation.COMBINING, operation_id, true);
             });
-            combine_window.combine_cancelled.connect ((operation_id) => {
+            combine_window.combine_cancelled.connect ((operation_id, cancel_message) => {
                 if (!complete_tracked_operation_with_close (
                         ActiveOperation.COMBINING, operation_id, true)) {
                     return;
                 }
                 status_area.set_status (
-                    "Combine cancelled.",
+                    @"Combine cancelled.\n$cancel_message",
                     StatusIcon.CANCELLED_ICON,
                     StatusIcon.CANCELLED_CSS
                 );

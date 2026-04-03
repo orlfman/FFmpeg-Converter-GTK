@@ -130,7 +130,7 @@ public class CombineWindow : Adw.Window {
     public signal void combine_started (uint64 operation_id);
     public signal void combine_succeeded (uint64 operation_id, OperationOutputResult result);
     public signal void combine_failed (uint64 operation_id, string message);
-    public signal void combine_cancelled (uint64 operation_id);
+    public signal void combine_cancelled (uint64 operation_id, string cancel_message);
     public signal void window_closing ();
 
     // ── File list ───────────────────────────────────────────────────────────
@@ -1299,7 +1299,7 @@ public class CombineWindow : Adw.Window {
             // Cancelled — release the operation
             active_operation_id = 0;
             operation_reserved = false;
-            combine_cancelled (op_id);
+            combine_cancelled (op_id, "Cancelled by user.");
         }
     }
 
@@ -1465,10 +1465,10 @@ public class CombineWindow : Adw.Window {
         active_runner = null;
         active_runner_binding = null;
         cancel_button.set_visible (false);
-        status_label.set_text (cancel_message);
-        status_label.set_visible (true);
+        status_label.set_text ("");
+        status_label.set_visible (false);
         update_combine_sensitivity ();
-        combine_cancelled (op_id);
+        combine_cancelled (op_id, cancel_message);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1963,6 +1963,10 @@ public class CombineWindow : Adw.Window {
 
     internal bool has_active_runner_binding_for_widget_test () {
         return active_runner_binding != null;
+    }
+
+    internal bool is_status_label_visible_for_widget_test () {
+        return status_label.get_visible ();
     }
 
     internal void arm_pending_overwrite_for_widget_test (uint64 op_id) {

@@ -478,10 +478,12 @@ private void test_runner_binding_relays_cancelled_signal () {
     var harness = new CombineWindowHarness ();
     bool fired = false;
     uint64 seen_operation_id = 0;
+    string seen_cancel_message = "";
 
-    harness.window.combine_cancelled.connect ((operation_id) => {
+    harness.window.combine_cancelled.connect ((operation_id, cancel_message) => {
         fired = true;
         seen_operation_id = operation_id;
+        seen_cancel_message = cancel_message;
     });
 
     harness.window.simulate_runner_cancelled_for_widget_test (42, "Cancelled for test");
@@ -491,6 +493,13 @@ private void test_runner_binding_relays_cancelled_signal () {
         seen_operation_id,
         42,
         "combine runner binding preserves operation id");
+    assert_string_equal (
+        seen_cancel_message,
+        "Cancelled for test",
+        "combine runner binding preserves cancel message");
+    assert_false (
+        harness.window.is_status_label_visible_for_widget_test (),
+        "combine cancel keeps dialog-local status hidden");
     assert_false (
         harness.window.has_active_runner_binding_for_widget_test (),
         "combine runner binding clears stored binding after completion");
@@ -505,7 +514,7 @@ private void test_pending_overwrite_cancelled_by_main_window_is_ignored () {
     var harness = new CombineWindowHarness ();
     bool fired = false;
 
-    harness.window.combine_cancelled.connect ((operation_id) => {
+    harness.window.combine_cancelled.connect ((operation_id, cancel_message) => {
         fired = true;
     });
 
