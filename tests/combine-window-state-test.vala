@@ -987,6 +987,103 @@ private void test_reencode_command_generates_expected_filter_and_flags () {
         "reencode mode appends output path last");
 }
 
+private void test_reencode_command_image_watermark_topology () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 3.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "image";
+    profile.watermark_image_path = "/tmp/logo.png";
+    profile.watermark_image_width = 200;
+    profile.watermark_position = "Bottom Right";
+    profile.watermark_opacity = 0.7;
+    profile.watermark_margin = 15;
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "image watermark reencode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+
+    // Watermark image must appear as a third -i input (after the two video files)
+    assert_array_has_adjacent_pair (argv, "-i", "/tmp/logo.png",
+        "image watermark adds watermark as input");
+
+    // filter_complex must contain the overlay chain
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex, "overlay=",
+        "filter_complex contains overlay filter for image watermark");
+    assert_contains (filter_complex, "scale=200:-1",
+        "filter_complex scales watermark to requested width");
+    assert_contains (filter_complex, "main_w-overlay_w-15",
+        "filter_complex positions watermark at Bottom Right with margin");
+    assert_contains (filter_complex, "[outv_pre_wm]",
+        "filter_complex renames [outv] to [outv_pre_wm] before overlay");
+    assert_contains (filter_complex, "[outv]",
+        "filter_complex produces final [outv] from overlay");
+
+    // Standard output mapping must still work
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "image watermark maps video output");
+    assert_array_has_adjacent_pair (argv, "-map", "[outa]",
+        "image watermark maps audio output");
+}
+
+private void test_reencode_command_text_watermark_no_extra_input () {
+    var files = new GenericArray<CombineFile> ();
+    files.add (make_combine_file ("/tmp/first.mkv", 4.0, 1920, 1080));
+    files.add (make_combine_file ("/tmp/second.mkv", 3.0, 1920, 1080));
+
+    var runner = make_capture_runner (files);
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    // Text mode watermark — should NOT add an extra -i input
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "text";
+    runner.reencode_profile = profile;
+
+    int exit_code = runner.run_reencode_mode_for_widget_test ();
+    assert_true (exit_code == 0, "text watermark reencode exit code");
+
+    string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+
+    // Text mode watermark should only have the two video inputs, no extra
+    int input_count = 0;
+    for (int i = 0; i < argv.length; i++) {
+        if (argv[i] == "-i") input_count++;
+    }
+    assert_true (input_count == 2,
+        "text mode watermark does not add extra inputs (got %d)".printf (input_count));
+
+    // filter_complex must NOT contain overlay
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    if (filter_complex.contains ("overlay=")) {
+        Test.fail_printf ("text mode should not use overlay filter, got: %s", filter_complex);
+    }
+}
+
 private void test_remove_file_cancels_inflight_probe_and_unblocks_combine () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -3603,13 +3700,20 @@ private void test_drawtext_unavailable_disables_watermark_ui () {
 
     general.set_drawtext_available (false, "Unavailable — missing drawtext");
 
-    assert_false (general.get_watermark_expander_sensitive_for_widget_test (),
-        "watermark UI disabled when drawtext is unavailable");
+    // Expander stays sensitive because overlay is still available —
+    // user can switch to Image mode.
+    assert_true (general.get_watermark_expander_sensitive_for_widget_test (),
+        "watermark expander stays sensitive when overlay is available");
     assert_false (general.is_watermark_effectively_enabled (),
-        "watermark is not effective when drawtext is unavailable");
+        "text watermark is not effective when drawtext is unavailable");
     assert_contains (general.get_watermark_subtitle_for_widget_test (),
         "missing drawtext",
         "watermark subtitle explains drawtext unavailability");
+
+    // Fully disable both filters — now the whole expander should lock out
+    general.set_overlay_available (false, "Unavailable — missing overlay");
+    assert_false (general.get_watermark_expander_sensitive_for_widget_test (),
+        "watermark UI fully disabled when neither filter is available");
 }
 
 private void test_svt_av1_crf_two_pass_probe_reports_supported () {
@@ -3927,6 +4031,189 @@ private void test_drawtext_dark_color_gets_light_shadow () {
     assert_contains (chain, "shadowcolor=white@0.5", "dark color gets light shadow");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  IMAGE WATERMARK TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_image_mode_skips_drawtext () {
+    var snap = new GeneralSettingsSnapshot ();
+    snap.watermark_enabled = true;
+    snap.watermark_mode = "image";
+    snap.watermark_text = "Should not appear";
+    snap.watermark_image_path = "/tmp/logo.png";
+    string chain = FilterBuilder.build_video_filter_chain_from_snapshot (snap);
+
+    if (chain.contains ("drawtext")) {
+        Test.fail_printf ("image mode should not produce drawtext filter, got: %s", chain);
+    }
+}
+
+private void test_image_overlay_fragment_basic () {
+    string frag = FilterBuilder.build_image_overlay_fragment (
+        "[1:v]", "[0:v]", "[outv]",
+        "Bottom Right", 10, 0.5, 150);
+
+    assert_contains (frag, "scale=150:-1", "overlay fragment scales to width");
+    assert_contains (frag, "format=rgba", "overlay fragment converts to rgba");
+    assert_contains (frag, "colorchannelmixer=aa=0.50", "overlay fragment applies opacity");
+    assert_contains (frag, "overlay=x=main_w-overlay_w-10", "overlay x position");
+    assert_contains (frag, "y=main_h-overlay_h-10", "overlay y position");
+    assert_contains (frag, "[1:v]", "overlay fragment references watermark input");
+    assert_contains (frag, "[0:v]", "overlay fragment references video input");
+    assert_contains (frag, "[outv]", "overlay fragment produces output label");
+}
+
+private void test_image_overlay_fragment_full_opacity () {
+    string frag = FilterBuilder.build_image_overlay_fragment (
+        "[1:v]", "[0:v]", "[outv]",
+        "Center", 0, 1.0, 200);
+
+    // Full opacity should not include colorchannelmixer
+    if (frag.contains ("colorchannelmixer")) {
+        Test.fail_printf ("full opacity should not add colorchannelmixer, got: %s", frag);
+    }
+
+    assert_contains (frag, "x=(main_w-overlay_w)/2", "center x");
+    assert_contains (frag, "y=(main_h-overlay_h)/2", "center y");
+}
+
+private void test_image_overlay_fragment_original_size () {
+    string frag = FilterBuilder.build_image_overlay_fragment (
+        "[1:v]", "[0:v]", "[outv]",
+        "Top Left", 5, 0.8, -1);
+
+    // -1 means original size — no scale filter
+    if (frag.contains ("scale=")) {
+        Test.fail_printf ("original size (-1) should not include scale, got: %s", frag);
+    }
+
+    assert_contains (frag, "x=5", "top left x");
+    assert_contains (frag, "y=5", "top left y");
+}
+
+private void test_image_overlay_position_presets () {
+    // Top Right
+    string x_expr, y_expr;
+    FilterBuilder.get_overlay_position_exprs ("Top Right", 15, out x_expr, out y_expr);
+    assert_string_equal (x_expr, "main_w-overlay_w-15", "top right x");
+    assert_string_equal (y_expr, "15", "top right y");
+
+    // Bottom Left
+    FilterBuilder.get_overlay_position_exprs ("Bottom Left", 20, out x_expr, out y_expr);
+    assert_string_equal (x_expr, "20", "bottom left x");
+    assert_string_equal (y_expr, "main_h-overlay_h-20", "bottom left y");
+}
+
+private void test_image_watermark_effective_state () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+
+    // Image mode with switch on but no file — should not be effective
+    general.watermark_mode.set_selected (1);  // Image mode
+    general.watermark_check.set_active (true);
+    assert_false (general.is_watermark_effectively_enabled (),
+        "image watermark not effective with no file selected");
+
+    // Switch off — not effective regardless
+    general.watermark_check.set_active (false);
+    assert_false (general.is_watermark_effectively_enabled (),
+        "image watermark not effective when switch is off");
+}
+
+private void test_overlay_unavailable_disables_image_watermark () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+    general.watermark_mode.set_selected (1);  // Image mode
+    general.watermark_check.set_active (true);
+
+    general.set_overlay_available (false, "Unavailable — missing overlay");
+
+    // Expander stays sensitive because drawtext is still available —
+    // user can switch to Text mode.
+    assert_true (general.get_watermark_expander_sensitive_for_widget_test (),
+        "watermark expander stays sensitive when drawtext is available");
+    assert_false (general.is_watermark_effectively_enabled (),
+        "image watermark is not effective when overlay is unavailable");
+    assert_contains (general.get_watermark_subtitle_for_widget_test (),
+        "missing overlay",
+        "watermark subtitle explains overlay unavailability");
+}
+
+private void test_mode_switch_unlocks_when_other_filter_available () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+
+    // Simulate FFmpeg that has overlay but not drawtext
+    general.set_drawtext_available (false, "Unavailable — no drawtext");
+    general.set_overlay_available (true);
+
+    // Expander must remain sensitive so the user can reach the mode dropdown
+    assert_true (general.get_watermark_expander_sensitive_for_widget_test (),
+        "expander sensitive when overlay available but drawtext missing");
+
+    // Default text mode shows the unavailability hint
+    assert_contains (general.get_watermark_subtitle_for_widget_test (),
+        "no drawtext",
+        "subtitle shows drawtext hint in text mode");
+
+    // Switch to image mode — subtitle should clear
+    general.watermark_mode.set_selected (1);
+    assert_string_equal (general.get_watermark_subtitle_for_widget_test (),
+        "Overlay text or an image on the video",
+        "subtitle resets to default after switching to available image mode");
+
+    // Switch back to text mode — hint should return
+    general.watermark_mode.set_selected (0);
+    assert_contains (general.get_watermark_subtitle_for_widget_test (),
+        "no drawtext",
+        "subtitle shows drawtext hint again after switching back to text mode");
+}
+
+private void test_image_watermark_snapshot_fields () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+    general.watermark_mode.set_selected (1);  // Image mode
+    general.watermark_check.set_active (true);
+    general.watermark_image_width.set_value (200);
+
+    var snap = general.snapshot_settings ();
+
+    assert_string_equal (snap.watermark_mode, "image", "snapshot captures image mode");
+    assert_true ((int) snap.watermark_image_width == 200, "snapshot captures image width");
+}
+
+private void test_encode_profile_carries_watermark_fields () {
+    var snap = new GeneralSettingsSnapshot ();
+    snap.watermark_enabled = true;
+    snap.watermark_mode = "image";
+    snap.watermark_image_path = "/tmp/logo.png";
+    snap.watermark_image_width = 200;
+    snap.watermark_position = "Top Left";
+    snap.watermark_opacity = 0.8;
+    snap.watermark_margin = 15;
+
+    // Verify fields roundtrip through EncodeProfileSnapshot
+    var profile = new EncodeProfileSnapshot ();
+    profile.watermark_enabled = snap.watermark_enabled;
+    profile.watermark_mode = snap.watermark_mode;
+    profile.watermark_image_path = snap.watermark_image_path;
+    profile.watermark_image_width = snap.watermark_image_width;
+    profile.watermark_position = snap.watermark_position;
+    profile.watermark_opacity = snap.watermark_opacity;
+    profile.watermark_margin = snap.watermark_margin;
+
+    assert_true (profile.watermark_enabled, "profile watermark_enabled");
+    assert_string_equal (profile.watermark_mode, "image", "profile watermark_mode");
+    assert_string_equal (profile.watermark_image_path, "/tmp/logo.png", "profile watermark_image_path");
+    assert_true ((int) profile.watermark_image_width == 200, "profile watermark_image_width");
+    assert_string_equal (profile.watermark_position, "Top Left", "profile watermark_position");
+    assert_true ((int) profile.watermark_margin == 15, "profile watermark_margin");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -3960,6 +4247,10 @@ void main (string[] args) {
         test_reencode_command_normalizes_sample_aspect_ratio);
     Test.add_func ("/combine/runner/reencode-command-filter-and-flags",
         test_reencode_command_generates_expected_filter_and_flags);
+    Test.add_func ("/combine/runner/reencode-command-image-watermark-topology",
+        test_reencode_command_image_watermark_topology);
+    Test.add_func ("/combine/runner/reencode-command-text-watermark-no-extra-input",
+        test_reencode_command_text_watermark_no_extra_input);
     Test.add_func ("/combine/window/remove-file-cancels-pending-probe",
         test_remove_file_cancels_inflight_probe_and_unblocks_combine);
     Test.add_func ("/combine/window/copy-mode-sar-mismatch",
@@ -4188,6 +4479,28 @@ void main (string[] args) {
         test_drawtext_custom_color);
     Test.add_func ("/combine/drawtext/dark-color-gets-light-shadow",
         test_drawtext_dark_color_gets_light_shadow);
+
+    // Image watermark tests
+    Test.add_func ("/combine/image-watermark/image-mode-skips-drawtext",
+        test_image_mode_skips_drawtext);
+    Test.add_func ("/combine/image-watermark/overlay-fragment-basic",
+        test_image_overlay_fragment_basic);
+    Test.add_func ("/combine/image-watermark/overlay-fragment-full-opacity",
+        test_image_overlay_fragment_full_opacity);
+    Test.add_func ("/combine/image-watermark/overlay-fragment-original-size",
+        test_image_overlay_fragment_original_size);
+    Test.add_func ("/combine/image-watermark/overlay-position-presets",
+        test_image_overlay_position_presets);
+    Test.add_func ("/combine/image-watermark/effective-state-requires-file",
+        test_image_watermark_effective_state);
+    Test.add_func ("/combine/image-watermark/overlay-unavailable-disables-ui",
+        test_overlay_unavailable_disables_image_watermark);
+    Test.add_func ("/combine/image-watermark/mode-switch-unlocks-available-filter",
+        test_mode_switch_unlocks_when_other_filter_available);
+    Test.add_func ("/combine/image-watermark/snapshot-fields",
+        test_image_watermark_snapshot_fields);
+    Test.add_func ("/combine/image-watermark/encode-profile-carries-fields",
+        test_encode_profile_carries_watermark_fields);
 
     Test.run ();
 }

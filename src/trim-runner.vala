@@ -538,6 +538,27 @@ public class TrimRunner : Object {
             }
         }
 
+        // ── Image watermark overlay (post-concat) ───────────────────────────
+        bool has_image_watermark = is_trim_image_watermark_active ();
+        if (has_image_watermark) {
+            int wm_input_index = segments.length;  // watermark is the last input
+            cmd += "-i";
+            cmd += reencode_profile.watermark_image_path;
+
+            // Rename [outv] -> [outv_pre], then overlay -> [outv]
+            string fc_str = fc.str;
+            fc_str = fc_str.replace ("[outv]", "[outv_pre]");
+            fc = new StringBuilder ();
+            fc.append (fc_str);
+            fc.append ("; ");
+            fc.append (FilterBuilder.build_image_overlay_fragment (
+                @"[$wm_input_index:v]", "[outv_pre]", "[outv]",
+                reencode_profile.watermark_position,
+                reencode_profile.watermark_margin,
+                reencode_profile.watermark_opacity,
+                reencode_profile.watermark_image_width));
+        }
+
         cmd += "-filter_complex";
         cmd += fc.str;
 
@@ -818,7 +839,37 @@ public class TrimRunner : Object {
             }
 
             string vf = build_segment_vf (seg);
-            if (vf != "") {
+            bool seg_image_wm = is_trim_image_watermark_active ();
+
+            if (seg_image_wm) {
+                cmd += "-i";
+                cmd += reencode_profile.watermark_image_path;
+
+                string fc;
+                if (vf.length > 0) {
+                    fc = "[0:v]" + vf + "[vf_out]; ";
+                    fc += FilterBuilder.build_image_overlay_fragment (
+                        "[1:v]", "[vf_out]", "[outv]",
+                        reencode_profile.watermark_position,
+                        reencode_profile.watermark_margin,
+                        reencode_profile.watermark_opacity,
+                        reencode_profile.watermark_image_width);
+                } else {
+                    fc = FilterBuilder.build_image_overlay_fragment (
+                        "[1:v]", "[0:v]", "[outv]",
+                        reencode_profile.watermark_position,
+                        reencode_profile.watermark_margin,
+                        reencode_profile.watermark_opacity,
+                        reencode_profile.watermark_image_width);
+                }
+
+                cmd += "-filter_complex";
+                cmd += fc;
+                cmd += "-map";
+                cmd += "[outv]";
+                cmd += "-map";
+                cmd += "0:a?";
+            } else if (vf != "") {
                 cmd += "-vf";
                 cmd += vf;
             }
@@ -1061,6 +1112,13 @@ public class TrimRunner : Object {
 
     private bool should_remove_chapters () {
         return reencode_profile != null && reencode_profile.remove_chapters;
+    }
+
+    private bool is_trim_image_watermark_active () {
+        return reencode_profile != null
+            && reencode_profile.watermark_enabled
+            && reencode_profile.watermark_mode == "image"
+            && reencode_profile.watermark_image_path.length > 0;
     }
 
     // ═════════════════════════════════════════════════════════════════════════

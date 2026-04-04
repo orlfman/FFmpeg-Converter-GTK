@@ -49,9 +49,11 @@ public class GeneralTab : Box {
     private const string LOCK_REASON_TIMING_COMBINE =
         "Disabled while Combine is open — trim clips before combining";
     private const string WATERMARK_SUBTITLE_DEFAULT =
-        "Overlay text on the video";
+        "Overlay text or an image on the video";
     private const string WATERMARK_DRAWTEXT_UNAVAILABLE =
         "Unavailable — the selected FFmpeg build does not include the drawtext filter";
+    private const string WATERMARK_OVERLAY_UNAVAILABLE =
+        "Unavailable — the selected FFmpeg build does not include the overlay filter";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -128,16 +130,27 @@ public class GeneralTab : Box {
 
     // ── Watermark ───────────────────────────────────────────────────────────
     public Switch     watermark_check    { get; private set; }
+    public DropDown   watermark_mode     { get; private set; }
     public Entry      watermark_text     { get; private set; }
     public DropDown   watermark_position { get; private set; }
     public SpinButton watermark_opacity  { get; private set; }
     public SpinButton watermark_margin   { get; private set; }
     public SpinButton watermark_font_size { get; private set; }
+    public SpinButton watermark_image_width { get; private set; }
     public Gtk.ColorDialogButton watermark_color_button { get; private set; }
 
     private Adw.ExpanderRow watermark_expander;
+    private Adw.ActionRow watermark_text_row;
+    private Adw.ActionRow watermark_color_row;
+    private Adw.ActionRow watermark_font_row;
+    private Adw.ActionRow watermark_image_source_row;
+    private Adw.ActionRow watermark_image_width_row;
+    private string watermark_image_path = "";
     private bool last_watermark_effective = false;
     private bool drawtext_available = true;
+    private string? drawtext_unavailable_reason = null;
+    private bool overlay_available = true;
+    private string? overlay_unavailable_reason = null;
 
     // ── Forwarding Signals ─────────────────────────────────────────────────
     //    Emitted when the corresponding effective feature state changes.
@@ -670,7 +683,7 @@ public class GeneralTab : Box {
     private void build_watermark_group () {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Watermark");
-        group.set_description ("Overlay text on the output video");
+        group.set_description ("Overlay text or an image on the output video");
 
         watermark_check = new Switch ();
         watermark_check.set_active (false);
@@ -684,16 +697,65 @@ public class GeneralTab : Box {
         watermark_check.bind_property ("active", watermark_expander, "enable-expansion",
             BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
 
+        // ── Mode ─────────────────────────────────────────────────────────────
+        var mode_row = new Adw.ActionRow ();
+        mode_row.set_title ("Mode");
+        mode_row.set_subtitle ("Text overlay or image overlay");
+        watermark_mode = new DropDown (new StringList (
+            { "Text", "Image" }
+        ), null);
+        watermark_mode.set_valign (Align.CENTER);
+        watermark_mode.set_selected (0);  // default: Text
+        mode_row.add_suffix (watermark_mode);
+        watermark_expander.add_row (mode_row);
+
         // ── Text ─────────────────────────────────────────────────────────────
-        var text_row = new Adw.ActionRow ();
-        text_row.set_title ("Text");
-        text_row.set_subtitle ("The text to display on the video");
+        watermark_text_row = new Adw.ActionRow ();
+        watermark_text_row.set_title ("Text");
+        watermark_text_row.set_subtitle ("The text to display on the video");
         watermark_text = new Entry ();
         watermark_text.set_placeholder_text ("e.g. © My Video");
         watermark_text.set_valign (Align.CENTER);
         watermark_text.set_width_chars (20);
-        text_row.add_suffix (watermark_text);
-        watermark_expander.add_row (text_row);
+        watermark_text_row.add_suffix (watermark_text);
+        watermark_expander.add_row (watermark_text_row);
+
+        // ── Image Source ─────────────────────────────────────────────────────
+        watermark_image_source_row = new Adw.ActionRow ();
+        watermark_image_source_row.set_title ("No file selected");
+        watermark_image_source_row.set_subtitle ("Choose a watermark image (png, jpg, webp, bmp)");
+        watermark_image_source_row.add_prefix (make_watermark_icon ("image-x-generic-symbolic"));
+
+        var wm_browse_btn = new Button.with_label ("Browse…");
+        wm_browse_btn.add_css_class ("suggested-action");
+        wm_browse_btn.set_valign (Align.CENTER);
+        wm_browse_btn.clicked.connect (on_watermark_image_browse_clicked);
+        watermark_image_source_row.add_suffix (wm_browse_btn);
+
+        var wm_clear_btn = new Button.from_icon_name ("edit-clear-symbolic");
+        wm_clear_btn.set_tooltip_text ("Clear selected watermark image");
+        wm_clear_btn.add_css_class ("flat");
+        wm_clear_btn.set_valign (Align.CENTER);
+        wm_clear_btn.clicked.connect (() => {
+            watermark_image_path = "";
+            watermark_image_source_row.set_title ("No file selected");
+            watermark_image_source_row.set_subtitle ("Choose a watermark image (png, jpg, webp, bmp)");
+            emit_watermark_if_changed ();
+        });
+        watermark_image_source_row.add_suffix (wm_clear_btn);
+        watermark_image_source_row.set_visible (false);
+        watermark_expander.add_row (watermark_image_source_row);
+
+        // ── Image Width ──────────────────────────────────────────────────────
+        watermark_image_width_row = new Adw.ActionRow ();
+        watermark_image_width_row.set_title ("Width");
+        watermark_image_width_row.set_subtitle ("Scale the watermark image to this width in pixels (-1 = original)");
+        watermark_image_width = new SpinButton.with_range (-1, 3840, 1);
+        watermark_image_width.set_value (150);
+        watermark_image_width.set_valign (Align.CENTER);
+        watermark_image_width_row.add_suffix (watermark_image_width);
+        watermark_image_width_row.set_visible (false);
+        watermark_expander.add_row (watermark_image_width_row);
 
         // ── Position ─────────────────────────────────────────────────────────
         var pos_row = new Adw.ActionRow ();
@@ -708,9 +770,9 @@ public class GeneralTab : Box {
         watermark_expander.add_row (pos_row);
 
         // ── Color ─────────────────────────────────────────────────────────────
-        var color_row_wm = new Adw.ActionRow ();
-        color_row_wm.set_title ("Color");
-        color_row_wm.set_subtitle ("Text color — shadow adapts automatically");
+        watermark_color_row = new Adw.ActionRow ();
+        watermark_color_row.set_title ("Color");
+        watermark_color_row.set_subtitle ("Text color — shadow adapts automatically");
         var color_dialog = new Gtk.ColorDialog ();
         color_dialog.set_with_alpha (false);
         watermark_color_button = new Gtk.ColorDialogButton (color_dialog);
@@ -721,8 +783,8 @@ public class GeneralTab : Box {
         default_color.alpha = 1.0f;
         watermark_color_button.set_rgba (default_color);
         watermark_color_button.set_valign (Align.CENTER);
-        color_row_wm.add_suffix (watermark_color_button);
-        watermark_expander.add_row (color_row_wm);
+        watermark_color_row.add_suffix (watermark_color_button);
+        watermark_expander.add_row (watermark_color_row);
 
         // ── Opacity ──────────────────────────────────────────────────────────
         var opacity_row = new Adw.ActionRow ();
@@ -746,17 +808,85 @@ public class GeneralTab : Box {
         watermark_expander.add_row (margin_row);
 
         // ── Font Size ────────────────────────────────────────────────────────
-        var font_row = new Adw.ActionRow ();
-        font_row.set_title ("Font Size");
-        font_row.set_subtitle ("Text size in pixels");
+        watermark_font_row = new Adw.ActionRow ();
+        watermark_font_row.set_title ("Font Size");
+        watermark_font_row.set_subtitle ("Text size in pixels");
         watermark_font_size = new SpinButton.with_range (8, 200, 1);
         watermark_font_size.set_value (24);
         watermark_font_size.set_valign (Align.CENTER);
-        font_row.add_suffix (watermark_font_size);
-        watermark_expander.add_row (font_row);
+        watermark_font_row.add_suffix (watermark_font_size);
+        watermark_expander.add_row (watermark_font_row);
+
+        // ── Mode toggle visibility ───────────────────────────────────────────
+        watermark_mode.notify["selected"].connect (() => {
+            update_watermark_mode_visibility ();
+            update_watermark_availability ();
+            emit_watermark_if_changed ();
+        });
 
         group.add (watermark_expander);
         append (group);
+    }
+
+    private void update_watermark_mode_visibility () {
+        bool is_image = watermark_mode.get_selected () == 1;
+
+        // Text-only rows
+        watermark_text_row.set_visible (!is_image);
+        watermark_color_row.set_visible (!is_image);
+        watermark_font_row.set_visible (!is_image);
+
+        // Image-only rows
+        watermark_image_source_row.set_visible (is_image);
+        watermark_image_width_row.set_visible (is_image);
+    }
+
+    private Gtk.Image make_watermark_icon (string icon_name) {
+        var icon = new Gtk.Image.from_icon_name (icon_name);
+        icon.set_pixel_size (16);
+        return icon;
+    }
+
+    private void on_watermark_image_browse_clicked () {
+        var dialog = new FileDialog ();
+        dialog.title = "Select Watermark Image";
+
+        var image_filter = new FileFilter ();
+        image_filter.name = "Image files (.png, .jpg, .jpeg, .webp, .bmp)";
+        image_filter.add_pattern ("*.png");
+        image_filter.add_pattern ("*.jpg");
+        image_filter.add_pattern ("*.jpeg");
+        image_filter.add_pattern ("*.webp");
+        image_filter.add_pattern ("*.bmp");
+
+        var all_filter = new FileFilter ();
+        all_filter.name = "All files";
+        all_filter.add_pattern ("*");
+
+        var filters = new GLib.ListStore (typeof (FileFilter));
+        filters.append (image_filter);
+        filters.append (all_filter);
+        dialog.set_filters (filters);
+
+        dialog.open.begin (get_root () as Gtk.Window, null, (obj, res) => {
+            try {
+                var file = dialog.open.end (res);
+                if (file == null) return;
+                string? path = file.get_path ();
+                if (path == null) return;
+                apply_watermark_image_path (path);
+            } catch (Error e) {
+                // User cancelled — ignore
+            }
+        });
+    }
+
+    private void apply_watermark_image_path (string path) {
+        watermark_image_path = path;
+        string basename = Path.get_basename (path);
+        watermark_image_source_row.set_title (basename);
+        watermark_image_source_row.set_subtitle (path);
+        emit_watermark_if_changed ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -840,6 +970,7 @@ public class GeneralTab : Box {
         watermark_text.changed.connect (() => {
             emit_watermark_if_changed ();
         });
+        // Mode and image path changes are wired in build_watermark_group().
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -914,12 +1045,15 @@ public class GeneralTab : Box {
         snapshot.video_filters = video_filters.snapshot_settings (
             snapshot.pixel_format.ten_bit_selected);
         snapshot.watermark_enabled = is_watermark_effectively_enabled ();
+        snapshot.watermark_mode = get_watermark_mode_text ();
         snapshot.watermark_text = watermark_text.text.strip ();
         snapshot.watermark_position = get_watermark_position_text ();
         snapshot.watermark_color = get_watermark_color_hex ();
         snapshot.watermark_opacity = watermark_opacity.get_value ();
         snapshot.watermark_margin = (int) watermark_margin.get_value ();
         snapshot.watermark_font_size = (int) watermark_font_size.get_value ();
+        snapshot.watermark_image_path = watermark_image_path;
+        snapshot.watermark_image_width = (int) watermark_image_width.get_value ();
         return snapshot;
     }
 
@@ -1398,29 +1532,80 @@ public class GeneralTab : Box {
     // ── Watermark ────────────────────────────────────────────────────────────
 
     public bool is_watermark_effectively_enabled () {
+        if (!watermark_check.active) return false;
+
+        if (get_watermark_mode_text () == "image") {
+            return overlay_available
+                && watermark_image_path.length > 0
+                && FileUtils.test (watermark_image_path, FileTest.EXISTS);
+        }
+
+        // text mode
         return drawtext_available
-            && watermark_check.active
             && watermark_text.text.strip ().length > 0;
+    }
+
+    public bool is_watermark_image_mode () {
+        return is_watermark_effectively_enabled ()
+            && get_watermark_mode_text () == "image";
     }
 
     public void set_drawtext_available (bool available, string? reason = null) {
         drawtext_available = available;
+        drawtext_unavailable_reason = reason;
+        update_watermark_availability ();
+    }
 
-        if (!available) {
+    public void set_overlay_available (bool available, string? reason = null) {
+        overlay_available = available;
+        overlay_unavailable_reason = reason;
+        update_watermark_availability ();
+    }
+
+    private void update_watermark_availability () {
+        bool either_available = drawtext_available || overlay_available;
+        bool is_image = watermark_mode.get_selected () == 1;
+        bool current_mode_available = is_image ? overlay_available : drawtext_available;
+
+        if (!either_available) {
+            // Neither filter available — fully disable watermark
             watermark_check.set_active (false);
             watermark_expander.set_enable_expansion (false);
             watermark_expander.set_sensitive (false);
-            watermark_expander.set_subtitle (
-                reason ?? WATERMARK_DRAWTEXT_UNAVAILABLE);
-            watermark_expander.set_tooltip_text (
-                reason ?? WATERMARK_DRAWTEXT_UNAVAILABLE);
+            string reason = drawtext_unavailable_reason
+                ?? overlay_unavailable_reason
+                ?? WATERMARK_DRAWTEXT_UNAVAILABLE;
+            watermark_expander.set_subtitle (reason);
+            watermark_expander.set_tooltip_text (reason);
         } else {
+            // At least one filter available — expander stays usable
             watermark_expander.set_sensitive (true);
-            watermark_expander.set_subtitle (WATERMARK_SUBTITLE_DEFAULT);
-            watermark_expander.set_tooltip_text (null);
+
+            if (!current_mode_available) {
+                // Current mode's filter is missing — show a hint but let the
+                // user switch modes.  Deactivate the enable switch so we don't
+                // claim an effective watermark while the active mode can't run.
+                watermark_check.set_active (false);
+                string hint;
+                if (is_image) {
+                    hint = overlay_unavailable_reason ?? WATERMARK_OVERLAY_UNAVAILABLE;
+                } else {
+                    hint = drawtext_unavailable_reason ?? WATERMARK_DRAWTEXT_UNAVAILABLE;
+                }
+                watermark_expander.set_subtitle (hint);
+                watermark_expander.set_tooltip_text (hint);
+            } else {
+                watermark_expander.set_subtitle (WATERMARK_SUBTITLE_DEFAULT);
+                watermark_expander.set_tooltip_text (null);
+            }
         }
 
         emit_watermark_if_changed ();
+    }
+
+    private string get_watermark_mode_text () {
+        var item = watermark_mode.selected_item as StringObject;
+        return item != null ? item.string.down () : "text";
     }
 
     private string get_watermark_position_text () {

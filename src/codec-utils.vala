@@ -44,12 +44,15 @@ public class GeneralSettingsSnapshot : Object {
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
     public bool watermark_enabled = false;
+    public string watermark_mode = "text";  // "text" or "image"
     public string watermark_text = "";
     public string watermark_position = "Bottom Right";
     public string watermark_color = "ffffff";
     public double watermark_opacity = 0.5;
     public int watermark_margin = 10;
     public int watermark_font_size = 24;
+    public string watermark_image_path = "";
+    public int watermark_image_width = 150;
 }
 
 public class CodecTabSettingsSnapshot : Object {
@@ -81,6 +84,13 @@ public class EncodeProfileSnapshot : Object {
     public AudioProcessingSettingsSnapshot audio_processing { get; set; default = new AudioProcessingSettingsSnapshot (); }
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
+    public bool watermark_enabled = false;
+    public string watermark_mode = "text";
+    public string watermark_image_path = "";
+    public int watermark_image_width = 150;
+    public string watermark_position = "Bottom Right";
+    public double watermark_opacity = 0.5;
+    public int watermark_margin = 10;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -446,6 +456,13 @@ namespace CodecUtils {
                 general_settings);
             snapshot.preserve_metadata = general_settings.preserve_metadata;
             snapshot.remove_chapters = general_settings.remove_chapters;
+            snapshot.watermark_enabled = general_settings.watermark_enabled;
+            snapshot.watermark_mode = general_settings.watermark_mode;
+            snapshot.watermark_image_path = general_settings.watermark_image_path;
+            snapshot.watermark_image_width = general_settings.watermark_image_width;
+            snapshot.watermark_position = general_settings.watermark_position;
+            snapshot.watermark_opacity = general_settings.watermark_opacity;
+            snapshot.watermark_margin = general_settings.watermark_margin;
         }
 
         return snapshot;

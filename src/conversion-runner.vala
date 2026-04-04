@@ -152,10 +152,20 @@ public class ConversionRunner {
     //  All three command builders share the same prefix:
     //    ffmpeg -y [-ss timestamp] -i input [-vf filters] [codec_args...]
     //
+    //  When image watermarking is active, the prefix becomes:
+    //    ffmpeg -y [-ss timestamp] -i input -i watermark.png
+    //      -filter_complex "...[outv]" -map [outv] -map 0:a? [codec_args...]
+    //
     //  Extracting this avoids duplicating seek, input, filter, and codec
     //  argument logic three times — a bug fix in any of these now only
     //  needs to happen in one place.
     // ═════════════════════════════════════════════════════════════════════════
+
+    private bool is_image_watermark_active () {
+        return config.profile.watermark_enabled
+            && config.profile.watermark_mode == "image"
+            && config.profile.watermark_image_path.length > 0;
+    }
 
     private string[] build_common_prefix (string input) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
@@ -167,7 +177,37 @@ public class ConversionRunner {
 
         cmd += "-i"; cmd += input;
 
-        if (config.profile.video_filters != "") {
+        if (is_image_watermark_active ()) {
+            cmd += "-i";
+            cmd += config.profile.watermark_image_path;
+
+            // Build filter_complex: existing video filters + overlay
+            string vf = config.profile.video_filters;
+            string fc;
+            if (vf.length > 0) {
+                fc = "[0:v]" + vf + "[vf_out]; ";
+                fc += FilterBuilder.build_image_overlay_fragment (
+                    "[1:v]", "[vf_out]", "[outv]",
+                    config.profile.watermark_position,
+                    config.profile.watermark_margin,
+                    config.profile.watermark_opacity,
+                    config.profile.watermark_image_width);
+            } else {
+                fc = FilterBuilder.build_image_overlay_fragment (
+                    "[1:v]", "[0:v]", "[outv]",
+                    config.profile.watermark_position,
+                    config.profile.watermark_margin,
+                    config.profile.watermark_opacity,
+                    config.profile.watermark_image_width);
+            }
+
+            cmd += "-filter_complex";
+            cmd += fc;
+            cmd += "-map";
+            cmd += "[outv]";
+            cmd += "-map";
+            cmd += "0:a?";
+        } else if (config.profile.video_filters != "") {
             cmd += "-vf"; cmd += config.profile.video_filters;
         }
 

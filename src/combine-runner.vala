@@ -497,6 +497,31 @@ public class CombineRunner : Object {
                 fc.append ("[outa_pre]%s[outa]".printf (AudioNormalization.EBU_R128_FILTER));
             }
 
+            // ── Image watermark overlay (post-output) ──────────────────────
+            bool has_image_wm = reencode_profile != null
+                && reencode_profile.watermark_enabled
+                && reencode_profile.watermark_mode == "image"
+                && reencode_profile.watermark_image_path.length > 0;
+
+            if (has_image_wm) {
+                int wm_input_index = files.length
+                    + (chapters_input_idx >= 0 ? 1 : 0);
+                cmd += "-i";
+                cmd += reencode_profile.watermark_image_path;
+
+                string fc_str = fc.str;
+                fc_str = fc_str.replace ("[outv]", "[outv_pre_wm]");
+                fc_str = ensure_filter_chain_separator (fc_str);
+                fc = new StringBuilder ();
+                fc.append (fc_str);
+                fc.append (FilterBuilder.build_image_overlay_fragment (
+                    @"[$wm_input_index:v]", "[outv_pre_wm]", "[outv]",
+                    reencode_profile.watermark_position,
+                    reencode_profile.watermark_margin,
+                    reencode_profile.watermark_opacity,
+                    reencode_profile.watermark_image_width));
+            }
+
             cmd += "-filter_complex";
             cmd += fc.str;
 

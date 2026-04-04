@@ -544,6 +544,7 @@ namespace FilterBuilder {
 
     private string? build_drawtext_filter (GeneralSettingsSnapshot snapshot) {
         if (!snapshot.watermark_enabled) return null;
+        if (snapshot.watermark_mode == "image") return null;
 
         string text = snapshot.watermark_text;
         if (text.length == 0) return null;
@@ -551,12 +552,32 @@ namespace FilterBuilder {
         double opacity = snapshot.watermark_opacity.clamp (0.05, 1.0);
         int margin = int.max (0, snapshot.watermark_margin);
         int font_size = int.max (8, snapshot.watermark_font_size);
-        string position = snapshot.watermark_position;
 
         string x_expr;
         string y_expr;
+        get_drawtext_position_exprs (snapshot.watermark_position, margin,
+            out x_expr, out y_expr);
 
-        // Map position presets to FFmpeg expressions
+        string escaped_text = escape_drawtext_text (text);
+        string color_hex = snapshot.watermark_color;
+        if (color_hex.length != 6) color_hex = "ffffff";
+
+        string alpha_str = ConversionUtils.format_ffmpeg_double (opacity, "%.2f");
+        string shadow_color = is_color_bright (color_hex) ? "black" : "white";
+
+        return "drawtext=text='%s':fontsize=%d:fontcolor=0x%s@%s:shadowcolor=%s@0.5:shadowx=2:shadowy=2:x=%s:y=%s:expansion=none".printf (
+            escaped_text, font_size, color_hex, alpha_str, shadow_color, x_expr, y_expr);
+    }
+
+    // ── Shared watermark position helpers ────────────────────────────────────
+    //
+    // drawtext uses: w/h for video dimensions, text_w/text_h for text size.
+    // overlay uses: main_w/main_h (or W/H) for main video, overlay_w/overlay_h
+    //               (or w/h) for the overlay input.
+
+    public static void get_drawtext_position_exprs (string position, int margin,
+                                                     out string x_expr,
+                                                     out string y_expr) {
         if (position == "Top Left") {
             x_expr = "%d".printf (margin);
             y_expr = "%d".printf (margin);
@@ -574,16 +595,75 @@ namespace FilterBuilder {
             x_expr = "(w-text_w)/2";
             y_expr = "(h-text_h)/2";
         }
+    }
 
-        string escaped_text = escape_drawtext_text (text);
-        string color_hex = snapshot.watermark_color;
-        if (color_hex.length != 6) color_hex = "ffffff";
+    public static void get_overlay_position_exprs (string position, int margin,
+                                                    out string x_expr,
+                                                    out string y_expr) {
+        if (position == "Top Left") {
+            x_expr = "%d".printf (margin);
+            y_expr = "%d".printf (margin);
+        } else if (position == "Top Right") {
+            x_expr = "main_w-overlay_w-%d".printf (margin);
+            y_expr = "%d".printf (margin);
+        } else if (position == "Bottom Left") {
+            x_expr = "%d".printf (margin);
+            y_expr = "main_h-overlay_h-%d".printf (margin);
+        } else if (position == "Bottom Right") {
+            x_expr = "main_w-overlay_w-%d".printf (margin);
+            y_expr = "main_h-overlay_h-%d".printf (margin);
+        } else {
+            // Center
+            x_expr = "(main_w-overlay_w)/2";
+            y_expr = "(main_h-overlay_h)/2";
+        }
+    }
 
-        string alpha_str = ConversionUtils.format_ffmpeg_double (opacity, "%.2f");
-        string shadow_color = is_color_bright (color_hex) ? "black" : "white";
+    /**
+     * Build the overlay filter fragment for image watermarking.
+     *
+     * Returns the filter text only (e.g. "scale=150:-1,format=rgba,...overlay=x=...:y=...").
+     * The caller is responsible for adding the second -i input and wiring
+     * the filter_complex labels.
+     *
+     * @param wm_input_label  label for the watermark input (e.g. "[1:v]" or "[wm]")
+     * @param video_label     label for the video input (e.g. "[0:v]" or "[outv_pre]")
+     * @param output_label    label for the output (e.g. "[outv]")
+     * @param position        position preset string
+     * @param margin          margin in pixels
+     * @param opacity         opacity 0.05–1.0
+     * @param image_width     desired width in pixels, -1 for original
+     */
+    public static string build_image_overlay_fragment (
+        string wm_input_label,
+        string video_label,
+        string output_label,
+        string position,
+        int margin,
+        double opacity,
+        int image_width) {
 
-        return "drawtext=text='%s':fontsize=%d:fontcolor=0x%s@%s:shadowcolor=%s@0.5:shadowx=2:shadowy=2:x=%s:y=%s:expansion=none".printf (
-            escaped_text, font_size, color_hex, alpha_str, shadow_color, x_expr, y_expr);
+        string x_expr;
+        string y_expr;
+        get_overlay_position_exprs (position, int.max (0, margin),
+            out x_expr, out y_expr);
+
+        // Build the watermark preparation chain: scale (optional) + format rgba
+        string wm_prep = "";
+        if (image_width > 0) {
+            wm_prep = "scale=%d:-1,".printf (image_width);
+        }
+        wm_prep += "format=rgba";
+
+        double clamped_opacity = opacity.clamp (0.05, 1.0);
+        if (clamped_opacity < 1.0) {
+            string alpha_str = ConversionUtils.format_ffmpeg_double (clamped_opacity, "%.2f");
+            wm_prep += ",colorchannelmixer=aa=%s".printf (alpha_str);
+        }
+
+        return "%s%s[wm_ready]; %s[wm_ready]overlay=x=%s:y=%s%s".printf (
+            wm_input_label, wm_prep,
+            video_label, x_expr, y_expr, output_label);
     }
 
     // Detect Crop helper

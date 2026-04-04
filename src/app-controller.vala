@@ -54,6 +54,8 @@ public class AppController : Object {
     private string drawtext_probe_cache_path = "";
     private bool drawtext_probe_cache_available = true;
     private string? drawtext_probe_cache_reason = null;
+    private bool overlay_probe_cache_available = true;
+    private string? overlay_probe_cache_reason = null;
     private Cancellable? svt_crf_two_pass_probe_cancel = null;
     private int svt_crf_two_pass_probe_generation = 0;
     private string active_svt_crf_two_pass_cache_key = "";
@@ -268,18 +270,22 @@ public class AppController : Object {
 
     private void wire_drawtext_availability () {
         AppSettings.get_default ().settings_changed.connect (() => {
-            refresh_drawtext_availability.begin ();
+            refresh_filter_availability.begin ();
         });
-        refresh_drawtext_availability.begin ();
+        refresh_filter_availability.begin ();
     }
 
-    private async void refresh_drawtext_availability () {
+    private async void refresh_filter_availability () {
         string ffmpeg_path = AppSettings.get_default ().ffmpeg_path;
 
         if (drawtext_probe_cache_valid && ffmpeg_path == drawtext_probe_cache_path) {
             general_tab.set_drawtext_available (
                 drawtext_probe_cache_available,
                 drawtext_probe_cache_reason
+            );
+            general_tab.set_overlay_available (
+                overlay_probe_cache_available,
+                overlay_probe_cache_reason
             );
             return;
         }
@@ -292,8 +298,10 @@ public class AppController : Object {
         drawtext_probe_cancel = cancellable;
         int generation = ++drawtext_probe_generation;
 
-        bool available = false;
-        string? reason = null;
+        bool dt_available = false;
+        string? dt_reason = null;
+        bool ol_available = false;
+        string? ol_reason = null;
 
         try {
             string filters_output = yield run_subprocess_capture (
@@ -301,9 +309,13 @@ public class AppController : Object {
                 cancellable
             );
 
-            available = filters_output_supports_drawtext (filters_output);
-            if (!available) {
-                reason = "Unavailable — the selected FFmpeg build does not include the drawtext filter";
+            dt_available = filters_output_supports_filter (filters_output, "drawtext");
+            if (!dt_available) {
+                dt_reason = "Unavailable — the selected FFmpeg build does not include the drawtext filter";
+            }
+            ol_available = filters_output_supports_filter (filters_output, "overlay");
+            if (!ol_available) {
+                ol_reason = "Unavailable — the selected FFmpeg build does not include the overlay filter";
             }
         } catch (IOError.CANCELLED e) {
             if (drawtext_probe_cancel == cancellable) {
@@ -321,7 +333,9 @@ public class AppController : Object {
             string failure_reason =
                 "Unavailable — failed to inspect the selected FFmpeg build: "
                 + describe_subprocess_error (e.message);
-            apply_drawtext_probe_result (ffmpeg_path, false, failure_reason);
+            apply_filter_probe_result (ffmpeg_path,
+                false, failure_reason,
+                false, failure_reason);
             return;
         }
 
@@ -332,20 +346,27 @@ public class AppController : Object {
             return;
         }
 
-        apply_drawtext_probe_result (ffmpeg_path, available, reason);
+        apply_filter_probe_result (ffmpeg_path,
+            dt_available, dt_reason,
+            ol_available, ol_reason);
     }
 
-    private void apply_drawtext_probe_result (string ffmpeg_path,
-                                              bool available,
-                                              string? reason) {
+    private void apply_filter_probe_result (string ffmpeg_path,
+                                            bool dt_available,
+                                            string? dt_reason,
+                                            bool ol_available,
+                                            string? ol_reason) {
         drawtext_probe_cache_valid = true;
         drawtext_probe_cache_path = ffmpeg_path;
-        drawtext_probe_cache_available = available;
-        drawtext_probe_cache_reason = reason;
-        general_tab.set_drawtext_available (available, reason);
+        drawtext_probe_cache_available = dt_available;
+        drawtext_probe_cache_reason = dt_reason;
+        overlay_probe_cache_available = ol_available;
+        overlay_probe_cache_reason = ol_reason;
+        general_tab.set_drawtext_available (dt_available, dt_reason);
+        general_tab.set_overlay_available (ol_available, ol_reason);
     }
 
-    private static bool filters_output_supports_drawtext (string output) {
+    private static bool filters_output_supports_filter (string output, string filter_name) {
         foreach (string line in output.split ("\n")) {
             string clean = line.strip ();
             if (clean.length == 0 || clean.has_prefix ("Filters:")) {
@@ -353,7 +374,7 @@ public class AppController : Object {
             }
 
             string[] fields = Regex.split_simple ("\\s+", clean);
-            if (fields.length >= 2 && fields[1] == "drawtext") {
+            if (fields.length >= 2 && fields[1] == filter_name) {
                 return true;
             }
         }
