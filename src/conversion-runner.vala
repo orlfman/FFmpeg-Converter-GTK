@@ -167,19 +167,7 @@ public class ConversionRunner {
             && config.profile.watermark_image_path.length > 0;
     }
 
-    private bool is_audio_disabled () {
-        return config.profile.audio_args.length > 0
-            && config.profile.audio_args[0] == "-an";
-    }
-
-    /**
-     * Build the shared command prefix.
-     *
-     * @param input       the input file path
-     * @param map_audio   whether to add audio mapping for filter_complex paths.
-     *                    Pass false for pass-1 (which always adds -an later).
-     */
-    private string[] build_common_prefix (string input, bool map_audio = true) {
+    private string[] build_common_prefix (string input) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
@@ -217,15 +205,8 @@ public class ConversionRunner {
             cmd += fc;
             cmd += "-map";
             cmd += "[outv]";
-
-            // Map only the best audio stream (0:a:0) to match the default
-            // stream selection that FFmpeg uses when no -map is specified.
-            // Using 0:a (without :0) would map ALL audio streams, breaking
-            // progress tracking on inputs with multiple audio tracks.
-            if (map_audio && !is_audio_disabled ()) {
-                cmd += "-map";
-                cmd += "0:a:0?";
-            }
+            cmd += "-map";
+            cmd += "0:a?";
         } else if (config.profile.video_filters != "") {
             cmd += "-vf"; cmd += config.profile.video_filters;
         }
@@ -300,7 +281,7 @@ public class ConversionRunner {
     // ═════════════════════════════════════════════════════════════════════════
 
     private string[] build_pass1 (string input) {
-        string[] cmd = build_common_prefix (input, false);
+        string[] cmd = build_common_prefix (input);
 
         cmd += "-pass"; cmd += "1";
         cmd += "-passlogfile"; cmd += config.passlog_base;

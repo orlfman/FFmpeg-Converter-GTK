@@ -16,6 +16,7 @@ public class ProgressTracker : Object {
     private Mutex progress_mutex = Mutex ();
     private bool use_pulse_mode = false;
     private int64 last_progress_update = 0;
+    private double high_water_sec = 0.0;
 
     public ProgressTracker (ProgressBar bar) {
         this.progress_bar = bar;
@@ -138,8 +139,19 @@ public class ProgressTracker : Object {
         if (current_sec < 0 || total_dur <= 0) return false;
 
         bool should_update;
+        double effective_sec;
         progress_mutex.lock ();
         try {
+            // Track the high-water mark of reported time.  When FFmpeg
+            // encodes multiple output streams of different lengths the
+            // out_time_us value can jump between streams, causing the
+            // reported position to temporarily regress.  Ignoring
+            // regressions keeps the progress bar moving forward smoothly.
+            if (current_sec > high_water_sec) {
+                high_water_sec = current_sec;
+            }
+            effective_sec = high_water_sec;
+
             int64 now = GLib.get_monotonic_time ();
             should_update = (now - last_progress_update > 250000);
             if (should_update) last_progress_update = now;
@@ -149,7 +161,7 @@ public class ProgressTracker : Object {
 
         if (!should_update) return false;
 
-        double fraction = (current_sec / total_dur).clamp (0.0, 1.0);
+        double fraction = (effective_sec / total_dur).clamp (0.0, 1.0);
         double percent = pass_start + (fraction * pass_range);
         update_percent (percent);
         return true;
@@ -162,6 +174,7 @@ public class ProgressTracker : Object {
         progress_mutex.lock ();
         try {
             last_progress_update = 0;
+            high_water_sec = 0.0;
         } finally {
             progress_mutex.unlock ();
         }
