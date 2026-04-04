@@ -868,8 +868,12 @@ public class TrimRunner : Object {
                 cmd += "-map";
                 cmd += "[outv]";
 
-                cmd += "-map";
-                cmd += "0:a?";
+                string[] raw_audio = get_audio_args ();
+                bool audio_disabled = raw_audio.length > 0 && raw_audio[0] == "-an";
+                if (!audio_disabled) {
+                    cmd += "-map";
+                    cmd += "0:a?";
+                }
             } else if (vf != "") {
                 cmd += "-vf";
                 cmd += vf;
