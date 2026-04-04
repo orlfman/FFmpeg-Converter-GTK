@@ -783,9 +783,9 @@ public class SubtitlesRunner : Object {
     }
 
     private bool prepare_peak_normalization (uint64 operation_id,
-                                             string input_file,
-                                             EncodeProfileSnapshot profile,
-                                             double duration) {
+                                            string input_file,
+                                            EncodeProfileSnapshot profile,
+                                            double duration) {
         if (!needs_peak_analysis (profile)) {
             return true;
         }
@@ -861,6 +861,161 @@ public class SubtitlesRunner : Object {
         return true;
     }
 
+    private static bool is_audio_disabled (EncodeProfileSnapshot profile) {
+        return profile.audio_args.length > 0 && profile.audio_args[0] == "-an";
+    }
+
+    private static bool is_image_watermark_active (EncodeProfileSnapshot profile) {
+        return profile.watermark_enabled
+            && profile.watermark_mode == "image"
+            && profile.watermark_image_path.length > 0;
+    }
+
+    private string build_text_subtitle_filter (string input_file,
+                                               int sub_stream_index,
+                                               string? external_sub_path) {
+        if (external_sub_path != null) {
+            return "subtitles=" + escape_filter_path (external_sub_path);
+        }
+
+        return "subtitles=" + escape_filter_path (input_file)
+             + @":si=$(sub_stream_index)";
+    }
+
+    private string[] build_burn_in_command (string input_file,
+                                            string output_path,
+                                            int sub_stream_index,
+                                            string? external_sub_path,
+                                            bool is_bitmap,
+                                            EncodeProfileSnapshot profile,
+                                            double duration,
+                                            string[] resolved_codec_args) {
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+
+        bool has_external_bitmap = (external_sub_path != null && is_bitmap);
+        bool has_image_wm = is_image_watermark_active (profile);
+        bool audio_disabled = is_audio_disabled (profile);
+
+        cmd += "-i";
+        cmd += input_file;
+
+        if (has_external_bitmap) {
+            cmd += "-i";
+            cmd += external_sub_path;
+        }
+
+        int wm_input_index = -1;
+        if (has_image_wm) {
+            wm_input_index = has_external_bitmap ? 2 : 1;
+            cmd += "-i";
+            cmd += profile.watermark_image_path;
+        }
+
+        if (is_bitmap) {
+            string overlay_src = has_external_bitmap
+                ? "[0:v][1:0]overlay"
+                : @"[0:v][0:s:$(sub_stream_index)]overlay";
+
+            string fc;
+            if (has_image_wm) {
+                if (profile.video_filters.length > 0) {
+                    fc = overlay_src + "[subbedv]; [subbedv]" + profile.video_filters
+                        + "[vf_out]; ";
+                    fc += FilterBuilder.build_image_overlay_fragment (
+                        @"[$wm_input_index:v]", "[vf_out]", "[outv]",
+                        profile.watermark_position,
+                        profile.watermark_margin,
+                        profile.watermark_opacity,
+                        profile.watermark_image_width);
+                } else {
+                    fc = overlay_src + "[subbedv]; ";
+                    fc += FilterBuilder.build_image_overlay_fragment (
+                        @"[$wm_input_index:v]", "[subbedv]", "[outv]",
+                        profile.watermark_position,
+                        profile.watermark_margin,
+                        profile.watermark_opacity,
+                        profile.watermark_image_width);
+                }
+            } else if (profile.video_filters.length > 0) {
+                fc = overlay_src + "[subbedv]; [subbedv]" + profile.video_filters + "[outv]";
+            } else {
+                fc = overlay_src + "[outv]";
+            }
+
+            cmd += "-filter_complex";
+            cmd += fc;
+            cmd += "-map";
+            cmd += "[outv]";
+            if (!audio_disabled) {
+                cmd += "-map";
+                cmd += "0:a?";
+            }
+        } else {
+            string sub_filter = build_text_subtitle_filter (
+                input_file, sub_stream_index, external_sub_path);
+
+            if (has_image_wm) {
+                string fc;
+                if (profile.video_filters.length > 0) {
+                    fc = "[0:v]" + sub_filter + "," + profile.video_filters + "[subbedv]; ";
+                } else {
+                    fc = "[0:v]" + sub_filter + "[subbedv]; ";
+                }
+                fc += FilterBuilder.build_image_overlay_fragment (
+                    @"[$wm_input_index:v]", "[subbedv]", "[outv]",
+                    profile.watermark_position,
+                    profile.watermark_margin,
+                    profile.watermark_opacity,
+                    profile.watermark_image_width);
+
+                cmd += "-filter_complex";
+                cmd += fc;
+                cmd += "-map";
+                cmd += "[outv]";
+                if (!audio_disabled) {
+                    cmd += "-map";
+                    cmd += "0:a?";
+                }
+            } else {
+                string full_vf;
+                if (profile.video_filters.length > 0) {
+                    full_vf = sub_filter + "," + profile.video_filters;
+                } else {
+                    full_vf = sub_filter;
+                }
+
+                cmd += "-vf";
+                cmd += full_vf;
+                cmd += "-map";
+                cmd += "0:v";
+                if (!audio_disabled) {
+                    cmd += "-map";
+                    cmd += "0:a?";
+                }
+            }
+        }
+
+        foreach (string arg in resolved_codec_args) cmd += arg;
+
+        if (audio_disabled) {
+            cmd += "-an";
+        } else {
+            string[] merged = FilterBuilder.merge_audio_filters (
+                build_audio_filters (profile, duration),
+                profile.audio_args
+            );
+            foreach (string a in merged) cmd += a;
+        }
+
+        if (profile.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
+        if (profile.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
+
+        cmd += "-progress";
+        cmd += "pipe:2";
+        cmd += output_path;
+        return cmd;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  BURN IN — Hardcode subtitles into video frames (full re-encode)
     //
@@ -928,97 +1083,15 @@ public class SubtitlesRunner : Object {
                 }
             }
 
-            // ── Build FFmpeg command ─────────────────────────────────────────
-            string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
-
-            bool has_external_bitmap = (external_sub_path != null && is_bitmap);
-
-            cmd += "-i";
-            cmd += input_file;
-
-            // External bitmap subs need a second input
-            if (has_external_bitmap) {
-                cmd += "-i";
-                cmd += external_sub_path;
-            }
-
-            // ── Determine audio state ────────────────────────────────────────
-            bool audio_disabled = (
-                profile.audio_args.length > 0 && profile.audio_args[0] == "-an");
-
-            // ── Build subtitle filter + combine with general video filters ───
-            if (is_bitmap) {
-                // Bitmap path → -filter_complex with overlay
-                string overlay_src;
-                if (has_external_bitmap) {
-                    overlay_src = "[0:v][1:0]overlay";
-                } else {
-                    overlay_src = @"[0:v][0:s:$(sub_stream_index)]overlay";
-                }
-
-                string fc;
-                if (profile.video_filters.length > 0) {
-                    fc = overlay_src + "," + profile.video_filters + "[outv]";
-                } else {
-                    fc = overlay_src + "[outv]";
-                }
-
-                cmd += "-filter_complex";
-                cmd += fc;
-                cmd += "-map";
-                cmd += "[outv]";
-                if (!audio_disabled) {
-                    cmd += "-map";
-                    cmd += "0:a?";
-                }
-            } else {
-                // Text path → -vf with subtitles= filter
-                string sub_filter;
-                if (external_sub_path != null) {
-                    sub_filter = "subtitles=" + escape_filter_path (external_sub_path);
-                } else {
-                    sub_filter = "subtitles=" + escape_filter_path (input_file)
-                                 + @":si=$(sub_stream_index)";
-                }
-
-                string full_vf;
-                if (profile.video_filters.length > 0) {
-                    full_vf = sub_filter + "," + profile.video_filters;
-                } else {
-                    full_vf = sub_filter;
-                }
-
-                cmd += "-vf";
-                cmd += full_vf;
-                cmd += "-map";
-                cmd += "0:v";
-                if (!audio_disabled) {
-                    cmd += "-map";
-                    cmd += "0:a?";
-                }
-            }
-
-            // ── Codec args ───────────────────────────────────────────────────
-            foreach (string arg in resolved_codec_args) cmd += arg;
-
-            // ── Audio args (merged with General-tab audio filters) ───────────
-            if (audio_disabled) {
-                cmd += "-an";
-            } else {
-                string[] merged = FilterBuilder.merge_audio_filters (
-                    build_audio_filters (profile, duration),
-                    profile.audio_args
-                );
-                foreach (string a in merged) cmd += a;
-            }
-
-            // ── Metadata ─────────────────────────────────────────────────────
-            if (profile.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
-            if (profile.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
-
-            cmd += "-progress";
-            cmd += "pipe:2";
-            cmd += output_path;
+            string[] cmd = build_burn_in_command (
+                input_file,
+                output_path,
+                sub_stream_index,
+                external_sub_path,
+                is_bitmap,
+                profile,
+                duration,
+                resolved_codec_args);
 
             log_line ("=== Subtitle Burn-In ===");
             string full_cmd = ConversionUtils.format_command_for_display (cmd);
@@ -1090,6 +1163,28 @@ public class SubtitlesRunner : Object {
             }
         });
     }
+
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal string[] build_burn_in_command_for_widget_test (string input_file,
+                                                             string output_path,
+                                                             int sub_stream_index,
+                                                             string? external_sub_path,
+                                                             bool is_bitmap,
+                                                             EncodeProfileSnapshot profile,
+                                                             double duration = 0.0) {
+        string[] resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
+            profile, input_file);
+        return build_burn_in_command (
+            input_file,
+            output_path,
+            sub_stream_index,
+            external_sub_path,
+            is_bitmap,
+            profile,
+            duration,
+            resolved_codec_args);
+    }
+#endif
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CANCEL

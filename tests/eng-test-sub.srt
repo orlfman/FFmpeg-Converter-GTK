@@ -1,0 +1,8 @@
+1
+00:00:01,000 --> 00:00:03,000
+Hello from the SRT test fixture.
+
+2
+00:00:34,456 --> 00:00:36,000
+This line aligns with the SUP fixture timing.
+

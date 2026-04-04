@@ -38,6 +38,27 @@ private void assert_string_not_equal (string actual, string unexpected, string c
     }
 }
 
+private void assert_contains (string actual, string expected_fragment, string context) {
+    if (!actual.contains (expected_fragment)) {
+        Test.fail_printf ("%s expected to find '%s' in '%s'",
+            context, expected_fragment, actual);
+    }
+}
+
+private void assert_array_has_adjacent_pair (string[] values,
+                                             string expected_left,
+                                             string expected_right,
+                                             string context) {
+    for (int i = 0; i < values.length - 1; i++) {
+        if (values[i] == expected_left && values[i + 1] == expected_right) {
+            return;
+        }
+    }
+
+    Test.fail_printf ("%s expected pair ['%s', '%s']",
+        context, expected_left, expected_right);
+}
+
 private void assert_double_equal (double actual, double expected, string context) {
     if (Math.fabs (actual - expected) > 0.000001) {
         Test.fail_printf ("%s expected %.6f but got %.6f", context, expected, actual);
@@ -286,6 +307,135 @@ private void test_trim_image_watermark_preserves_segment_duration () {
     }
 }
 
+private void test_subtitle_burn_in_bitmap_image_watermark_topology () {
+    string input_path = resolve_test_asset_path ("test2.vob");
+    string sub_path = resolve_test_asset_path ("eng-test-sub.sup");
+    string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+
+    var runner = new SubtitlesRunner ();
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    profile.video_filters =
+        "zscale=w=trunc(iw*2.000000/2)*2:h=trunc(ih*2.000000/2)*2:filter=lanczos";
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "image";
+    profile.watermark_image_path = watermark_path;
+    profile.watermark_image_width = 120;
+    profile.watermark_position = "Top Right";
+    profile.watermark_opacity = 0.85;
+    profile.watermark_margin = 10;
+
+    string[] argv = runner.build_burn_in_command_for_widget_test (
+        input_path,
+        "/tmp/subtitle-burnin-image-wm.mkv",
+        -1,
+        sub_path,
+        true,
+        profile,
+        120.0);
+
+    assert_array_has_adjacent_pair (argv, "-i", input_path,
+        "subtitle burn-in includes primary input");
+    assert_array_has_adjacent_pair (argv, "-i", sub_path,
+        "subtitle burn-in includes external bitmap subtitle input");
+    assert_array_has_adjacent_pair (argv, "-i", watermark_path,
+        "subtitle burn-in includes watermark image input");
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "subtitle burn-in maps filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "subtitle burn-in preserves audio mapping");
+
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex, "[0:v][1:0]overlay[subbedv]",
+        "subtitle burn-in overlays external bitmap subtitles first");
+    assert_contains (filter_complex, "[subbedv]zscale=",
+        "subtitle burn-in applies general video filters after subtitle overlay");
+    assert_contains (filter_complex, "[2:v]scale=120:-1",
+        "subtitle burn-in uses watermark image as third input");
+    assert_contains (filter_complex, "colorchannelmixer=aa=0.85",
+        "subtitle burn-in applies watermark opacity");
+    assert_contains (filter_complex, "overlay=x=main_w-overlay_w-10:y=10[outv]",
+        "subtitle burn-in overlays watermark at requested position");
+}
+
+private void test_subtitle_burn_in_text_image_watermark_topology () {
+    string input_path = resolve_test_asset_path ("test2.vob");
+    string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+    string sub_path = resolve_test_asset_path ("eng-test-sub.srt");
+
+    var runner = new SubtitlesRunner ();
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    profile.video_filters =
+        "zscale=w=trunc(iw*2.000000/2)*2:h=trunc(ih*2.000000/2)*2:filter=lanczos";
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "image";
+    profile.watermark_image_path = watermark_path;
+    profile.watermark_image_width = 120;
+    profile.watermark_position = "Top Right";
+    profile.watermark_opacity = 0.85;
+    profile.watermark_margin = 10;
+
+    string[] argv = runner.build_burn_in_command_for_widget_test (
+        input_path,
+        "/tmp/subtitle-burnin-text-image-wm.mkv",
+        -1,
+        sub_path,
+        false,
+        profile,
+        120.0);
+
+    assert_array_has_adjacent_pair (argv, "-i", input_path,
+        "text subtitle burn-in includes primary input");
+    assert_array_has_adjacent_pair (argv, "-i", watermark_path,
+        "text subtitle burn-in includes watermark image input");
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "text subtitle burn-in maps filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "text subtitle burn-in preserves audio mapping");
+
+    int input_count = 0;
+    bool has_vf = false;
+    string filter_complex = "";
+    for (int i = 0; i < argv.length; i++) {
+        if (argv[i] == "-i") input_count++;
+        if (argv[i] == "-vf") has_vf = true;
+        if (i < argv.length - 1 && argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+        }
+    }
+
+    assert_true (input_count == 2,
+        "text subtitle burn-in uses only main video and watermark inputs");
+    assert_false (has_vf,
+        "text subtitle burn-in switches to filter_complex when image watermark is active");
+    assert_contains (filter_complex, "[0:v]subtitles=",
+        "text subtitle burn-in renders subtitles from a filter graph");
+    assert_contains (filter_complex, "eng-test-sub.srt",
+        "text subtitle burn-in references the real srt fixture");
+    assert_contains (filter_complex, ",zscale=",
+        "text subtitle burn-in applies general video filters after subtitle render");
+    assert_contains (filter_complex, "filter=lanczos[subbedv];",
+        "text subtitle burn-in labels filtered subtitle video before watermark overlay");
+    assert_contains (filter_complex, "[1:v]scale=120:-1",
+        "text subtitle burn-in uses watermark image as second input");
+    assert_contains (filter_complex, "colorchannelmixer=aa=0.85",
+        "text subtitle burn-in applies watermark opacity");
+    assert_contains (filter_complex, "overlay=x=main_w-overlay_w-10:y=10[outv]",
+        "text subtitle burn-in overlays watermark at requested position");
+}
+
 private void test_trim_chapter_checkbox_updates_model_and_segments () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -461,6 +611,10 @@ void main (string[] args) {
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
     Test.add_func ("/trim/runner/image-watermark-preserves-duration",
         test_trim_image_watermark_preserves_segment_duration);
+    Test.add_func ("/subtitles/burn-in/bitmap-image-watermark-topology",
+        test_subtitle_burn_in_bitmap_image_watermark_topology);
+    Test.add_func ("/subtitles/burn-in/text-image-watermark-topology",
+        test_subtitle_burn_in_text_image_watermark_topology);
     Test.add_func ("/trim/widgets/chapter-checkbox", test_trim_chapter_checkbox_updates_model_and_segments);
     Test.add_func ("/trim/widgets/move-button", test_trim_move_button_reorders_segments);
     Test.add_func ("/trim/widgets/drag-drop", test_trim_drag_drop_reorders_segments);
