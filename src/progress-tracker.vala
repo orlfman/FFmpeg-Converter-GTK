@@ -16,7 +16,7 @@ public class ProgressTracker : Object {
     private Mutex progress_mutex = Mutex ();
     private bool use_pulse_mode = false;
     private int64 last_progress_update = 0;
-    private double high_water_sec = 0.0;
+    private int64 total_expected_frames = 0;
 
     public ProgressTracker (ProgressBar bar) {
         this.progress_bar = bar;
@@ -139,19 +139,8 @@ public class ProgressTracker : Object {
         if (current_sec < 0 || total_dur <= 0) return false;
 
         bool should_update;
-        double effective_sec;
         progress_mutex.lock ();
         try {
-            // Track the high-water mark of reported time.  When FFmpeg
-            // encodes multiple output streams of different lengths the
-            // out_time_us value can jump between streams, causing the
-            // reported position to temporarily regress.  Ignoring
-            // regressions keeps the progress bar moving forward smoothly.
-            if (current_sec > high_water_sec) {
-                high_water_sec = current_sec;
-            }
-            effective_sec = high_water_sec;
-
             int64 now = GLib.get_monotonic_time ();
             should_update = (now - last_progress_update > 250000);
             if (should_update) last_progress_update = now;
@@ -161,10 +150,51 @@ public class ProgressTracker : Object {
 
         if (!should_update) return false;
 
-        double fraction = (effective_sec / total_dur).clamp (0.0, 1.0);
+        double fraction = (current_sec / total_dur).clamp (0.0, 1.0);
         double percent = pass_start + (fraction * pass_range);
         update_percent (percent);
         return true;
+    }
+
+    /**
+     * Update progress based on current frame count vs expected total frames.
+     * Preferred over time-based progress for video encodes, because FFmpeg's
+     * out_time_us can stall on multi-audio-stream inputs where shorter
+     * streams finish before the video.
+     */
+    public bool update_from_frame (int64 current_frame,
+                                   double pass_start, double pass_range) {
+        int64 expected;
+        bool should_update;
+        progress_mutex.lock ();
+        try {
+            expected = total_expected_frames;
+            int64 now = GLib.get_monotonic_time ();
+            should_update = (now - last_progress_update > 250000);
+            if (should_update) last_progress_update = now;
+        } finally {
+            progress_mutex.unlock ();
+        }
+
+        if (expected <= 0 || !should_update) return false;
+
+        double fraction = ((double) current_frame / (double) expected).clamp (0.0, 1.0);
+        double percent = pass_start + (fraction * pass_range);
+        update_percent (percent);
+        return true;
+    }
+
+    /**
+     * Set the expected total frame count for frame-based progress.
+     * Pass 0 to disable frame-based tracking (falls back to time-based).
+     */
+    public void set_expected_frames (int64 frames) {
+        progress_mutex.lock ();
+        try {
+            total_expected_frames = frames;
+        } finally {
+            progress_mutex.unlock ();
+        }
     }
 
     /**
@@ -174,7 +204,7 @@ public class ProgressTracker : Object {
         progress_mutex.lock ();
         try {
             last_progress_update = 0;
-            high_water_sec = 0.0;
+            total_expected_frames = 0;
         } finally {
             progress_mutex.unlock ();
         }

@@ -28,6 +28,11 @@ public class ConversionConfig : Object {
     public bool   time_enabled   { get; set; default = false; }
     public string time_timestamp { get; set; default = "00:00:00"; }
     public double output_duration_seconds { get; set; default = 0.0; }
+
+    // ── Frame-based progress ───────────────────────────────────────────────
+    //    Effective output fps resolved at snapshot time from the General tab's
+    //    frame rate setting.  0.0 means "use probed input fps".
+    public double output_fps { get; set; default = 0.0; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -265,8 +270,9 @@ public class Converter : Object {
 
         try {
             new Thread<void>.try ("ffmpeg-thread", () => {
-                // Probe duration on background thread via shared utility
+                // Probe duration and fps on background thread
                 double dur = FfprobeUtils.probe_duration (input_file);
+                double probed_fps = FfprobeUtils.probe_input_fps (input_file);
                 bool still_active;
 
                 state_mutex.lock ();
@@ -287,6 +293,17 @@ public class Converter : Object {
                 if (!still_active) {
                     return;
                 }
+
+                // Compute expected output frames for frame-based progress.
+                // Use effective output fps: custom frame rate from the profile
+                // takes precedence over the probed input fps.
+                double output_fps = resolve_output_fps (config, probed_fps);
+                int64 expected_frames = 0;
+                if (output_fps > 0 && config.output_duration_seconds > 0) {
+                    expected_frames = (int64) Math.round (
+                        output_fps * config.output_duration_seconds);
+                }
+                progress_tracker.set_expected_frames (expected_frames);
 
                 bool pulse = (dur <= 0);
                 if (!accepts_runner_updates (runner)) {
@@ -375,7 +392,10 @@ public class Converter : Object {
             config.time_timestamp = general_tab.get_time_timestamp ();
         }
 
-        // Metadata
+        // Effective output fps from the General tab frame rate setting.
+        // 0.0 means "use probed input fps" (resolved on background thread).
+        config.output_fps = resolve_output_fps_from_settings (general_settings);
+
         return config;
     }
 
@@ -407,6 +427,36 @@ public class Converter : Object {
             }
         }
         return duration;
+    }
+
+    /**
+     * Resolve the effective output fps from the General tab's frame rate
+     * setting, snapshotted into general_settings.  Returns 0.0 if the
+     * setting is "Original" (meaning: use the probed input fps).
+     */
+    private static double resolve_output_fps_from_settings (
+        GeneralSettingsSnapshot general_settings) {
+        string fr_text = general_settings.frame_rate_text;
+        if (fr_text == FrameRateLabel.CUSTOM) {
+            string custom = general_settings.custom_frame_rate_text;
+            if (custom.length > 0) {
+                double fps = double.parse (custom);
+                if (fps > 0) return fps;
+            }
+        } else if (fr_text != FrameRateLabel.ORIGINAL) {
+            double fps = double.parse (fr_text);
+            if (fps > 0) return fps;
+        }
+        return 0.0;
+    }
+
+    /**
+     * Determine the effective output fps for frame-based progress, preferring
+     * the user's configured output fps over the probed input fps.
+     */
+    private static double resolve_output_fps (ConversionConfig config,
+                                              double probed_fps) {
+        return config.output_fps > 0 ? config.output_fps : probed_fps;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -441,7 +491,22 @@ public class Converter : Object {
                 console_tab.add_line (clean);
             }
 
-            // Progress parsing
+            // Progress parsing — prefer frame-based when available,
+            // fall back to time-based.  Frame-based progress is reliable
+            // even on multi-audio-stream inputs where out_time_us can
+            // stall at the shortest audio stream's duration.
+            if (clean.has_prefix ("frame=")) {
+                string frame_str = clean.substring ("frame=".length).strip ();
+                int64 frame = int64.parse (frame_str);
+                if (frame > 0) {
+                    if (progress_tracker.update_from_frame (frame, pass_start, pass_range)) {
+                        return;
+                    }
+                }
+            }
+
+            // Time-based fallback (used when expected frames is 0, or
+            // for lines that aren't frame= lines)
             double current_sec = -1.0;
 
             if (clean.has_prefix ("out_time_us=")) {
