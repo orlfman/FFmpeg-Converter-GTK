@@ -792,6 +792,7 @@ public class TrimRunner : Object {
 
     private int extract_segment (int seg_index, TrimSegment seg, string output) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+        string? deferred_to = null;
 
         bool seg_has_crop = seg.has_crop ();
         bool seg_reencode = !copy_mode || seg_has_crop;
@@ -824,8 +825,9 @@ public class TrimRunner : Object {
             cmd += format_seconds (seg.start_time);
             cmd += "-i";
             cmd += input_file;
-            cmd += "-to";
-            cmd += format_seconds (seg.end_time - seg.start_time);
+            // Defer -to until after all inputs so it keeps applying to the
+            // trimmed video even when image watermarking adds a second -i.
+            deferred_to = format_seconds (seg.end_time - seg.start_time);
         }
 
         if (!seg_reencode) {
@@ -877,6 +879,11 @@ public class TrimRunner : Object {
             } else if (vf != "") {
                 cmd += "-vf";
                 cmd += vf;
+            }
+
+            if (deferred_to != null) {
+                cmd += "-to";
+                cmd += deferred_to;
             }
 
             // ── Video codec args: per-segment Smart Optimizer or shared builder ──
@@ -1263,4 +1270,14 @@ public class TrimRunner : Object {
         int dot = basename.last_index_of_char ('.');
         return (dot > 0) ? basename.substring (dot) : fallback_ext;
     }
+
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal int run_extract_segment_for_widget_test (int seg_index, string output) {
+        if (seg_index < 0 || seg_index >= segments.length) {
+            return -1;
+        }
+
+        return extract_segment (seg_index, segments[seg_index], output);
+    }
+#endif
 }

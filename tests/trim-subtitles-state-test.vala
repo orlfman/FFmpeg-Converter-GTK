@@ -81,6 +81,75 @@ private bool ensure_gtk_widget_tests_available () {
     return true;
 }
 
+private int run_command_for_test (string[] cmd,
+                                  out string stdout_buf,
+                                  out string stderr_buf,
+                                  string context) {
+    stdout_buf = "";
+    stderr_buf = "";
+    int status = -1;
+
+    try {
+        Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
+            null, out stdout_buf, out stderr_buf, out status);
+    } catch (Error e) {
+        Test.fail_printf ("%s failed to launch command: %s", context, e.message);
+    }
+
+    return status;
+}
+
+private double probe_media_duration_seconds (string path, string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffprobe_path,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1",
+        path
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s failed to probe duration for '%s': %s",
+            context, path, stderr_buf.strip ());
+    }
+
+    return double.parse (stdout_buf.strip ());
+}
+
+private void cleanup_exec_test_dir (string dir) {
+    try {
+        var d = Dir.open (dir);
+        string? name;
+        while ((name = d.read_name ()) != null) {
+            FileUtils.unlink (Path.build_filename (dir, name));
+        }
+    } catch (FileError e) {
+        // Best-effort cleanup for test temp files.
+    }
+    DirUtils.remove (dir);
+}
+
+private string resolve_test_asset_path (string filename) {
+    string cwd = Environment.get_current_dir ();
+    string[] candidates = {
+        Path.build_filename (cwd, "tests", filename),
+        Path.build_filename (cwd, "..", "tests", filename),
+        Path.build_filename (cwd, "..", "..", "tests", filename)
+    };
+
+    foreach (unowned string candidate in candidates) {
+        if (FileUtils.test (candidate, FileTest.EXISTS)) {
+            return candidate;
+        }
+    }
+
+    Test.fail_printf ("could not resolve test asset '%s' from cwd '%s'",
+        filename, cwd);
+    return "";
+}
+
 private void test_trim_chapter_derivation_preserves_existing_order_and_appends_new () {
     var chapters = new GenericArray<ChapterInfo> ();
     var ch1 = new ChapterInfo (0, "One", 0.0, 10.0);
@@ -167,6 +236,54 @@ private void test_trim_runner_guard_helpers () {
     assert_false (
         TrimTab.export_failure_counts_as_cancelled_for_test (false, false),
         "trim cancellation state stays false otherwise");
+}
+
+private void test_trim_image_watermark_preserves_segment_duration () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-image-watermark-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string output_path = Path.build_filename (tmp_dir, "trimmed.mkv");
+        string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 3.0));
+        runner.set_segments (segments);
+
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        profile.watermark_enabled = true;
+        profile.watermark_mode = "image";
+        profile.watermark_image_path = watermark_path;
+        profile.watermark_image_width = 120;
+        profile.watermark_position = "Bottom Right";
+        profile.watermark_opacity = 1.0;
+        profile.watermark_margin = 10;
+        runner.reencode_profile = profile;
+
+        int exit_code = runner.run_extract_segment_for_widget_test (0, output_path);
+        assert_true (exit_code == 0, "trim image watermark extract exit code");
+
+        double duration = probe_media_duration_seconds (
+            output_path,
+            "trim image watermark duration probe");
+        assert_true (Math.fabs (duration - 2.0) < 0.2,
+            "trim image watermark preserves requested segment duration");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
 }
 
 private void test_trim_chapter_checkbox_updates_model_and_segments () {
@@ -342,6 +459,8 @@ void main (string[] args) {
     Test.add_func ("/trim/chapters/derive", test_trim_chapter_derivation_preserves_existing_order_and_appends_new);
     Test.add_func ("/trim/segments/edit-move-delete-crop", test_trim_segment_edit_move_delete_and_crop_helpers);
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
+    Test.add_func ("/trim/runner/image-watermark-preserves-duration",
+        test_trim_image_watermark_preserves_segment_duration);
     Test.add_func ("/trim/widgets/chapter-checkbox", test_trim_chapter_checkbox_updates_model_and_segments);
     Test.add_func ("/trim/widgets/move-button", test_trim_move_button_reorders_segments);
     Test.add_func ("/trim/widgets/drag-drop", test_trim_drag_drop_reorders_segments);
