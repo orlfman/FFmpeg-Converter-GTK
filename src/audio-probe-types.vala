@@ -11,4 +11,7 @@ public class AudioStreamProbeResult : Object {
     public int channels { get; set; default = 0; }
     public string sample_fmt { get; set; default = ""; }
     public int bits_per_raw_sample { get; set; default = 0; }
+
+    /** All source audio streams (populated when the full probe runs). */
+    public AudioSourceInfo[] all_sources { get; set; default = {}; }
 }

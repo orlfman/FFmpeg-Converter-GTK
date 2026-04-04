@@ -661,7 +661,7 @@ private void test_pipeline_constraint_subtitle_takes_priority_over_source_incomp
     );
     assert_contains (
         settings.get_codec_row_subtitle_for_test (),
-        "source Vorbis audio is not supported in MP4",
+        "Vorbis audio track is not supported in MP4",
         "source incompatibility subtitle explains the persistent blocker"
     );
 
@@ -736,6 +736,181 @@ private void test_audio_status_override_does_not_replace_real_probe_state () {
     );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  MULTI-TRACK CONTAINER COMPATIBILITY TESTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+private AudioSourceInfo make_source (string codec_name) {
+    var s = new AudioSourceInfo ();
+    s.presence = MediaStreamPresence.PRESENT;
+    s.codec_name = codec_name;
+    return s;
+}
+
+private void test_all_streams_compatible_webm_opus_only () {
+    // All streams are opus — WebM should allow copy
+    var primary = make_source ("opus");
+    AudioSourceInfo[] all = { make_source ("opus"), make_source ("opus") };
+    string incompatible;
+    assert_true (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.WEBM, primary, all, out incompatible),
+        "webm with all-opus streams should allow copy"
+    );
+}
+
+private void test_mixed_streams_incompatible_webm () {
+    // Primary is opus (ok), but secondary is flac (not ok for WebM)
+    var primary = make_source ("opus");
+    AudioSourceInfo[] all = { make_source ("opus"), make_source ("flac") };
+    string incompatible;
+    assert_false (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.WEBM, primary, all, out incompatible),
+        "webm with mixed opus+flac should block copy"
+    );
+    assert_equal_string (incompatible, "flac",
+        "incompatible codec should be flac");
+}
+
+private void test_mixed_streams_incompatible_webm_mp3 () {
+    // Primary is opus, secondaries include mp3
+    var primary = make_source ("opus");
+    AudioSourceInfo[] all = {
+        make_source ("opus"), make_source ("mp3"), make_source ("mp3")
+    };
+    string incompatible;
+    assert_false (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.WEBM, primary, all, out incompatible),
+        "webm with opus+mp3 should block copy"
+    );
+    assert_equal_string (incompatible, "mp3",
+        "incompatible codec should be mp3");
+}
+
+private void test_all_streams_compatible_mp4 () {
+    // AAC + MP3 are both valid in MP4
+    var primary = make_source ("aac");
+    AudioSourceInfo[] all = { make_source ("aac"), make_source ("mp3") };
+    string incompatible;
+    assert_true (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.MP4, primary, all, out incompatible),
+        "mp4 with aac+mp3 should allow copy"
+    );
+}
+
+private void test_mixed_streams_incompatible_mp4_vorbis () {
+    // AAC is ok for MP4, but vorbis is not
+    var primary = make_source ("aac");
+    AudioSourceInfo[] all = { make_source ("aac"), make_source ("vorbis") };
+    string incompatible;
+    assert_false (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.MP4, primary, all, out incompatible),
+        "mp4 with aac+vorbis should block copy"
+    );
+    assert_equal_string (incompatible, "vorbis",
+        "incompatible codec should be vorbis");
+}
+
+private void test_empty_all_sources_falls_back_to_primary () {
+    // When all_sources is empty, should check primary only
+    var primary = make_source ("opus");
+    AudioSourceInfo[] all = {};
+    string incompatible;
+    assert_true (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.WEBM, primary, all, out incompatible),
+        "empty all_sources with compatible primary should allow copy"
+    );
+
+    var bad_primary = make_source ("flac");
+    assert_false (
+        AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            ContainerExt.WEBM, bad_primary, all, out incompatible),
+        "empty all_sources with incompatible primary should block copy"
+    );
+}
+
+private void test_coerce_copy_checks_all_streams () {
+    // Snapshot with copy selected, primary is opus (ok for webm),
+    // but secondary is flac (not ok for webm).  Coerce should switch
+    // to the fallback codec.
+    var snapshot = new AudioSettingsSnapshot ();
+    snapshot.codec = AudioCodecName.COPY;
+    snapshot.source = make_source ("opus");
+    snapshot.all_sources = { make_source ("opus"), make_source ("flac") };
+
+    AudioSettings.coerce_copy_selection_for_container (snapshot, ContainerExt.WEBM);
+
+    assert_equal_string (snapshot.codec, AudioCodecName.OPUS,
+        "coerce should switch to opus fallback when secondary stream is incompatible");
+}
+
+private void test_coerce_copy_preserves_when_all_compatible () {
+    var snapshot = new AudioSettingsSnapshot ();
+    snapshot.codec = AudioCodecName.COPY;
+    snapshot.source = make_source ("opus");
+    snapshot.all_sources = { make_source ("opus"), make_source ("vorbis") };
+
+    AudioSettings.coerce_copy_selection_for_container (snapshot, ContainerExt.WEBM);
+
+    assert_equal_string (snapshot.codec, AudioCodecName.COPY,
+        "coerce should keep copy when all streams are compatible");
+}
+
+private void test_secondary_incompatible_track_disables_copy_in_widget () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.WEBM);
+
+    // Build a probe result: primary opus (ok for webm), secondary flac (not ok)
+    var probe = new AudioStreamProbeResult ();
+    probe.presence = MediaStreamPresence.PRESENT;
+    probe.codec_name = "opus";
+    probe.channels = 2;
+    probe.all_sources = {
+        make_source ("opus"),
+        make_source ("flac")
+    };
+
+    settings.apply_source_audio_probe_result (probe);
+
+    assert_false (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Copy should be unavailable when a secondary track is incompatible with the container"
+    );
+    assert_contains (
+        settings.get_codec_row_subtitle_for_test (),
+        "FLAC audio track is not supported in WebM",
+        "subtitle should name the incompatible codec"
+    );
+}
+
+private void test_all_compatible_tracks_preserves_copy_in_widget () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.WEBM);
+
+    var probe = new AudioStreamProbeResult ();
+    probe.presence = MediaStreamPresence.PRESENT;
+    probe.codec_name = "opus";
+    probe.channels = 2;
+    probe.all_sources = {
+        make_source ("opus"),
+        make_source ("vorbis")
+    };
+
+    settings.apply_source_audio_probe_result (probe);
+
+    assert_true (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Copy should remain available when all tracks are compatible"
+    );
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -799,6 +974,28 @@ void main (string[] args) {
         test_wav_source_s32_without_raw_bits_falls_back_conservatively);
     Test.add_func ("/audio-settings/flac-source-s32-without-raw-bits-avoids-guessing-depth",
         test_flac_source_s32_without_raw_bits_avoids_guessing_depth);
+
+    // Multi-track container compatibility tests
+    Test.add_func ("/audio-settings/multi-track/all-opus-webm-allows-copy",
+        test_all_streams_compatible_webm_opus_only);
+    Test.add_func ("/audio-settings/multi-track/mixed-opus-flac-webm-blocks-copy",
+        test_mixed_streams_incompatible_webm);
+    Test.add_func ("/audio-settings/multi-track/mixed-opus-mp3-webm-blocks-copy",
+        test_mixed_streams_incompatible_webm_mp3);
+    Test.add_func ("/audio-settings/multi-track/aac-mp3-mp4-allows-copy",
+        test_all_streams_compatible_mp4);
+    Test.add_func ("/audio-settings/multi-track/aac-vorbis-mp4-blocks-copy",
+        test_mixed_streams_incompatible_mp4_vorbis);
+    Test.add_func ("/audio-settings/multi-track/empty-all-sources-falls-back-to-primary",
+        test_empty_all_sources_falls_back_to_primary);
+    Test.add_func ("/audio-settings/multi-track/coerce-copy-checks-all-streams",
+        test_coerce_copy_checks_all_streams);
+    Test.add_func ("/audio-settings/multi-track/coerce-preserves-copy-when-all-compatible",
+        test_coerce_copy_preserves_when_all_compatible);
+    Test.add_func ("/audio-settings/multi-track/secondary-incompatible-disables-copy-widget",
+        test_secondary_incompatible_track_disables_copy_in_widget);
+    Test.add_func ("/audio-settings/multi-track/all-compatible-preserves-copy-widget",
+        test_all_compatible_tracks_preserves_copy_in_widget);
 
     Test.run ();
 }

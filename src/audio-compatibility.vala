@@ -100,6 +100,41 @@ namespace AudioCompatibilityLogic {
         return container_supports_audio_copy (container, source);
     }
 
+    /**
+     * Check whether ALL source audio streams can be copied into the
+     * target container.  Returns true only if every stream's codec is
+     * compatible.  When all_sources is empty, falls back to checking
+     * just the primary source.
+     *
+     * @param incompatible_codec  set to the first incompatible codec
+     *                            name found, or "" if all are compatible.
+     */
+    public bool container_supports_audio_copy_all_streams (
+        string container,
+        AudioSourceInfo primary_source,
+        AudioSourceInfo[] all_sources,
+        out string incompatible_codec) {
+
+        incompatible_codec = "";
+
+        if (all_sources.length == 0) {
+            bool ok = container_supports_audio_copy (container, primary_source);
+            if (!ok) {
+                incompatible_codec = primary_source.codec_name;
+            }
+            return ok;
+        }
+
+        foreach (unowned AudioSourceInfo source in all_sources) {
+            if (!container_supports_audio_copy (container, source)) {
+                incompatible_codec = source.codec_name;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public string get_copy_fallback_codec_for_container (string container) {
         return get_container_audio_policy (container).fallback_codec;
     }

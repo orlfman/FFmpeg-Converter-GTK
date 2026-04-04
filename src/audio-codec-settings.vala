@@ -33,6 +33,7 @@ public class AudioSettingsSnapshot : Object {
     public bool enabled = true;
     public string codec = AudioCodecName.COPY;
     public AudioSourceInfo source { get; set; default = new AudioSourceInfo (); }
+    public AudioSourceInfo[] all_sources { get; set; default = {}; }
     public int sample_rate_hz = 0;
     public int bitrate_kbps = 128;
     public string opus_vbr_mode = "Default";
@@ -68,6 +69,11 @@ public class AudioSettingsSnapshot : Object {
         snapshot.enabled = enabled;
         snapshot.codec = codec;
         snapshot.source = source.copy ();
+        AudioSourceInfo[] sources_copy = {};
+        foreach (unowned AudioSourceInfo s in all_sources) {
+            sources_copy += s.copy ();
+        }
+        snapshot.all_sources = sources_copy;
         snapshot.sample_rate_hz = sample_rate_hz;
         snapshot.bitrate_kbps = bitrate_kbps;
         snapshot.opus_vbr_mode = opus_vbr_mode;

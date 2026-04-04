@@ -1560,29 +1560,57 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         status_area.set_status (verification_status,
             StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
 
-        AudioStreamProbeResult audio_probe =
-            yield FfprobeUtils.probe_primary_audio_stream_async (input_file, cancellable);
+        var all_streams_result =
+            yield FfprobeUtils.probe_all_audio_streams_async (input_file, cancellable);
 
         if (cancellable.is_cancelled ()) {
             return AudioCopyUnknownPreflightResult.CANCELLED;
+        }
+
+        // Build an AudioStreamProbeResult from the all-streams probe
+        // so the existing codec-tab pipeline stays in sync.
+        var audio_probe = new AudioStreamProbeResult ();
+        if (!all_streams_result.success) {
+            audio_probe.presence = MediaStreamPresence.ERROR;
+        } else if (all_streams_result.streams.length == 0) {
+            audio_probe.presence = MediaStreamPresence.ABSENT;
+        } else {
+            var primary = all_streams_result.streams[0];
+            audio_probe.presence = MediaStreamPresence.PRESENT;
+            audio_probe.codec_name = primary.codec_name;
+            audio_probe.channels = primary.channels;
+            audio_probe.sample_fmt = primary.sample_fmt;
+            audio_probe.bits_per_raw_sample = primary.bits_per_raw_sample;
+
+            AudioSourceInfo[] sources = {};
+            for (int i = 0; i < all_streams_result.streams.length; i++) {
+                sources += AudioSourceLogic.from_stream_info (all_streams_result.streams[i]);
+            }
+            audio_probe.all_sources = sources;
         }
 
         controller.apply_codec_audio_probe_result (audio_probe);
 
         switch (audio_probe.presence) {
             case MediaStreamPresence.PRESENT:
-                if (!AudioSettings.container_supports_audio_copy (container, audio_probe.codec_name)) {
+                string incompatible_codec;
+                var primary_source = AudioSourceLogic.from_probe_result (audio_probe);
+                bool all_ok = AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+                    container, primary_source, audio_probe.all_sources, out incompatible_codec);
+                if (!all_ok) {
                     string fallback_codec =
                         AudioSettings.get_copy_fallback_codec_for_container (container);
                     string container_label = container.up ();
+                    string codec_label = incompatible_codec.length > 0
+                        ? incompatible_codec.up () : "source";
                     status_area.set_status (
-                        "Source audio cannot be copied into %s. Switched audio to %s."
-                        .printf (container_label, fallback_codec),
+                        "%s audio cannot be copied into %s. Switched audio to %s."
+                        .printf (codec_label, container_label, fallback_codec),
                         StatusIcon.NOTICE_ICON, StatusIcon.NOTICE_CSS
                     );
                     console_tab.add_line (
-                        "[Audio] Verified source audio is incompatible with %s copy; switched to %s."
-                        .printf (container_label, fallback_codec)
+                        "[Audio] Verified %s audio is incompatible with %s copy; switched to %s."
+                        .printf (codec_label, container_label, fallback_codec)
                     );
                 } else {
                     status_area.replace_status_if_current (

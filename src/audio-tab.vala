@@ -2274,6 +2274,14 @@ public class AudioTab : Box {
         result.channels = channels;
         result.sample_fmt = sample_fmt;
         result.bits_per_raw_sample = bits_per_raw_sample;
+
+        // Carry all source audio stream info for multi-track compatibility checks
+        AudioSourceInfo[] sources = {};
+        for (int i = 0; i < all_audio_streams.length; i++) {
+            sources += AudioSourceLogic.from_stream_info (all_audio_streams[i]);
+        }
+        result.all_sources = sources;
+
         source_audio_probe_updated (result);
     }
     // ═════════════════════════════════════════════════════════════════════════

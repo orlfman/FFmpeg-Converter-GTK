@@ -82,6 +82,7 @@ public class AudioSettings : Object {
     private AudioProbeDisplayState audio_probe_state = AudioProbeDisplayState.UNKNOWN;
     private string current_status_css_class = "";
     private AudioSourceInfo source_audio = new AudioSourceInfo ();
+    private AudioSourceInfo[] all_source_audio = {};
     private string desired_codec = "";
 
     // Display-only badge override (set by Combine, shown only when probe state is UNKNOWN)
@@ -519,19 +520,24 @@ public class AudioSettings : Object {
     }
 
     public void apply_source_audio_probe_result (AudioStreamProbeResult audio_probe) {
+        all_source_audio = audio_probe.all_sources;
+
         switch (audio_probe.presence) {
         case MediaStreamPresence.PRESENT:
             source_audio = AudioSourceLogic.from_probe_result (audio_probe);
             apply_source_audio_state (audio_probe.codec_name, AudioProbeDisplayState.FOUND);
             break;
         case MediaStreamPresence.ABSENT:
+            all_source_audio = {};
             apply_source_audio_state ("", AudioProbeDisplayState.MISSING);
             break;
         case MediaStreamPresence.ERROR:
+            all_source_audio = {};
             apply_source_audio_state ("", AudioProbeDisplayState.ERROR);
             break;
         case MediaStreamPresence.UNKNOWN:
         default:
+            all_source_audio = {};
             apply_source_audio_state ("", AudioProbeDisplayState.UNKNOWN);
             break;
         }
@@ -826,6 +832,11 @@ public class AudioSettings : Object {
         snapshot.enabled = is_audio_enabled_for_output ();
         snapshot.codec = get_codec_text ();
         snapshot.source = source_audio.copy ();
+        AudioSourceInfo[] sources_copy = {};
+        foreach (unowned AudioSourceInfo s in all_source_audio) {
+            sources_copy += s.copy ();
+        }
+        snapshot.all_sources = sources_copy;
 
         string sr_text = get_dropdown_text (sample_rate_combo);
         snapshot.sample_rate_hz = parse_sample_rate_selection (sr_text);
@@ -1014,8 +1025,11 @@ public class AudioSettings : Object {
         if (snapshot.codec != AudioCodecName.COPY)
             return;
 
-        if (AudioCompatibilityLogic.container_supports_audio_copy (container, snapshot.source))
+        string incompatible_codec;
+        if (AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+                container, snapshot.source, snapshot.all_sources, out incompatible_codec)) {
             return;
+        }
 
         string fallback_codec = AudioCompatibilityLogic.get_copy_fallback_codec_for_container (container);
         if (fallback_codec.length > 0) {
@@ -1224,12 +1238,13 @@ public class AudioSettings : Object {
             blockers += AudioCopyBlockerReason.AUDIO_PROCESSING;
         }
 
-        AudioCompatibility compatibility =
-            AudioCompatibilityLogic.evaluate (source_audio, current_container);
+        string incompatible_codec;
+        bool all_streams_copy_ok = AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
+            current_container, source_audio, all_source_audio, out incompatible_codec);
         if (audio_probe_state == AudioProbeDisplayState.FOUND
-            && !compatibility.can_copy) {
+            && !all_streams_copy_ok) {
             blockers += AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE;
-            result.source_codec_label = format_audio_codec_label (source_audio.codec_name);
+            result.source_codec_label = format_audio_codec_label (incompatible_codec);
             result.container_label = format_container_label (current_container);
         }
 
@@ -1263,7 +1278,7 @@ public class AudioSettings : Object {
             return;
         case AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE:
             codec_row.set_subtitle (
-                "Copy unavailable: source %s audio is not supported in %s, so audio will be re-encoded"
+                "Copy unavailable: %s audio track is not supported in %s, so all audio will be re-encoded"
                 .printf (
                     evaluation.source_codec_label,
                     evaluation.container_label
