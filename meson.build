@@ -21,6 +21,7 @@ dependencies = [
 sources = files(
   'src/main.vala',
   'src/subprocess-compat.c',
+  'src/ffmpeg-runtime-capabilities.vala',
   'src/app-controller.vala',
   'src/process-runner.vala',
   'src/conversion-utils.vala',
@@ -295,6 +296,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
     'trim-subtitles-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',
       'src/operation-output-result.vala',
@@ -367,6 +369,7 @@ if fs.exists('tests/combine-window-state-test.vala')
     'combine-window-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',
       'src/operation-output-result.vala',
@@ -441,6 +444,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
     'audio-reorder-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',
       'src/operation-output-result.vala',

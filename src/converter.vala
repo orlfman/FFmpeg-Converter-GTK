@@ -17,6 +17,10 @@ public class ConversionConfig : Object {
     // ── FFmpeg arguments ────────────────────────────────────────────────────
     public EncodeProfileSnapshot profile { get; set; default = new EncodeProfileSnapshot (); }
     public string passlog_base   { get; set; default = ""; }
+    public SvtAv1CrfTwoPassCapabilityStatus svt_crf_two_pass_status {
+        get; set; default = SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN;
+    }
+    public string? svt_crf_two_pass_reason { get; set; default = null; }
 
     // ── Seek / Duration ─────────────────────────────────────────────────────
     public bool   seek_enabled   { get; set; default = false; }
@@ -71,6 +75,8 @@ public class Converter : Object {
     private string _last_output_file = "";
     private string? _passlog_base = null;
     private string? _passlog_run_dir = null;
+    private SvtAv1CrfTwoPassCapability svt_crf_two_pass_capability =
+        new SvtAv1CrfTwoPassCapability ();
 
     // ── Thread-safe accessors ───────────────────────────────────────────────
     public string last_output_file {
@@ -129,6 +135,14 @@ public class Converter : Object {
         this.console_tab    = console_tab;
         this.general_tab    = general_tab;
         this.progress_tracker = new ProgressTracker (status_area.progress_bar);
+    }
+
+    public void set_svt_crf_two_pass_capability (SvtAv1CrfTwoPassCapability capability) {
+        svt_crf_two_pass_capability = capability.copy ();
+    }
+
+    public SvtAv1CrfTwoPassCapability get_svt_crf_two_pass_capability () {
+        return svt_crf_two_pass_capability.copy ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -347,6 +361,9 @@ public class Converter : Object {
             : null;
         GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings (pixel_format);
         config.profile = CodecUtils.snapshot_encode_profile (builder, codec_tab, general_settings);
+        SvtAv1CrfTwoPassCapability svt_capability = get_svt_crf_two_pass_capability ();
+        config.svt_crf_two_pass_status = svt_capability.status;
+        config.svt_crf_two_pass_reason = svt_capability.reason;
 
         // Seek / Duration
         config.seek_enabled = general_tab.is_seek_enabled ();

@@ -24,6 +24,10 @@ public class ConversionRunner {
         bool succeeded = false;
 
         try {
+            if (!validate_svt_av1_constant_quality_two_pass_compatibility (two_pass)) {
+                return;
+            }
+
             if (!prepare_peak_normalization (
                     input,
                     two_pass ? ConversionPhase.PASS1 : ConversionPhase.ENCODING)) {
@@ -86,6 +90,59 @@ public class ConversionRunner {
                 succeeded,
                 succeeded ? safe_output : null
             );
+        }
+    }
+
+    private bool validate_svt_av1_constant_quality_two_pass_compatibility (bool two_pass) {
+        if (!two_pass || config.profile.codec_name != "SVT-AV1") {
+            return true;
+        }
+
+        bool has_constant_quality = false;
+        foreach (string arg in config.profile.codec_args) {
+            if (arg == "-crf" || arg == "-qp") {
+                has_constant_quality = true;
+                break;
+            }
+        }
+        if (!has_constant_quality) {
+            return true;
+        }
+
+        switch (config.svt_crf_two_pass_status) {
+            case SvtAv1CrfTwoPassCapabilityStatus.SUPPORTED:
+                return true;
+
+            case SvtAv1CrfTwoPassCapabilityStatus.UNSUPPORTED:
+                converter.report_error_if_active (
+                    process_runner,
+                    config.svt_crf_two_pass_reason
+                        ?? "This FFmpeg build does not support SVT-AV1 CRF/QP two-pass. "
+                           + "Use single-pass CRF/QP or switch to VBR two-pass."
+                );
+                return false;
+
+            case SvtAv1CrfTwoPassCapabilityStatus.PROBING:
+            case SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN:
+                converter.report_error_if_active (
+                    process_runner,
+                    "SVT-AV1 CRF/QP two-pass support has not been verified for the selected "
+                    + "FFmpeg build. Open Preferences > Binaries and validate the ffmpeg path."
+                );
+                return false;
+
+            case SvtAv1CrfTwoPassCapabilityStatus.ERROR:
+                converter.report_error_if_active (
+                    process_runner,
+                    config.svt_crf_two_pass_reason
+                        ?? "SVT-AV1 CRF/QP two-pass support could not be verified for the "
+                           + "selected FFmpeg build. Open Preferences > Binaries and "
+                           + "validate the ffmpeg path."
+                );
+                return false;
+
+            default:
+                return false;
         }
     }
 

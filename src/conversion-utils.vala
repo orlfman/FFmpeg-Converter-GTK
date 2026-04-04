@@ -775,7 +775,7 @@ namespace ConversionUtils {
 
         string name_stem = resolve_output_stem (input_file, codec_suffix);
 
-        return @"$out_folder/$name_stem.$container_ext";
+        return sanitize_filename (@"$out_folder/$name_stem.$container_ext");
     }
 
     public async string compute_output_path_async (string input_file,
@@ -790,7 +790,7 @@ namespace ConversionUtils {
 
         string name_stem = yield resolve_output_stem_async (input_file, codec_suffix, cancellable);
 
-        return @"$out_folder/$name_stem.$container_ext";
+        return sanitize_filename (@"$out_folder/$name_stem.$container_ext");
     }
 
     /**

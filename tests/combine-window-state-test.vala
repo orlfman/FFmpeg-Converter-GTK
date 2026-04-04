@@ -156,6 +156,44 @@ private int count_directories_in_path (string path) {
     return count;
 }
 
+private string run_compute_output_path_async_for_test (string input_file,
+                                                       string output_folder,
+                                                       ICodecBuilder builder,
+                                                       ICodecTab codec_tab,
+                                                       string context) {
+    var loop = new MainLoop (null, false);
+    string? output_path = null;
+    Error? async_error = null;
+
+    Converter.compute_output_path_async.begin (
+        input_file,
+        output_folder,
+        builder,
+        codec_tab,
+        null,
+        (obj, res) => {
+            try {
+                output_path = Converter.compute_output_path_async.end (res);
+            } catch (Error e) {
+                async_error = e;
+            }
+            loop.quit ();
+        }
+    );
+
+    loop.run ();
+
+    if (async_error != null) {
+        Test.fail_printf ("%s async output-path computation failed: %s",
+            context, async_error.message);
+    }
+    if (output_path == null) {
+        Test.fail_printf ("%s async output-path computation returned no result", context);
+    }
+
+    return output_path;
+}
+
 private int run_command_for_test (string[] cmd,
                                   out string stdout_buf,
                                   out string stderr_buf,
@@ -209,6 +247,134 @@ private void cleanup_exec_test_dir (string dir) {
         // Best-effort cleanup for test temp files.
     }
     DirUtils.remove (dir);
+}
+
+private string make_fake_svt_probe_ffmpeg (string dir,
+                                           string filename,
+                                           bool supports_crf_two_pass) {
+    string path = Path.build_filename (dir, filename);
+    string pass2_body = supports_crf_two_pass
+        ? "    exit 0\n"
+        : "    echo 'Svt[info]: probe started' >&2\n"
+          + "    echo 'Svt[error]: CRF does not support multi-pass. Use single pass.' >&2\n"
+          + "    exit 1\n";
+    string script =
+        "#!/bin/sh\n"
+        + "pass=''\n"
+        + "passlog=''\n"
+        + "while [ \"$#\" -gt 0 ]; do\n"
+        + "  case \"$1\" in\n"
+        + "    -pass)\n"
+        + "      shift\n"
+        + "      pass=\"$1\"\n"
+        + "      ;;\n"
+        + "    -passlogfile)\n"
+        + "      shift\n"
+        + "      passlog=\"$1\"\n"
+        + "      ;;\n"
+        + "  esac\n"
+        + "  shift\n"
+        + "done\n"
+        + "case \"$pass\" in\n"
+        + "  1)\n"
+        + "    if [ -n \"$passlog\" ]; then\n"
+        + "      : > \"${passlog}-0.log\"\n"
+        + "    fi\n"
+        + "    exit 0\n"
+        + "    ;;\n"
+        + "  2)\n"
+        + pass2_body
+        + "    ;;\n"
+        + "esac\n"
+        + "echo 'missing -pass argument' >&2\n"
+        + "exit 1\n";
+
+    try {
+        FileUtils.set_contents (path, script);
+    } catch (FileError e) {
+        Test.fail_printf ("failed to write fake ffmpeg probe script '%s': %s",
+            path, e.message);
+    }
+
+    if (Posix.chmod (path, 0755) != 0) {
+        Test.fail_printf ("failed to chmod fake ffmpeg probe script '%s'", path);
+    }
+
+    return path;
+}
+
+private string make_fake_svt_probe_ffmpeg_with_generic_error (string dir,
+                                                              string filename) {
+    string path = Path.build_filename (dir, filename);
+    string script =
+        "#!/bin/sh\n"
+        + "pass=''\n"
+        + "while [ \"$#\" -gt 0 ]; do\n"
+        + "  case \"$1\" in\n"
+        + "    -pass)\n"
+        + "      shift\n"
+        + "      pass=\"$1\"\n"
+        + "      ;;\n"
+        + "  esac\n"
+        + "  shift\n"
+        + "done\n"
+        + "case \"$pass\" in\n"
+        + "  1)\n"
+        + "    exit 0\n"
+        + "    ;;\n"
+        + "  2)\n"
+        + "    echo 'Svt[info]: probe started' >&2\n"
+        + "    echo 'Error opening output files: Invalid argument' >&2\n"
+        + "    exit 1\n"
+        + "    ;;\n"
+        + "esac\n"
+        + "echo 'missing -pass argument' >&2\n"
+        + "exit 1\n";
+
+    try {
+        FileUtils.set_contents (path, script);
+    } catch (FileError e) {
+        Test.fail_printf ("failed to write fake ffmpeg generic-error script '%s': %s",
+            path, e.message);
+    }
+
+    if (Posix.chmod (path, 0755) != 0) {
+        Test.fail_printf ("failed to chmod fake ffmpeg generic-error script '%s'", path);
+    }
+
+    return path;
+}
+
+private SvtAv1CrfTwoPassCapability run_svt_crf_two_pass_probe_for_test (string binary_path,
+                                                                        string context) {
+    var loop = new MainLoop (null, false);
+    var cancellable = new Cancellable ();
+    SvtAv1CrfTwoPassCapability? capability = null;
+    Error? async_error = null;
+
+    FfmpegRuntimeCapabilities.probe_svt_av1_crf_two_pass.begin (
+        binary_path,
+        cancellable,
+        (obj, res) => {
+            try {
+                capability = FfmpegRuntimeCapabilities.probe_svt_av1_crf_two_pass.end (res);
+            } catch (Error e) {
+                async_error = e;
+            }
+            loop.quit ();
+        }
+    );
+
+    loop.run ();
+
+    if (async_error != null) {
+        Test.fail_printf ("%s probe failed: %s", context, async_error.message);
+    }
+    if (capability == null) {
+        Test.fail_printf ("%s probe returned no result", context);
+    }
+
+    return capability;
 }
 
 private void assert_filter_complex_executes_with_media_inputs (string[] input_paths,
@@ -1012,6 +1178,52 @@ private void test_combine_uses_live_main_output_folder () {
         "combine launch keeps the expected combined suffix and container extension");
 
     harness.window.close ();
+}
+
+private void test_converter_output_path_is_sanitized_before_overwrite_check () {
+    var settings = AppSettings.get_default ();
+    OutputNameMode previous_mode = settings.output_name_mode;
+    string previous_custom_name = settings.output_custom_name;
+
+    try {
+        settings.output_name_mode = OutputNameMode.DEFAULT;
+        settings.output_custom_name = "";
+
+        var svt = new SvtAv1Tab ();
+        var builder = new SvtAv1Builder (svt);
+
+        string input_file = "/tmp/Episode:01?.mkv";
+        string output_folder = "/tmp/output";
+        string expected = "/tmp/output/Episode_01_-av1.webm";
+
+        string sync_path = Converter.compute_output_path (
+            input_file,
+            output_folder,
+            builder,
+            svt
+        );
+        assert_string_equal (
+            sync_path,
+            expected,
+            "sync conversion output path is sanitized before overwrite checks"
+        );
+
+        string async_path = run_compute_output_path_async_for_test (
+            input_file,
+            output_folder,
+            builder,
+            svt,
+            "sanitized conversion output path"
+        );
+        assert_string_equal (
+            async_path,
+            expected,
+            "async conversion output path is sanitized before overwrite checks"
+        );
+    } finally {
+        settings.output_name_mode = previous_mode;
+        settings.output_custom_name = previous_custom_name;
+    }
 }
 
 private void test_idle_close_request_cancels_pending_probes () {
@@ -3400,6 +3612,210 @@ private void test_drawtext_unavailable_disables_watermark_ui () {
         "watermark subtitle explains drawtext unavailability");
 }
 
+private void test_svt_av1_crf_two_pass_probe_reports_supported () {
+    string? dir = null;
+
+    try {
+        dir = DirUtils.make_tmp ("svt-probe-supported-XXXXXX");
+        string fake_ffmpeg = make_fake_svt_probe_ffmpeg (dir, "fake-ffmpeg", true);
+
+        SvtAv1CrfTwoPassCapability capability =
+            run_svt_crf_two_pass_probe_for_test (fake_ffmpeg, "supported probe");
+
+        assert_true (
+            capability.status == SvtAv1CrfTwoPassCapabilityStatus.SUPPORTED,
+            "supported probe status"
+        );
+        assert_contains (
+            capability.reason ?? "",
+            "supported",
+            "supported probe reason"
+        );
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create supported probe temp dir: %s", e.message);
+    } finally {
+        if (dir != null) {
+            cleanup_exec_test_dir (dir);
+        }
+    }
+}
+
+private void test_svt_av1_crf_two_pass_probe_reports_unsupported () {
+    string? dir = null;
+
+    try {
+        dir = DirUtils.make_tmp ("svt-probe-unsupported-XXXXXX");
+        string fake_ffmpeg = make_fake_svt_probe_ffmpeg (dir, "fake-ffmpeg", false);
+
+        SvtAv1CrfTwoPassCapability capability =
+            run_svt_crf_two_pass_probe_for_test (fake_ffmpeg, "unsupported probe");
+
+        assert_true (
+            capability.status == SvtAv1CrfTwoPassCapabilityStatus.UNSUPPORTED,
+            "unsupported probe status"
+        );
+        assert_contains (
+            capability.reason ?? "",
+            "unsupported",
+            "unsupported probe reason"
+        );
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create unsupported probe temp dir: %s", e.message);
+    } finally {
+        if (dir != null) {
+            cleanup_exec_test_dir (dir);
+        }
+    }
+}
+
+private void test_svt_av1_crf_two_pass_probe_prefers_error_over_info () {
+    string? dir = null;
+
+    try {
+        dir = DirUtils.make_tmp ("svt-probe-error-detail-XXXXXX");
+        string fake_ffmpeg = make_fake_svt_probe_ffmpeg_with_generic_error (
+            dir,
+            "fake-ffmpeg"
+        );
+
+        SvtAv1CrfTwoPassCapability capability =
+            run_svt_crf_two_pass_probe_for_test (fake_ffmpeg, "generic error probe");
+
+        assert_true (
+            capability.status == SvtAv1CrfTwoPassCapabilityStatus.ERROR,
+            "generic error probe status"
+        );
+        assert_contains (
+            capability.reason ?? "",
+            "Error opening output files",
+            "generic error probe reason prefers error line"
+        );
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create generic error probe temp dir: %s", e.message);
+    } finally {
+        if (dir != null) {
+            cleanup_exec_test_dir (dir);
+        }
+    }
+}
+
+private void test_svt_av1_crf_two_pass_capability_updates_visibility () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var svt = new SvtAv1Tab ();
+    svt.rc_mode_combo.set_selected (0);
+
+    var unsupported = new SvtAv1CrfTwoPassCapability ();
+    unsupported.status = SvtAv1CrfTwoPassCapabilityStatus.UNSUPPORTED;
+    unsupported.reason = "Unsupported by current ffmpeg build";
+    svt.set_crf_two_pass_capability (unsupported);
+
+    assert_false (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass hidden when crf two-pass is unsupported"
+    );
+
+    svt.rc_mode_combo.set_selected (1);
+    assert_false (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass hidden when qp two-pass is unsupported"
+    );
+
+    svt.rc_mode_combo.set_selected (2);
+    assert_true (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass visible in vbr regardless of crf capability"
+    );
+    assert_contains (
+        svt.get_two_pass_subtitle_for_widget_test (),
+        "Slower but better quality distribution",
+        "svt vbr two-pass keeps default subtitle"
+    );
+
+    var supported = new SvtAv1CrfTwoPassCapability ();
+    supported.status = SvtAv1CrfTwoPassCapabilityStatus.SUPPORTED;
+    supported.reason = "Supported by current ffmpeg build";
+    svt.set_crf_two_pass_capability (supported);
+
+    assert_true (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass remains visible for vbr when crf two-pass is supported"
+    );
+
+    svt.rc_mode_combo.set_selected (0);
+    assert_true (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass visible when crf two-pass is supported"
+    );
+    assert_contains (
+        svt.get_two_pass_subtitle_for_widget_test (),
+        "verified for the current FFmpeg build",
+        "svt two-pass subtitle explains supported state"
+    );
+
+    svt.rc_mode_combo.set_selected (1);
+    assert_true (
+        svt.get_two_pass_row_visible_for_widget_test (),
+        "svt two-pass visible when qp two-pass is supported"
+    );
+}
+
+private void test_svt_av1_crf_two_pass_backstop_fails_fast () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    string? dir = null;
+
+    try {
+        dir = DirUtils.make_tmp ("svt-backstop-XXXXXX");
+        string input = make_exec_test_media_file (dir, "input.mkv");
+        string output = Path.build_filename (dir, "output.webm");
+
+        var status_area = new StatusArea ();
+        var console_tab = new ConsoleTab ();
+        var general_tab = new GeneralTab ();
+        var converter = new Converter (status_area, console_tab, general_tab);
+        var svt_tab = new SvtAv1Tab ();
+        var builder = new SvtAv1Builder (svt_tab);
+
+        var unsupported = new SvtAv1CrfTwoPassCapability ();
+        unsupported.status = SvtAv1CrfTwoPassCapabilityStatus.UNSUPPORTED;
+        unsupported.reason = "Unsupported by current ffmpeg build";
+        converter.set_svt_crf_two_pass_capability (unsupported);
+        svt_tab.rc_mode_combo.set_selected (1);
+        svt_tab.two_pass_switch.set_active (true);
+
+        bool failed = false;
+        converter.conversion_failed.connect ((operation_id) => {
+            failed = true;
+        });
+
+        assert_true (
+            converter.start_conversion (input, output, svt_tab, builder, 77),
+            "svt backstop conversion starts"
+        );
+        assert_true (
+            spin_main_context_until (() => { return failed; }, 500),
+            "svt backstop conversion fails"
+        );
+
+        string status_text;
+        string status_icon;
+        string status_css;
+        status_area.get_full_status_snapshot (out status_text, out status_icon, out status_css);
+        assert_contains (
+            status_text,
+            "Unsupported by current ffmpeg build",
+            "svt backstop status explains unsupported state"
+        );
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create svt backstop temp dir: %s", e.message);
+    } finally {
+        if (dir != null) {
+            cleanup_exec_test_dir (dir);
+        }
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  FILTERBUILDER DRAWTEXT TESTS
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3552,6 +3968,8 @@ void main (string[] args) {
         test_reencode_codec_subtitle_describes_supported_general_settings);
     Test.add_func ("/combine/overwrite/freezes-launch-file-list",
         test_pending_overwrite_freezes_launch_file_list);
+    Test.add_func ("/combine/output-path/sanitizes-before-overwrite-check",
+        test_converter_output_path_is_sanitized_before_overwrite_check);
     Test.add_func ("/combine/window/uses-live-main-output-folder",
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
@@ -3742,6 +4160,16 @@ void main (string[] args) {
         test_watermark_effective_state_requires_text);
     Test.add_func ("/combine/watermark/drawtext-unavailable-disables-ui",
         test_drawtext_unavailable_disables_watermark_ui);
+    Test.add_func ("/combine/svt-av1/crf-two-pass-probe-supported",
+        test_svt_av1_crf_two_pass_probe_reports_supported);
+    Test.add_func ("/combine/svt-av1/crf-two-pass-probe-unsupported",
+        test_svt_av1_crf_two_pass_probe_reports_unsupported);
+    Test.add_func ("/combine/svt-av1/crf-two-pass-probe-prefers-error-over-info",
+        test_svt_av1_crf_two_pass_probe_prefers_error_over_info);
+    Test.add_func ("/combine/svt-av1/crf-two-pass-ui-reacts-to-capability",
+        test_svt_av1_crf_two_pass_capability_updates_visibility);
+    Test.add_func ("/combine/svt-av1/crf-two-pass-backstop-fails-fast",
+        test_svt_av1_crf_two_pass_backstop_fails_fast);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",

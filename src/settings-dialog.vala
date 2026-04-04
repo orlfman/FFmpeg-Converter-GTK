@@ -726,9 +726,11 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         string success_text = success_prefix + "\n" + result.runtime_summary;
         if (result.codec_warning != null) {
-            set_status (status,
+            set_status (
+                status,
                 success_text + "\n" + result.codec_warning,
-                "settings-path-warning");
+                "settings-path-warning"
+            );
         } else {
             set_status (status, success_text, "settings-path-found");
         }

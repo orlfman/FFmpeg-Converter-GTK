@@ -45,6 +45,7 @@ public class AppController : Object {
     private SmartOptimizer smart_optimizer;
     private Cancellable? smart_opt_cancel = null;
     private int smart_opt_generation = 0;
+    private FfmpegRuntimeCapabilities ffmpeg_runtime_capabilities;
 
     // ── FFmpeg capability probing ────────────────────────────────────────────
     private Cancellable? drawtext_probe_cancel = null;
@@ -53,6 +54,9 @@ public class AppController : Object {
     private string drawtext_probe_cache_path = "";
     private bool drawtext_probe_cache_available = true;
     private string? drawtext_probe_cache_reason = null;
+    private Cancellable? svt_crf_two_pass_probe_cancel = null;
+    private int svt_crf_two_pass_probe_generation = 0;
+    private string active_svt_crf_two_pass_cache_key = "";
 
     // ── Codec Registry ───────────────────────────────────────────────────────
     //    Maps ViewStack page names to their ISmartCodecTab, eliminating
@@ -94,6 +98,9 @@ public class AppController : Object {
         this.view_stack     = view_stack;
 
         smart_optimizer = new SmartOptimizer ();
+        ffmpeg_runtime_capabilities = new FfmpegRuntimeCapabilities ();
+        ffmpeg_runtime_capabilities.svt_crf_two_pass_changed.connect (
+            apply_svt_crf_two_pass_capability);
 
         // Build the codec registry — add new codecs here and they
         // automatically participate in audio constraints + Smart Optimizer.
@@ -115,6 +122,10 @@ public class AppController : Object {
             drawtext_probe_cancel.cancel ();
             drawtext_probe_cancel = null;
         }
+        if (svt_crf_two_pass_probe_cancel != null) {
+            svt_crf_two_pass_probe_cancel.cancel ();
+            svt_crf_two_pass_probe_cancel = null;
+        }
         base.dispose ();
     }
 
@@ -133,6 +144,7 @@ public class AppController : Object {
         wire_video_speed_constraint ();
         wire_watermark_constraint ();
         wire_drawtext_availability ();
+        wire_svt_av1_crf_two_pass_capability ();
         wire_conversion_done ();
         wire_trim_done ();
         wire_trim_tab_focus ();
@@ -152,6 +164,107 @@ public class AppController : Object {
     }
 
     // ── FFmpeg drawtext support → enable/disable watermark UI ───────────────
+
+    private void wire_svt_av1_crf_two_pass_capability () {
+        AppSettings.get_default ().settings_changed.connect (() => {
+            string ffmpeg_path = AppSettings.get_default ().ffmpeg_path;
+            string cache_key = FfmpegRuntimeCapabilities.build_binary_cache_key (ffmpeg_path);
+            if (cache_key == active_svt_crf_two_pass_cache_key) {
+                return;
+            }
+
+            invalidate_svt_crf_two_pass_capability ();
+            refresh_svt_av1_crf_two_pass_capability.begin ();
+        });
+
+        invalidate_svt_crf_two_pass_capability ();
+        refresh_svt_av1_crf_two_pass_capability.begin ();
+    }
+
+    private void invalidate_svt_crf_two_pass_capability () {
+        active_svt_crf_two_pass_cache_key = "";
+        ffmpeg_runtime_capabilities.set_current_svt_crf_two_pass (
+            SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN,
+            "Open Preferences > Binaries to verify whether the current FFmpeg build supports SVT-AV1 CRF/QP two-pass"
+        );
+    }
+
+    private async void refresh_svt_av1_crf_two_pass_capability () {
+        string ffmpeg_path = AppSettings.get_default ().ffmpeg_path;
+        string cache_key = FfmpegRuntimeCapabilities.build_binary_cache_key (ffmpeg_path);
+
+        SvtAv1CrfTwoPassCapability cached;
+        if (ffmpeg_runtime_capabilities.lookup_cached_svt_crf_two_pass (ffmpeg_path, out cached)) {
+            apply_svt_crf_two_pass_probe_result (cache_key, ffmpeg_path, cached);
+            return;
+        }
+
+        if (svt_crf_two_pass_probe_cancel != null) {
+            svt_crf_two_pass_probe_cancel.cancel ();
+        }
+
+        var cancellable = new Cancellable ();
+        svt_crf_two_pass_probe_cancel = cancellable;
+        int generation = ++svt_crf_two_pass_probe_generation;
+
+        ffmpeg_runtime_capabilities.set_current_svt_crf_two_pass (
+            SvtAv1CrfTwoPassCapabilityStatus.PROBING,
+            "Checking whether the current FFmpeg build supports SVT-AV1 CRF/QP two-pass"
+        );
+
+        SvtAv1CrfTwoPassCapability capability;
+        try {
+            capability = yield FfmpegRuntimeCapabilities.probe_svt_av1_crf_two_pass (
+                ffmpeg_path,
+                cancellable
+            );
+        } catch (IOError.CANCELLED e) {
+            if (svt_crf_two_pass_probe_cancel == cancellable) {
+                svt_crf_two_pass_probe_cancel = null;
+            }
+            return;
+        } catch (Error e) {
+            if (svt_crf_two_pass_probe_cancel == cancellable) {
+                svt_crf_two_pass_probe_cancel = null;
+            }
+            if (generation != svt_crf_two_pass_probe_generation || cancellable.is_cancelled ()) {
+                return;
+            }
+
+            capability = new SvtAv1CrfTwoPassCapability ();
+            capability.status = SvtAv1CrfTwoPassCapabilityStatus.ERROR;
+            capability.reason =
+                "SVT-AV1 CRF/QP two-pass: could not be verified ("
+                + describe_subprocess_error (e.message) + ").";
+            apply_svt_crf_two_pass_probe_result (cache_key, ffmpeg_path, capability);
+            return;
+        }
+
+        if (svt_crf_two_pass_probe_cancel == cancellable) {
+            svt_crf_two_pass_probe_cancel = null;
+        }
+        if (generation != svt_crf_two_pass_probe_generation || cancellable.is_cancelled ()) {
+            return;
+        }
+
+        apply_svt_crf_two_pass_probe_result (cache_key, ffmpeg_path, capability);
+    }
+
+    private void apply_svt_crf_two_pass_probe_result (string cache_key,
+                                                      string ffmpeg_path,
+                                                      SvtAv1CrfTwoPassCapability capability) {
+        active_svt_crf_two_pass_cache_key = cache_key;
+        ffmpeg_runtime_capabilities.cache_svt_crf_two_pass (ffmpeg_path, capability);
+        ffmpeg_runtime_capabilities.set_current_svt_crf_two_pass (
+            capability.status,
+            capability.reason
+        );
+    }
+
+    private void apply_svt_crf_two_pass_capability (SvtAv1CrfTwoPassCapability capability) {
+        svt_tab.set_crf_two_pass_capability (capability);
+        converter.set_svt_crf_two_pass_capability (capability);
+    }
 
     private void wire_drawtext_availability () {
         AppSettings.get_default ().settings_changed.connect (() => {

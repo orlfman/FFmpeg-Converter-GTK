@@ -2,6 +2,10 @@ using Gtk;
 using Adw;
 
 public class SvtAv1Tab : BaseCodecTab {
+    private const string TWO_PASS_SUBTITLE_DEFAULT =
+        "Slower but better quality distribution";
+    private const string TWO_PASS_SUBTITLE_SUPPORTED =
+        "Slower but better quality distribution — verified for the current FFmpeg build";
 
     // ── Preset ───────────────────────────────────────────────────────────────
     public DropDown  quality_profile_combo        { get; private set; }
@@ -70,6 +74,9 @@ public class SvtAv1Tab : BaseCodecTab {
 
     private Adw.ActionRow custom_keyframe_row;
     private bool syncing_qm_range = false;
+    private SvtAv1CrfTwoPassCapabilityStatus svt_crf_two_pass_capability_status =
+        SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN;
+    private string? svt_crf_two_pass_capability_reason = null;
 
     public SvtAv1Tab () {
         Object (orientation: Orientation.VERTICAL, spacing: 24);
@@ -240,7 +247,7 @@ public class SvtAv1Tab : BaseCodecTab {
         // Two-Pass (#2: simplified — no hidden CheckButton)
         two_pass_row = new Adw.ActionRow ();
         two_pass_row.set_title ("Two-Pass Encoding");
-        two_pass_row.set_subtitle ("Slower but better quality distribution");
+        two_pass_row.set_subtitle (TWO_PASS_SUBTITLE_DEFAULT);
         two_pass_switch = new Switch ();
         two_pass_switch.set_valign (Align.CENTER);
         two_pass_switch.set_active (false);
@@ -713,9 +720,42 @@ public class SvtAv1Tab : BaseCodecTab {
         qp_row.set_visible (mode == RateControl.QP);
         vbr_row.set_visible (mode == RateControl.VBR);
         mbr_expander.set_visible (mode == RateControl.CRF);
-        // Two-pass available for all modes
+        bool can_show_two_pass = (mode == RateControl.VBR)
+            || (svt_crf_two_pass_capability_status
+                == SvtAv1CrfTwoPassCapabilityStatus.SUPPORTED);
+
+        if (!can_show_two_pass) {
+            two_pass_row.set_visible (false);
+            two_pass_switch.set_active (false);
+            two_pass_row.set_subtitle (TWO_PASS_SUBTITLE_DEFAULT);
+            two_pass_row.set_tooltip_text (null);
+            return;
+        }
+
         two_pass_row.set_visible (true);
+        two_pass_row.set_tooltip_text (null);
+        if (mode == RateControl.VBR) {
+            two_pass_row.set_subtitle (TWO_PASS_SUBTITLE_DEFAULT);
+        } else {
+            two_pass_row.set_subtitle (TWO_PASS_SUBTITLE_SUPPORTED);
+        }
     }
+
+    public void set_crf_two_pass_capability (SvtAv1CrfTwoPassCapability capability) {
+        svt_crf_two_pass_capability_status = capability.status;
+        svt_crf_two_pass_capability_reason = capability.reason;
+        update_rc_visibility ();
+    }
+
+#if COMBINE_WINDOW_TEST_BUILD || AUDIO_REORDER_TEST_BUILD || TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal bool get_two_pass_row_visible_for_widget_test () {
+        return two_pass_row.get_visible ();
+    }
+
+    internal string get_two_pass_subtitle_for_widget_test () {
+        return two_pass_row.get_subtitle () ?? "";
+    }
+#endif
 
     private void sync_qm_range (bool min_changed) {
         if (syncing_qm_range)
