@@ -871,9 +871,9 @@ public class SubtitlesRunner : Object {
             && profile.watermark_image_path.length > 0;
     }
 
-    private string build_text_subtitle_filter (string input_file,
-                                               int sub_stream_index,
-                                               string? external_sub_path) {
+    private static string build_text_subtitle_filter (string input_file,
+                                                      int sub_stream_index,
+                                                      string? external_sub_path) {
         if (external_sub_path != null) {
             return "subtitles=" + escape_filter_path (external_sub_path);
         }
@@ -1019,9 +1019,12 @@ public class SubtitlesRunner : Object {
     // ═════════════════════════════════════════════════════════════════════════
     //  BURN IN — Hardcode subtitles into video frames (full re-encode)
     //
-    //  Two filter paths:
-    //   • Text subs (SRT, ASS, VTT, SSA):  -vf "subtitles=..."
-    //   • Bitmap subs (PGS, VobSub, DVB):  -filter_complex "[0:v][0:s:N]overlay"
+    //  Two subtitle render paths:
+    //   • Text subs (SRT, ASS, VTT, SSA):  subtitles=...
+    //   • Bitmap subs (PGS, VobSub, DVB):  [video][sub]overlay
+    //
+    //  Text burn-in uses -vf in the simple case, but switches to
+    //  -filter_complex when image watermarking adds another video input.
     //
     //  All config is snapshot on the main thread and passed as params
     //  to avoid cross-thread widget access.

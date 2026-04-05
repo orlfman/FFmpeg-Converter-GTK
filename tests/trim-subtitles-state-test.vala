@@ -309,7 +309,7 @@ private void test_trim_image_watermark_preserves_segment_duration () {
 
 private void test_subtitle_burn_in_bitmap_image_watermark_topology () {
     string input_path = resolve_test_asset_path ("test2.vob");
-    string sub_path = resolve_test_asset_path ("eng-test-sub.sup");
+    string sub_path = "/tmp/eng-test-sub.sup";
     string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
 
     var runner = new SubtitlesRunner ();
@@ -434,6 +434,74 @@ private void test_subtitle_burn_in_text_image_watermark_topology () {
         "text subtitle burn-in applies watermark opacity");
     assert_contains (filter_complex, "overlay=x=main_w-overlay_w-10:y=10[outv]",
         "text subtitle burn-in overlays watermark at requested position");
+}
+
+private void test_subtitle_burn_in_text_image_watermark_executes () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-subtitle-burnin-text-imagewm-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+        string sub_path = resolve_test_asset_path ("eng-test-sub.srt");
+        string output_path = Path.build_filename (tmp_dir, "burnin-text-imagewm.mkv");
+
+        var runner = new SubtitlesRunner ();
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = {
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "30"
+        };
+        profile.audio_args = { "-an" };
+        profile.video_filters =
+            "zscale=w=trunc(iw*2.000000/2)*2:h=trunc(ih*2.000000/2)*2:filter=lanczos";
+        profile.watermark_enabled = true;
+        profile.watermark_mode = "image";
+        profile.watermark_image_path = watermark_path;
+        profile.watermark_image_width = 120;
+        profile.watermark_position = "Top Right";
+        profile.watermark_opacity = 0.85;
+        profile.watermark_margin = 10;
+
+        string[] cmd = runner.build_burn_in_command_for_widget_test (
+            input_path,
+            output_path,
+            -1,
+            sub_path,
+            false,
+            profile,
+            4.9658);
+
+        string stdout_buf, stderr_buf;
+        int status = run_command_for_test (
+            cmd,
+            out stdout_buf,
+            out stderr_buf,
+            "text subtitle burn-in image watermark execute");
+        if (status != 0) {
+            Test.fail_printf (
+                "text subtitle burn-in image watermark execute failed: %s",
+                stderr_buf.strip ());
+        }
+
+        assert_true (FileUtils.test (output_path, FileTest.EXISTS),
+            "text subtitle burn-in execution creates output file");
+
+        double duration = probe_media_duration_seconds (
+            output_path,
+            "text subtitle burn-in execution duration probe");
+        assert_true (duration > 4.0 && duration < 6.0,
+            "text subtitle burn-in execution preserves approximate duration");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
 }
 
 private void test_trim_chapter_checkbox_updates_model_and_segments () {
@@ -615,6 +683,8 @@ void main (string[] args) {
         test_subtitle_burn_in_bitmap_image_watermark_topology);
     Test.add_func ("/subtitles/burn-in/text-image-watermark-topology",
         test_subtitle_burn_in_text_image_watermark_topology);
+    Test.add_func ("/subtitles/burn-in/text-image-watermark-executes",
+        test_subtitle_burn_in_text_image_watermark_executes);
     Test.add_func ("/trim/widgets/chapter-checkbox", test_trim_chapter_checkbox_updates_model_and_segments);
     Test.add_func ("/trim/widgets/move-button", test_trim_move_button_reorders_segments);
     Test.add_func ("/trim/widgets/drag-drop", test_trim_drag_drop_reorders_segments);
