@@ -76,6 +76,7 @@ public class EncodeProfileSnapshot : Object {
     public string[] codec_args = {};
     public KeyframeSettingsSnapshot? keyframe_settings { get; set; default = null; }
     public string[] audio_args = {};
+    public bool preserve_all_audio_tracks = false;
     public string video_filters = "";
     public string video_filters_skip_crop = "";
     public string combine_video_filters_per_input = "";
@@ -439,6 +440,8 @@ namespace CodecUtils {
             audio_args.add (arg);
         }
         snapshot.audio_args = StringArrayUtils.copy_generic_array (audio_args);
+        snapshot.preserve_all_audio_tracks =
+            codec_settings.audio_settings.preserve_all_audio_tracks;
         snapshot.audio_processing = codec_settings.audio_processing.copy ();
 
         if (general_settings != null) {

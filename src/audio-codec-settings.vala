@@ -32,6 +32,7 @@ public class AudioProcessingSettingsSnapshot : Object {
 public class AudioSettingsSnapshot : Object {
     public bool enabled = true;
     public string codec = AudioCodecName.COPY;
+    public bool preserve_all_audio_tracks = false;
     public AudioSourceInfo source { get; set; default = new AudioSourceInfo (); }
     public AudioSourceInfo[] all_sources { get; set; default = {}; }
     public int sample_rate_hz = 0;
@@ -68,6 +69,7 @@ public class AudioSettingsSnapshot : Object {
         var snapshot = new AudioSettingsSnapshot ();
         snapshot.enabled = enabled;
         snapshot.codec = codec;
+        snapshot.preserve_all_audio_tracks = preserve_all_audio_tracks;
         snapshot.source = source.copy ();
         AudioSourceInfo[] sources_copy = {};
         foreach (unowned AudioSourceInfo s in all_sources) {

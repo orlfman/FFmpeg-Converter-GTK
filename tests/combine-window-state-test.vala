@@ -134,6 +134,14 @@ private CombineRunner make_capture_runner (GenericArray<CombineFile> files,
     return runner;
 }
 
+private ConversionRunner make_conversion_runner_for_test (EncodeProfileSnapshot profile,
+                                                          double output_duration_seconds = 1.0) {
+    var config = new ConversionConfig ();
+    config.profile = profile;
+    config.output_duration_seconds = output_duration_seconds;
+    return new ConversionRunner.for_command_test (config);
+}
+
 private int count_directories_in_path (string path) {
     if (!FileUtils.test (path, FileTest.IS_DIR)) {
         return 0;
@@ -1321,6 +1329,166 @@ private void test_converter_output_path_is_sanitized_before_overwrite_check () {
         settings.output_name_mode = previous_mode;
         settings.output_custom_name = previous_custom_name;
     }
+}
+
+private EncodeProfileSnapshot make_basic_conversion_profile_for_test () {
+    var profile = new EncodeProfileSnapshot ();
+    profile.codec_name = "x264";
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "20" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "160k" };
+    return profile;
+}
+
+private void enable_image_watermark_for_conversion_test (EncodeProfileSnapshot profile) {
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "image";
+    profile.watermark_image_path = "/tmp/logo.png";
+}
+
+private void test_conversion_runner_non_watermark_off_keeps_existing_mapping_behavior () {
+    var profile = make_basic_conversion_profile_for_test ();
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_not_contains (argv, "0:v:0",
+        "off path should not explicitly map the primary video stream");
+    assert_array_not_contains (argv, "0:a?",
+        "off path should not explicitly map all audio streams");
+}
+
+private void test_conversion_runner_non_watermark_on_maps_primary_video_and_all_audio () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:v:0",
+        "on path maps the primary video stream");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "on path maps all audio streams");
+}
+
+private void test_conversion_runner_image_watermark_toggle_off_maps_first_audio_only () {
+    var profile = make_basic_conversion_profile_for_test ();
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "image watermark path maps the filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+        "image watermark path maps only the first audio stream when toggle is off");
+    assert_array_not_contains (argv, "0:a?",
+        "image watermark path should not map all audio streams when toggle is off");
+    assert_array_not_contains (argv, "0:v:0",
+        "image watermark path should not add a redundant direct video map");
+}
+
+private void test_conversion_runner_image_watermark_toggle_on_maps_all_audio () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "image watermark path maps the filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "image watermark path maps all audio streams when toggle is on");
+    assert_array_not_contains (argv, "0:a:0?",
+        "image watermark path should not map only the first audio stream when toggle is on");
+    assert_array_not_contains (argv, "0:v:0",
+        "image watermark path should not add a redundant direct video map");
+}
+
+private void test_conversion_runner_pass1_image_watermark_keeps_audio_mapping_disabled () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_pass1_argv_for_test ("/tmp/input.mkv");
+
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "pass1 watermark path still maps the filtered video output");
+    assert_array_contains (argv, "-an",
+        "pass1 disables audio");
+    assert_array_not_contains (argv, "0:v:0",
+        "pass1 should not add explicit primary video mapping for keep-all-audio");
+    assert_array_not_contains (argv, "0:a?",
+        "pass1 should not add explicit all-audio mapping before -an");
+    assert_array_not_contains (argv, "0:a:0?",
+        "pass1 should not add explicit first-audio mapping before -an");
+}
+
+private void test_conversion_runner_pass2_maps_primary_video_and_all_audio_when_toggle_on () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_pass2_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:v:0",
+        "pass2 maps the primary video stream");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "pass2 maps all audio streams");
+}
+
+private void test_conversion_runner_pass2_image_watermark_toggle_off_maps_first_audio_only () {
+    var profile = make_basic_conversion_profile_for_test ();
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_pass2_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "pass2 watermark path maps the filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+        "pass2 watermark path maps only the first audio stream when toggle is off");
+    assert_array_not_contains (argv, "0:a?",
+        "pass2 watermark path should not map all audio streams when toggle is off");
+}
+
+private void test_conversion_runner_pass2_image_watermark_toggle_on_maps_all_audio () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_pass2_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+        "pass2 watermark path maps the filtered video output");
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "pass2 watermark path maps all audio streams when toggle is on");
+    assert_array_not_contains (argv, "0:a:0?",
+        "pass2 watermark path should not map only the first audio stream when toggle is on");
 }
 
 private void test_idle_close_request_cancels_pending_probes () {
@@ -4261,6 +4429,22 @@ void main (string[] args) {
         test_pending_overwrite_freezes_launch_file_list);
     Test.add_func ("/combine/output-path/sanitizes-before-overwrite-check",
         test_converter_output_path_is_sanitized_before_overwrite_check);
+    Test.add_func ("/convert/runner/non-watermark-off-keeps-existing-mapping",
+        test_conversion_runner_non_watermark_off_keeps_existing_mapping_behavior);
+    Test.add_func ("/convert/runner/non-watermark-on-maps-primary-video-and-all-audio",
+        test_conversion_runner_non_watermark_on_maps_primary_video_and_all_audio);
+    Test.add_func ("/convert/runner/image-watermark-toggle-off-maps-first-audio",
+        test_conversion_runner_image_watermark_toggle_off_maps_first_audio_only);
+    Test.add_func ("/convert/runner/image-watermark-toggle-on-maps-all-audio",
+        test_conversion_runner_image_watermark_toggle_on_maps_all_audio);
+    Test.add_func ("/convert/runner/pass1-image-watermark-keeps-audio-mapping-disabled",
+        test_conversion_runner_pass1_image_watermark_keeps_audio_mapping_disabled);
+    Test.add_func ("/convert/runner/pass2-toggle-on-maps-primary-video-and-all-audio",
+        test_conversion_runner_pass2_maps_primary_video_and_all_audio_when_toggle_on);
+    Test.add_func ("/convert/runner/pass2-image-watermark-toggle-off-maps-first-audio",
+        test_conversion_runner_pass2_image_watermark_toggle_off_maps_first_audio_only);
+    Test.add_func ("/convert/runner/pass2-image-watermark-toggle-on-maps-all-audio",
+        test_conversion_runner_pass2_image_watermark_toggle_on_maps_all_audio);
     Test.add_func ("/combine/window/uses-live-main-output-folder",
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",

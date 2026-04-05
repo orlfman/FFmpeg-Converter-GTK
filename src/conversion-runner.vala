@@ -19,6 +19,14 @@ public class ConversionRunner {
         this.config         = config;
     }
 
+#if COMBINE_WINDOW_TEST_BUILD
+    internal ConversionRunner.for_command_test (ConversionConfig config) {
+        this.converter = null;
+        this.process_runner = null;
+        this.config = config;
+    }
+#endif
+
     public void run (string input, string output, bool two_pass, uint64 operation_id) {
         string safe_output = ConversionUtils.sanitize_filename (output);
         bool succeeded = false;
@@ -154,7 +162,8 @@ public class ConversionRunner {
     //
     //  When image watermarking is active, the prefix becomes:
     //    ffmpeg -y [-ss timestamp] -i input -i watermark.png
-    //      -filter_complex "...[outv]" -map [outv] -map 0:a? [codec_args...]
+    //      -filter_complex "...[outv]" -map [outv]
+    //      [-map 0:a:0? | -map 0:a?] [codec_args...]
     //
     //  Extracting this avoids duplicating seek, input, filter, and codec
     //  argument logic three times — a bug fix in any of these now only
@@ -170,6 +179,10 @@ public class ConversionRunner {
     private bool is_audio_disabled () {
         return config.profile.audio_args.length > 0
             && config.profile.audio_args[0] == "-an";
+    }
+
+    private string get_explicit_audio_map_spec () {
+        return config.profile.preserve_all_audio_tracks ? "0:a?" : "0:a:0?";
     }
 
     /**
@@ -220,10 +233,26 @@ public class ConversionRunner {
 
             if (map_audio && !is_audio_disabled ()) {
                 cmd += "-map";
-                cmd += "0:a?";
+                cmd += get_explicit_audio_map_spec ();
             }
         } else if (config.profile.video_filters != "") {
             cmd += "-vf"; cmd += config.profile.video_filters;
+        }
+
+        // When preserve_all_audio_tracks is on and we are NOT in a
+        // filter_complex (image-watermark) path, explicitly map the
+        // primary video stream plus all audio streams so FFmpeg keeps
+        // every audio track without broadening video selection.
+        // The watermark path handles audio mapping above so the toggle
+        // can choose between the first audio stream and all audio streams.
+        if (!is_image_watermark_active ()
+                && map_audio
+                && !is_audio_disabled ()
+                && config.profile.preserve_all_audio_tracks) {
+            cmd += "-map";
+            cmd += "0:v:0";
+            cmd += "-map";
+            cmd += "0:a?";
         }
 
         foreach (string arg in get_codec_args (input)) cmd += arg;
@@ -466,4 +495,18 @@ public class ConversionRunner {
             true
         );
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal string[] build_single_pass_argv_for_test (string input, string output) {
+        return build_single_pass (input, output);
+    }
+
+    internal string[] build_pass1_argv_for_test (string input) {
+        return build_pass1 (input);
+    }
+
+    internal string[] build_pass2_argv_for_test (string input, string output) {
+        return build_pass2 (input, output);
+    }
+#endif
 }

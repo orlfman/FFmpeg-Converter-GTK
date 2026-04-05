@@ -47,6 +47,7 @@ public class AudioSettings : Object {
     private Label audio_status_label;
 
     public Adw.ExpanderRow? audio_expander { get; private set; }
+    private Switch?   keep_all_audio_switch;
     public DropDown  codec_combo           { get; private set; }
     public DropDown  sample_rate_combo     { get; private set; }
     public DropDown  bitrate_combo         { get; private set; }
@@ -59,6 +60,7 @@ public class AudioSettings : Object {
     public DropDown  vorbis_quality_combo  { get; private set; }
 
     // Rows (for visibility control)
+    private Adw.ActionRow? keep_all_audio_row;
     private Adw.ActionRow codec_row;
     private Adw.ActionRow sample_rate_row;
     private Adw.ActionRow bitrate_row;
@@ -249,12 +251,27 @@ public class AudioSettings : Object {
             expander.set_subtitle ("Disable to strip audio entirely from the output");
             expander.set_show_enable_switch (true);
             expander.set_enable_expansion (true);
+            expander.set_expanded (true);
             audio_expander = expander;
             group.add (expander);
         } else {
             group.set_title ("Codec Settings");
             group.set_description ("Configure the audio encoding parameters");
             audio_expander = null;
+        }
+
+        // ── Keep All Audio Tracks (STANDARD mode only) ──────────────────────
+        if (!is_transcode_only_mode ()) {
+            keep_all_audio_row = new Adw.ActionRow ();
+            keep_all_audio_row.set_title ("Keep All Audio Tracks");
+            keep_all_audio_row.set_subtitle (
+                "Preserve all source audio tracks in the output");
+            keep_all_audio_switch = new Switch ();
+            keep_all_audio_switch.set_valign (Align.CENTER);
+            keep_all_audio_switch.set_active (false);
+            keep_all_audio_row.add_suffix (keep_all_audio_switch);
+            keep_all_audio_row.set_activatable_widget (keep_all_audio_switch);
+            add_audio_row (keep_all_audio_row);
         }
 
         // ── Codec ────────────────────────────────────────────────────────────
@@ -831,6 +848,8 @@ public class AudioSettings : Object {
         // even if some caller previously left the UI toggle enabled.
         snapshot.enabled = is_audio_enabled_for_output ();
         snapshot.codec = get_codec_text ();
+        snapshot.preserve_all_audio_tracks =
+            keep_all_audio_switch != null && keep_all_audio_switch.active;
         snapshot.source = source_audio.copy ();
         AudioSourceInfo[] sources_copy = {};
         foreach (unowned AudioSourceInfo s in all_source_audio) {
@@ -1043,6 +1062,9 @@ public class AudioSettings : Object {
 
     public void reset_defaults () {
         set_audio_enabled (true);
+        if (keep_all_audio_switch != null) {
+            keep_all_audio_switch.set_active (false);
+        }
         codec_combo.set_selected (0);
         sample_rate_combo.set_selected (0);
         bitrate_combo.set_selected (AudioCodecOptions.BITRATE_DEFAULT);
@@ -1396,6 +1418,20 @@ public class AudioSettings : Object {
 #endif
 
 #if AUDIO_SETTINGS_TEST_BUILD
+    internal bool get_keep_all_audio_active_for_test () {
+        return keep_all_audio_switch != null && keep_all_audio_switch.active;
+    }
+
+    internal void set_keep_all_audio_active_for_test (bool active) {
+        if (keep_all_audio_switch != null) {
+            keep_all_audio_switch.set_active (active);
+        }
+    }
+
+    internal bool has_keep_all_audio_row_for_test () {
+        return keep_all_audio_row != null;
+    }
+
     internal void select_codec_for_test (string codec) {
         var model = codec_combo.get_model () as StringList;
         if (model == null) {

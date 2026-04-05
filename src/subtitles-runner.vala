@@ -871,6 +871,10 @@ public class SubtitlesRunner : Object {
             && profile.watermark_image_path.length > 0;
     }
 
+    private static string get_explicit_audio_map_spec (EncodeProfileSnapshot profile) {
+        return profile.preserve_all_audio_tracks ? "0:a?" : "0:a:0?";
+    }
+
     private static string build_text_subtitle_filter (string input_file,
                                                       int sub_stream_index,
                                                       string? external_sub_path) {
@@ -948,7 +952,7 @@ public class SubtitlesRunner : Object {
             cmd += "[outv]";
             if (!audio_disabled) {
                 cmd += "-map";
-                cmd += "0:a?";
+                cmd += get_explicit_audio_map_spec (profile);
             }
         } else {
             string sub_filter = build_text_subtitle_filter (
@@ -974,7 +978,7 @@ public class SubtitlesRunner : Object {
                 cmd += "[outv]";
                 if (!audio_disabled) {
                     cmd += "-map";
-                    cmd += "0:a?";
+                    cmd += get_explicit_audio_map_spec (profile);
                 }
             } else {
                 string full_vf;
@@ -990,7 +994,7 @@ public class SubtitlesRunner : Object {
                 cmd += "0:v";
                 if (!audio_disabled) {
                     cmd += "-map";
-                    cmd += "0:a?";
+                    cmd += get_explicit_audio_map_spec (profile);
                 }
             }
         }

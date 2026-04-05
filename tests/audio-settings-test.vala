@@ -911,6 +911,86 @@ private void test_all_compatible_tracks_preserves_copy_in_widget () {
     );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  Keep All Audio Tracks — Toggle & Snapshot Tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+private void test_keep_all_audio_toggle_defaults_off_in_standard_mode () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    assert_true (
+        settings.has_keep_all_audio_row_for_test (),
+        "STANDARD mode should have the Keep All Audio Tracks row"
+    );
+    assert_false (
+        settings.get_keep_all_audio_active_for_test (),
+        "Keep All Audio Tracks should default to off"
+    );
+}
+
+private void test_keep_all_audio_toggle_absent_in_transcode_only_mode () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.TRANSCODE_ONLY);
+    assert_false (
+        settings.has_keep_all_audio_row_for_test (),
+        "TRANSCODE_ONLY mode should not have the Keep All Audio Tracks row"
+    );
+}
+
+private void test_keep_all_audio_snapshot_exports_false_by_default () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    var snapshot = settings.snapshot_settings ();
+    assert_false (
+        snapshot.preserve_all_audio_tracks,
+        "snapshot should export preserve_all_audio_tracks as false by default"
+    );
+}
+
+private void test_keep_all_audio_snapshot_exports_true_when_enabled () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    settings.set_keep_all_audio_active_for_test (true);
+    var snapshot = settings.snapshot_settings ();
+    assert_true (
+        snapshot.preserve_all_audio_tracks,
+        "snapshot should export preserve_all_audio_tracks as true when toggled on"
+    );
+}
+
+private void test_keep_all_audio_snapshot_copy_preserves_flag () {
+    var snapshot = new AudioSettingsSnapshot ();
+    snapshot.preserve_all_audio_tracks = true;
+    var copy = snapshot.copy ();
+    assert_true (
+        copy.preserve_all_audio_tracks,
+        "AudioSettingsSnapshot.copy() should preserve preserve_all_audio_tracks"
+    );
+
+    snapshot.preserve_all_audio_tracks = false;
+    copy = snapshot.copy ();
+    assert_false (
+        copy.preserve_all_audio_tracks,
+        "AudioSettingsSnapshot.copy() should preserve preserve_all_audio_tracks=false"
+    );
+}
+
+private void test_keep_all_audio_reset_restores_off () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    settings.set_keep_all_audio_active_for_test (true);
+    settings.reset_defaults ();
+    assert_false (
+        settings.get_keep_all_audio_active_for_test (),
+        "reset_defaults() should restore Keep All Audio Tracks to off"
+    );
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -996,6 +1076,20 @@ void main (string[] args) {
         test_secondary_incompatible_track_disables_copy_in_widget);
     Test.add_func ("/audio-settings/multi-track/all-compatible-preserves-copy-widget",
         test_all_compatible_tracks_preserves_copy_in_widget);
+
+    // Keep All Audio Tracks toggle tests
+    Test.add_func ("/audio-settings/keep-all-audio/defaults-off-in-standard-mode",
+        test_keep_all_audio_toggle_defaults_off_in_standard_mode);
+    Test.add_func ("/audio-settings/keep-all-audio/absent-in-transcode-only-mode",
+        test_keep_all_audio_toggle_absent_in_transcode_only_mode);
+    Test.add_func ("/audio-settings/keep-all-audio/snapshot-exports-false-by-default",
+        test_keep_all_audio_snapshot_exports_false_by_default);
+    Test.add_func ("/audio-settings/keep-all-audio/snapshot-exports-true-when-enabled",
+        test_keep_all_audio_snapshot_exports_true_when_enabled);
+    Test.add_func ("/audio-settings/keep-all-audio/snapshot-copy-preserves-flag",
+        test_keep_all_audio_snapshot_copy_preserves_flag);
+    Test.add_func ("/audio-settings/keep-all-audio/reset-restores-off",
+        test_keep_all_audio_reset_restores_off);
 
     Test.run ();
 }
