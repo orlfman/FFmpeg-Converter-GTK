@@ -8,6 +8,12 @@ namespace AppVersion {
     public const string VERSION = "1.5.6";
 }
 
+namespace ProjectUrls {
+    public const string REPOSITORY = "https://github.com/orlfman/FFmpeg-Converter-GTK";
+    public const string RELEASES = REPOSITORY + "/releases";
+    public const string ISSUES = REPOSITORY + "/issues";
+}
+
 // ── Rate Control Modes (UI labels used in codec tab DropDowns) ───────────────
 
 namespace RateControl {

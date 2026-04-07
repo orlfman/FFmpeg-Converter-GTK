@@ -333,9 +333,7 @@ public class AppController : Object {
             string failure_reason =
                 "Unavailable — failed to inspect the selected FFmpeg build: "
                 + describe_subprocess_error (e.message);
-            apply_filter_probe_result (ffmpeg_path,
-                false, failure_reason,
-                false, failure_reason);
+            apply_filter_probe_error_result (failure_reason);
             return;
         }
 
@@ -364,6 +362,11 @@ public class AppController : Object {
         overlay_probe_cache_reason = ol_reason;
         general_tab.set_drawtext_available (dt_available, dt_reason);
         general_tab.set_overlay_available (ol_available, ol_reason);
+    }
+
+    private void apply_filter_probe_error_result (string failure_reason) {
+        general_tab.set_drawtext_available (false, failure_reason);
+        general_tab.set_overlay_available (false, failure_reason);
     }
 
     private static bool filters_output_supports_filter (string output, string filter_name) {

@@ -10,8 +10,9 @@ namespace AboutDialog {
         about.set_version (AppVersion.VERSION);
         about.set_application_icon ("ffmpeg-converter-gtk");
         about.set_developer_name ("orlfman");
-        about.set_website ("https://github.com/orlfman/FFmpeg-Converter-GTK");
-        about.set_issue_url ("https://github.com/orlfman/FFmpeg-Converter-GTK/issues");
+        about.set_website (ProjectUrls.REPOSITORY);
+        about.add_link ("GitHub Releases", ProjectUrls.RELEASES);
+        about.set_issue_url (ProjectUrls.ISSUES);
         about.add_legal_section ("FFmpeg Converter GTK", null, Gtk.License.GPL_3_0, null);
         about.add_legal_section ("FFmpeg", "This application is a frontend for FFmpeg and does not bundle or distribute it.\nFFmpeg is a trademark of Fabrice Bellard.\nhttps://ffmpeg.org", Gtk.License.CUSTOM, null);
         about.set_comments ("A GTK4/libadwaita frontend for FFmpeg video conversion.");
