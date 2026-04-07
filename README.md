@@ -61,7 +61,9 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 
 - Dedicated tabs for **SVT-AV1**, **x265**, **x264**, and **VP9** with deep encoder control
 - Automatic, one-click crop detection for black bars, HDR to SDR tone mapping, scaling, rotation, speed control, and way more
-- Audio codec support for AAC, FLAC, MP3, Opus, and Vorbis
+- Watermarking — text watermarks with configurable font, size, color, opacity, and position, plus an image watermark mode for logo overlays. Works across normal conversions, subtitle burn-in, and Crop & Trim re-encode paths.
+- Combine Videos — join multiple video files with copy mode (lossless, requires matching formats) or full re-encode mode with normalization. Supports crossfade transitions, chapter markers, drag-and-drop reordering, and metadata preservation.
+- Audio codec support for AAC, FLAC, MP3, Opus, and Vorbis, with an option to keep all audio tracks or only the default track
 - Live console output for debugging, and detailed information tab for video metadata
 - Extensive color and light correction and alteration. Full RGB manipulation.
 - Subtitles tab to reorder, remove, add, and extract subtitles.
