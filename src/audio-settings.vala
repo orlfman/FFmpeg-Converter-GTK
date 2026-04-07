@@ -415,6 +415,11 @@ public class AudioSettings : Object {
         aac_quality_combo.notify["selected"].connect (update_codec_visibility);
         mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
         vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
+        if (keep_all_audio_switch != null) {
+            keep_all_audio_switch.notify["active"].connect (() => {
+                rebuild_codec_list ();
+            });
+        }
         if (audio_expander != null) {
             audio_expander.notify["enable-expansion"].connect (
                 on_audio_expander_enable_expansion_notify);
@@ -1067,8 +1072,12 @@ public class AudioSettings : Object {
             return;
 
         string incompatible_codec;
-        if (AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
-                container, snapshot.source, snapshot.all_sources, out incompatible_codec)) {
+        if (AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
+                container,
+                snapshot.source,
+                snapshot.all_sources,
+                snapshot.preserve_all_audio_tracks,
+                out incompatible_codec)) {
             return;
         }
 
@@ -1283,8 +1292,15 @@ public class AudioSettings : Object {
         }
 
         string incompatible_codec;
-        bool all_streams_copy_ok = AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
-            current_container, source_audio, all_source_audio, out incompatible_codec);
+        bool preserve_all_audio_tracks =
+            keep_all_audio_switch != null && keep_all_audio_switch.active;
+        bool all_streams_copy_ok = AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
+            current_container,
+            source_audio,
+            all_source_audio,
+            preserve_all_audio_tracks,
+            out incompatible_codec
+        );
         if (audio_probe_state == AudioProbeDisplayState.FOUND
             && !all_streams_copy_ok) {
             blockers += AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE;

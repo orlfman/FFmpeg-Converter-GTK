@@ -835,11 +835,11 @@ private void test_empty_all_sources_falls_back_to_primary () {
 }
 
 private void test_coerce_copy_checks_all_streams () {
-    // Snapshot with copy selected, primary is opus (ok for webm),
-    // but secondary is flac (not ok for webm).  Coerce should switch
-    // to the fallback codec.
+    // Toggle on: preserve all tracks, so an incompatible secondary stream
+    // should force copy to fall back.
     var snapshot = new AudioSettingsSnapshot ();
     snapshot.codec = AudioCodecName.COPY;
+    snapshot.preserve_all_audio_tracks = true;
     snapshot.source = make_source ("opus");
     snapshot.all_sources = { make_source ("opus"), make_source ("flac") };
 
@@ -849,9 +849,23 @@ private void test_coerce_copy_checks_all_streams () {
         "coerce should switch to opus fallback when secondary stream is incompatible");
 }
 
+private void test_coerce_copy_ignores_incompatible_secondary_when_keep_all_off () {
+    var snapshot = new AudioSettingsSnapshot ();
+    snapshot.codec = AudioCodecName.COPY;
+    snapshot.preserve_all_audio_tracks = false;
+    snapshot.source = make_source ("opus");
+    snapshot.all_sources = { make_source ("opus"), make_source ("flac") };
+
+    AudioSettings.coerce_copy_selection_for_container (snapshot, ContainerExt.WEBM);
+
+    assert_equal_string (snapshot.codec, AudioCodecName.COPY,
+        "coerce should keep copy when only the secondary stream is incompatible and keep-all is off");
+}
+
 private void test_coerce_copy_preserves_when_all_compatible () {
     var snapshot = new AudioSettingsSnapshot ();
     snapshot.codec = AudioCodecName.COPY;
+    snapshot.preserve_all_audio_tracks = true;
     snapshot.source = make_source ("opus");
     snapshot.all_sources = { make_source ("opus"), make_source ("vorbis") };
 
@@ -877,15 +891,74 @@ private void test_secondary_incompatible_track_disables_copy_in_widget () {
     };
 
     settings.apply_source_audio_probe_result (probe);
+    settings.set_keep_all_audio_active_for_test (true);
 
     assert_false (
         settings.is_codec_available_for_test (AudioCodecName.COPY),
-        "Copy should be unavailable when a secondary track is incompatible with the container"
+        "Copy should be unavailable when a secondary track is incompatible and keep-all is on"
     );
     assert_contains (
         settings.get_codec_row_subtitle_for_test (),
         "FLAC audio track is not supported in WebM",
         "subtitle should name the incompatible codec"
+    );
+}
+
+private void test_secondary_incompatible_track_preserves_copy_in_widget_when_keep_all_off () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.WEBM);
+
+    var probe = new AudioStreamProbeResult ();
+    probe.presence = MediaStreamPresence.PRESENT;
+    probe.codec_name = "opus";
+    probe.channels = 2;
+    probe.all_sources = {
+        make_source ("opus"),
+        make_source ("flac")
+    };
+
+    settings.apply_source_audio_probe_result (probe);
+
+    assert_true (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Copy should remain available when only a secondary track is incompatible and keep-all is off"
+    );
+}
+
+private void test_keep_all_audio_toggle_rebuilds_copy_availability () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.WEBM);
+
+    var probe = new AudioStreamProbeResult ();
+    probe.presence = MediaStreamPresence.PRESENT;
+    probe.codec_name = "opus";
+    probe.channels = 2;
+    probe.all_sources = {
+        make_source ("opus"),
+        make_source ("flac")
+    };
+
+    settings.apply_source_audio_probe_result (probe);
+
+    assert_true (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Copy should start available while keep-all is off"
+    );
+
+    settings.set_keep_all_audio_active_for_test (true);
+
+    assert_false (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Enabling keep-all should immediately re-evaluate and block copy"
+    );
+
+    settings.set_keep_all_audio_active_for_test (false);
+
+    assert_true (
+        settings.is_codec_available_for_test (AudioCodecName.COPY),
+        "Disabling keep-all should immediately restore copy availability"
     );
 }
 
@@ -1070,10 +1143,16 @@ void main (string[] args) {
         test_empty_all_sources_falls_back_to_primary);
     Test.add_func ("/audio-settings/multi-track/coerce-copy-checks-all-streams",
         test_coerce_copy_checks_all_streams);
+    Test.add_func ("/audio-settings/multi-track/coerce-copy-ignores-secondary-when-keep-all-off",
+        test_coerce_copy_ignores_incompatible_secondary_when_keep_all_off);
     Test.add_func ("/audio-settings/multi-track/coerce-preserves-copy-when-all-compatible",
         test_coerce_copy_preserves_when_all_compatible);
     Test.add_func ("/audio-settings/multi-track/secondary-incompatible-disables-copy-widget",
         test_secondary_incompatible_track_disables_copy_in_widget);
+    Test.add_func ("/audio-settings/multi-track/secondary-incompatible-preserves-copy-widget-when-keep-all-off",
+        test_secondary_incompatible_track_preserves_copy_in_widget_when_keep_all_off);
+    Test.add_func ("/audio-settings/multi-track/keep-all-toggle-rebuilds-copy-availability",
+        test_keep_all_audio_toggle_rebuilds_copy_availability);
     Test.add_func ("/audio-settings/multi-track/all-compatible-preserves-copy-widget",
         test_all_compatible_tracks_preserves_copy_in_widget);
 

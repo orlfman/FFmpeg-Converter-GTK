@@ -135,6 +135,39 @@ namespace AudioCompatibilityLogic {
         return true;
     }
 
+    /**
+     * Check whether the selected copy behavior is valid for the target
+     * container. When preserving all tracks, every source audio stream must
+     * be compatible. Otherwise only the primary selected stream matters.
+     *
+     * @param incompatible_codec  set to the first incompatible codec name
+     *                            found, or "" if the selection is compatible.
+     */
+    public bool container_supports_audio_copy_for_selection (
+        string container,
+        AudioSourceInfo primary_source,
+        AudioSourceInfo[] all_sources,
+        bool preserve_all_audio_tracks,
+        out string incompatible_codec) {
+
+        incompatible_codec = "";
+
+        if (!preserve_all_audio_tracks) {
+            bool ok = container_supports_audio_copy (container, primary_source);
+            if (!ok) {
+                incompatible_codec = primary_source.codec_name;
+            }
+            return ok;
+        }
+
+        return container_supports_audio_copy_all_streams (
+            container,
+            primary_source,
+            all_sources,
+            out incompatible_codec
+        );
+    }
+
     public string get_copy_fallback_codec_for_container (string container) {
         return get_container_audio_policy (container).fallback_codec;
     }

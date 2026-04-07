@@ -1609,8 +1609,14 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             case MediaStreamPresence.PRESENT:
                 string incompatible_codec;
                 var primary_source = AudioSourceLogic.from_probe_result (audio_probe);
-                bool all_ok = AudioCompatibilityLogic.container_supports_audio_copy_all_streams (
-                    container, primary_source, audio_probe.all_sources, out incompatible_codec);
+                AudioSettingsSnapshot audio_snapshot = audio_settings.snapshot_settings ();
+                bool all_ok = AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
+                    container,
+                    primary_source,
+                    audio_probe.all_sources,
+                    audio_snapshot.preserve_all_audio_tracks,
+                    out incompatible_codec
+                );
                 if (!all_ok) {
                     string fallback_codec =
                         AudioSettings.get_copy_fallback_codec_for_container (container);
