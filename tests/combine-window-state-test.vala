@@ -2294,6 +2294,40 @@ private void test_closing_combine_window_releases_keep_all_audio_constraint () {
     }
 }
 
+private void test_trim_style_clear_does_not_clear_keep_all_audio_while_combine_is_open () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists for trim-style keep-all clear");
+        assert_false (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "combine constrains keep-all before trim-style clear");
+
+        tab.audio_settings.set_keep_all_audio_active_for_test (true);
+        tab.audio_settings.clear_keep_all_audio ();
+
+        assert_true (tab.audio_settings.get_keep_all_audio_active_for_test (),
+            "trim-style clear does not wipe preserved keep-all state while combine is open");
+        assert_false (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "combine constraint remains active after trim-style clear");
+    }
+
+    harness.window.invoke_close_request_for_widget_test ();
+
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists after trim-style clear release");
+        assert_true (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "closing combine restores keep-all sensitivity after trim-style clear");
+        assert_true (tab.audio_settings.get_keep_all_audio_active_for_test (),
+            "closing combine still preserves keep-all state after trim-style clear");
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  AUDIO STATUS OVERRIDE TESTS
 // ═════════════════════════════════════════════════════════════════════════════
@@ -4625,6 +4659,8 @@ void main (string[] args) {
         test_combine_disables_keep_all_audio_at_construction);
     Test.add_func ("/combine/keep-all-audio/close-releases-constraint",
         test_closing_combine_window_releases_keep_all_audio_constraint);
+    Test.add_func ("/combine/keep-all-audio/trim-style-clear-does-not-clear-preserved-state",
+        test_trim_style_clear_does_not_clear_keep_all_audio_while_combine_is_open);
 
     // Audio status override tests
     Test.add_func ("/combine/audio-badge/reencode-sets-override",

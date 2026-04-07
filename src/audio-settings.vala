@@ -608,6 +608,12 @@ public class AudioSettings : Object {
         }
     }
 
+    public void clear_keep_all_audio () {
+        if (keep_all_audio_switch != null && keep_all_audio_switch.get_sensitive ()) {
+            keep_all_audio_switch.set_active (false);
+        }
+    }
+
     /**
      * Sets a display-only badge override that replaces the normal probe badge
      * when audio_probe_state is UNKNOWN.  Used by Combine to show meaningful

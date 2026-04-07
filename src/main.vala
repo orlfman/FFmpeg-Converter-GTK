@@ -470,6 +470,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         // Disable the Convert button on tabs where it has no function
         view_stack.notify["visible-child-name"].connect (() => {
             update_convert_sensitivity ();
+            clear_keep_all_audio_on_trim_tab ();
         });
         update_convert_sensitivity ();
     }
@@ -486,6 +487,19 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                    || page == "vp9"     || page == "trim" || page == "audio"
                    || page == "subtitles";
         convert_button.set_sensitive (active && can_start_primary_operation ());
+    }
+
+    /**
+     * Turn off "Keep All Audio Tracks" when the user navigates to the
+     * Crop & Trim tab.  Crop & Trim always outputs a single audio track,
+     * so leaving the toggle on would silently ignore the user's choice.
+     */
+    private void clear_keep_all_audio_on_trim_tab () {
+        if (view_stack.visible_child_name != "trim") return;
+        if (svt_tab != null)  svt_tab.audio_settings.clear_keep_all_audio ();
+        if (x265_tab != null) x265_tab.audio_settings.clear_keep_all_audio ();
+        if (x264_tab != null) x264_tab.audio_settings.clear_keep_all_audio ();
+        if (vp9_tab != null)  vp9_tab.audio_settings.clear_keep_all_audio ();
     }
 
     private bool is_effectively_idle () {
@@ -2203,6 +2217,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
         app.send_notification ("operation-complete", notification);
     }
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
