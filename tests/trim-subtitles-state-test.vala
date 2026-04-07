@@ -203,6 +203,21 @@ private EncodeProfileSnapshot make_subtitle_burn_in_profile_for_test (bool prese
     return profile;
 }
 
+private EncodeProfileSnapshot make_trim_reencode_profile_for_test (string watermark_path) {
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    profile.watermark_enabled = true;
+    profile.watermark_mode = "image";
+    profile.watermark_image_path = watermark_path;
+    profile.watermark_image_width = 120;
+    profile.watermark_position = "Bottom Right";
+    profile.watermark_opacity = 1.0;
+    profile.watermark_margin = 10;
+    return profile;
+}
+
 private void assert_toggle_aware_audio_mapping (string[] argv,
                                                 string expected_video_map,
                                                 bool preserve_all_audio_tracks,
@@ -379,6 +394,97 @@ private void test_trim_image_watermark_preserves_segment_duration () {
     } finally {
         cleanup_exec_test_dir (tmp_dir);
     }
+}
+
+private void test_trim_image_watermark_export_maps_first_audio_only () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-image-watermark-map-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string output_path = Path.build_filename (tmp_dir, "trimmed-map-check.mkv");
+        string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 3.0));
+        runner.set_segments (segments);
+        runner.reencode_profile = make_trim_reencode_profile_for_test (watermark_path);
+
+        int exit_code = runner.run_extract_segment_for_widget_test (0, output_path);
+        assert_true (exit_code == 0, "trim image watermark export exit code");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_has_adjacent_pair (argv, "-map", "[outv]",
+            "trim image watermark export maps filtered video output");
+        assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+            "trim image watermark export maps only the first audio stream");
+        assert_array_not_contains (argv, "0:a?",
+            "trim image watermark export should not map all audio streams");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+private void test_trim_peak_detect_maps_first_audio_only () {
+    string input_path = resolve_test_asset_path ("test_dvd.vob");
+    string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+
+    var runner = new TrimRunner ();
+    runner.input_file = input_path;
+
+    var segments = new GenericArray<TrimSegment> ();
+    segments.add (new TrimSegment (1.0, 3.0));
+    runner.set_segments (segments);
+    runner.reencode_profile = make_trim_reencode_profile_for_test (watermark_path);
+
+    string[] argv = runner.build_peak_detect_command_for_widget_test (0);
+    assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+        "trim peak detect maps only the first audio stream");
+    assert_array_not_contains (argv, "0:a?",
+        "trim peak detect should not map all audio streams");
+}
+
+private void test_subtitle_peak_detect_toggle_off_maps_first_audio_only () {
+    string input_path = resolve_test_asset_path ("test2.vob");
+
+    var runner = new SubtitlesRunner ();
+    var profile = make_subtitle_burn_in_profile_for_test (false);
+
+    string[] argv = runner.build_peak_detect_command_for_widget_test (
+        input_path,
+        profile,
+        120.0);
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+        "subtitle peak detect maps only the first audio stream when toggle is off");
+    assert_array_not_contains (argv, "0:a?",
+        "subtitle peak detect should not map all audio streams when toggle is off");
+}
+
+private void test_subtitle_peak_detect_toggle_on_maps_all_audio () {
+    string input_path = resolve_test_asset_path ("test2.vob");
+
+    var runner = new SubtitlesRunner ();
+    var profile = make_subtitle_burn_in_profile_for_test (true);
+
+    string[] argv = runner.build_peak_detect_command_for_widget_test (
+        input_path,
+        profile,
+        120.0);
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "subtitle peak detect maps all audio streams when toggle is on");
+    assert_array_not_contains (argv, "0:a:0?",
+        "subtitle peak detect should not map only the first audio stream when toggle is on");
 }
 
 private void test_subtitle_burn_in_bitmap_image_watermark_toggle_off_topology () {
@@ -874,6 +980,14 @@ void main (string[] args) {
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
     Test.add_func ("/trim/runner/image-watermark-preserves-duration",
         test_trim_image_watermark_preserves_segment_duration);
+    Test.add_func ("/trim/runner/image-watermark-maps-first-audio",
+        test_trim_image_watermark_export_maps_first_audio_only);
+    Test.add_func ("/trim/runner/peak-detect-maps-first-audio",
+        test_trim_peak_detect_maps_first_audio_only);
+    Test.add_func ("/subtitles/burn-in/peak-detect-toggle-off-maps-first-audio",
+        test_subtitle_peak_detect_toggle_off_maps_first_audio_only);
+    Test.add_func ("/subtitles/burn-in/peak-detect-toggle-on-maps-all-audio",
+        test_subtitle_peak_detect_toggle_on_maps_all_audio);
     Test.add_func ("/subtitles/burn-in/bitmap-image-watermark-toggle-off-topology",
         test_subtitle_burn_in_bitmap_image_watermark_toggle_off_topology);
     Test.add_func ("/subtitles/burn-in/bitmap-image-watermark-toggle-on-topology",

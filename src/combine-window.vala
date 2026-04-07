@@ -435,6 +435,9 @@ public class CombineWindow : Adw.Window {
         toolbar_view.set_content (scroll);
         set_content (toolbar_view);
 
+        // ── Constraints applied for the lifetime of the window ────────────
+        sync_keep_all_audio_constraint ();
+
         // ── Close guard ─────────────────────────────────────────────────────
         close_request.connect (on_close_request);
     }
@@ -501,6 +504,7 @@ public class CombineWindow : Adw.Window {
         release_general_speed_constraint ();
         release_crossfade_fade_constraint ();
         release_audio_copy_constraint ();
+        release_keep_all_audio_constraint ();
         clear_audio_status_override_from_all_tabs ();
         cancel_probes_for_teardown ();
         close_preview_window ();
@@ -1631,6 +1635,20 @@ public class CombineWindow : Adw.Window {
         if (x265_tab != null) x265_tab.audio_settings.update_for_combine_reencode (false);
         if (x264_tab != null) x264_tab.audio_settings.update_for_combine_reencode (false);
         if (vp9_tab != null)  vp9_tab.audio_settings.update_for_combine_reencode (false);
+    }
+
+    private void sync_keep_all_audio_constraint () {
+        if (svt_tab != null)  svt_tab.audio_settings.set_keep_all_audio_sensitive (false);
+        if (x265_tab != null) x265_tab.audio_settings.set_keep_all_audio_sensitive (false);
+        if (x264_tab != null) x264_tab.audio_settings.set_keep_all_audio_sensitive (false);
+        if (vp9_tab != null)  vp9_tab.audio_settings.set_keep_all_audio_sensitive (false);
+    }
+
+    private void release_keep_all_audio_constraint () {
+        if (svt_tab != null)  svt_tab.audio_settings.set_keep_all_audio_sensitive (true);
+        if (x265_tab != null) x265_tab.audio_settings.set_keep_all_audio_sensitive (true);
+        if (x264_tab != null) x264_tab.audio_settings.set_keep_all_audio_sensitive (true);
+        if (vp9_tab != null)  vp9_tab.audio_settings.set_keep_all_audio_sensitive (true);
     }
 
     private void sync_audio_status_override () {

@@ -69,6 +69,9 @@ public class TrimRunner : Object {
     private bool run_active = false;
 
     private string last_output = "";
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+    private string[] last_ffmpeg_argv_for_test = {};
+#endif
 
     private void log_runner_event (string text) {
         if (console_tab != null) {
@@ -691,6 +694,15 @@ public class TrimRunner : Object {
         report_status ("Analyzing audio peak for normalization...",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
+        string[] cmd = build_peak_detect_cmd_for_segment (
+            seg, apply_fade_in, apply_fade_out);
+
+        return execute_peak_analysis (cmd);
+    }
+
+    private string[] build_peak_detect_cmd_for_segment (TrimSegment seg,
+                                                        bool apply_fade_in = true,
+                                                        bool apply_fade_out = true) {
         string[] pre_input_args = {
             "-ss", format_seconds (seg.start_time)
         };
@@ -703,16 +715,14 @@ public class TrimRunner : Object {
             apply_fade_out,
             false
         );
-        string[] cmd = FilterBuilder.build_audio_peak_detect_cmd (
+        return FilterBuilder.build_audio_peak_detect_cmd (
             input_file,
             filter_chain,
             pre_input_args,
             post_input_args,
             FilterBuilder.extract_peak_analysis_output_args (get_audio_args ()),
-            "0:a?"
+            "0:a:0?"
         );
-
-        return execute_peak_analysis (cmd);
     }
 
     private bool execute_peak_analysis (string[] cmd) {
@@ -721,6 +731,9 @@ public class TrimRunner : Object {
         if (console_tab != null) {
             console_tab.set_command (full_cmd);
         }
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+        last_ffmpeg_argv_for_test = {};
+#endif
 
         double max_volume_db = 0.0;
         bool found_max_volume = false;
@@ -874,7 +887,7 @@ public class TrimRunner : Object {
                 bool audio_disabled = raw_audio.length > 0 && raw_audio[0] == "-an";
                 if (!audio_disabled) {
                     cmd += "-map";
-                    cmd += "0:a?";
+                    cmd += "0:a:0?";
                 }
             } else if (vf != "") {
                 cmd += "-vf";
@@ -1026,6 +1039,9 @@ public class TrimRunner : Object {
         if (console_tab != null) {
             console_tab.set_command (full_cmd);
         }
+#if TRIM_SUBTITLES_STATE_TEST_BUILD
+        last_ffmpeg_argv_for_test = argv;
+#endif
 
         int exit = runner.execute (argv, (clean) => {
             // Filter noisy progress lines — only log interesting ones
@@ -1272,6 +1288,21 @@ public class TrimRunner : Object {
     }
 
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal string[] build_peak_detect_command_for_widget_test (int seg_index,
+                                                                 bool apply_fade_in = true,
+                                                                 bool apply_fade_out = true) {
+        if (seg_index < 0 || seg_index >= segments.length) {
+            return {};
+        }
+
+        return build_peak_detect_cmd_for_segment (
+            segments[seg_index], apply_fade_in, apply_fade_out);
+    }
+
+    internal string[] get_last_ffmpeg_argv_for_widget_test () {
+        return last_ffmpeg_argv_for_test;
+    }
+
     internal int run_extract_segment_for_widget_test (int seg_index, string output) {
         if (seg_index < 0 || seg_index >= segments.length) {
             return -1;

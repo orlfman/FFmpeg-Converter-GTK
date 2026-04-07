@@ -1491,6 +1491,31 @@ private void test_conversion_runner_pass2_image_watermark_toggle_on_maps_all_aud
         "pass2 watermark path should not map only the first audio stream when toggle is on");
 }
 
+private void test_conversion_runner_peak_detect_toggle_off_maps_first_audio_only () {
+    var profile = make_basic_conversion_profile_for_test ();
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_peak_detect_argv_for_test ("/tmp/input.mkv");
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:a:0?",
+        "peak detect path maps only the first audio stream when toggle is off");
+    assert_array_not_contains (argv, "0:a?",
+        "peak detect path should not map all audio streams when toggle is off");
+}
+
+private void test_conversion_runner_peak_detect_toggle_on_maps_all_audio () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.preserve_all_audio_tracks = true;
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_peak_detect_argv_for_test ("/tmp/input.mkv");
+
+    assert_array_has_adjacent_pair (argv, "-map", "0:a?",
+        "peak detect path maps all audio streams when toggle is on");
+    assert_array_not_contains (argv, "0:a:0?",
+        "peak detect path should not map only the first audio stream when toggle is on");
+}
+
 private void test_idle_close_request_cancels_pending_probes () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -2184,6 +2209,87 @@ private void test_closing_combine_window_releases_audio_copy_constraint () {
             harness.window.get_codec_tab_selected_audio_codec_for_widget_test (i),
             AudioCodecName.COPY,
             "closing combine restores Copy selection in each codec tab"
+        );
+    }
+}
+
+private void test_combine_disables_keep_all_audio_at_construction () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    // Constraint is applied immediately at construction, even in copy mode.
+    // Set the toggle on while constrained to verify state preservation.
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists after construction");
+        assert_false (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "combine window disables keep-all at construction in each codec tab");
+        assert_contains (
+            tab.audio_settings.get_keep_all_audio_subtitle_for_test (),
+            "Combine does not support multiple audio tracks",
+            "keep-all subtitle explains combine constraint at construction"
+        );
+        tab.audio_settings.set_keep_all_audio_active_for_test (true);
+    }
+
+    // Stays disabled and preserves toggle after switching to reencode
+    harness.window.set_copy_mode_switch_active_for_widget_test (false);
+
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists after reencode switch");
+        assert_false (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "keep-all stays disabled after switching to reencode");
+        assert_true (tab.audio_settings.get_keep_all_audio_active_for_test (),
+            "keep-all toggle state preserved after switching to reencode");
+    }
+
+    // Stays disabled and preserves toggle after switching back to copy
+    harness.window.set_copy_mode_switch_active_for_widget_test (true);
+
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists after copy switch");
+        assert_false (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "keep-all stays disabled after switching back to copy");
+        assert_true (tab.audio_settings.get_keep_all_audio_active_for_test (),
+            "keep-all toggle state preserved after switching back to copy");
+    }
+
+    harness.window.close ();
+}
+
+private void test_closing_combine_window_releases_keep_all_audio_constraint () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var harness = new CombineWindowHarness ();
+
+    // Set toggle on while constrained — state should survive
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists before keep-all close release");
+        tab.audio_settings.set_keep_all_audio_active_for_test (true);
+    }
+
+    harness.window.invoke_close_request_for_widget_test ();
+
+    for (uint i = 0; i < 4; i++) {
+        harness.window.set_codec_choice_selected_for_widget_test (i);
+        BaseCodecTab? tab = harness.window.get_selected_base_codec_tab_for_widget_test ();
+        assert_true (tab != null, "selected codec tab exists after keep-all close release");
+        assert_true (tab.audio_settings.get_keep_all_audio_sensitive_for_test (),
+            "closing combine re-enables keep-all in each codec tab");
+        assert_true (tab.audio_settings.get_keep_all_audio_active_for_test (),
+            "closing combine preserves keep-all toggle state in each codec tab");
+        assert_string_equal (
+            tab.audio_settings.get_keep_all_audio_subtitle_for_test (),
+            "Preserve all source audio tracks in the output",
+            "closing combine restores keep-all subtitle in each codec tab"
         );
     }
 }
@@ -4445,6 +4551,10 @@ void main (string[] args) {
         test_conversion_runner_pass2_image_watermark_toggle_off_maps_first_audio_only);
     Test.add_func ("/convert/runner/pass2-image-watermark-toggle-on-maps-all-audio",
         test_conversion_runner_pass2_image_watermark_toggle_on_maps_all_audio);
+    Test.add_func ("/convert/runner/peak-detect-toggle-off-maps-first-audio",
+        test_conversion_runner_peak_detect_toggle_off_maps_first_audio_only);
+    Test.add_func ("/convert/runner/peak-detect-toggle-on-maps-all-audio",
+        test_conversion_runner_peak_detect_toggle_on_maps_all_audio);
     Test.add_func ("/combine/window/uses-live-main-output-folder",
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",
@@ -4511,6 +4621,10 @@ void main (string[] args) {
         test_combine_reencode_syncs_audio_copy_constraint_across_codec_tabs);
     Test.add_func ("/combine/audio-copy/close-releases-constraint",
         test_closing_combine_window_releases_audio_copy_constraint);
+    Test.add_func ("/combine/keep-all-audio/disabled-at-construction",
+        test_combine_disables_keep_all_audio_at_construction);
+    Test.add_func ("/combine/keep-all-audio/close-releases-constraint",
+        test_closing_combine_window_releases_keep_all_audio_constraint);
 
     // Audio status override tests
     Test.add_func ("/combine/audio-badge/reencode-sets-override",

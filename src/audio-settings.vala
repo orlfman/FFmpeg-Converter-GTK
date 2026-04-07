@@ -264,8 +264,7 @@ public class AudioSettings : Object {
         if (!is_transcode_only_mode ()) {
             keep_all_audio_row = new Adw.ActionRow ();
             keep_all_audio_row.set_title ("Keep All Audio Tracks");
-            keep_all_audio_row.set_subtitle (
-                "Preserve all source audio tracks in the output");
+            keep_all_audio_row.set_subtitle (KEEP_ALL_AUDIO_SUBTITLE_DEFAULT);
             keep_all_audio_switch = new Switch ();
             keep_all_audio_switch.set_valign (Align.CENTER);
             keep_all_audio_switch.set_active (false);
@@ -590,6 +589,23 @@ public class AudioSettings : Object {
     public void update_for_combine_reencode (bool active) {
         combine_reencode_active = active;
         rebuild_codec_list ();
+    }
+
+    private const string KEEP_ALL_AUDIO_SUBTITLE_DEFAULT =
+        "Preserve all source audio tracks in the output";
+    private const string KEEP_ALL_AUDIO_LOCK_REASON =
+        "Disabled while Combine is open — Combine does not support multiple audio tracks";
+
+    public void set_keep_all_audio_sensitive (bool sensitive) {
+        if (keep_all_audio_row != null) {
+            keep_all_audio_row.set_sensitive (sensitive);
+            keep_all_audio_row.set_subtitle (
+                sensitive ? KEEP_ALL_AUDIO_SUBTITLE_DEFAULT : KEEP_ALL_AUDIO_LOCK_REASON);
+            keep_all_audio_row.set_tooltip_text (sensitive ? null : KEEP_ALL_AUDIO_LOCK_REASON);
+        }
+        if (keep_all_audio_switch != null) {
+            keep_all_audio_switch.set_sensitive (sensitive);
+        }
     }
 
     /**
@@ -1417,7 +1433,7 @@ public class AudioSettings : Object {
     }
 #endif
 
-#if AUDIO_SETTINGS_TEST_BUILD
+#if AUDIO_SETTINGS_TEST_BUILD || COMBINE_WINDOW_TEST_BUILD
     internal bool get_keep_all_audio_active_for_test () {
         return keep_all_audio_switch != null && keep_all_audio_switch.active;
     }
@@ -1432,6 +1448,26 @@ public class AudioSettings : Object {
         return keep_all_audio_row != null;
     }
 
+    internal bool get_keep_all_audio_sensitive_for_test () {
+        return keep_all_audio_row != null && keep_all_audio_row.get_sensitive ();
+    }
+
+    internal string get_keep_all_audio_subtitle_for_test () {
+        if (keep_all_audio_row == null) {
+            return "";
+        }
+        return keep_all_audio_row.get_subtitle () ?? "";
+    }
+
+    internal string get_keep_all_audio_tooltip_for_test () {
+        if (keep_all_audio_row == null) {
+            return "";
+        }
+        return keep_all_audio_row.get_tooltip_text () ?? "";
+    }
+#endif
+
+#if AUDIO_SETTINGS_TEST_BUILD
     internal void select_codec_for_test (string codec) {
         var model = codec_combo.get_model () as StringList;
         if (model == null) {

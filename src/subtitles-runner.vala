@@ -795,14 +795,7 @@ public class SubtitlesRunner : Object {
         report_status ("Analyzing audio peak for normalization...",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
-        string[] cmd = FilterBuilder.build_audio_peak_detect_cmd (
-            input_file,
-            build_peak_analysis_audio_filters (profile, duration),
-            null,
-            null,
-            FilterBuilder.extract_peak_analysis_output_args (profile.audio_args),
-            "0:a?"
-        );
+        string[] cmd = build_peak_detect_cmd (input_file, profile, duration);
 
         string full_cmd = ConversionUtils.format_command_for_display (cmd);
         log_line ("=== Peak Normalization Analysis ===");
@@ -873,6 +866,19 @@ public class SubtitlesRunner : Object {
 
     private static string get_explicit_audio_map_spec (EncodeProfileSnapshot profile) {
         return profile.preserve_all_audio_tracks ? "0:a?" : "0:a:0?";
+    }
+
+    private string[] build_peak_detect_cmd (string input_file,
+                                            EncodeProfileSnapshot profile,
+                                            double duration) {
+        return FilterBuilder.build_audio_peak_detect_cmd (
+            input_file,
+            build_peak_analysis_audio_filters (profile, duration),
+            null,
+            null,
+            FilterBuilder.extract_peak_analysis_output_args (profile.audio_args),
+            get_explicit_audio_map_spec (profile)
+        );
     }
 
     private static string build_text_subtitle_filter (string input_file,
@@ -1172,6 +1178,12 @@ public class SubtitlesRunner : Object {
     }
 
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal string[] build_peak_detect_command_for_widget_test (string input_file,
+                                                                 EncodeProfileSnapshot profile,
+                                                                 double duration = 0.0) {
+        return build_peak_detect_cmd (input_file, profile, duration);
+    }
+
     internal string[] build_burn_in_command_for_widget_test (string input_file,
                                                              string output_path,
                                                              int sub_stream_index,

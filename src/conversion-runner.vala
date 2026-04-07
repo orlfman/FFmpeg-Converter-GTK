@@ -404,7 +404,7 @@ public class ConversionRunner {
             build_peak_analysis_pre_input_args (),
             build_peak_analysis_post_input_args (),
             FilterBuilder.extract_peak_analysis_output_args (config.profile.audio_args),
-            "0:a?"
+            get_explicit_audio_map_spec ()
         );
     }
 
@@ -507,6 +507,10 @@ public class ConversionRunner {
 
     internal string[] build_pass2_argv_for_test (string input, string output) {
         return build_pass2 (input, output);
+    }
+
+    internal string[] build_peak_detect_argv_for_test (string input) {
+        return build_peak_detect_cmd (input);
     }
 #endif
 }
