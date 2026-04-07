@@ -92,6 +92,9 @@ public class AudioSettings : Object {
     private string audio_status_override_icon = "";
     private string audio_status_override_text = "";
     private string audio_status_override_css = "";
+    private bool   has_smart_optimizer_preserve_all_override = false;
+    private bool   smart_optimizer_preserve_all_override = false;
+    private bool   suppress_smart_optimizer_override_invalidation = false;
 
     public signal void changed ();
 
@@ -412,11 +415,45 @@ public class AudioSettings : Object {
 
     private void connect_signals () {
         codec_combo.notify["selected"].connect (on_codec_combo_selected_notify);
-        aac_quality_combo.notify["selected"].connect (update_codec_visibility);
-        mp3_vbr_combo.notify["selected"].connect (update_codec_visibility);
-        vorbis_quality_combo.notify["selected"].connect (update_codec_visibility);
+        sample_rate_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        bitrate_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        sample_format_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        opus_vbr_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        opus_surround_fix.notify["active"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        aac_quality_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            update_codec_visibility ();
+        });
+        mp3_vbr_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            update_codec_visibility ();
+        });
+        flac_compression_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            changed ();
+        });
+        vorbis_quality_combo.notify["selected"].connect (() => {
+            maybe_invalidate_smart_optimizer_preserve_all_override ();
+            update_codec_visibility ();
+        });
         if (keep_all_audio_switch != null) {
             keep_all_audio_switch.notify["active"].connect (() => {
+                maybe_invalidate_smart_optimizer_preserve_all_override ();
                 rebuild_codec_list ();
             });
         }
@@ -427,6 +464,7 @@ public class AudioSettings : Object {
     }
 
     private void on_codec_combo_selected_notify () {
+        maybe_invalidate_smart_optimizer_preserve_all_override ();
         if (!suppress_codec_tracking) {
             desired_codec = get_codec_text ();
         }
@@ -441,7 +479,15 @@ public class AudioSettings : Object {
         if (!suppress_audio_enabled_tracking && expander.sensitive) {
             desired_audio_enabled = expander.enable_expansion;
         }
+        maybe_invalidate_smart_optimizer_preserve_all_override ();
         changed ();
+    }
+
+    private void maybe_invalidate_smart_optimizer_preserve_all_override () {
+        if (suppress_smart_optimizer_override_invalidation) {
+            return;
+        }
+        clear_smart_optimizer_preserve_all_override ();
     }
 
     internal static bool codec_uses_quality_scale (string codec,
@@ -526,6 +572,7 @@ public class AudioSettings : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     public void update_for_container (string container) {
+        maybe_invalidate_smart_optimizer_preserve_all_override ();
         current_container = container;
         rebuild_codec_list ();
     }
@@ -875,8 +922,9 @@ public class AudioSettings : Object {
         // even if some caller previously left the UI toggle enabled.
         snapshot.enabled = is_audio_enabled_for_output ();
         snapshot.codec = get_codec_text ();
-        snapshot.preserve_all_audio_tracks =
-            keep_all_audio_switch != null && keep_all_audio_switch.active;
+        snapshot.preserve_all_audio_tracks = has_smart_optimizer_preserve_all_override
+            ? smart_optimizer_preserve_all_override
+            : get_keep_all_audio_requested ();
         snapshot.source = source_audio.copy ();
         AudioSourceInfo[] sources_copy = {};
         foreach (unowned AudioSourceInfo s in all_source_audio) {
@@ -1064,6 +1112,33 @@ public class AudioSettings : Object {
             true,
             channel_override
         );
+    }
+
+    public bool get_keep_all_audio_requested () {
+        return keep_all_audio_switch != null && keep_all_audio_switch.active;
+    }
+
+    public void set_keep_all_audio_requested (bool preserve_all) {
+        if (keep_all_audio_switch != null) {
+            keep_all_audio_switch.set_active (preserve_all);
+        }
+    }
+
+    public void begin_smart_optimizer_override_application () {
+        suppress_smart_optimizer_override_invalidation = true;
+    }
+
+    public void end_smart_optimizer_override_application () {
+        suppress_smart_optimizer_override_invalidation = false;
+    }
+
+    public void set_smart_optimizer_preserve_all_override (bool preserve_all) {
+        has_smart_optimizer_preserve_all_override = true;
+        smart_optimizer_preserve_all_override = preserve_all;
+    }
+
+    public void clear_smart_optimizer_preserve_all_override () {
+        has_smart_optimizer_preserve_all_override = false;
     }
 
     public static void coerce_copy_selection_for_container (AudioSettingsSnapshot snapshot,

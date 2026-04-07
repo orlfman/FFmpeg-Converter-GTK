@@ -223,7 +223,10 @@ public struct OptimizationRecommendation {
     public ContentType content_type;
     public double confidence;          // 0.0–1.0, how far we extrapolated
     public SizeTier size_tier;         // optimization strategy tier
-    public int recommended_audio_kbps; // audio bitrate the preset should use
+    public int recommended_audio_kbps; // per-stream audio bitrate the preset should use
+    public int total_audio_budget_kbps; // total audio bitrate reserved across all output tracks
+    public int audio_track_count;      // number of output audio tracks represented by the budget
+    public bool preserve_all_audio_tracks_effective; // tier-aware effective keep-all state
     public bool stream_copy_audio;     // true when source audio should be copied, not re-encoded
     public bool strip_metadata;        // true for TINY tier — save every byte
     public string recommended_pix_fmt; // "yuv420p10le", "yuv420p", or "" (codec default)
@@ -240,9 +243,13 @@ internal struct SmartOptimizerVideoInfo {
     public int    width;
     public int    height;
     public double fps;
-    public int    audio_bitrate_kbps;
-    public bool   audio_bitrate_estimated;   // true when we fell back to a default
-    public string audio_codec;               // e.g. "opus", "aac", "vorbis"
+    public int    audio_bitrate_kbps;       // first audio stream bitrate
+    public bool   audio_bitrate_estimated;   // true when first stream fell back to a default
+    public string audio_codec;               // first audio stream codec
+    public int    total_audio_bitrate_kbps;  // sum across all source audio streams
+    public bool   total_audio_bitrate_estimated; // true when any stream used a fallback bitrate
+    public AudioSourceInfo source_audio;     // first audio stream
+    public AudioSourceInfo[] all_source_audio; // every source audio stream
     public int64  file_size_bytes;            // source file size from format.size or stat
     public int    source_bit_depth;           // 8, 10, 12… (0 = unknown)
     public string color_transfer;             // "smpte2084", "arib-std-b67", ""
@@ -298,6 +305,9 @@ public struct OptimizationContext {
     /** When true, audio filters (speed change, normalization, concat)
      *  are active — stream-copy is not possible, audio must be re-encoded. */
     public bool audio_requires_reencode;
+
+    /** True when the user requested preserving every source audio track. */
+    public bool preserve_all_audio_tracks_requested;
 
     /** Output container format (e.g. "mkv", "mp4", "webm").
      *  Used for audio stream-copy compatibility checks.
@@ -452,26 +462,11 @@ public class SmartOptimizer : GLib.Object {
         }
         double sample_segment_duration = double.min ((double) SEGMENT_DURATION, encode_duration);
 
-        // Save probed audio info before any overrides — we need it
-        // to decide whether stream-copying audio is viable.
-        string probed_audio_codec      = info.audio_codec;
-        int    probed_audio_kbps       = info.audio_bitrate_kbps;
-        bool   probed_audio_estimated  = info.audio_bitrate_estimated;
-
-        if (ctx.strip_audio) {
-            // No audio track — entire budget goes to video
-            info.audio_bitrate_kbps      = 0;
-            info.audio_bitrate_estimated = false;
-        } else if (ctx.audio_bitrate_kbps_override > 0) {
-            info.audio_bitrate_kbps      = ctx.audio_bitrate_kbps_override;
-            info.audio_bitrate_estimated = false;
-        }
-
-        string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
-
         // ── 1c. Size tier & audio budget ─────────────────────────────────
         SizeTier tier = SizeTier.from_mb (target_mb);
         int tier_audio = tier_audio_kbps (tier);
+        bool preserve_all_audio_tracks_effective =
+            ctx.preserve_all_audio_tracks_requested && tier >= SizeTier.MEDIUM;
         bool use_stream_copy_audio = false;
 
         // Resolve the effective container once:
@@ -480,28 +475,83 @@ public class SmartOptimizer : GLib.Object {
         string resolved_container = resolve_effective_container (
             preferred_codec, tier, ctx.output_container);
 
+        // Save probed audio info before any overrides — we need both the
+        // first-stream and aggregate views to decide whether multi-track
+        // preservation is viable and how much budget it consumes.
+        string probed_audio_codec      = info.audio_codec;
+        int    probed_audio_kbps       = info.audio_bitrate_kbps;
+        bool   probed_audio_estimated  = info.audio_bitrate_estimated;
+        int    probed_total_audio_kbps = preserve_all_audio_tracks_effective
+            ? info.total_audio_bitrate_kbps
+            : probed_audio_kbps;
+        bool   probed_total_audio_estimated = preserve_all_audio_tracks_effective
+            ? info.total_audio_bitrate_estimated
+            : probed_audio_estimated;
+        int actual_source_audio_track_count = (info.all_source_audio.length > 0)
+            ? info.all_source_audio.length
+            : (info.audio_codec.length > 0 ? 1 : 0);
+        int effective_audio_track_count = preserve_all_audio_tracks_effective
+            ? actual_source_audio_track_count
+            : (actual_source_audio_track_count > 0 ? 1 : 0);
+        int total_audio_budget_kbps = 0;
+        AudioSourceInfo[] selected_audio_sources = select_budget_audio_sources (
+            info, preserve_all_audio_tracks_effective);
+
+        string incompatible_audio_codec = "";
+        bool audio_copy_compatible = AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
+            resolved_container,
+            info.source_audio,
+            info.all_source_audio,
+            preserve_all_audio_tracks_effective,
+            out incompatible_audio_codec
+        );
+
+        if (ctx.strip_audio) {
+            // No audio track — entire budget goes to video
+            info.audio_bitrate_kbps      = 0;
+            info.audio_bitrate_estimated = false;
+            effective_audio_track_count  = 0;
+        } else if (ctx.audio_bitrate_kbps_override > 0) {
+            // Overrides are per-stream FFmpeg rates; multiply by track count
+            // when preserving multiple tracks.
+            info.audio_bitrate_kbps      = ctx.audio_bitrate_kbps_override;
+            info.audio_bitrate_estimated = false;
+            effective_audio_track_count  = int.max (effective_audio_track_count, 1);
+            total_audio_budget_kbps      = ctx.audio_bitrate_kbps_override * effective_audio_track_count;
+        }
+
+        string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
+
         // Determine the actual audio budget:
         //   1. If the caller stripped audio or set an explicit override, honour that.
-        //   2. Otherwise, try to stream-copy the source audio when it is compatible
-        //      with the output container and its bitrate fits within the tier budget.
-        //      This gives an *exact* audio size rather than a budget estimate.
-        //   3. Otherwise, use the tier-based audio budget (re-encode).
-        if (!ctx.strip_audio && ctx.audio_bitrate_kbps_override <= 0) {
-            bool codec_compatible = audio_codec_compatible_with_container (
-                probed_audio_codec, resolved_container);
+        //   2. Otherwise, try to stream-copy the selected audio set when it is
+        //      container-compatible. For Tiny/Small this remains first-track-only
+        //      and must fit the tier budget; for Medium+ keep-all mode we reserve
+        //      the exact combined source bitrate and let feasibility checks decide.
+        //   3. Otherwise, use the tier-based per-stream re-encode budget.
+        if (!ctx.strip_audio && ctx.audio_bitrate_kbps_override <= 0 && effective_audio_track_count > 0) {
+            bool can_stream_copy_single = audio_copy_compatible
+                && !ctx.audio_requires_reencode
+                && probed_audio_kbps > 0
+                && !probed_audio_estimated
+                && probed_audio_kbps <= tier_audio;
+            bool can_stream_copy_multi = preserve_all_audio_tracks_effective
+                && audio_copy_compatible
+                && !ctx.audio_requires_reencode
+                && probed_total_audio_kbps > 0
+                && !probed_total_audio_estimated;
 
-            if (codec_compatible
-                    && !ctx.audio_requires_reencode
-                    && probed_audio_kbps > 0
-                    && !probed_audio_estimated
-                    && probed_audio_kbps <= tier_audio) {
-                // Source audio is efficient enough — stream copy for exact size
+            if (can_stream_copy_multi || can_stream_copy_single) {
                 use_stream_copy_audio = true;
                 info.audio_bitrate_kbps      = probed_audio_kbps;
-                info.audio_bitrate_estimated = false;
+                info.audio_bitrate_estimated = probed_audio_estimated;
+                total_audio_budget_kbps      = preserve_all_audio_tracks_effective
+                    ? probed_total_audio_kbps
+                    : probed_audio_kbps;
             } else {
                 info.audio_bitrate_kbps      = tier_audio;
                 info.audio_bitrate_estimated = false;
+                total_audio_budget_kbps      = tier_audio * effective_audio_track_count;
             }
         }
 
@@ -511,15 +561,19 @@ public class SmartOptimizer : GLib.Object {
         // encodes for a result that was never achievable.
         double target_total_kib = mib_to_kib ((double) target_mb);
         double container_overhead_kib = container_overhead_for_tier (tier);
-        double audio_kib = (info.audio_bitrate_kbps > 0)
-            ? kib_from_kbps_for_duration ((double) info.audio_bitrate_kbps, encode_duration)
-            : 0.0;
+        double audio_kib = compute_reserved_audio_kib (
+            selected_audio_sources,
+            use_stream_copy_audio,
+            info.audio_bitrate_kbps,
+            total_audio_budget_kbps,
+            encode_duration);
         double video_target_kib = target_total_kib - audio_kib - container_overhead_kib;
 
         if (video_target_kib <= 0) {
             return make_error_rec (preferred_codec,
-                "Audio track alone (~%.0f KiB) exceeds the %d MB target."
-                    .printf (audio_kib, target_mb));
+                "%s alone (~%.0f KiB) exceeds the %d MB target."
+                    .printf (effective_audio_track_count == 1 ? "Audio track" : "Audio tracks",
+                        audio_kib, target_mb));
         }
 
         int available_video_kbps = (int) kbps_from_kib_for_duration (
@@ -846,6 +900,7 @@ public class SmartOptimizer : GLib.Object {
         if (tier_uses_strict_targeting (tier)
                 && !use_stream_copy_audio
                 && !ctx.strip_audio
+                && effective_audio_track_count == 1
                 && ctx.audio_bitrate_kbps_override <= 0
                 && info.audio_bitrate_kbps > 0
                 && probed_audio_codec.length > 0) {
@@ -859,12 +914,17 @@ public class SmartOptimizer : GLib.Object {
                     // 2× the tier budget (encoder overhead, container
                     // framing).  If it does, the measurement is suspect.
                     if (measured_audio_kbps <= tier_audio * 2) {
-                        double new_audio_kib = kib_from_kbps_for_duration (
-                            (double) measured_audio_kbps, encode_duration);
+                        double new_audio_kib = compute_reserved_audio_kib (
+                            selected_audio_sources,
+                            false,
+                            measured_audio_kbps,
+                            measured_audio_kbps,
+                            encode_duration);
                         double new_video_kib = target_total_kib - new_audio_kib - container_overhead_kib;
                         if (new_video_kib > 0) {
                             audio_measured = true;
                             info.audio_bitrate_kbps = measured_audio_kbps;
+                            total_audio_budget_kbps = measured_audio_kbps;
                             audio_kib = new_audio_kib;
                             video_target_kib = new_video_kib;
                             available_video_kbps = (int) kbps_from_kib_for_duration (
@@ -1122,8 +1182,12 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Tier ---
         notes.append ("── Strategy: %s ──\n".printf (tier.to_label ()));
-        notes.append ("  Audio budget: %d kbps%s\n".printf (
-            info.audio_bitrate_kbps,
+        notes.append ("  Audio budget: %d kbps/stream".printf (info.audio_bitrate_kbps));
+        if (effective_audio_track_count > 1) {
+            notes.append (" (%d tracks, %d kbps total)".printf (
+                effective_audio_track_count, total_audio_budget_kbps));
+        }
+        notes.append ("%s\n".printf (
             use_stream_copy_audio ? " (stream copy)" :
             audio_measured ? " (measured)" : ""));
 
@@ -1174,18 +1238,32 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Audio ---
         notes.append ("\n── Audio ──\n");
+        if (ctx.preserve_all_audio_tracks_requested
+                && !preserve_all_audio_tracks_effective
+                && actual_source_audio_track_count > 1) {
+            notes.append ("  Multi-track audio overridden: Tiny/Small targets keep only the first audio track\n");
+        }
         if (info.audio_bitrate_kbps > 0) {
             if (use_stream_copy_audio) {
-                notes.append ("  Audio: stream copy (%s @ %d kbps) → %d KiB exact\n"
-                    .printf (probed_audio_codec, probed_audio_kbps, (int) audio_kib));
+                if (effective_audio_track_count > 1) {
+                    notes.append ("  Audio: stream copy (%d tracks, %d kbps total) → %d KiB exact\n"
+                        .printf (effective_audio_track_count, total_audio_budget_kbps, (int) audio_kib));
+                } else {
+                    notes.append ("  Audio: stream copy (%s @ %d kbps) → %d KiB exact\n"
+                        .printf (probed_audio_codec, probed_audio_kbps, (int) audio_kib));
+                }
             } else if (audio_measured) {
                 notes.append ("  Audio: %d kbps (measured, tier budget %d kbps) → %d KiB reserved\n"
                     .printf (measured_audio_kbps, tier_audio, (int) audio_kib));
             } else {
-                notes.append ("  Audio: ~%d kbps".printf (info.audio_bitrate_kbps));
+                notes.append ("  Audio: ~%d kbps/stream".printf (info.audio_bitrate_kbps));
                 if (info.audio_bitrate_estimated)
-                    notes.append (" (estimated %s — stream did not report bitrate)".printf (
+                    notes.append (" (estimated %s — first stream did not report bitrate)".printf (
                         info.audio_codec));
+                if (effective_audio_track_count > 1) {
+                    notes.append (" across %d tracks (%d kbps total)".printf (
+                        effective_audio_track_count, total_audio_budget_kbps));
+                }
                 notes.append (" → %d KiB reserved\n".printf ((int) audio_kib));
             }
         }
@@ -1353,6 +1431,9 @@ public class SmartOptimizer : GLib.Object {
                 confidence            = confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = info.audio_bitrate_kbps,
+                total_audio_budget_kbps = total_audio_budget_kbps,
+                audio_track_count     = effective_audio_track_count,
+                preserve_all_audio_tracks_effective = preserve_all_audio_tracks_effective,
                 stream_copy_audio     = use_stream_copy_audio,
                 strip_metadata        = (tier == SizeTier.TINY),
                 recommended_pix_fmt   = bit_depth.pix_fmt,
@@ -1397,7 +1478,16 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
         sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
-        sb.append ("Audio budget:   %d kbps\n".printf (rec.recommended_audio_kbps));
+        sb.append ("Audio tracks:   %d (%s)\n".printf (
+            rec.audio_track_count,
+            rec.audio_track_count == 0
+                ? "none"
+                : (rec.preserve_all_audio_tracks_effective ? "all preserved" : "first track only")));
+        sb.append ("Audio budget:   %d kbps/stream".printf (rec.recommended_audio_kbps));
+        if (rec.audio_track_count > 1) {
+            sb.append (" (%d kbps total)".printf (rec.total_audio_budget_kbps));
+        }
+        sb.append ("\n");
         if (rec.recommended_pix_fmt != null && rec.recommended_pix_fmt.length > 0)
             sb.append ("Pixel format:   %s\n".printf (rec.recommended_pix_fmt));
         if (rec.strip_metadata)
@@ -1463,6 +1553,10 @@ public class SmartOptimizer : GLib.Object {
             audio_bitrate_kbps      = 0,
             audio_bitrate_estimated = false,
             audio_codec             = "",
+            total_audio_bitrate_kbps = 0,
+            total_audio_bitrate_estimated = false,
+            source_audio            = new AudioSourceInfo (),
+            all_source_audio        = {},
             file_size_bytes         = source_size_bytes,
             source_bit_depth        = 0,
             color_transfer          = "",
@@ -1502,27 +1596,61 @@ public class SmartOptimizer : GLib.Object {
 
                     // ── Duration fallback: video stream level ────────────
                     if (info.duration <= 0) {
-                        string stream_dur = s.get_string_member_with_default ("duration", "0");
-                        double parsed_stream_dur = 0.0;
-                        if (try_parse_double (stream_dur, out parsed_stream_dur) && parsed_stream_dur > 0) {
+                        double parsed_stream_dur = get_stream_duration_seconds (s);
+                        if (parsed_stream_dur > 0) {
                             info.duration = parsed_stream_dur;
                         }
                     }
                 }
 
                 if (ctype == "audio") {
+                    var source = new AudioSourceInfo ();
+                    source.presence = MediaStreamPresence.PRESENT;
+                    source.stream_index = (int) i;
+                    source.codec_name = s.get_string_member_with_default ("codec_name", "");
+                    source.channels = (int) s.get_int_member_with_default ("channels", 0);
+                    source.sample_rate = (int) s.get_int_member_with_default ("sample_rate", 0);
+                    source.sample_fmt = s.get_string_member_with_default ("sample_fmt", "");
+                    string bits_raw = s.get_string_member_with_default ("bits_per_raw_sample", "");
+                    int64 parsed_bits = 0;
+                    if (bits_raw != null && bits_raw.strip ().length > 0
+                        && try_parse_int64 (bits_raw, out parsed_bits) && parsed_bits > 0) {
+                        source.bits_per_raw_sample = (int) parsed_bits;
+                    }
+                    double parsed_stream_dur = get_stream_duration_seconds (s);
+                    if (parsed_stream_dur > 0) {
+                        source.duration = parsed_stream_dur;
+                    }
+
+                    int stream_bitrate_kbps = 0;
+                    bool stream_bitrate_estimated = false;
                     var bstr = s.get_string_member_with_default ("bit_rate", "0");
                     double parsed_audio_bps = 0.0;
                     if (try_parse_double (bstr, out parsed_audio_bps) && parsed_audio_bps > 0) {
-                        info.audio_bitrate_kbps = (int) (parsed_audio_bps / 1000.0);
+                        stream_bitrate_kbps = (int) (parsed_audio_bps / 1000.0);
+                    } else {
+                        stream_bitrate_estimated = true;
+                        stream_bitrate_kbps = default_audio_bitrate_kbps_for_codec (source.codec_name);
                     }
-                    info.audio_codec = s.get_string_member_with_default ("codec_name", "");
+                    source.bitrate_kbps = stream_bitrate_kbps;
+                    source.bitrate_estimated = stream_bitrate_estimated;
+
+                    if (info.audio_codec.length == 0) {
+                        info.audio_bitrate_kbps = stream_bitrate_kbps;
+                        info.audio_bitrate_estimated = stream_bitrate_estimated;
+                        info.audio_codec = source.codec_name;
+                        info.source_audio = source.copy ();
+                    }
+
+                    info.all_source_audio += source.copy ();
+                    info.total_audio_bitrate_kbps += stream_bitrate_kbps;
+                    if (stream_bitrate_estimated) {
+                        info.total_audio_bitrate_estimated = true;
+                    }
 
                     // ── Duration fallback: audio stream level ────────────
                     if (info.duration <= 0) {
-                        string stream_dur = s.get_string_member_with_default ("duration", "0");
-                        double parsed_stream_dur = 0.0;
-                        if (try_parse_double (stream_dur, out parsed_stream_dur) && parsed_stream_dur > 0) {
+                        if (parsed_stream_dur > 0) {
                             info.duration = parsed_stream_dur;
                         }
                     }
@@ -1536,25 +1664,6 @@ public class SmartOptimizer : GLib.Object {
         // the JSON field contains "N/A" or is absent).
         if (info.duration <= 0) {
             info.duration = FfprobeUtils.probe_duration (path);
-        }
-
-        // If the audio stream didn't report a bitrate, fall back to a
-        // codec-aware default. Opus is efficient at lower bitrates than
-        // AAC/Vorbis, so over-estimating eats into the video budget.
-        if (info.audio_bitrate_kbps == 0) {
-            info.audio_bitrate_estimated = true;
-            switch (info.audio_codec) {
-                case "opus":
-                    info.audio_bitrate_kbps = 96;
-                    break;
-                case "vorbis":
-                    info.audio_bitrate_kbps = 112;
-                    break;
-                default:
-                    // AAC, MP3, or unknown — conservative estimate
-                    info.audio_bitrate_kbps = 128;
-                    break;
-            }
         }
 
         return info;
@@ -1955,36 +2064,16 @@ public class SmartOptimizer : GLib.Object {
         }
     }
 
-    /**
-     * Check if a source audio codec can be stream-copied into the target container.
-     *
-     * Container support:
-     *   webm  → Opus, Vorbis only
-     *   mkv   → virtually all codecs (AAC, MP3, Opus, Vorbis, FLAC, AC3, EAC3, DTS)
-     *   mp4   → AAC, MP3, AC3, EAC3
-     *   other → fall back to AAC, MP3 (safe baseline)
-     */
-    private static bool audio_codec_compatible_with_container (string audio_codec, string container) {
-        if (audio_codec.length == 0) return false;
-        string lc = audio_codec.down ();
-        string ct = container.down ();
-
-        if (ct == "webm") {
-            return (lc == "opus" || lc == "vorbis");
+    private static int default_audio_bitrate_kbps_for_codec (string codec_name) {
+        switch (codec_name.down ()) {
+            case "opus":
+                return 96;
+            case "vorbis":
+                return 112;
+            default:
+                // AAC, MP3, AC3, or unknown — conservative estimate
+                return 128;
         }
-
-        if (ct == "mkv" || ct == "matroska") {
-            // MKV accepts virtually all audio codecs
-            return (lc == "aac" || lc == "mp3" || lc == "opus" || lc == "vorbis"
-                 || lc == "flac" || lc == "ac3" || lc == "eac3" || lc == "dts");
-        }
-
-        if (ct == "mp4") {
-            return (lc == "aac" || lc == "mp3" || lc == "ac3" || lc == "eac3");
-        }
-
-        // Unknown container — conservative baseline
-        return (lc == "aac" || lc == "mp3");
     }
 
     /**
@@ -2064,6 +2153,124 @@ public class SmartOptimizer : GLib.Object {
         if (duration_seconds <= 0.0)
             return 0.0;
         return (double) bytes * BITS_PER_BYTE / (duration_seconds * BITS_PER_KILOBIT);
+    }
+
+    private double get_stream_duration_seconds (Json.Object stream) {
+        string stream_dur = stream.get_string_member_with_default ("duration", "0");
+        double parsed_stream_dur = 0.0;
+        if (try_parse_double (stream_dur, out parsed_stream_dur) && parsed_stream_dur > 0.0)
+            return parsed_stream_dur;
+
+        if (stream.has_member ("tags")) {
+            var tags = stream.get_object_member ("tags");
+            if (tags != null) {
+                string tagged_duration = "";
+                if (tags.has_member ("DURATION")) {
+                    tagged_duration = tags.get_string_member_with_default ("DURATION", "");
+                } else if (tags.has_member ("duration")) {
+                    tagged_duration = tags.get_string_member_with_default ("duration", "");
+                }
+
+                double tagged_seconds = 0.0;
+                if (try_parse_duration_seconds (tagged_duration, out tagged_seconds) && tagged_seconds > 0.0)
+                    return tagged_seconds;
+            }
+        }
+
+        return 0.0;
+    }
+
+    private bool try_parse_duration_seconds (string text, out double seconds) {
+        seconds = 0.0;
+        string t = text.strip ();
+        if (t.length == 0)
+            return false;
+
+        if (try_parse_double (t, out seconds) && seconds > 0.0)
+            return true;
+
+        string[] parts = t.split (":");
+        if (parts.length != 3)
+            return false;
+
+        if (!Regex.match_simple ("^[0-9]+$", parts[0])
+                || !Regex.match_simple ("^[0-9]{1,2}$", parts[1])
+                || !Regex.match_simple ("^[0-9]{1,2}(\\.[0-9]+)?$", parts[2])) {
+            return false;
+        }
+
+        double hours = 0.0;
+        double minutes = 0.0;
+        double secs = 0.0;
+        if (!try_parse_double (parts[0], out hours)
+                || !try_parse_double (parts[1], out minutes)
+                || !try_parse_double (parts[2], out secs)) {
+            return false;
+        }
+        if (minutes >= 60.0 || secs >= 60.0)
+            return false;
+
+        seconds = hours * 3600.0 + minutes * 60.0 + secs;
+        return true;
+    }
+
+    private AudioSourceInfo[] select_budget_audio_sources (
+        SmartOptimizerVideoInfo info,
+        bool preserve_all_audio_tracks_effective
+    ) {
+        if (preserve_all_audio_tracks_effective && info.all_source_audio.length > 0)
+            return info.all_source_audio;
+
+        if (info.source_audio.codec_name.length > 0)
+            return { info.source_audio };
+
+        if (info.all_source_audio.length > 0)
+            return { info.all_source_audio[0] };
+
+        return {};
+    }
+
+    private double effective_audio_stream_duration (
+        AudioSourceInfo source,
+        double encode_duration
+    ) {
+        if (encode_duration <= 0.0)
+            return 0.0;
+
+        double stream_duration = source.duration > 0.0 ? source.duration : encode_duration;
+        return double.min (stream_duration, encode_duration);
+    }
+
+    private double compute_reserved_audio_kib (
+        AudioSourceInfo[] selected_audio_sources,
+        bool use_source_stream_bitrates,
+        int per_stream_bitrate_kbps,
+        int fallback_total_audio_budget_kbps,
+        double encode_duration
+    ) {
+        if (encode_duration <= 0.0)
+            return 0.0;
+
+        if (selected_audio_sources.length == 0) {
+            return (fallback_total_audio_budget_kbps > 0)
+                ? kib_from_kbps_for_duration ((double) fallback_total_audio_budget_kbps, encode_duration)
+                : 0.0;
+        }
+
+        double total_kib = 0.0;
+        foreach (unowned AudioSourceInfo source in selected_audio_sources) {
+            int stream_bitrate_kbps = use_source_stream_bitrates
+                ? source.bitrate_kbps
+                : per_stream_bitrate_kbps;
+            if (stream_bitrate_kbps <= 0)
+                continue;
+
+            total_kib += kib_from_kbps_for_duration (
+                (double) stream_bitrate_kbps,
+                effective_audio_stream_duration (source, encode_duration));
+        }
+
+        return total_kib;
     }
 
     private double seconds_for_kib_at_kbps (double kib, int kbps) {
@@ -3101,6 +3308,9 @@ public class SmartOptimizer : GLib.Object {
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,
+            total_audio_budget_kbps = 0,
+            audio_track_count      = 0,
+            preserve_all_audio_tracks_effective = false,
             stream_copy_audio      = false,
             strip_metadata         = false,
             recommended_pix_fmt    = "",

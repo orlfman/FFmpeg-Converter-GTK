@@ -10,6 +10,11 @@ project('ffmpeg-converter-gtk',
 gnome = import('gnome')
 fs = import('fs')
 add_project_arguments('--target-glib=2.0', '--pkg=posix', language : 'vala')
+headless_gtk_test_env = environment()
+headless_gtk_test_env.set('DISPLAY', '')
+headless_gtk_test_env.set('WAYLAND_DISPLAY', '')
+headless_gtk_test_env.set('GSETTINGS_BACKEND', 'memory')
+headless_gtk_test_env.set('GIO_USE_VFS', 'local')
 dependencies = [
   dependency('glib-2.0'),
   dependency('gobject-2.0'),
@@ -228,7 +233,7 @@ if fs.exists('tests/audio-settings-test.vala')
     link_args : ['-lm'],
   )
 
-  test('audio-settings', audio_settings_test)
+  test('audio-settings', audio_settings_test, env : headless_gtk_test_env)
 endif
 
 if fs.exists('tests/audio-extract-logic-test.vala')
@@ -436,7 +441,7 @@ if fs.exists('tests/combine-window-state-test.vala')
     link_args : ['-lm'],
   )
 
-  test('combine-window-state', combine_window_state_test)
+  test('combine-window-state', combine_window_state_test, env : headless_gtk_test_env)
 endif
 
 if fs.exists('tests/audio-reorder-state-test.vala')

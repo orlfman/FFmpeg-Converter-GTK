@@ -787,6 +787,10 @@ public class AppController : Object {
             strip_audio = true;
         }
         ctx.strip_audio = strip_audio;
+        if (smart_tab != null) {
+            ctx.preserve_all_audio_tracks_requested =
+                smart_tab.get_audio_settings_ref ().get_keep_all_audio_requested ();
+        }
 
         // Audio filters (speed, normalize, concat) prevent stream-copy
         if (smart_tab != null) {

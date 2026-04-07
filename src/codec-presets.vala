@@ -635,135 +635,144 @@ public class CodecPresets : Object {
 
     public static void apply_smart_x264 (X264Tab tab, OptimizationRecommendation rec) {
         uint saved_container = tab.container_combo.get_selected ();
-        tab.reset_defaults ();
-        SizeTier tier = rec.size_tier;
+        bool requested_keep_all_audio = tab.audio_settings.get_keep_all_audio_requested ();
+        tab.audio_settings.begin_smart_optimizer_override_application ();
+        try {
+            tab.reset_defaults ();
+            SizeTier tier = rec.size_tier;
 
-        // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
-        if (tier <= SizeTier.SMALL) {
-            tab.container_combo.set_selected (1);   // mp4
-        } else {
-            tab.container_combo.set_selected (saved_container);
+            // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
+            if (tier <= SizeTier.SMALL) {
+                tab.container_combo.set_selected (1);   // mp4
+            } else {
+                tab.container_combo.set_selected (saved_container);
+            }
+            set_dropdown_by_label (tab.profile_combo, "High");
+
+            // Preset
+            set_dropdown_by_label (tab.preset_combo, rec.preset);
+
+            // Rate control
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                tab.rc_mode_combo.set_selected (2);   // ABR
+                tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
+                tab.two_pass_switch.set_active (true);
+                tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
+            } else {
+                tab.rc_mode_combo.set_selected (0);   // CRF
+                tab.crf_spin.set_value (rec.crf);
+            }
+
+            // Content-aware tune
+            switch (rec.content_type) {
+                case ContentType.ANIME:
+                    set_dropdown_by_label (tab.tune_combo, "animation");
+                    break;
+                case ContentType.SCREENCAST:
+                    set_dropdown_by_label (tab.tune_combo, "stillimage");
+                    break;
+                default:
+                    tab.tune_combo.set_selected (0);
+                    break;
+            }
+
+            // ── Tier-scaled encoder features ─────────────────────────────────
+            tab.cabac_switch.set_active (true);
+            tab.mbtree_switch.set_active (true);
+            tab.weightp_switch.set_active (true);
+            tab.deblock_expander.set_enable_expansion (true);
+            tab.psy_rd_expander.set_enable_expansion (true);
+
+            switch (tier) {
+                case SizeTier.TINY:
+                    set_dropdown_by_label (tab.ref_frames_combo, "3");
+                    tab.bframes_spin.set_value (3);
+                    set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+                    set_dropdown_by_label (tab.me_combo, "hex");
+                    tab.subme_combo.set_selected (7);
+                    tab.me_range_spin.set_value (16);
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (1.0);
+                    tab.psy_trellis_spin.set_value (0.0);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (40);
+                    tab.open_gop_switch.set_active (false);
+                    break;
+
+                case SizeTier.SMALL:
+                    set_dropdown_by_label (tab.ref_frames_combo, "4");
+                    tab.bframes_spin.set_value (4);
+                    set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+                    set_dropdown_by_label (tab.me_combo, "hex");
+                    tab.subme_combo.set_selected (8);
+                    tab.me_range_spin.set_value (16);
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (1.0);
+                    tab.psy_trellis_spin.set_value (0.1);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (50);
+                    tab.open_gop_switch.set_active (false);
+                    break;
+
+                case SizeTier.MEDIUM:
+                    set_dropdown_by_label (tab.ref_frames_combo, "5");
+                    tab.bframes_spin.set_value (5);
+                    set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+                    set_dropdown_by_label (tab.me_combo, "umh");
+                    tab.subme_combo.set_selected (9);
+                    tab.me_range_spin.set_value (24);
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (1.0);
+                    tab.psy_trellis_spin.set_value (0.15);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (60);
+                    tab.open_gop_switch.set_active (false);
+                    break;
+
+                case SizeTier.LARGE:
+                    set_dropdown_by_label (tab.ref_frames_combo, "6");
+                    tab.bframes_spin.set_value (6);
+                    set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+                    set_dropdown_by_label (tab.me_combo, "umh");
+                    tab.subme_combo.set_selected (10);
+                    tab.me_range_spin.set_value (32);
+                    tab.deblock_alpha_spin.set_value (-1);
+                    tab.deblock_beta_spin.set_value (-1);
+                    tab.psy_rd_spin.set_value (1.0);
+                    tab.psy_trellis_spin.set_value (0.2);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (80);
+                    tab.open_gop_switch.set_active (true);
+                    break;
+
+                case SizeTier.XLARGE:
+                    set_dropdown_by_label (tab.ref_frames_combo, "8");
+                    tab.bframes_spin.set_value (8);
+                    set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
+                    set_dropdown_by_label (tab.me_combo, "umh");
+                    tab.subme_combo.set_selected (11);
+                    tab.me_range_spin.set_value (32);
+                    tab.deblock_alpha_spin.set_value (-1);
+                    tab.deblock_beta_spin.set_value (-1);
+                    tab.psy_rd_spin.set_value (1.0);
+                    tab.psy_trellis_spin.set_value (0.25);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (120);
+                    tab.open_gop_switch.set_active (true);
+                    break;
+            }
+
+            // Audio
+            configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
+            tab.audio_settings.set_keep_all_audio_requested (requested_keep_all_audio);
+            tab.audio_settings.set_smart_optimizer_preserve_all_override (
+                rec.preserve_all_audio_tracks_effective);
+        } finally {
+            tab.audio_settings.end_smart_optimizer_override_application ();
         }
-        set_dropdown_by_label (tab.profile_combo, "High");
-
-        // Preset
-        set_dropdown_by_label (tab.preset_combo, rec.preset);
-
-        // Rate control
-        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
-            tab.rc_mode_combo.set_selected (2);   // ABR
-            tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
-            tab.two_pass_switch.set_active (true);
-            tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
-        } else {
-            tab.rc_mode_combo.set_selected (0);   // CRF
-            tab.crf_spin.set_value (rec.crf);
-        }
-
-        // Content-aware tune
-        switch (rec.content_type) {
-            case ContentType.ANIME:
-                set_dropdown_by_label (tab.tune_combo, "animation");
-                break;
-            case ContentType.SCREENCAST:
-                set_dropdown_by_label (tab.tune_combo, "stillimage");
-                break;
-            default:
-                tab.tune_combo.set_selected (0);
-                break;
-        }
-
-        // ── Tier-scaled encoder features ─────────────────────────────────
-        tab.cabac_switch.set_active (true);
-        tab.mbtree_switch.set_active (true);
-        tab.weightp_switch.set_active (true);
-        tab.deblock_expander.set_enable_expansion (true);
-        tab.psy_rd_expander.set_enable_expansion (true);
-
-        switch (tier) {
-            case SizeTier.TINY:
-                set_dropdown_by_label (tab.ref_frames_combo, "3");
-                tab.bframes_spin.set_value (3);
-                set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
-                set_dropdown_by_label (tab.me_combo, "hex");
-                tab.subme_combo.set_selected (7);
-                tab.me_range_spin.set_value (16);
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (1.0);
-                tab.psy_trellis_spin.set_value (0.0);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (40);
-                tab.open_gop_switch.set_active (false);
-                break;
-
-            case SizeTier.SMALL:
-                set_dropdown_by_label (tab.ref_frames_combo, "4");
-                tab.bframes_spin.set_value (4);
-                set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
-                set_dropdown_by_label (tab.me_combo, "hex");
-                tab.subme_combo.set_selected (8);
-                tab.me_range_spin.set_value (16);
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (1.0);
-                tab.psy_trellis_spin.set_value (0.1);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (50);
-                tab.open_gop_switch.set_active (false);
-                break;
-
-            case SizeTier.MEDIUM:
-                set_dropdown_by_label (tab.ref_frames_combo, "5");
-                tab.bframes_spin.set_value (5);
-                set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
-                set_dropdown_by_label (tab.me_combo, "umh");
-                tab.subme_combo.set_selected (9);
-                tab.me_range_spin.set_value (24);
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (1.0);
-                tab.psy_trellis_spin.set_value (0.15);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (60);
-                tab.open_gop_switch.set_active (false);
-                break;
-
-            case SizeTier.LARGE:
-                set_dropdown_by_label (tab.ref_frames_combo, "6");
-                tab.bframes_spin.set_value (6);
-                set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
-                set_dropdown_by_label (tab.me_combo, "umh");
-                tab.subme_combo.set_selected (10);
-                tab.me_range_spin.set_value (32);
-                tab.deblock_alpha_spin.set_value (-1);
-                tab.deblock_beta_spin.set_value (-1);
-                tab.psy_rd_spin.set_value (1.0);
-                tab.psy_trellis_spin.set_value (0.2);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (80);
-                tab.open_gop_switch.set_active (true);
-                break;
-
-            case SizeTier.XLARGE:
-                set_dropdown_by_label (tab.ref_frames_combo, "8");
-                tab.bframes_spin.set_value (8);
-                set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
-                set_dropdown_by_label (tab.me_combo, "umh");
-                tab.subme_combo.set_selected (11);
-                tab.me_range_spin.set_value (32);
-                tab.deblock_alpha_spin.set_value (-1);
-                tab.deblock_beta_spin.set_value (-1);
-                tab.psy_rd_spin.set_value (1.0);
-                tab.psy_trellis_spin.set_value (0.25);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (120);
-                tab.open_gop_switch.set_active (true);
-                break;
-        }
-
-        // Audio
-        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -772,91 +781,100 @@ public class CodecPresets : Object {
 
     public static void apply_smart_vp9 (Vp9Tab tab, OptimizationRecommendation rec) {
         uint saved_container = tab.container_combo.get_selected ();
-        tab.reset_defaults ();
-        SizeTier tier = rec.size_tier;
+        bool requested_keep_all_audio = tab.audio_settings.get_keep_all_audio_requested ();
+        tab.audio_settings.begin_smart_optimizer_override_application ();
+        try {
+            tab.reset_defaults ();
+            SizeTier tier = rec.size_tier;
 
-        // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
-        if (tier <= SizeTier.SMALL) {
-            tab.container_combo.set_selected (0);   // webm
-        } else {
-            tab.container_combo.set_selected (saved_container);
+            // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
+            if (tier <= SizeTier.SMALL) {
+                tab.container_combo.set_selected (0);   // webm
+            } else {
+                tab.container_combo.set_selected (saved_container);
+            }
+
+            // Speed
+            string speed_str = rec.preset.replace ("cpu-used ", "");
+            int speed_val = int.parse (speed_str);
+            tab.speed_spin.set_value (speed_val);
+
+            // Quality deadline — "good" provides excellent quality at all tiers;
+            // "best" is prohibitively slow with negligible visual gain.
+            set_dropdown_by_label (tab.quality_combo, "good");
+
+            // Rate control — use pure VBR for two-pass size-targeted encodes.
+            // Constrained Quality (CQ) has a CRF floor that can prevent the
+            // encoder from staying under the bitrate cap on complex content.
+            // VBR two-pass gives the encoder a clear bitrate target with no
+            // quality minimum fighting the size constraint.
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                tab.rc_mode_combo.set_selected (2);   // VBR
+                tab.vbr_bitrate_spin.set_value (rec.target_bitrate_kbps);
+                tab.two_pass_switch.set_active (true);
+            } else {
+                tab.rc_mode_combo.set_selected (0);   // CRF
+                tab.crf_spin.set_value (rec.crf);
+            }
+
+            // Content-aware tuning
+            if (rec.content_type == ContentType.SCREENCAST) {
+                set_dropdown_by_label (tab.tune_content_combo, "Screen");
+            } else {
+                tab.tune_content_combo.set_selected (0);
+            }
+
+            // ── Tier-scaled encoder features ─────────────────────────────────
+            tab.row_mt_switch.set_active (true);
+            tab.frame_parallel_switch.set_active (false);
+            tab.lookahead_expander.set_enable_expansion (true);
+            tab.lag_in_frames_spin.set_value (25);   // VP9 max is 25
+
+            switch (tier) {
+                case SizeTier.TINY:
+                    tab.altref_expander.set_enable_expansion (true);
+                    tab.arnr_maxframes_spin.set_value (7);
+                    tab.arnr_strength_spin.set_value (5);
+                    tab.aq_mode_combo.set_selected (0);
+                    break;
+
+                case SizeTier.SMALL:
+                    tab.altref_expander.set_enable_expansion (true);
+                    tab.arnr_maxframes_spin.set_value (7);
+                    tab.arnr_strength_spin.set_value (5);
+                    set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
+                    break;
+
+                case SizeTier.MEDIUM:
+                    tab.altref_expander.set_enable_expansion (true);
+                    tab.arnr_maxframes_spin.set_value (9);
+                    tab.arnr_strength_spin.set_value (6);
+                    set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
+                    break;
+
+                case SizeTier.LARGE:
+                    tab.altref_expander.set_enable_expansion (true);
+                    tab.arnr_maxframes_spin.set_value (12);
+                    tab.arnr_strength_spin.set_value (6);
+                    set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
+                    break;
+
+                case SizeTier.XLARGE:
+                    tab.altref_expander.set_enable_expansion (true);
+                    tab.arnr_maxframes_spin.set_value (15);
+                    tab.arnr_strength_spin.set_value (6);
+                    set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
+                    break;
+            }
+
+            // Audio
+            configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
+            tab.audio_settings.set_keep_all_audio_requested (requested_keep_all_audio);
+            tab.audio_settings.set_smart_optimizer_preserve_all_override (
+                rec.preserve_all_audio_tracks_effective);
+        } finally {
+            tab.audio_settings.end_smart_optimizer_override_application ();
         }
-
-        // Speed
-        string speed_str = rec.preset.replace ("cpu-used ", "");
-        int speed_val = int.parse (speed_str);
-        tab.speed_spin.set_value (speed_val);
-
-        // Quality deadline — "good" provides excellent quality at all tiers;
-        // "best" is prohibitively slow with negligible visual gain.
-        set_dropdown_by_label (tab.quality_combo, "good");
-
-        // Rate control — use pure VBR for two-pass size-targeted encodes.
-        // Constrained Quality (CQ) has a CRF floor that can prevent the
-        // encoder from staying under the bitrate cap on complex content.
-        // VBR two-pass gives the encoder a clear bitrate target with no
-        // quality minimum fighting the size constraint.
-        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
-            tab.rc_mode_combo.set_selected (2);   // VBR
-            tab.vbr_bitrate_spin.set_value (rec.target_bitrate_kbps);
-            tab.two_pass_switch.set_active (true);
-        } else {
-            tab.rc_mode_combo.set_selected (0);   // CRF
-            tab.crf_spin.set_value (rec.crf);
-        }
-
-        // Content-aware tuning
-        if (rec.content_type == ContentType.SCREENCAST) {
-            set_dropdown_by_label (tab.tune_content_combo, "Screen");
-        } else {
-            tab.tune_content_combo.set_selected (0);
-        }
-
-        // ── Tier-scaled encoder features ─────────────────────────────────
-        tab.row_mt_switch.set_active (true);
-        tab.frame_parallel_switch.set_active (false);
-        tab.lookahead_expander.set_enable_expansion (true);
-        tab.lag_in_frames_spin.set_value (25);   // VP9 max is 25
-
-        switch (tier) {
-            case SizeTier.TINY:
-                tab.altref_expander.set_enable_expansion (true);
-                tab.arnr_maxframes_spin.set_value (7);
-                tab.arnr_strength_spin.set_value (5);
-                tab.aq_mode_combo.set_selected (0);
-                break;
-
-            case SizeTier.SMALL:
-                tab.altref_expander.set_enable_expansion (true);
-                tab.arnr_maxframes_spin.set_value (7);
-                tab.arnr_strength_spin.set_value (5);
-                set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
-                break;
-
-            case SizeTier.MEDIUM:
-                tab.altref_expander.set_enable_expansion (true);
-                tab.arnr_maxframes_spin.set_value (9);
-                tab.arnr_strength_spin.set_value (6);
-                set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
-                break;
-
-            case SizeTier.LARGE:
-                tab.altref_expander.set_enable_expansion (true);
-                tab.arnr_maxframes_spin.set_value (12);
-                tab.arnr_strength_spin.set_value (6);
-                set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
-                break;
-
-            case SizeTier.XLARGE:
-                tab.altref_expander.set_enable_expansion (true);
-                tab.arnr_maxframes_spin.set_value (15);
-                tab.arnr_strength_spin.set_value (6);
-                set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
-                break;
-        }
-
-        // Audio
-        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -865,104 +883,113 @@ public class CodecPresets : Object {
 
     public static void apply_smart_x265 (X265Tab tab, OptimizationRecommendation rec) {
         uint saved_container = tab.container_combo.get_selected ();
-        tab.reset_defaults ();
-        SizeTier tier = rec.size_tier;
+        bool requested_keep_all_audio = tab.audio_settings.get_keep_all_audio_requested ();
+        tab.audio_settings.begin_smart_optimizer_override_application ();
+        try {
+            tab.reset_defaults ();
+            SizeTier tier = rec.size_tier;
 
-        // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
-        if (tier <= SizeTier.SMALL) {
-            tab.container_combo.set_selected (1);   // mp4
-        } else {
-            tab.container_combo.set_selected (saved_container);
+            // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
+            if (tier <= SizeTier.SMALL) {
+                tab.container_combo.set_selected (1);   // mp4
+            } else {
+                tab.container_combo.set_selected (saved_container);
+            }
+
+            // Preset
+            set_dropdown_by_label (tab.preset_combo, rec.preset);
+
+            // Rate control
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                tab.rc_mode_combo.set_selected (2);   // ABR
+                tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
+                tab.two_pass_switch.set_active (true);
+                tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
+            } else {
+                tab.rc_mode_combo.set_selected (0);   // CRF
+                tab.crf_spin.set_value (rec.crf);
+            }
+
+            // Content-aware tune
+            if (rec.content_type == ContentType.ANIME) {
+                set_dropdown_by_label (tab.tune_combo, "animation");
+            } else if (tier >= SizeTier.LARGE
+                       && (rec.content_type == ContentType.LIVE_ACTION
+                           || rec.content_type == ContentType.MIXED)) {
+                // At generous budgets, preserve natural film grain rather
+                // than smearing it for compression — improves perceived quality
+                set_dropdown_by_label (tab.tune_combo, "grain");
+            } else {
+                tab.tune_combo.set_selected (0);
+            }
+
+            // ── Tier-scaled encoder features ─────────────────────────────────
+            tab.sao_switch.set_active (true);
+            tab.deblock_expander.set_enable_expansion (true);
+            tab.psy_rd_expander.set_enable_expansion (true);
+            tab.cutree_switch.set_active (true);
+            tab.weightp_switch.set_active (true);
+
+            switch (tier) {
+                case SizeTier.TINY:
+                    set_dropdown_by_label (tab.ref_frames_combo, "3");
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (2.0);
+                    tab.pmode_switch.set_active (false);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (40);
+                    break;
+
+                case SizeTier.SMALL:
+                    set_dropdown_by_label (tab.ref_frames_combo, "4");
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (2.0);
+                    tab.pmode_switch.set_active (false);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (50);
+                    break;
+
+                case SizeTier.MEDIUM:
+                    set_dropdown_by_label (tab.ref_frames_combo, "4");
+                    tab.deblock_alpha_spin.set_value (0);
+                    tab.deblock_beta_spin.set_value (0);
+                    tab.psy_rd_spin.set_value (2.5);
+                    tab.pmode_switch.set_active (true);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (60);
+                    break;
+
+                case SizeTier.LARGE:
+                    set_dropdown_by_label (tab.ref_frames_combo, "5");
+                    tab.deblock_alpha_spin.set_value (-1);
+                    tab.deblock_beta_spin.set_value (-1);
+                    tab.psy_rd_spin.set_value (3.0);
+                    tab.pmode_switch.set_active (true);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (80);
+                    break;
+
+                case SizeTier.XLARGE:
+                    set_dropdown_by_label (tab.ref_frames_combo, "5");
+                    tab.deblock_alpha_spin.set_value (-1);
+                    tab.deblock_beta_spin.set_value (-1);
+                    tab.psy_rd_spin.set_value (3.5);
+                    tab.pmode_switch.set_active (true);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (120);
+                    break;
+            }
+
+            // Audio
+            configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
+            tab.audio_settings.set_keep_all_audio_requested (requested_keep_all_audio);
+            tab.audio_settings.set_smart_optimizer_preserve_all_override (
+                rec.preserve_all_audio_tracks_effective);
+        } finally {
+            tab.audio_settings.end_smart_optimizer_override_application ();
         }
-
-        // Preset
-        set_dropdown_by_label (tab.preset_combo, rec.preset);
-
-        // Rate control
-        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
-            tab.rc_mode_combo.set_selected (2);   // ABR
-            tab.abr_bitrate_spin.set_value (rec.target_bitrate_kbps);
-            tab.two_pass_switch.set_active (true);
-            tab.abr_vbv_switch.set_active (true);  // VBV prevents peak bitrate spikes
-        } else {
-            tab.rc_mode_combo.set_selected (0);   // CRF
-            tab.crf_spin.set_value (rec.crf);
-        }
-
-        // Content-aware tune
-        if (rec.content_type == ContentType.ANIME) {
-            set_dropdown_by_label (tab.tune_combo, "animation");
-        } else if (tier >= SizeTier.LARGE
-                   && (rec.content_type == ContentType.LIVE_ACTION
-                       || rec.content_type == ContentType.MIXED)) {
-            // At generous budgets, preserve natural film grain rather
-            // than smearing it for compression — improves perceived quality
-            set_dropdown_by_label (tab.tune_combo, "grain");
-        } else {
-            tab.tune_combo.set_selected (0);
-        }
-
-        // ── Tier-scaled encoder features ─────────────────────────────────
-        tab.sao_switch.set_active (true);
-        tab.deblock_expander.set_enable_expansion (true);
-        tab.psy_rd_expander.set_enable_expansion (true);
-        tab.cutree_switch.set_active (true);
-        tab.weightp_switch.set_active (true);
-
-        switch (tier) {
-            case SizeTier.TINY:
-                set_dropdown_by_label (tab.ref_frames_combo, "3");
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (2.0);
-                tab.pmode_switch.set_active (false);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (40);
-                break;
-
-            case SizeTier.SMALL:
-                set_dropdown_by_label (tab.ref_frames_combo, "4");
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (2.0);
-                tab.pmode_switch.set_active (false);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (50);
-                break;
-
-            case SizeTier.MEDIUM:
-                set_dropdown_by_label (tab.ref_frames_combo, "4");
-                tab.deblock_alpha_spin.set_value (0);
-                tab.deblock_beta_spin.set_value (0);
-                tab.psy_rd_spin.set_value (2.5);
-                tab.pmode_switch.set_active (true);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (60);
-                break;
-
-            case SizeTier.LARGE:
-                set_dropdown_by_label (tab.ref_frames_combo, "5");
-                tab.deblock_alpha_spin.set_value (-1);
-                tab.deblock_beta_spin.set_value (-1);
-                tab.psy_rd_spin.set_value (3.0);
-                tab.pmode_switch.set_active (true);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (80);
-                break;
-
-            case SizeTier.XLARGE:
-                set_dropdown_by_label (tab.ref_frames_combo, "5");
-                tab.deblock_alpha_spin.set_value (-1);
-                tab.deblock_beta_spin.set_value (-1);
-                tab.psy_rd_spin.set_value (3.5);
-                tab.pmode_switch.set_active (true);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (120);
-                break;
-        }
-
-        // Audio
-        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -971,116 +998,125 @@ public class CodecPresets : Object {
 
     public static void apply_smart_svt_av1 (SvtAv1Tab tab, OptimizationRecommendation rec) {
         uint saved_container = tab.container_combo.get_selected ();
-        tab.reset_defaults ();
-        SizeTier tier = rec.size_tier;
+        bool requested_keep_all_audio = tab.audio_settings.get_keep_all_audio_requested ();
+        tab.audio_settings.begin_smart_optimizer_override_application ();
+        try {
+            tab.reset_defaults ();
+            SizeTier tier = rec.size_tier;
 
-        // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
-        if (tier <= SizeTier.SMALL) {
-            tab.container_combo.set_selected (1);   // webm
-        } else {
-            tab.container_combo.set_selected (saved_container);
+            // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
+            if (tier <= SizeTier.SMALL) {
+                tab.container_combo.set_selected (1);   // webm
+            } else {
+                tab.container_combo.set_selected (saved_container);
+            }
+
+            // Preset
+            string preset_str = rec.preset.replace ("preset ", "");
+            int preset_val = int.parse (preset_str);
+            tab.preset_spin.set_value (preset_val);
+
+            // Rate control
+            if (rec.two_pass && rec.target_bitrate_kbps > 0) {
+                tab.rc_mode_combo.set_selected (2);   // VBR
+                tab.vbr_bitrate_spin.set_value (rec.target_bitrate_kbps);
+                tab.two_pass_switch.set_active (true);
+            } else {
+                tab.rc_mode_combo.set_selected (0);   // CRF
+                tab.crf_spin.set_value (rec.crf);
+            }
+
+            // Content-aware screen content mode
+            if (rec.content_type == ContentType.SCREENCAST) {
+                set_dropdown_by_label (tab.scm_combo, "Auto-Detect");
+            }
+
+            // ── Tier-scaled encoder features ─────────────────────────────────
+            tab.cdef_switch.set_active (true);
+            tab.restoration_switch.set_active (true);
+            tab.tf_switch.set_active (true);
+            tab.dlf_switch.set_active (true);
+            tab.tpl_switch.set_active (true);
+            tab.low_latency_switch.set_active (false);
+
+            // Film grain — only for live-action/mixed at MEDIUM+ tiers
+            bool use_grain = (tier >= SizeTier.MEDIUM)
+                && (rec.content_type == ContentType.LIVE_ACTION
+                    || rec.content_type == ContentType.MIXED);
+
+            switch (tier) {
+                case SizeTier.TINY:
+                    tab.grain_expander.set_enable_expansion (false);
+                    tab.qm_expander.set_enable_expansion (false);
+                    tab.sharpness_expander.set_enable_expansion (false);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (60);
+                    break;
+
+                case SizeTier.SMALL:
+                    tab.grain_expander.set_enable_expansion (use_grain);
+                    if (use_grain) {
+                        tab.grain_strength_spin.set_value (8);
+                        tab.grain_denoise_combo.set_selected (1);
+                    }
+                    tab.qm_expander.set_enable_expansion (false);
+                    tab.sharpness_expander.set_enable_expansion (false);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (80);
+                    break;
+
+                case SizeTier.MEDIUM:
+                    tab.grain_expander.set_enable_expansion (use_grain);
+                    if (use_grain) {
+                        tab.grain_strength_spin.set_value (10);
+                        tab.grain_denoise_combo.set_selected (1);
+                    }
+                    tab.qm_expander.set_enable_expansion (true);
+                    tab.qm_min_spin.set_value (8);
+                    tab.qm_max_spin.set_value (12);
+                    tab.sharpness_expander.set_enable_expansion (false);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (100);
+                    break;
+
+                case SizeTier.LARGE:
+                    tab.grain_expander.set_enable_expansion (use_grain);
+                    if (use_grain) {
+                        tab.grain_strength_spin.set_value (12);
+                        tab.grain_denoise_combo.set_selected (1);
+                    }
+                    tab.qm_expander.set_enable_expansion (true);
+                    tab.qm_min_spin.set_value (8);
+                    tab.qm_max_spin.set_value (13);
+                    tab.sharpness_expander.set_enable_expansion (true);
+                    tab.sharpness_spin.set_value (2);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (120);
+                    break;
+
+                case SizeTier.XLARGE:
+                    tab.grain_expander.set_enable_expansion (use_grain);
+                    if (use_grain) {
+                        tab.grain_strength_spin.set_value (15);
+                        tab.grain_denoise_combo.set_selected (1);
+                    }
+                    tab.qm_expander.set_enable_expansion (true);
+                    tab.qm_min_spin.set_value (8);
+                    tab.qm_max_spin.set_value (15);
+                    tab.sharpness_expander.set_enable_expansion (true);
+                    tab.sharpness_spin.set_value (3);
+                    tab.lookahead_expander.set_enable_expansion (true);
+                    tab.lookahead_spin.set_value (120);
+                    break;
+            }
+
+            // Audio
+            configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
+            tab.audio_settings.set_keep_all_audio_requested (requested_keep_all_audio);
+            tab.audio_settings.set_smart_optimizer_preserve_all_override (
+                rec.preserve_all_audio_tracks_effective);
+        } finally {
+            tab.audio_settings.end_smart_optimizer_override_application ();
         }
-
-        // Preset
-        string preset_str = rec.preset.replace ("preset ", "");
-        int preset_val = int.parse (preset_str);
-        tab.preset_spin.set_value (preset_val);
-
-        // Rate control
-        if (rec.two_pass && rec.target_bitrate_kbps > 0) {
-            tab.rc_mode_combo.set_selected (2);   // VBR
-            tab.vbr_bitrate_spin.set_value (rec.target_bitrate_kbps);
-            tab.two_pass_switch.set_active (true);
-        } else {
-            tab.rc_mode_combo.set_selected (0);   // CRF
-            tab.crf_spin.set_value (rec.crf);
-        }
-
-        // Content-aware screen content mode
-        if (rec.content_type == ContentType.SCREENCAST) {
-            set_dropdown_by_label (tab.scm_combo, "Auto-Detect");
-        }
-
-        // ── Tier-scaled encoder features ─────────────────────────────────
-        tab.cdef_switch.set_active (true);
-        tab.restoration_switch.set_active (true);
-        tab.tf_switch.set_active (true);
-        tab.dlf_switch.set_active (true);
-        tab.tpl_switch.set_active (true);
-        tab.low_latency_switch.set_active (false);
-
-        // Film grain — only for live-action/mixed at MEDIUM+ tiers
-        bool use_grain = (tier >= SizeTier.MEDIUM)
-            && (rec.content_type == ContentType.LIVE_ACTION
-                || rec.content_type == ContentType.MIXED);
-
-        switch (tier) {
-            case SizeTier.TINY:
-                tab.grain_expander.set_enable_expansion (false);
-                tab.qm_expander.set_enable_expansion (false);
-                tab.sharpness_expander.set_enable_expansion (false);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (60);
-                break;
-
-            case SizeTier.SMALL:
-                tab.grain_expander.set_enable_expansion (use_grain);
-                if (use_grain) {
-                    tab.grain_strength_spin.set_value (8);
-                    tab.grain_denoise_combo.set_selected (1);
-                }
-                tab.qm_expander.set_enable_expansion (false);
-                tab.sharpness_expander.set_enable_expansion (false);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (80);
-                break;
-
-            case SizeTier.MEDIUM:
-                tab.grain_expander.set_enable_expansion (use_grain);
-                if (use_grain) {
-                    tab.grain_strength_spin.set_value (10);
-                    tab.grain_denoise_combo.set_selected (1);
-                }
-                tab.qm_expander.set_enable_expansion (true);
-                tab.qm_min_spin.set_value (8);
-                tab.qm_max_spin.set_value (12);
-                tab.sharpness_expander.set_enable_expansion (false);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (100);
-                break;
-
-            case SizeTier.LARGE:
-                tab.grain_expander.set_enable_expansion (use_grain);
-                if (use_grain) {
-                    tab.grain_strength_spin.set_value (12);
-                    tab.grain_denoise_combo.set_selected (1);
-                }
-                tab.qm_expander.set_enable_expansion (true);
-                tab.qm_min_spin.set_value (8);
-                tab.qm_max_spin.set_value (13);
-                tab.sharpness_expander.set_enable_expansion (true);
-                tab.sharpness_spin.set_value (2);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (120);
-                break;
-
-            case SizeTier.XLARGE:
-                tab.grain_expander.set_enable_expansion (use_grain);
-                if (use_grain) {
-                    tab.grain_strength_spin.set_value (15);
-                    tab.grain_denoise_combo.set_selected (1);
-                }
-                tab.qm_expander.set_enable_expansion (true);
-                tab.qm_min_spin.set_value (8);
-                tab.qm_max_spin.set_value (15);
-                tab.sharpness_expander.set_enable_expansion (true);
-                tab.sharpness_spin.set_value (3);
-                tab.lookahead_expander.set_enable_expansion (true);
-                tab.lookahead_spin.set_value (120);
-                break;
-        }
-
-        // Audio
-        configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
     }
 }

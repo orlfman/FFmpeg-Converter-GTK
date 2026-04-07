@@ -391,10 +391,19 @@ namespace ConversionUtils {
                 FileQueryInfoFlags.NONE
             );
 
+            uint64 modified_unix = 0;
+            DateTime? modified_time = info.get_modification_date_time ();
+            if (modified_time != null) {
+                int64 unix_time = modified_time.to_unix ();
+                if (unix_time > 0) {
+                    modified_unix = (uint64) unix_time;
+                }
+            }
+
             return new FileSignature (
                 path,
                 info.get_size (),
-                info.get_attribute_uint64 (FileAttribute.TIME_MODIFIED),
+                modified_unix,
                 info.get_attribute_uint32 (FileAttribute.TIME_MODIFIED_USEC)
             );
         } catch (Error e) {
@@ -591,7 +600,13 @@ namespace ConversionUtils {
                 FileQueryInfoFlags.NONE
             );
 
-            return ((int64) info.get_attribute_uint64 (FileAttribute.TIME_MODIFIED) * 1000000)
+            int64 modified_unix = 0;
+            DateTime? modified_time = info.get_modification_date_time ();
+            if (modified_time != null) {
+                modified_unix = modified_time.to_unix ();
+            }
+
+            return (modified_unix * 1000000)
                 + (int64) info.get_attribute_uint32 (FileAttribute.TIME_MODIFIED_USEC);
         } catch (Error e) {
             return 0;

@@ -2,6 +2,9 @@ public class AudioSourceInfo : Object {
     public MediaStreamPresence presence { get; set; default = MediaStreamPresence.UNKNOWN; }
     public int stream_index { get; set; default = 0; }
     public string codec_name { get; set; default = ""; }
+    public int bitrate_kbps { get; set; default = 0; }
+    public bool bitrate_estimated { get; set; default = false; }
+    public double duration { get; set; default = 0.0; }
     public int channels { get; set; default = 0; }
     public int sample_rate { get; set; default = 0; }
     public string sample_fmt { get; set; default = ""; }
@@ -13,6 +16,9 @@ public class AudioSourceInfo : Object {
         source.presence = presence;
         source.stream_index = stream_index;
         source.codec_name = codec_name;
+        source.bitrate_kbps = bitrate_kbps;
+        source.bitrate_estimated = bitrate_estimated;
+        source.duration = duration;
         source.channels = channels;
         source.sample_rate = sample_rate;
         source.sample_fmt = sample_fmt;

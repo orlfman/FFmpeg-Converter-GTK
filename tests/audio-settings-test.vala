@@ -1052,6 +1052,69 @@ private void test_keep_all_audio_snapshot_copy_preserves_flag () {
     );
 }
 
+private void test_keep_all_audio_snapshot_prefers_smart_optimizer_override () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    settings.set_keep_all_audio_active_for_test (true);
+    settings.set_smart_optimizer_preserve_all_override (false);
+
+    var snapshot = settings.snapshot_settings ();
+    assert_true (
+        settings.get_keep_all_audio_active_for_test (),
+        "the widget should continue reflecting the user's requested keep-all state"
+    );
+    assert_false (
+        snapshot.preserve_all_audio_tracks,
+        "snapshot should prefer the Smart Optimizer override over the widget state"
+    );
+}
+
+private void test_keep_all_audio_override_survives_programmatic_apply_flow () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    settings.set_keep_all_audio_active_for_test (true);
+
+    settings.begin_smart_optimizer_override_application ();
+    settings.reset_defaults ();
+    settings.set_keep_all_audio_requested (true);
+    settings.set_smart_optimizer_preserve_all_override (false);
+    settings.end_smart_optimizer_override_application ();
+
+    var snapshot = settings.snapshot_settings ();
+    assert_true (
+        settings.get_keep_all_audio_active_for_test (),
+        "programmatic Smart Optimizer apply should restore the user's keep-all request"
+    );
+    assert_false (
+        snapshot.preserve_all_audio_tracks,
+        "snapshot should keep using the override after the apply flow finishes"
+    );
+}
+
+private void test_keep_all_audio_override_clears_on_manual_codec_change () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var settings = new AudioSettings (AudioSettingsMode.STANDARD, ContainerExt.MKV);
+    settings.set_keep_all_audio_active_for_test (true);
+    settings.set_smart_optimizer_preserve_all_override (false);
+
+    var snapshot = settings.snapshot_settings ();
+    assert_false (
+        snapshot.preserve_all_audio_tracks,
+        "precondition failed: snapshot should use the override before user changes"
+    );
+
+    settings.select_codec_for_test (AudioCodecName.AAC);
+
+    snapshot = settings.snapshot_settings ();
+    assert_true (
+        snapshot.preserve_all_audio_tracks,
+        "manual codec changes should invalidate the Smart Optimizer override"
+    );
+}
+
 private void test_keep_all_audio_reset_restores_off () {
     if (!ensure_gtk_widget_tests_available ()) return;
 
@@ -1167,6 +1230,12 @@ void main (string[] args) {
         test_keep_all_audio_snapshot_exports_true_when_enabled);
     Test.add_func ("/audio-settings/keep-all-audio/snapshot-copy-preserves-flag",
         test_keep_all_audio_snapshot_copy_preserves_flag);
+    Test.add_func ("/audio-settings/keep-all-audio/snapshot-prefers-smart-optimizer-override",
+        test_keep_all_audio_snapshot_prefers_smart_optimizer_override);
+    Test.add_func ("/audio-settings/keep-all-audio/override-survives-programmatic-apply-flow",
+        test_keep_all_audio_override_survives_programmatic_apply_flow);
+    Test.add_func ("/audio-settings/keep-all-audio/override-clears-on-manual-codec-change",
+        test_keep_all_audio_override_clears_on_manual_codec_change);
     Test.add_func ("/audio-settings/keep-all-audio/reset-restores-off",
         test_keep_all_audio_reset_restores_off);
 

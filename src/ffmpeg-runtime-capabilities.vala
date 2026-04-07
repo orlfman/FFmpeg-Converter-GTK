@@ -87,7 +87,7 @@ public class FfmpegRuntimeCapabilities : Object {
             return resolved_path
                 + "|" + ((int64) info.get_size ()).to_string ()
                 + "|" + modified_unix.to_string ()
-                + "|" + ((int64) info.get_attribute_uint64 ("time::modified-usec")).to_string ();
+                + "|" + ((int64) info.get_attribute_uint32 ("time::modified-usec")).to_string ();
         } catch (Error e) {
             return resolved_path;
         }

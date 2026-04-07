@@ -455,6 +455,68 @@ private class TestOperationStateSource : Object, IOperationStateSource {
     }
 }
 
+private class OutputPathCodecBuilder : Object, ICodecBuilder {
+    private string codec_name;
+
+    public OutputPathCodecBuilder (string codec_name) {
+        this.codec_name = codec_name;
+    }
+
+    public string get_codec_name () {
+        return codec_name;
+    }
+
+    public Object? snapshot_settings (GeneralSettingsSnapshot? general_settings = null) {
+        return null;
+    }
+
+    public string[] build_codec_args_from_snapshot (Object? snapshot) {
+        return {};
+    }
+
+    public string[] get_codec_args () {
+        return {};
+    }
+}
+
+private class OutputPathCodecTab : Object, ICodecTab {
+    private string container;
+    private ICodecBuilder builder;
+
+    public OutputPathCodecTab (string codec_name, string container) {
+        this.container = container;
+        this.builder = new OutputPathCodecBuilder (codec_name);
+    }
+
+    public ICodecBuilder get_codec_builder () {
+        return builder;
+    }
+
+    public bool get_two_pass () {
+        return false;
+    }
+
+    public string get_container () {
+        return container;
+    }
+
+    public CodecTabSettingsSnapshot snapshot_settings (
+        GeneralSettingsSnapshot? general_settings = null) {
+        var snapshot = new CodecTabSettingsSnapshot ();
+        snapshot.container = container;
+        return snapshot;
+    }
+
+    public KeyframeSettingsSnapshot snapshot_keyframe_settings (
+        GeneralSettingsSnapshot? general_settings) {
+        return new KeyframeSettingsSnapshot ();
+    }
+
+    public string[] get_audio_args () {
+        return {};
+    }
+}
+
 private class CombineWindowHarness : Object {
     public TestOperationStateSource op_state { get; private set; }
     public CombineWindow window { get; private set; }
@@ -1294,8 +1356,8 @@ private void test_converter_output_path_is_sanitized_before_overwrite_check () {
         settings.output_name_mode = OutputNameMode.DEFAULT;
         settings.output_custom_name = "";
 
-        var svt = new SvtAv1Tab ();
-        var builder = new SvtAv1Builder (svt);
+        var codec_tab = new OutputPathCodecTab ("svt-av1", ContainerExt.WEBM);
+        var builder = codec_tab.get_codec_builder ();
 
         string input_file = "/tmp/Episode:01?.mkv";
         string output_folder = "/tmp/output";
@@ -1305,7 +1367,7 @@ private void test_converter_output_path_is_sanitized_before_overwrite_check () {
             input_file,
             output_folder,
             builder,
-            svt
+            codec_tab
         );
         assert_string_equal (
             sync_path,
@@ -1317,7 +1379,7 @@ private void test_converter_output_path_is_sanitized_before_overwrite_check () {
             input_file,
             output_folder,
             builder,
-            svt,
+            codec_tab,
             "sanitized conversion output path"
         );
         assert_string_equal (
