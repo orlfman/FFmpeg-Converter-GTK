@@ -58,6 +58,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.ComboRow container_default_combo;
     private Adw.EntryRow custom_name_entry;
     private Adw.SwitchRow overwrite_switch;
+    private Adw.SwitchRow generate_collage_thumbnail_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
@@ -242,6 +243,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_group.add (overwrite_switch);
         overwrite_group.add (overwrite_warning_row);
         page.add (overwrite_group);
+
+        var generated_outputs_group = new Adw.PreferencesGroup ();
+        generated_outputs_group.set_title ("Generated Outputs");
+        generated_outputs_group.set_description (
+            "Optionally create a PNG collage sidecar from each newly encoded video."
+        );
+
+        generate_collage_thumbnail_switch = new Adw.SwitchRow ();
+        generate_collage_thumbnail_switch.set_title (
+            "Generate 4-4-4 PNG Collage Thumbnail"
+        );
+        generate_collage_thumbnail_switch.set_subtitle (
+            "Creates output-name-collage.png using frames from 8%, 16%, 24%, 32%, 40%, 48%, 56%, 64%, 72%, 80%, 88%, and 96% of the finished video"
+        );
+        generated_outputs_group.add (generate_collage_thumbnail_switch);
+        page.add (generated_outputs_group);
 
         var container_group = new Adw.PreferencesGroup ();
         container_group.set_title ("Default Container");
@@ -1245,6 +1262,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         custom_name_entry.set_text (s.output_custom_name);
         custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
         overwrite_switch.set_active (s.overwrite_enabled);
+        generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
         );
@@ -1287,6 +1305,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             index_to_container_default_mode (container_default_combo.get_selected ());
         s.output_custom_name = custom_name_entry.get_text ().strip ();
         s.overwrite_enabled = overwrite_switch.get_active ();
+        s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();
 

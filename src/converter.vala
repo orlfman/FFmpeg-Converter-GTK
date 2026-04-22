@@ -6,7 +6,9 @@ internal enum ConversionPhase {
     IDLE,
     ENCODING,
     PASS1,
-    PASS2
+    PASS2,
+    FINALIZING,
+    COLLAGE
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -565,6 +567,10 @@ public class Converter : Object {
             cancel_msg = "Cancelling Pass 1 (analysis)...";
         } else if (phase == ConversionPhase.PASS2) {
             cancel_msg = "Cancelling Pass 2 (encoding)...";
+        } else if (phase == ConversionPhase.FINALIZING) {
+            cancel_msg = "Finishing conversion...";
+        } else if (phase == ConversionPhase.COLLAGE) {
+            cancel_msg = "Cancelling collage thumbnail generation...";
         }
 
         update_status (cancel_msg, StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
@@ -683,6 +689,19 @@ public class Converter : Object {
         }
     }
 
+    internal void set_optional_phase_if_active (ProcessRunner process_runner,
+                                                ConversionPhase phase) {
+        state_mutex.lock ();
+        try {
+            if (active_runner != process_runner) {
+                return;
+            }
+            current_phase = phase;
+        } finally {
+            state_mutex.unlock ();
+        }
+    }
+
     internal bool is_cancelled (ProcessRunner process_runner) {
         return process_runner.is_cancelled ();
     }
@@ -699,12 +718,30 @@ public class Converter : Object {
         return accepts_updates;
     }
 
+    internal bool consume_optional_cancellation_if_active (ProcessRunner process_runner) {
+        bool consumed = false;
+
+        state_mutex.lock ();
+        try {
+            if (active_runner == process_runner
+                && cancel_pending
+                && (current_phase == ConversionPhase.FINALIZING
+                    || current_phase == ConversionPhase.COLLAGE)) {
+                cancel_pending = false;
+                cancel_progress_hidden = false;
+                consumed = true;
+            }
+        } finally {
+            state_mutex.unlock ();
+        }
+
+        return consumed;
+    }
+
     internal void finish_conversion (uint64 operation_id,
                                      ProcessRunner process_runner,
                                      bool succeeded,
-                                     string? output_file = null) {
-        string? completed_output = output_file;
-
+                                     OperationOutputResult? output_result = null) {
         Idle.add (() => {
             bool should_emit;
             bool was_cancelled = false;
@@ -747,8 +784,7 @@ public class Converter : Object {
 
             progress_tracker.hide ();
 
-            if (succeeded && completed_output != null) {
-                var output_result = new OperationOutputResult.for_file (completed_output);
+            if (succeeded && output_result != null) {
                 conversion_done (output_result);
                 conversion_succeeded (operation_id, output_result);
             } else if (!succeeded) {

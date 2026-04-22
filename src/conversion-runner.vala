@@ -30,6 +30,10 @@ public class ConversionRunner {
     public void run (string input, string output, bool two_pass, uint64 operation_id) {
         string safe_output = ConversionUtils.sanitize_filename (output);
         bool succeeded = false;
+        bool collage_attempted = false;
+        bool collage_cancelled = false;
+        string? collage_path = null;
+        OperationOutputResult? output_result = null;
 
         try {
             if (!validate_svt_av1_constant_quality_two_pass_compatibility (two_pass)) {
@@ -84,21 +88,268 @@ public class ConversionRunner {
                 }
             }
 
-            if (converter.is_cancelled (process_runner)) return;
-
-            converter.update_status_if_active (
+            converter.set_optional_phase_if_active (
                 process_runner,
-                @"Conversion completed successfully!\n\nSaved to:\n$safe_output",
-                StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                ConversionPhase.FINALIZING
+            );
             succeeded = true;
+
+            if (AppSettings.get_default ().generate_collage_thumbnail) {
+                converter.set_optional_phase_if_active (
+                    process_runner,
+                    ConversionPhase.COLLAGE
+                );
+
+                if (converter.is_cancelled (process_runner)) {
+                    collage_attempted = true;
+                    collage_cancelled = true;
+                    converter.consume_optional_cancellation_if_active (process_runner);
+                } else {
+                    collage_path = maybe_generate_collage_thumbnail (
+                        safe_output,
+                        out collage_attempted,
+                        out collage_cancelled
+                    );
+                    if (collage_cancelled) {
+                        converter.consume_optional_cancellation_if_active (process_runner);
+                    }
+                }
+            } else if (converter.is_cancelled (process_runner)) {
+                converter.consume_optional_cancellation_if_active (process_runner);
+            }
+
+            output_result = build_success_output_result (safe_output, collage_path);
+
+            if (collage_path != null) {
+                converter.update_status_if_active (
+                    process_runner,
+                    @"Conversion completed successfully!\n\nSaved files:\n$safe_output\n$collage_path",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS
+                );
+            } else if (collage_cancelled) {
+                converter.update_status_if_active (
+                    process_runner,
+                    @"Conversion completed successfully!\n\nSaved to:\n$safe_output\n\nCollage PNG generation was cancelled.",
+                    StatusIcon.NOTICE_ICON, StatusIcon.NOTICE_CSS
+                );
+            } else if (collage_attempted) {
+                converter.update_status_if_active (
+                    process_runner,
+                    @"Conversion completed successfully!\n\nSaved to:\n$safe_output\n\nCollage PNG was not generated. Check the console for details.",
+                    StatusIcon.NOTICE_ICON, StatusIcon.NOTICE_CSS
+                );
+            } else {
+                converter.update_status_if_active (
+                    process_runner,
+                    @"Conversion completed successfully!\n\nSaved to:\n$safe_output",
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS
+                );
+            }
         } finally {
             converter.finish_conversion (
                 operation_id,
                 process_runner,
                 succeeded,
-                succeeded ? safe_output : null
+                succeeded ? output_result : null
             );
         }
+    }
+
+    private OperationOutputResult build_success_output_result (string output_path,
+                                                               string? collage_path = null) {
+        if (collage_path == null || collage_path.length == 0) {
+            return new OperationOutputResult.for_file (output_path);
+        }
+
+        string[] paths = { output_path, collage_path };
+        return new OperationOutputResult.for_multiple_files (
+            (owned) paths,
+            Path.get_dirname (output_path),
+            output_path
+        );
+    }
+
+    private string? maybe_generate_collage_thumbnail (string output_path,
+                                                      out bool collage_attempted,
+                                                      out bool collage_cancelled) {
+        collage_attempted = false;
+        collage_cancelled = false;
+
+        if (!FfprobeUtils.has_video_stream (output_path)) {
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] Output has no video stream; skipping collage generation."
+            );
+            return null;
+        }
+
+        collage_attempted = true;
+        string? collage_output_path = resolve_collage_output_path (output_path);
+        if (collage_output_path == null || collage_output_path.length == 0) {
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] Could not determine a writable output path; skipping collage generation."
+            );
+            return null;
+        }
+        string final_collage_path = collage_output_path;
+
+        double duration_seconds = FfprobeUtils.probe_duration (output_path);
+        if (duration_seconds <= 0.0) {
+            duration_seconds = config.output_duration_seconds;
+        }
+        if (duration_seconds <= 0.0) {
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] Could not determine the finished video duration; skipping collage generation."
+            );
+            return null;
+        }
+
+        converter.set_phase_if_active (process_runner, ConversionPhase.COLLAGE);
+        converter.update_status_if_active (
+            process_runner,
+            "Generating 4-4-4 collage thumbnail...",
+            StatusIcon.PROGRESS_ICON,
+            StatusIcon.PROGRESS_CSS
+        );
+
+        string[] collage_cmd = build_collage_argv (
+            output_path,
+            final_collage_path,
+            duration_seconds
+        );
+        string display_cmd = ConversionUtils.format_command_for_display (collage_cmd);
+        converter.log_console_if_active (process_runner, "Collage command: " + display_cmd);
+
+        int exit = process_runner.execute (collage_cmd, (clean) => {
+            if (!converter.accepts_runner_updates (process_runner)) {
+                return;
+            }
+
+            if (ConversionUtils.should_log_ffmpeg_line (clean)) {
+                converter.log_console_if_active (process_runner, clean);
+            }
+        });
+
+        if (exit != 0) {
+            if (converter.is_cancelled (process_runner)) {
+                collage_cancelled = true;
+            } else {
+                converter.log_console_if_active (
+                    process_runner,
+                    "[Collage] FFmpeg failed while generating the PNG collage thumbnail."
+                );
+            }
+            return null;
+        }
+
+        if (!FileUtils.test (final_collage_path, FileTest.EXISTS)) {
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] FFmpeg completed but the PNG collage file was not created."
+            );
+            return null;
+        }
+
+        converter.log_console_if_active (
+            process_runner,
+            "[Collage] Created " + final_collage_path
+        );
+        return final_collage_path;
+    }
+
+    private string? resolve_collage_output_path (string output_path) {
+        string collage_path = build_collage_output_path (output_path);
+        if (AppSettings.get_default ().overwrite_enabled
+            || !FileUtils.test (collage_path, FileTest.EXISTS)) {
+            return collage_path;
+        }
+
+        return ConversionUtils.find_unique_path (collage_path);
+    }
+
+    private string build_collage_output_path (string output_path) {
+        string basename = Path.get_basename (output_path);
+        int dot_pos = basename.last_index_of_char ('.');
+        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+        return ConversionUtils.sanitize_filename (
+            Path.build_filename (Path.get_dirname (output_path), @"$stem-collage.png")
+        );
+    }
+
+    private string[] build_collage_argv (string output_path,
+                                         string collage_output_path,
+                                         double duration_seconds) {
+        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+
+        foreach (double fraction in get_collage_capture_fractions ()) {
+            double capture_time = duration_seconds * fraction;
+            cmd += "-ss";
+            cmd += ConversionUtils.format_ffmpeg_double (capture_time, "%.6f");
+            cmd += "-i";
+            cmd += output_path;
+        }
+
+        cmd += "-filter_complex";
+        cmd += build_collage_filter_complex ();
+        cmd += "-map";
+        cmd += "[outv]";
+        cmd += "-frames:v";
+        cmd += "1";
+        cmd += collage_output_path;
+
+        return cmd;
+    }
+
+    private string build_collage_filter_complex () {
+        int tile_width = 480;
+        int tile_height = 270;
+        int columns = 4;
+        int rows = 3;
+        int input_count = columns * rows;
+
+        var filter = new StringBuilder ();
+        for (int i = 0; i < input_count; i++) {
+            filter.append ("[%d:v]".printf (i));
+            filter.append (
+                "scale=%d:%d:force_original_aspect_ratio=decrease,".printf (
+                    tile_width,
+                    tile_height
+                )
+            );
+            filter.append (
+                "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[v%d];".printf (
+                    tile_width,
+                    tile_height,
+                    i
+                )
+            );
+        }
+
+        var layout = new StringBuilder ();
+        for (int i = 0; i < input_count; i++) {
+            filter.append ("[v%d]".printf (i));
+
+            int column = i % columns;
+            int row = i / columns;
+            if (i > 0) {
+                layout.append_c ('|');
+            }
+            layout.append ("%d_%d".printf (column * tile_width, row * tile_height));
+        }
+
+        filter.append ("xstack=inputs=%d:layout=%s[outv]".printf (input_count, layout.str));
+        return filter.str;
+    }
+
+    private double[] get_collage_capture_fractions () {
+        double[] fractions = {
+            0.08, 0.16, 0.24, 0.32,
+            0.40, 0.48, 0.56, 0.64,
+            0.72, 0.80, 0.88, 0.96
+        };
+        return fractions;
     }
 
     private bool validate_svt_av1_constant_quality_two_pass_compatibility (bool two_pass) {
@@ -511,6 +762,16 @@ public class ConversionRunner {
 
     internal string[] build_peak_detect_argv_for_test (string input) {
         return build_peak_detect_cmd (input);
+    }
+
+    internal string build_collage_output_path_for_test (string output_path) {
+        return build_collage_output_path (output_path);
+    }
+
+    internal string[] build_collage_argv_for_test (string output_path,
+                                                   string collage_output_path,
+                                                   double duration_seconds) {
+        return build_collage_argv (output_path, collage_output_path, duration_seconds);
     }
 #endif
 }

@@ -94,6 +94,23 @@ private void assert_array_has_adjacent_pair (string[] values,
     Test.fail_printf ("%s expected pair '%s' '%s'", context, first, second);
 }
 
+private void assert_array_occurrence_count (string[] values,
+                                            string expected,
+                                            int expected_count,
+                                            string context) {
+    int actual_count = 0;
+    foreach (string value in values) {
+        if (value == expected) {
+            actual_count++;
+        }
+    }
+
+    if (actual_count != expected_count) {
+        Test.fail_printf ("%s expected '%s' %d time(s) but found %d",
+            context, expected, expected_count, actual_count);
+    }
+}
+
 private CombineFile make_combine_file (string path,
                                        double duration,
                                        int width,
@@ -638,6 +655,38 @@ private void test_information_tab_combine_output_hides_input_and_shows_summary (
     assert_false (
         info_tab.is_source_summary_visible_for_widget_test (),
         "generic output hides combine summary"
+    );
+}
+
+private void test_information_tab_png_output_hides_frame_rate_and_uses_image_codec_label () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var info_tab = new InformationTab ();
+    var info = new VideoInfo ();
+    info.filename = "sample-collage.png";
+    info.container = "PNG";
+    info.duration = "N/A";
+    info.video_codec = "png";
+    info.resolution = "1920 x 810";
+    info.frame_rate = "25 fps";
+    info.pix_fmt = "rgb24";
+    info.file_size = "1.88 MB";
+
+    info_tab.populate_output_for_widget_test (info);
+
+    assert_false (
+        info_tab.is_output_frame_rate_visible_for_widget_test (),
+        "still-image outputs hide the frame rate row"
+    );
+    assert_string_equal (
+        info_tab.get_output_codec_title_for_widget_test (),
+        "Image Codec",
+        "still-image outputs relabel codec as image codec"
+    );
+    assert_false (
+        info_tab.build_output_summary_for_widget_test (info).contains ("fps"),
+        "still-image summaries omit frame rate text"
     );
 }
 
@@ -1576,6 +1625,82 @@ private void test_conversion_runner_peak_detect_toggle_on_maps_all_audio () {
         "peak detect path maps all audio streams when toggle is on");
     assert_array_not_contains (argv, "0:a:0?",
         "peak detect path should not map only the first audio stream when toggle is on");
+}
+
+private void test_conversion_runner_collage_output_path_uses_png_sidecar_name () {
+    var profile = make_basic_conversion_profile_for_test ();
+    var runner = make_conversion_runner_for_test (profile);
+
+    string collage_path = runner.build_collage_output_path_for_test (
+        "/tmp/final-video-x265.mkv"
+    );
+
+    assert_string_equal (
+        collage_path,
+        "/tmp/final-video-x265-collage.png",
+        "collage output path appends -collage.png next to the video"
+    );
+}
+
+private void test_conversion_runner_collage_command_uses_percentage_timestamps () {
+    var profile = make_basic_conversion_profile_for_test ();
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_collage_argv_for_test (
+        "/tmp/output.mkv",
+        "/tmp/output-collage.png",
+        100.0
+    );
+
+    assert_array_occurrence_count (argv, "-ss", 12,
+        "collage command seeks to twelve normalized timeline positions");
+    assert_array_has_adjacent_pair (argv, "-ss", "8.000000",
+        "collage command captures the 8 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "16.000000",
+        "collage command captures the 16 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "24.000000",
+        "collage command captures the 24 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "32.000000",
+        "collage command captures the 32 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "40.000000",
+        "collage command captures the 40 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "48.000000",
+        "collage command captures the 48 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "56.000000",
+        "collage command captures the 56 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "64.000000",
+        "collage command captures the 64 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "72.000000",
+        "collage command captures the 72 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "80.000000",
+        "collage command captures the 80 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "88.000000",
+        "collage command captures the 88 percent frame");
+    assert_array_has_adjacent_pair (argv, "-ss", "96.000000",
+        "collage command captures the 96 percent frame");
+    assert_array_has_adjacent_pair (argv, "-frames:v", "1",
+        "collage command writes a single PNG frame");
+    assert_string_equal (
+        argv[argv.length - 1],
+        "/tmp/output-collage.png",
+        "collage command writes to the expected PNG path"
+    );
+
+    string filter_complex = "";
+    for (int i = 0; i < argv.length - 1; i++) {
+        if (argv[i] == "-filter_complex") {
+            filter_complex = argv[i + 1];
+            break;
+        }
+    }
+
+    assert_contains (filter_complex, "xstack=inputs=12",
+        "collage command combines twelve captured frames");
+    assert_contains (
+        filter_complex,
+        "layout=0_0|480_0|960_0|1440_0|0_270|480_270|960_270|1440_270|0_540|480_540|960_540|1440_540",
+        "collage command arranges frames in a 4-by-3 grid"
+    );
 }
 
 private void test_idle_close_request_cancels_pending_probes () {
@@ -4597,6 +4722,8 @@ void main (string[] args) {
         test_information_tab_clears_stale_input_when_input_removed);
     Test.add_func ("/combine/information/output-hides-input-and-shows-summary",
         test_information_tab_combine_output_hides_input_and_shows_summary);
+    Test.add_func ("/combine/information/png-output-hides-frame-rate-and-relabels-codec",
+        test_information_tab_png_output_hides_frame_rate_and_uses_image_codec_label);
     Test.add_func ("/combine/runner/done-result-marks-source-and-summary",
         test_combine_done_result_marks_source_and_summary);
     Test.add_func ("/combine/runner/cancelled-relay",
@@ -4651,6 +4778,10 @@ void main (string[] args) {
         test_conversion_runner_peak_detect_toggle_off_maps_first_audio_only);
     Test.add_func ("/convert/runner/peak-detect-toggle-on-maps-all-audio",
         test_conversion_runner_peak_detect_toggle_on_maps_all_audio);
+    Test.add_func ("/convert/runner/collage-output-path-uses-png-sidecar-name",
+        test_conversion_runner_collage_output_path_uses_png_sidecar_name);
+    Test.add_func ("/convert/runner/collage-command-uses-percentage-timestamps",
+        test_conversion_runner_collage_command_uses_percentage_timestamps);
     Test.add_func ("/combine/window/uses-live-main-output-folder",
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",

@@ -21,6 +21,8 @@ using GLib;
     //    output_name_mode  = default             (default|custom|random|date|metadata)
     //    output_custom_name = my_video           (default: "" → used when mode=custom)
     //    overwrite_enabled = false               (default: false → prompt before overwriting)
+    //    generate_collage_thumbnail = false      (default: false → no automatic
+    //                                            4-4-4 PNG collage sidecar)
     //    container_default_mode = default        (default|mkv|codec_specific)
     //                                           (default: keep current tab defaults when
     //                                            resetting codec tabs; mkv: prefer MKV;
@@ -68,6 +70,7 @@ public class AppSettings : Object {
     private ContainerDefaultMode _container_default_mode = ContainerDefaultMode.DEFAULT;
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
+    private bool   _generate_collage_thumbnail = false;
     private bool   _verify_unknown_audio_copy_preflight = true;
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
@@ -325,6 +328,27 @@ public class AppSettings : Object {
         }
     }
 
+    public bool generate_collage_thumbnail {
+        get {
+            bool generate_collage_thumbnail;
+            mutex.lock ();
+            try {
+                generate_collage_thumbnail = _generate_collage_thumbnail;
+            } finally {
+                mutex.unlock ();
+            }
+            return generate_collage_thumbnail;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _generate_collage_thumbnail = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public int smart_optimizer_target_mb {
         get {
             int target_mb;
@@ -439,6 +463,8 @@ public class AppSettings : Object {
             read_string (kf, GROUP_GENERAL, "container_default_mode", "default"));
         string output_custom_name = read_string (kf, GROUP_GENERAL, "output_custom_name", "");
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
+        bool generate_collage_thumbnail = read_bool (
+            kf, GROUP_GENERAL, "generate_collage_thumbnail", false);
         bool verify_unknown_audio_copy_preflight = read_bool (
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
@@ -456,6 +482,7 @@ public class AppSettings : Object {
             _container_default_mode = container_default_mode;
             _output_custom_name = output_custom_name;
             _overwrite_enabled = overwrite_enabled;
+            _generate_collage_thumbnail = generate_collage_thumbnail;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
@@ -490,6 +517,7 @@ public class AppSettings : Object {
         ContainerDefaultMode container_default_mode;
         string output_custom_name;
         bool overwrite_enabled;
+        bool generate_collage_thumbnail;
         bool verify_unknown_audio_copy_preflight;
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
@@ -505,6 +533,7 @@ public class AppSettings : Object {
             container_default_mode = _container_default_mode;
             output_custom_name = _output_custom_name;
             overwrite_enabled = _overwrite_enabled;
+            generate_collage_thumbnail = _generate_collage_thumbnail;
             verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
@@ -521,6 +550,11 @@ public class AppSettings : Object {
         kf.set_string (GROUP_GENERAL, "container_default_mode", container_default_mode.to_string ());
         kf.set_string (GROUP_GENERAL, "output_custom_name", output_custom_name);
         kf.set_boolean (GROUP_GENERAL, "overwrite_enabled", overwrite_enabled);
+        kf.set_boolean (
+            GROUP_GENERAL,
+            "generate_collage_thumbnail",
+            generate_collage_thumbnail
+        );
         kf.set_boolean (
             GROUP_GENERAL,
             "verify_unknown_audio_copy_preflight",
@@ -557,6 +591,7 @@ public class AppSettings : Object {
             _container_default_mode = ContainerDefaultMode.DEFAULT;
             _output_custom_name = "";
             _overwrite_enabled  = false;
+            _generate_collage_thumbnail = false;
             _verify_unknown_audio_copy_preflight = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = false;

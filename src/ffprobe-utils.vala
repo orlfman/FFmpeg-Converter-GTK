@@ -571,6 +571,24 @@ namespace FfprobeUtils {
         return parse_ffprobe_fps_output (stdout_text);
     }
 
+    public bool has_video_stream (string input_file) {
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+            return false;
+
+        return stdout_text.strip ().length > 0;
+    }
+
     /**
      * Probe the total duration of @input_file in seconds using ffprobe.
      * Returns 0.0 on any failure so callers can treat it as "unknown duration"

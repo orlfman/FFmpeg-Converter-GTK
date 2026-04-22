@@ -83,6 +83,8 @@ public class InformationTab : Box {
     private Label iv_keyframes;
 
     private Adw.ActionRow iv_profile_row;
+    private Adw.ActionRow iv_vcodec_row;
+    private Adw.ActionRow iv_fps_row;
     private Adw.ActionRow iv_hdr_row;
     private Adw.ActionRow iv_scan_row;
     private Adw.ActionRow iv_keyframes_row;
@@ -129,6 +131,8 @@ public class InformationTab : Box {
     private Label ov_scan;
     private Label ov_keyframes;
 
+    private Adw.ActionRow ov_vcodec_row;
+    private Adw.ActionRow ov_fps_row;
     private Adw.ActionRow ov_profile_row;
     private Adw.ActionRow ov_hdr_row;
     private Adw.ActionRow ov_scan_row;
@@ -221,9 +225,9 @@ public class InformationTab : Box {
 
         iv_resolution = make_row (in_video_group, "Resolution");
         iv_aspect     = make_row (in_video_group, "Aspect Ratio");
-        iv_vcodec     = make_row (in_video_group, "Codec");
+        iv_vcodec     = make_row_conditional (in_video_group, "Codec", out iv_vcodec_row);
         iv_profile    = make_row_conditional (in_video_group, "Profile / Level", out iv_profile_row);
-        iv_fps        = make_row (in_video_group, "Frame Rate");
+        iv_fps        = make_row_conditional (in_video_group, "Frame Rate", out iv_fps_row);
         iv_bitrate    = make_row (in_video_group, "Bit Rate");
         iv_pixfmt     = make_row (in_video_group, "Pixel Format");
         iv_depth      = make_row (in_video_group, "Color Depth");
@@ -300,9 +304,9 @@ public class InformationTab : Box {
 
         ov_resolution = make_row (ov_video_group, "Resolution");
         ov_aspect     = make_row (ov_video_group, "Aspect Ratio");
-        ov_vcodec     = make_row (ov_video_group, "Codec");
+        ov_vcodec     = make_row_conditional (ov_video_group, "Codec", out ov_vcodec_row);
         ov_profile    = make_row_conditional (ov_video_group, "Profile / Level", out ov_profile_row);
-        ov_fps        = make_row (ov_video_group, "Frame Rate");
+        ov_fps        = make_row_conditional (ov_video_group, "Frame Rate", out ov_fps_row);
         ov_bitrate    = make_row (ov_video_group, "Bit Rate");
         ov_pixfmt     = make_row (ov_video_group, "Pixel Format");
         ov_depth      = make_row (ov_video_group, "Color Depth");
@@ -503,8 +507,11 @@ public class InformationTab : Box {
         iv_resolution.set_text ("—");
         iv_aspect.set_text ("—");
         iv_vcodec.set_text ("—");
+        iv_vcodec_row.set_title ("Codec");
+        iv_vcodec_row.set_visible (false);
         iv_profile_row.set_visible (false);
         iv_fps.set_text ("—");
+        iv_fps_row.set_visible (false);
         iv_bitrate.set_text ("—");
         iv_pixfmt.set_text ("—");
         iv_depth.set_text ("—");
@@ -542,8 +549,11 @@ public class InformationTab : Box {
         iv_resolution.set_text ("…");
         iv_aspect.set_text ("…");
         iv_vcodec.set_text ("…");
+        iv_vcodec_row.set_title ("Codec");
+        iv_vcodec_row.set_visible (false);
         iv_profile_row.set_visible (false);
         iv_fps.set_text ("…");
+        iv_fps_row.set_visible (false);
         iv_bitrate.set_text ("…");
         iv_pixfmt.set_text ("…");
         iv_depth.set_text ("…");
@@ -560,6 +570,9 @@ public class InformationTab : Box {
     }
 
     private void populate_input (VideoInfo i) {
+        bool has_video = (i.video_codec != "N/A");
+        bool is_still_image = is_still_image_info (i);
+
         iv_filename.set_text (i.filename);
         iv_size.set_text (i.file_size);
         iv_container.set_text (i.container);
@@ -568,9 +581,14 @@ public class InformationTab : Box {
 
         iv_resolution.set_text (i.resolution);
         iv_aspect.set_text (i.aspect);
-        iv_vcodec.set_text (i.video_codec);
+        iv_vcodec_row.set_title (is_still_image ? "Image Codec" : "Codec");
+        show_conditional (iv_vcodec_row, iv_vcodec, i.video_codec);
         show_conditional (iv_profile_row, iv_profile, i.video_profile);
-        iv_fps.set_text (i.frame_rate);
+        if (has_video && !is_still_image) {
+            show_conditional (iv_fps_row, iv_fps, i.frame_rate);
+        } else {
+            iv_fps_row.set_visible (false);
+        }
         iv_bitrate.set_text (i.bit_rate);
         iv_pixfmt.set_text (i.pix_fmt);
         iv_depth.set_text (i.color_depth);
@@ -600,6 +618,7 @@ public class InformationTab : Box {
 
     private void populate_output (VideoInfo i) {
         bool has_video = (i.video_codec != "N/A");
+        bool is_still_image = is_still_image_info (i);
 
         ov_filename.set_text (i.filename);
         ov_size.set_text (i.file_size);
@@ -611,9 +630,14 @@ public class InformationTab : Box {
         if (has_video) {
             ov_resolution.set_text (i.resolution);
             ov_aspect.set_text (i.aspect);
-            ov_vcodec.set_text (i.video_codec);
+            ov_vcodec_row.set_title (is_still_image ? "Image Codec" : "Codec");
+            show_conditional (ov_vcodec_row, ov_vcodec, i.video_codec);
             show_conditional (ov_profile_row, ov_profile, i.video_profile);
-            ov_fps.set_text (i.frame_rate);
+            if (!is_still_image) {
+                show_conditional (ov_fps_row, ov_fps, i.frame_rate);
+            } else {
+                ov_fps_row.set_visible (false);
+            }
             ov_bitrate.set_text (i.bit_rate);
             ov_pixfmt.set_text (i.pix_fmt);
             ov_depth.set_text (i.color_depth);
@@ -621,6 +645,10 @@ public class InformationTab : Box {
             show_conditional (ov_hdr_row, ov_hdr, i.hdr_format);
             show_conditional (ov_scan_row, ov_scan, i.scan_type);
             show_conditional (ov_keyframes_row, ov_keyframes, i.keyframe_count);
+        } else {
+            ov_vcodec_row.set_title ("Codec");
+            ov_vcodec_row.set_visible (false);
+            ov_fps_row.set_visible (false);
         }
 
         populate_audio_groups (ov_audio_container, i.audio_tracks, true);
@@ -674,9 +702,16 @@ public class InformationTab : Box {
 
             // Video (if present)
             if (info.video_codec != "N/A") {
+                bool is_still_image = is_still_image_info (info);
                 add_detail_row (expander, "Resolution", info.resolution);
-                add_detail_row (expander, "Video Codec", info.video_codec);
-                add_detail_row (expander, "Frame Rate", info.frame_rate);
+                add_detail_row (
+                    expander,
+                    is_still_image ? "Image Codec" : "Video Codec",
+                    info.video_codec
+                );
+                if (!is_still_image) {
+                    add_detail_row (expander, "Frame Rate", info.frame_rate);
+                }
                 add_detail_row (expander, "Pixel Format", info.pix_fmt);
                 add_detail_row (expander, "Video Bit Rate", info.bit_rate);
             }
@@ -717,13 +752,52 @@ public class InformationTab : Box {
             if (t.sample_rate != "N/A") parts.add (t.sample_rate);
             if (t.audio_bitrate != "N/A") parts.add (t.audio_bitrate);
         } else if (info.video_codec != "N/A") {
+            bool is_still_image = is_still_image_info (info);
             parts.add (info.video_codec);
             if (info.resolution != "N/A") parts.add (info.resolution);
-            if (info.frame_rate != "N/A") parts.add (info.frame_rate);
+            if (!is_still_image && info.frame_rate != "N/A") parts.add (info.frame_rate);
             if (info.bit_rate != "N/A") parts.add (info.bit_rate);
         }
         if (info.file_size != "N/A") parts.add (info.file_size);
         return string.joinv ("  ·  ", StringArrayUtils.copy_generic_array (parts));
+    }
+
+    private static bool is_still_image_info (VideoInfo info) {
+        if (info.video_codec == "N/A") {
+            return false;
+        }
+        if (info.audio_tracks.length > 0) {
+            return false;
+        }
+        if (info.duration != "N/A") {
+            return false;
+        }
+
+        string container = info.container.down ();
+        switch (container) {
+            case "png":
+            case "jpg":
+            case "jpeg":
+            case "bmp":
+            case "tif":
+            case "tiff":
+                return true;
+            default:
+                break;
+        }
+
+        string codec = info.video_codec.down ();
+        switch (codec) {
+            case "png":
+            case "mjpeg":
+            case "jpeg2000":
+            case "bmp":
+            case "tiff":
+            case "webp":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static void add_detail_row (Adw.ExpanderRow expander,
@@ -868,6 +942,22 @@ public class InformationTab : Box {
 
     internal string get_source_summary_for_widget_test () {
         return source_summary_label.get_text ();
+    }
+
+    internal void populate_output_for_widget_test (VideoInfo info) {
+        populate_output (info);
+    }
+
+    internal bool is_output_frame_rate_visible_for_widget_test () {
+        return ov_fps_row.get_visible ();
+    }
+
+    internal string get_output_codec_title_for_widget_test () {
+        return ov_vcodec_row.get_title ();
+    }
+
+    internal string build_output_summary_for_widget_test (VideoInfo info) {
+        return build_output_summary (info);
     }
 #endif
 
