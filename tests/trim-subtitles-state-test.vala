@@ -26,6 +26,15 @@ private void assert_int_equal (int actual, int expected, string context) {
     }
 }
 
+private void assert_output_kind_equal (OperationOutputKind actual,
+                                       OperationOutputKind expected,
+                                       string context) {
+    if (actual != expected) {
+        Test.fail_printf ("%s expected output kind %d but got %d",
+            context, (int) expected, (int) actual);
+    }
+}
+
 private void assert_string_equal (string actual, string expected, string context) {
     if (actual != expected) {
         Test.fail_printf ("%s expected '%s' but got '%s'", context, expected, actual);
@@ -346,6 +355,138 @@ private void test_trim_runner_guard_helpers () {
     assert_false (
         TrimTab.export_failure_counts_as_cancelled_for_test (false, false),
         "trim cancellation state stays false otherwise");
+}
+
+private void test_trim_collage_fallback_durations_use_segment_context () {
+    var runner = new TrimRunner ();
+
+    var segments = new GenericArray<TrimSegment> ();
+    segments.add (new TrimSegment (2.0, 7.5));
+    segments.add (new TrimSegment (10.0, 14.0));
+    segments.add (new TrimSegment (20.0, 29.25));
+    runner.set_segments (segments);
+
+    var combined_outputs = new GenericArray<string> ();
+    combined_outputs.add ("/tmp/movie-trimmed.mkv");
+    double[] combined_durations = runner.compute_fallback_durations_for_test (
+        combined_outputs,
+        false
+    );
+
+    assert_int_equal (combined_durations.length, 1,
+        "combined collage fallback duration count");
+    assert_double_equal (combined_durations[0], 18.75,
+        "combined collage fallback sums all selected segments");
+
+    var separate_outputs = new GenericArray<string> ();
+    separate_outputs.add ("/tmp/movie-segment-001.mkv");
+    separate_outputs.add ("/tmp/movie-segment-002.mkv");
+    separate_outputs.add ("/tmp/movie-segment-003.mkv");
+    double[] separate_durations = runner.compute_fallback_durations_for_test (
+        separate_outputs,
+        true
+    );
+
+    assert_int_equal (separate_durations.length, 3,
+        "separate collage fallback duration count");
+    assert_double_equal (separate_durations[0], 5.5,
+        "separate collage fallback uses first segment duration");
+    assert_double_equal (separate_durations[1], 4.0,
+        "separate collage fallback uses second segment duration");
+    assert_double_equal (separate_durations[2], 9.25,
+        "separate collage fallback uses third segment duration");
+}
+
+private void test_trim_collage_output_results_preserve_primary_outputs () {
+    var runner = new TrimRunner ();
+
+    var single_primary = new GenericArray<string> ();
+    single_primary.add ("/tmp/movie-trimmed.mkv");
+    var no_collages = new GenericArray<string> ();
+
+    OperationOutputResult single_result =
+        runner.build_export_output_result_for_test (
+            single_primary,
+            no_collages,
+            "/tmp",
+            false
+        );
+    assert_output_kind_equal (single_result.kind, OperationOutputKind.FILE,
+        "single trim output without collage stays a file result");
+    assert_string_equal (single_result.primary_file_path, "/tmp/movie-trimmed.mkv",
+        "single trim output primary path");
+    assert_int_equal (single_result.output_paths.length, 1,
+        "single trim output path count");
+    assert_string_equal (single_result.output_paths[0], "/tmp/movie-trimmed.mkv",
+        "single trim output path");
+
+    var single_collages = new GenericArray<string> ();
+    single_collages.add ("/tmp/movie-trimmed-collage.png");
+    OperationOutputResult single_with_collage =
+        runner.build_export_output_result_for_test (
+            single_primary,
+            single_collages,
+            "/tmp",
+            false
+        );
+    assert_output_kind_equal (single_with_collage.kind, OperationOutputKind.MULTIPLE_FILES,
+        "single trim output plus collage becomes a multi-file result");
+    assert_string_equal (single_with_collage.primary_file_path, "/tmp/movie-trimmed.mkv",
+        "single trim output plus collage keeps video primary");
+    assert_int_equal (single_with_collage.output_paths.length, 2,
+        "single trim output plus collage path count");
+    assert_string_equal (single_with_collage.output_paths[0], "/tmp/movie-trimmed.mkv",
+        "single trim output plus collage first path");
+    assert_string_equal (single_with_collage.output_paths[1], "/tmp/movie-trimmed-collage.png",
+        "single trim output plus collage second path");
+
+    var separate_primary = new GenericArray<string> ();
+    separate_primary.add ("/tmp/movie-segment-001.mkv");
+    separate_primary.add ("/tmp/movie-segment-002.mkv");
+
+    OperationOutputResult separate_without_collages =
+        runner.build_export_output_result_for_test (
+            separate_primary,
+            no_collages,
+            "/tmp",
+            true
+        );
+    assert_output_kind_equal (
+        separate_without_collages.kind,
+        OperationOutputKind.MULTIPLE_FILES,
+        "separate trim output without collage stays a multi-file result"
+    );
+    assert_string_equal (separate_without_collages.open_folder_path, "/tmp",
+        "separate trim output open folder");
+    assert_int_equal (separate_without_collages.output_paths.length, 2,
+        "separate trim output path count");
+
+    var separate_collages = new GenericArray<string> ();
+    separate_collages.add ("/tmp/movie-segment-001-collage.png");
+    separate_collages.add ("/tmp/movie-segment-002-collage.png");
+    OperationOutputResult separate_with_collages =
+        runner.build_export_output_result_for_test (
+            separate_primary,
+            separate_collages,
+            "/tmp",
+            true
+        );
+    assert_output_kind_equal (
+        separate_with_collages.kind,
+        OperationOutputKind.MULTIPLE_FILES,
+        "separate trim output plus collages is a multi-file result"
+    );
+    assert_string_equal (separate_with_collages.primary_file_path,
+        "/tmp/movie-segment-001.mkv",
+        "separate trim output plus collages keeps first video primary");
+    assert_int_equal (separate_with_collages.output_paths.length, 4,
+        "separate trim output plus collages path count");
+    assert_string_equal (separate_with_collages.output_paths[0],
+        "/tmp/movie-segment-001.mkv",
+        "separate trim output plus collages first video path");
+    assert_string_equal (separate_with_collages.output_paths[2],
+        "/tmp/movie-segment-001-collage.png",
+        "separate trim output plus collages first collage path");
 }
 
 private void test_trim_image_watermark_preserves_segment_duration () {
@@ -978,6 +1119,10 @@ void main (string[] args) {
     Test.add_func ("/trim/chapters/derive", test_trim_chapter_derivation_preserves_existing_order_and_appends_new);
     Test.add_func ("/trim/segments/edit-move-delete-crop", test_trim_segment_edit_move_delete_and_crop_helpers);
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
+    Test.add_func ("/trim/runner/collage-fallback-durations",
+        test_trim_collage_fallback_durations_use_segment_context);
+    Test.add_func ("/trim/runner/collage-output-results",
+        test_trim_collage_output_results_preserve_primary_outputs);
     Test.add_func ("/trim/runner/image-watermark-preserves-duration",
         test_trim_image_watermark_preserves_segment_duration);
     Test.add_func ("/trim/runner/image-watermark-maps-first-audio",

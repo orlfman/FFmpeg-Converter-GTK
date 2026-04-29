@@ -959,6 +959,125 @@ namespace ConversionUtils {
         return Path.build_filename (dir, safe);
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COLLAGE THUMBNAIL — shared helpers used by ConversionRunner and
+    //  TrimRunner. Builds the "<name>-collage.png" sidecar path and the
+    //  ffmpeg argv that produces a 4-4-4 (4×3) collage from twelve evenly
+    //  spaced frames.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public string build_collage_output_path (string output_path) {
+        string basename = Path.get_basename (output_path);
+        int dot_pos = basename.last_index_of_char ('.');
+        string stem = (dot_pos > 0) ? basename.substring (0, dot_pos) : basename;
+        return sanitize_filename (
+            Path.build_filename (Path.get_dirname (output_path), @"$stem-collage.png")
+        );
+    }
+
+    public string? resolve_collage_output_path (string output_path) {
+        string collage_path = build_collage_output_path (output_path);
+        if (AppSettings.get_default ().overwrite_enabled
+            || !FileUtils.test (collage_path, FileTest.EXISTS)) {
+            return collage_path;
+        }
+        return find_unique_path (collage_path);
+    }
+
+    public string? resolve_collage_output_path_with_reserved (
+            string output_path,
+            HashTable<string, bool>? reserved_paths) {
+        string collage_path = build_collage_output_path (output_path);
+        bool collides = FileUtils.test (collage_path, FileTest.EXISTS)
+            || (reserved_paths != null && reserved_paths.contains (collage_path));
+        if (AppSettings.get_default ().overwrite_enabled || !collides) {
+            if (reserved_paths != null) {
+                reserved_paths.replace (collage_path, true);
+            }
+            return collage_path;
+        }
+        string? unique = find_unique_path_with_reserved (collage_path, reserved_paths);
+        if (unique != null && reserved_paths != null) {
+            reserved_paths.replace (unique, true);
+        }
+        return unique;
+    }
+
+    public string[] build_collage_argv (string ffmpeg_path,
+                                        string source_video_path,
+                                        string collage_output_path,
+                                        double duration_seconds) {
+        string[] cmd = { ffmpeg_path, "-y" };
+
+        foreach (double fraction in get_collage_capture_fractions ()) {
+            double capture_time = duration_seconds * fraction;
+            cmd += "-ss";
+            cmd += format_ffmpeg_double (capture_time, "%.6f");
+            cmd += "-i";
+            cmd += source_video_path;
+        }
+
+        cmd += "-filter_complex";
+        cmd += build_collage_filter_complex ();
+        cmd += "-map";
+        cmd += "[outv]";
+        cmd += "-frames:v";
+        cmd += "1";
+        cmd += collage_output_path;
+
+        return cmd;
+    }
+
+    public string build_collage_filter_complex () {
+        int tile_width = 480;
+        int tile_height = 270;
+        int columns = 4;
+        int rows = 3;
+        int input_count = columns * rows;
+
+        var filter = new StringBuilder ();
+        for (int i = 0; i < input_count; i++) {
+            filter.append ("[%d:v]".printf (i));
+            filter.append (
+                "scale=%d:%d:force_original_aspect_ratio=decrease,".printf (
+                    tile_width,
+                    tile_height
+                )
+            );
+            filter.append (
+                "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[v%d];".printf (
+                    tile_width,
+                    tile_height,
+                    i
+                )
+            );
+        }
+
+        var layout = new StringBuilder ();
+        for (int i = 0; i < input_count; i++) {
+            filter.append ("[v%d]".printf (i));
+
+            int column = i % columns;
+            int row = i / columns;
+            if (i > 0) {
+                layout.append_c ('|');
+            }
+            layout.append ("%d_%d".printf (column * tile_width, row * tile_height));
+        }
+
+        filter.append ("xstack=inputs=%d:layout=%s[outv]".printf (input_count, layout.str));
+        return filter.str;
+    }
+
+    public double[] get_collage_capture_fractions () {
+        double[] fractions = {
+            0.08, 0.16, 0.24, 0.32,
+            0.40, 0.48, 0.56, 0.64,
+            0.72, 0.80, 0.88, 0.96
+        };
+        return fractions;
+    }
+
     public bool try_parse_non_negative_int_strict (string text, out int value) {
         value = 0;
         if (text.length == 0)

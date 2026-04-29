@@ -69,6 +69,12 @@ public class TrimRunner : Object {
     private bool run_active = false;
 
     private string last_output = "";
+    // Set when the user cancelled during the optional post-encode collage
+    // pass while the primary output was already on disk. Mirrors
+    // ConversionRunner's "completed with notice" handling and tells
+    // finish_progress to fade like a normal completion instead of flashing
+    // "Cancelled".
+    private bool collage_cancellation_consumed = false;
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
     private string[] last_ffmpeg_argv_for_test = {};
 #endif
@@ -133,6 +139,7 @@ public class TrimRunner : Object {
         runner.prepare_for_new_execution ();
 
         resolved_reencode_codec_args = null;
+        collage_cancellation_consumed = false;
 
         // Fix #3: Create a ProgressTracker for consistent progress behavior
         if (progress_bar != null) {
@@ -274,15 +281,9 @@ public class TrimRunner : Object {
                 }
             } else {
                 last_output = output_path;
-                report_status (@"$(operation_label) completed!\n\nSaved to:\n$output_path",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
-                update_progress (100.0);
-
-                var done = new OperationOutputResult.for_file (output_path);
-                Idle.add (() => {
-                    export_done (done);
-                    return Source.REMOVE;
-                });
+                var primary_outputs = new GenericArray<string> ();
+                primary_outputs.add (output_path);
+                complete_export_success (primary_outputs, out_dir, false);
             }
 
             return;
@@ -359,19 +360,22 @@ public class TrimRunner : Object {
             }
 
             // ── Phase 2: Concatenate (copy-mode multi-segment only) ──────────
+            var final_outputs = new GenericArray<string> ();
+            bool separate_export_completed = false;
+
             if (export_separate && segment_files.length == 1) {
                 last_output = segment_files[0];
-                report_status (@"$(operation_label) completed!\n\nSaved to:\n$(segment_files[0])",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                final_outputs.add (segment_files[0]);
             } else if (export_separate) {
                 last_output = segment_files[0];
-                report_status (@"$(operation_label) completed — exported $(segments.length) files to:\n$out_dir",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                for (int i = 0; i < segment_files.length; i++) {
+                    final_outputs.add (segment_files[i]);
+                }
+                separate_export_completed = true;
             } else if (segments.length == 1) {
                 // Single segment was written directly to the output path
                 last_output = segment_files[0];
-                report_status (@"$(operation_label) completed!\n\nSaved to:\n$(segment_files[0])",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                final_outputs.add (segment_files[0]);
             } else {
                 // Multi-segment copy mode → demuxer concat
                 if (runner.is_cancelled ()) {
@@ -396,27 +400,10 @@ public class TrimRunner : Object {
                     return;
                 }
 
-                report_status (@"$(operation_label) completed!\n\nSaved to:\n$concat_output",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                final_outputs.add (concat_output);
             }
 
-            update_progress (100.0);
-
-            OperationOutputResult done_result;
-            if (export_separate && segment_files.length == 1) {
-                done_result = new OperationOutputResult.for_file (segment_files[0]);
-            } else if (export_separate) {
-                done_result = OperationOutputResult.from_paths (
-                    OperationOutputResult.copy_paths (segment_files),
-                    out_dir
-                );
-            } else {
-                done_result = new OperationOutputResult.for_file (last_output);
-            }
-            Idle.add (() => {
-                export_done (done_result);
-                return Source.REMOVE;
-            });
+            complete_export_success (final_outputs, out_dir, separate_export_completed);
 
         } finally {
             if (!export_separate) {
@@ -1176,7 +1163,7 @@ public class TrimRunner : Object {
     private void finish_progress () {
         if (tracker == null) return;
 
-        if (runner.is_cancelled ()) {
+        if (runner.is_cancelled () && !collage_cancellation_consumed) {
             tracker.hide_cancelled ();
         } else {
             tracker.hide ();
@@ -1287,7 +1274,277 @@ public class TrimRunner : Object {
         return (dot > 0) ? basename.substring (dot) : fallback_ext;
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Collage thumbnail generation
+    //
+    //  Mirrors ConversionRunner's collage pass: when AppSettings has
+    //  generate_collage_thumbnail enabled, write a "<name>-collage.png"
+    //  sidecar next to each finished trim/crop output. Pure command
+    //  construction lives in ConversionUtils so both runners share it.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private class CollageRunSummary {
+        public GenericArray<string> paths = new GenericArray<string> ();
+        public bool attempted = false;
+        public bool cancelled = false;
+        public bool failed = false;
+    }
+
+    private CollageRunSummary generate_collages_for_outputs (
+            GenericArray<string> outputs,
+            double[] fallback_durations = {}) {
+        var summary = new CollageRunSummary ();
+        if (!AppSettings.get_default ().generate_collage_thumbnail) {
+            return summary;
+        }
+        if (outputs.length == 0) {
+            return summary;
+        }
+
+        var reserved = new HashTable<string, bool> (str_hash, str_equal);
+
+        for (int i = 0; i < outputs.length; i++) {
+            if (runner.is_cancelled ()) {
+                summary.cancelled = true;
+                break;
+            }
+
+            string output_path = outputs[i];
+            if (!FfprobeUtils.has_video_stream (output_path)) {
+                log_line ("[Collage] %s has no video stream; skipping collage generation."
+                    .printf (output_path));
+                continue;
+            }
+
+            summary.attempted = true;
+
+            string? collage_output_path =
+                ConversionUtils.resolve_collage_output_path_with_reserved (
+                    output_path, reserved);
+            if (collage_output_path == null || collage_output_path.length == 0) {
+                log_line ("[Collage] Could not determine a writable output path for %s; skipping."
+                    .printf (output_path));
+                summary.failed = true;
+                continue;
+            }
+
+            double duration_seconds = FfprobeUtils.probe_duration (output_path);
+            if (duration_seconds <= 0.0
+                && i < fallback_durations.length
+                && fallback_durations[i] > 0.0) {
+                duration_seconds = fallback_durations[i];
+                log_line ("[Collage] ffprobe could not read duration of %s; using segment-derived %.3fs."
+                    .printf (output_path, duration_seconds));
+            }
+            if (duration_seconds <= 0.0) {
+                log_line ("[Collage] Could not determine duration of %s; skipping collage generation."
+                    .printf (output_path));
+                summary.failed = true;
+                continue;
+            }
+
+            string label = (outputs.length > 1)
+                ? "Generating 4-4-4 collage thumbnail (%d/%d)…".printf (
+                    i + 1, (int) outputs.length)
+                : "Generating 4-4-4 collage thumbnail…";
+            report_status (label, StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+
+            string[] collage_cmd = ConversionUtils.build_collage_argv (
+                AppSettings.get_default ().ffmpeg_path,
+                output_path,
+                collage_output_path,
+                duration_seconds
+            );
+            log_line ("Collage command: "
+                + ConversionUtils.format_command_for_display (collage_cmd));
+
+            int exit = runner.execute (collage_cmd, (clean) => {
+                if (ConversionUtils.should_log_ffmpeg_line (clean)) {
+                    log_line (clean);
+                }
+            });
+
+            if (exit != 0) {
+                if (runner.is_cancelled ()) {
+                    summary.cancelled = true;
+                    break;
+                }
+                log_line ("[Collage] FFmpeg failed while generating the PNG collage thumbnail for "
+                    + output_path);
+                summary.failed = true;
+                continue;
+            }
+
+            if (!FileUtils.test (collage_output_path, FileTest.EXISTS)) {
+                log_line ("[Collage] FFmpeg completed but the PNG collage file was not created for "
+                    + output_path);
+                summary.failed = true;
+                continue;
+            }
+
+            log_line ("[Collage] Created " + collage_output_path);
+            summary.paths.add (collage_output_path);
+        }
+
+        return summary;
+    }
+
+    private void emit_export_done (OperationOutputResult result) {
+        Idle.add (() => {
+            export_done (result);
+            return Source.REMOVE;
+        });
+    }
+
+    private void complete_export_success (
+            GenericArray<string> primary_outputs,
+            string out_dir,
+            bool separate_export) {
+        double[] fallback_durations = compute_fallback_durations (
+            primary_outputs, separate_export);
+        CollageRunSummary collages = generate_collages_for_outputs (
+            primary_outputs, fallback_durations);
+
+        // The primary trim/crop output is already on disk at this point.
+        // If the user cancelled during the optional collage pass, mirror
+        // ConversionRunner: complete the export with a notice instead of
+        // emitting export_cancelled (which would make the app discard a
+        // file that's actually saved).
+        if (collages.cancelled) {
+            collage_cancellation_consumed = true;
+        }
+
+        bool any_collages = collages.paths.length > 0;
+        bool has_failure = collages.failed
+            || (collages.attempted && !any_collages && !collages.cancelled);
+        bool has_notice = has_failure || collages.cancelled;
+
+        var status = new StringBuilder ();
+        status.append (operation_label);
+
+        if (separate_export && primary_outputs.length > 1) {
+            status.append (" completed");
+            if (any_collages) {
+                status.append (
+                    @" — exported $(primary_outputs.length) files (+ $(collages.paths.length) collage PNG"
+                );
+                if (collages.paths.length != 1) status.append ("s");
+                status.append (") to:\n");
+            } else {
+                status.append (@" — exported $(primary_outputs.length) files to:\n");
+            }
+            status.append (out_dir);
+        } else if (primary_outputs.length >= 1) {
+            status.append ("!\n\nSaved");
+            if (any_collages || primary_outputs.length > 1) {
+                status.append (" files");
+            } else {
+                status.append (" to");
+            }
+            status.append (":\n");
+            for (int i = 0; i < primary_outputs.length; i++) {
+                if (i > 0) status.append ("\n");
+                status.append (primary_outputs[i]);
+            }
+            for (int i = 0; i < collages.paths.length; i++) {
+                status.append ("\n");
+                status.append (collages.paths[i]);
+            }
+        }
+
+        if (collages.cancelled) {
+            status.append ("\n\nCollage PNG generation was cancelled.");
+        } else if (has_failure) {
+            status.append ("\n\nCollage PNG was not generated for every output. Check the console for details.");
+        }
+
+        string icon = has_notice ? StatusIcon.NOTICE_ICON : StatusIcon.SUCCESS_ICON;
+        string css = has_notice ? StatusIcon.NOTICE_CSS : StatusIcon.SUCCESS_CSS;
+        report_status (status.str, icon, css);
+        update_progress (100.0);
+
+        OperationOutputResult done_result = build_export_output_result (
+            primary_outputs, collages.paths, out_dir, separate_export);
+        emit_export_done (done_result);
+    }
+
+    private double[] compute_fallback_durations (
+            GenericArray<string> primary_outputs,
+            bool separate_export) {
+        double[] durations = new double[primary_outputs.length];
+        if (separate_export
+            && primary_outputs.length > 1
+            && primary_outputs.length == segments.length) {
+            for (int i = 0; i < primary_outputs.length; i++) {
+                durations[i] = segments[i].get_duration ();
+            }
+            return durations;
+        }
+
+        if (primary_outputs.length == 1) {
+            double total = 0.0;
+            for (int i = 0; i < segments.length; i++) {
+                total += segments[i].get_duration ();
+            }
+            durations[0] = total;
+        }
+        return durations;
+    }
+
+    private OperationOutputResult build_export_output_result (
+            GenericArray<string> primary_outputs,
+            GenericArray<string> collage_paths,
+            string out_dir,
+            bool separate_export) {
+        if (primary_outputs.length == 0) {
+            // Defensive: should not happen, but fall back to a directory result.
+            return new OperationOutputResult.for_directory (out_dir);
+        }
+
+        if (collage_paths.length == 0
+            && !separate_export
+            && primary_outputs.length == 1) {
+            return new OperationOutputResult.for_file (primary_outputs[0]);
+        }
+
+        if (separate_export && primary_outputs.length > 1 && collage_paths.length == 0) {
+            return OperationOutputResult.from_paths (
+                OperationOutputResult.copy_paths (primary_outputs),
+                out_dir
+            );
+        }
+
+        var combined = new GenericArray<string> ();
+        for (int i = 0; i < primary_outputs.length; i++) combined.add (primary_outputs[i]);
+        for (int i = 0; i < collage_paths.length; i++) combined.add (collage_paths[i]);
+
+        string primary = primary_outputs[0];
+        string folder = (out_dir != null && out_dir.length > 0)
+            ? out_dir : Path.get_dirname (primary);
+
+        return new OperationOutputResult.for_multiple_files (
+            OperationOutputResult.copy_paths (combined),
+            folder,
+            primary
+        );
+    }
+
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal double[] compute_fallback_durations_for_test (
+            GenericArray<string> primary_outputs,
+            bool separate_export) {
+        return compute_fallback_durations (primary_outputs, separate_export);
+    }
+
+    internal OperationOutputResult build_export_output_result_for_test (
+            GenericArray<string> primary_outputs,
+            GenericArray<string> collage_paths,
+            string out_dir,
+            bool separate_export) {
+        return build_export_output_result (
+            primary_outputs, collage_paths, out_dir, separate_export);
+    }
+
     internal string[] build_peak_detect_command_for_widget_test (int seg_index,
                                                                  bool apply_fade_in = true,
                                                                  bool apply_fade_out = true) {
