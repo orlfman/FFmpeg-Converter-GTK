@@ -77,6 +77,8 @@ sources = files(
   'src/subtitles-runner.vala',
   'src/ffprobe-utils.vala',
   'src/codec-utils.vala',
+  'src/smart-optimizer-logic.vala',
+  'src/smart-optimizer-cache.vala',
   'src/smart-optimizer.vala',
   'src/audio-tab.vala',
   'src/audio-player.vala',
@@ -351,6 +353,8 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/subtitles-runner.vala',
       'src/ffprobe-utils.vala',
       'src/codec-utils.vala',
+      'src/smart-optimizer-logic.vala',
+      'src/smart-optimizer-cache.vala',
       'src/smart-optimizer.vala',
       'src/audio-tab.vala',
       'src/audio-player.vala',
@@ -424,6 +428,8 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/subtitles-runner.vala',
       'src/ffprobe-utils.vala',
       'src/codec-utils.vala',
+      'src/smart-optimizer-logic.vala',
+      'src/smart-optimizer-cache.vala',
       'src/smart-optimizer.vala',
       'src/audio-tab.vala',
       'src/audio-player.vala',
@@ -499,6 +505,8 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/subtitles-runner.vala',
       'src/ffprobe-utils.vala',
       'src/codec-utils.vala',
+      'src/smart-optimizer-logic.vala',
+      'src/smart-optimizer-cache.vala',
       'src/smart-optimizer.vala',
       'src/audio-tab.vala',
       'src/audio-player.vala',
@@ -515,4 +523,36 @@ if fs.exists('tests/audio-reorder-state-test.vala')
   )
 
   test('audio-reorder-state', audio_reorder_state_test)
+endif
+
+if fs.exists('tests/smart-optimizer-logic-test.vala')
+  smart_optimizer_logic_test = executable(
+    'smart-optimizer-logic-test',
+    files(
+      'src/constants.vala',
+      'src/audio-probe-types.vala',
+      'src/audio-source-info.vala',
+      'src/audio-compatibility.vala',
+      'src/audio-settings.vala',
+      'src/audio-extract-logic.vala',
+      'src/audio-codec-settings.vala',
+      'src/audio-processing-settings.vala',
+      'src/audio-builder.vala',
+      'src/smart-optimizer-logic.vala',
+      'src/smart-optimizer-cache.vala',
+      'tests/smart-optimizer-logic-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gio-2.0'),
+      dependency('gtk4'),
+      dependency('libadwaita-1'),
+      dependency('json-glib-1.0'),
+    ],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('smart-optimizer-logic', smart_optimizer_logic_test)
 endif
