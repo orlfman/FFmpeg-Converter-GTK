@@ -108,7 +108,15 @@ Just pick the mode and go.
 meson, ninja, valac, pkg-config, GTK4, libadwaita, json-glib, FFmpeg, FFprobe, and GStreamer 
 ```
 
-### Install
+### Install (Arch Linux / AUR)
+
+Available on the AUR as [`ffmpeg-converter-gtk`](https://aur.archlinux.org/packages/ffmpeg-converter-gtk). Install it with your favorite AUR helper:
+
+```bash
+yay -S ffmpeg-converter-gtk
+```
+
+### Install (from source)
 
 Download the latest source release from [Releases](https://github.com/orlfman/FFmpeg-Converter-GTK/releases), extract it, then:
 
