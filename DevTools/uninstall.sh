@@ -18,6 +18,18 @@ echo "=== FFmpeg Converter GTK - Uninstaller ==="
 echo "Prefix: $PREFIX"
 echo
 
+# --- Pacman ownership guard ---
+# This uninstaller is for manual (make/meson) installs only. If the app
+# was installed through pacman/the AUR, removing its files here would
+# corrupt the package — pacman is the right tool for that.
+if command -v pacman &> /dev/null \
+        && pacman -Qo "$INSTALL_DIR/$BINARY_NAME" &> /dev/null; then
+    echo "ℹ️  $(pacman -Qo "$INSTALL_DIR/$BINARY_NAME")"
+    echo "   This copy is managed by pacman — uninstall it with:"
+    echo "       sudo pacman -R ffmpeg-converter-gtk"
+    exit 0
+fi
+
 # Check what's installed first
 echo "Checking installed files..."
 for path in "$INSTALL_DIR/$BINARY_NAME" "$LEGACY_INSTALL_DIR/$BINARY_NAME" "$DESKTOP_DEST" "$ICON_DEST" "$CONFIG_DIR"; do

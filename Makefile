@@ -37,6 +37,13 @@ test: build
 	meson test -C $(BUILDDIR)
 
 install: build
+	@if command -v pacman >/dev/null 2>&1 && pacman -Qo $(PREFIX)/bin/$(BINARY) >/dev/null 2>&1; then \
+		pacman -Qo $(PREFIX)/bin/$(BINARY); \
+		echo "Refusing to overwrite package-managed files."; \
+		echo "Use 'yay -S ffmpeg-converter-gtk' for installs, or remove the package first:"; \
+		echo "    sudo pacman -R ffmpeg-converter-gtk"; \
+		exit 1; \
+	fi
 	sudo meson install -C $(BUILDDIR)
 	@if [ -f /usr/local/bin/$(BINARY) ]; then \
 		echo "Warning: legacy binary found at /usr/local/bin/$(BINARY)"; \
@@ -48,6 +55,12 @@ install: build
 	@echo "FFmpeg Converter GTK installed to $(PREFIX)"
 
 uninstall:
+	@if command -v pacman >/dev/null 2>&1 && pacman -Qo $(PREFIX)/bin/$(BINARY) >/dev/null 2>&1; then \
+		pacman -Qo $(PREFIX)/bin/$(BINARY); \
+		echo "This installation is managed by pacman — uninstall it with:"; \
+		echo "    sudo pacman -R ffmpeg-converter-gtk"; \
+		exit 1; \
+	fi
 	sudo rm -f $(PREFIX)/bin/$(BINARY)
 	sudo rm -f /usr/local/bin/$(BINARY)
 	sudo rm -f $(ICONDIR)/ffmpeg-converter-gtk.svg

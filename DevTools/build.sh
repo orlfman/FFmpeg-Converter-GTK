@@ -110,6 +110,26 @@ if [ "$RUN_TESTS" -eq 1 ]; then
     echo
 fi
 
+# --- Pacman ownership guard ---
+# Never overwrite package-manager-owned files: a dev install into /usr
+# would corrupt the AUR package (pacman -Qkk failures, the next upgrade
+# silently reverting this build, pacman -R deleting it).
+if command -v pacman &> /dev/null \
+        && pacman -Qo "$PREFIX/bin/$BINARY_NAME" &> /dev/null; then
+    echo "⚠️  $(pacman -Qo "$PREFIX/bin/$BINARY_NAME")"
+    echo "   Skipping installation — dev builds must not overwrite package-managed files."
+    echo
+    echo "   Run this build directly:      $BUILD_DIR/$BINARY_NAME"
+    echo "   Release installs/updates:     yay -S ffmpeg-converter-gtk"
+    echo "   To install manually instead:  sudo pacman -R ffmpeg-converter-gtk  (then re-run this script)"
+    echo
+    echo "========================================"
+    echo "✅ Build complete (not installed)"
+    echo "   Binary: $BUILD_DIR/$BINARY_NAME"
+    echo "========================================"
+    exit 0
+fi
+
 # --- Installation ---
 echo "Installing (sudo required)..."
 if ! sudo -v 2>/dev/null; then
