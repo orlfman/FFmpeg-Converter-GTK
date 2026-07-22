@@ -1017,8 +1017,9 @@ public class SubtitlesRunner : Object {
             foreach (string a in merged) cmd += a;
         }
 
-        if (profile.preserve_metadata) { cmd += "-map_metadata"; cmd += "0"; }
-        if (profile.remove_chapters)   { cmd += "-map_chapters"; cmd += "-1"; }
+        cmd += "-map_metadata";
+        cmd += profile.preserve_metadata ? "0" : "-1";
+        if (profile.remove_chapters) { cmd += "-map_chapters"; cmd += "-1"; }
 
         cmd += "-progress";
         cmd += "pipe:2";

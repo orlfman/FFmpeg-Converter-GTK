@@ -472,12 +472,18 @@ public class ConversionRunner {
     /**
      * Build metadata flags when the output is a real file (not /dev/null).
      * Returns an array that the caller appends to its command.
+     *
+     * FFmpeg copies global metadata from the first input by default, so
+     * "preserve off" must emit an explicit -map_metadata -1 — otherwise the
+     * toggle (and Smart Optimizer's strip_metadata, which is applied by
+     * switching preserve off) silently does nothing.
      */
     private string[] build_metadata_args () {
         string[] args = {};
 
-        if (config.profile.preserve_metadata) { args += "-map_metadata"; args += "0"; }
-        if (config.profile.remove_chapters)   { args += "-map_chapters"; args += "-1"; }
+        args += "-map_metadata";
+        args += config.profile.preserve_metadata ? "0" : "-1";
+        if (config.profile.remove_chapters) { args += "-map_chapters"; args += "-1"; }
 
         return args;
     }

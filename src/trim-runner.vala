@@ -582,10 +582,8 @@ public class TrimRunner : Object {
         }
 
         // ── Metadata ─────────────────────────────────────────────────────────
-        if (should_preserve_metadata ()) {
-            cmd += "-map_metadata";
-            cmd += "0";
-        }
+        cmd += "-map_metadata";
+        cmd += should_preserve_metadata () ? "0" : "-1";
         if (should_remove_chapters ()) {
             cmd += "-map_chapters";
             cmd += "-1";
@@ -918,10 +916,8 @@ public class TrimRunner : Object {
             string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
-            if (should_preserve_metadata ()) {
-                cmd += "-map_metadata";
-                cmd += "0";
-            }
+            cmd += "-map_metadata";
+            cmd += should_preserve_metadata () ? "0" : "-1";
             if (should_remove_chapters ()) {
                 cmd += "-map_chapters";
                 cmd += "-1";

@@ -275,10 +275,8 @@ public class CombineRunner : Object {
             cmd += "-an";
         }
 
-        if (preserve_metadata) {
-            cmd += "-map_metadata";
-            cmd += "0";
-        }
+        cmd += "-map_metadata";
+        cmd += preserve_metadata ? "0" : "-1";
 
         // Chapter policy
         if (generate_chapters) {
@@ -560,10 +558,9 @@ public class CombineRunner : Object {
             }
 
             // ── Metadata ────────────────────────────────────────────────────
-            if (reencode_profile != null && reencode_profile.preserve_metadata) {
-                cmd += "-map_metadata";
-                cmd += "0";
-            }
+            cmd += "-map_metadata";
+            cmd += (reencode_profile != null && reencode_profile.preserve_metadata)
+                ? "0" : "-1";
 
             // Chapter policy uses request-level generate_chapters / remove_source_chapters.
             // reencode_profile.remove_chapters is intentionally ignored here — Combine
