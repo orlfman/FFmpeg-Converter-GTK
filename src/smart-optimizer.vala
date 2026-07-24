@@ -281,6 +281,45 @@ public class SmartOptimizer : GLib.Object {
     // Analysis segment config
     private const int    SEGMENT_DURATION   = 8;        // seconds per sample
 
+    // Print only every Nth frame's signalstats metadata. signalstats still
+    // runs on every frame (so YDIF/TOUT stay frame-accurate), but printing
+    // ~30 metadata keys for every frame at 60fps floods the captured stderr
+    // (~15 MB), which starves the GLib pipe drain and backs ffmpeg up — an
+    // 8-minute analysis instead of ~1. Decimating the *print* to a few
+    // samples/sec keeps the aggregate means stable while keeping the pipe
+    // small. At 60fps a stride of 15 samples ~4x/sec; at 24fps ~1.6x/sec.
+    private const int    ANALYSIS_PRINT_STRIDE = 15;
+
+    // Adaptive-expansion time budget: the calibration phase may expand to more
+    // sample segments when content is variable, but each probe encode's cost
+    // scales with resolution/fps/preset — a flat segment cap that's cheap at
+    // 720p stalls for minutes at 4K. This is the wall-time (seconds) we're
+    // willing to spend on calibration; a live speed-probe measures the real
+    // per-segment cost and expansion is sized to fit. It's a policy value
+    // (how long is acceptable), NOT a machine-tuned constant — the machine's
+    // real speed comes from the probe, so this stays correct on any hardware.
+    private const double ANALYSIS_TIME_BUDGET_SECONDS = 90.0;
+
+    // Duration (seconds) of the single speed-probe encode. Kept short so the
+    // probe is cheap even at 4K/8K; scaled up to a full segment afterward.
+    // Long enough to amortize encoder start-up / first-frame latency.
+    private const double SPEED_PROBE_SECONDS = 3.0;
+
+    // Run the probe (for the memory cap) at or above this pixel count even when
+    // no segment expansion is wanted — parallel calibration only threatens RAM
+    // at high resolution. ~3.1 MP ≈ just above 1080p, so 1440p/4K/8K probe for
+    // memory; smaller sources skip it (their parallel jobs are cheap).
+    private const long   PROBE_MIN_PIXELS = 3110400;   // 1920x1080 x1.5
+
+    // Fraction of currently-available RAM the parallel calibration encodes may
+    // use. Leaves headroom for the encodes to grow and for other apps to
+    // allocate during the multi-minute run. The per-job cost comes from the
+    // live probe, so this is the only memory policy knob.
+    private const double CALIBRATION_MEMORY_FRACTION = 0.7;
+
+    // How often (ms) to sample the probe process's RSS while it encodes.
+    private const uint   RSS_POLL_INTERVAL_MS = 150;
+
     // ════════════════════════════════════════════════════════════════════════
     // PUBLIC API
     // ════════════════════════════════════════════════════════════════════════
@@ -408,18 +447,77 @@ public class SmartOptimizer : GLib.Object {
                 };
             }
 
-            // ── 4b. Adaptive segment expansion ──────────────────────────
-            // High motion variability between segments → more calibration
-            // samples improve size prediction.  Content classification is
-            // already done and doesn't need re-running.
+            // ── 4b. Bit depth & content-aware, tier-scaled preset ───────
+            // Decided before expansion so the speed-probe below encodes at the
+            // real target preset/pix_fmt. Neither depends on sample positions.
+            var bit_depth = SmartOptimizerLogic.decide_bit_depth (
+                info, profile, tier, preferred_codec, ctx.tone_mapping_active);
+            int preset_idx = SmartOptimizerLogic.choose_preset_index (
+                profile, tier, preferred_codec);
+
+            // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
+            // One short probe encode at the real preset/res/bit-depth measures
+            // BOTH per-segment encode time AND peak RSS. Time sizes how far the
+            // calibration can expand within the wall-time budget (a flat
+            // segment cap that's cheap at 720p is an 8-min stall at 4K); RSS
+            // caps how many calibration jobs run in parallel (4× 4K/10-bit
+            // encodes ≈ 58 GiB otherwise → swap thrash). Nothing is tuned to
+            // this machine — both limits come from the measurement.
             bool adaptive_expanded = false;
-            int expanded_count = SmartOptimizerLogic.adaptive_expansion_count (
-                profile, positions.length, tw.encode_duration, tw.sample_segment_duration);
-            if (expanded_count > 0) {
-                positions = SmartOptimizerLogic.pick_sample_positions_n_in_window (
-                    tw.trim_start, tw.encode_duration, tw.sample_segment_duration,
-                    expanded_count);
-                adaptive_expanded = true;
+            int  base_segments = positions.length;
+            int  desired_segments = SmartOptimizerLogic.adaptive_expansion_count (
+                profile, base_segments, tw.encode_duration, tw.sample_segment_duration);
+
+            // Probe when expansion is wanted (needs a time estimate) or the
+            // source is large enough that parallel calibration could exhaust
+            // RAM (needs a memory estimate).
+            long source_pixels = (long) info.width * (long) info.height;
+            bool run_probe = (desired_segments > 0) || (source_pixels >= PROBE_MIN_PIXELS);
+
+            int    calibration_job_cap   = calibration_parallel_jobs ();
+            double secs_per_segment      = -1.0;
+            int64  probe_peak_rss_bytes  = 0;
+            if (run_probe) {
+                try {
+                    ProbeResult probe = yield run_speed_memory_probe (
+                        input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
+                        vf, tw.sample_segment_duration, tw.trim_start,
+                        tw.encode_duration, temp_run_dir, cancellable);
+                    secs_per_segment = probe.seconds;
+                    probe_peak_rss_bytes = probe.peak_rss;
+                    calibration_job_cap = memory_capped_calibration_jobs (probe.peak_rss);
+                    warning ("Smart Optimizer: probe %.2fs/segment, peak %.1f GiB/job → "
+                        + "calibration parallelism %d (uncapped %d)",
+                        secs_per_segment, probe.peak_rss / (1024.0 * 1024.0 * 1024.0),
+                        calibration_job_cap, calibration_parallel_jobs ());
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    warning ("Smart Optimizer: speed/memory probe failed (%s) — "
+                        + "no expansion, default parallelism", e.message);
+                    secs_per_segment    = -1.0;
+                    calibration_job_cap = calibration_parallel_jobs ();
+                }
+            }
+
+            // Expand only if wanted AND we have a usable time measurement.
+            // The budget uses the memory-capped parallelism so the time
+            // estimate reflects the calibration that will actually run.
+            if (desired_segments > 0 && secs_per_segment > 0.0) {
+                int final_segments = SmartOptimizerLogic.budget_expanded_count (
+                    desired_segments, base_segments, secs_per_segment,
+                    SmartOptimizerLogic.ADAPTIVE_CALIBRATION_BASE_MAX_POINTS + 1,
+                    calibration_job_cap,
+                    ANALYSIS_TIME_BUDGET_SECONDS,
+                    SmartOptimizerLogic.ADAPTIVE_MAX_SEGMENTS);
+                warning ("Smart Optimizer: variability wants %d segments → budgeted to "
+                    + "%d (base %d)", desired_segments, final_segments, base_segments);
+                if (final_segments > base_segments) {
+                    positions = SmartOptimizerLogic.pick_sample_positions_n_in_window (
+                        tw.trim_start, tw.encode_duration, tw.sample_segment_duration,
+                        final_segments);
+                    adaptive_expanded = true;
+                }
             }
 
             // ── 4b2. Complexity-weighted extrapolation ──────────────────
@@ -428,12 +526,6 @@ public class SmartOptimizer : GLib.Object {
             double extrapolation_weight = SmartOptimizerLogic.compute_extrapolation_weight (
                 source_bitrate_profile, positions, tw.sample_segment_duration,
                 tw.trim_start, tw.trim_end);
-
-            // ── 4c/5. Bit depth & content-aware, tier-scaled preset ─────
-            var bit_depth = SmartOptimizerLogic.decide_bit_depth (
-                info, profile, tier, preferred_codec, ctx.tone_mapping_active);
-            int preset_idx = SmartOptimizerLogic.choose_preset_index (
-                profile, tier, preferred_codec);
 
             // ── 5b. Persistent calibration sample cache ────────────────
             // Keyed on everything that shapes a measurement (file
@@ -453,7 +545,7 @@ public class SmartOptimizer : GLib.Object {
                     tw.encode_duration, tw.sample_segment_duration, vf,
                     preset_idx, bit_depth.pix_fmt, budget.video_target_kib,
                     extrapolation_weight, cache, intermediate, info,
-                    temp_run_dir, cancellable);
+                    calibration_job_cap, temp_run_dir, cancellable);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -540,7 +632,8 @@ public class SmartOptimizer : GLib.Object {
                 preset_label, model, verification, conf, policy, downscale,
                 estimated_total_kib, extrapolation_weight,
                 positions.length, adaptive_expanded,
-                intermediate.path != null);
+                intermediate.path != null,
+                secs_per_segment, probe_peak_rss_bytes, calibration_job_cap);
 
             return OptimizationRecommendation () {
                 codec                 = preferred_codec,
@@ -552,6 +645,7 @@ public class SmartOptimizer : GLib.Object {
                 notes                 = notes,
                 is_impossible         = policy.is_impossible,
                 content_type          = profile.content_type,
+                grain_score           = profile.noise_mean,
                 confidence            = conf.confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
@@ -661,6 +755,12 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /** Lazily-built pre-filtered lossless intermediate for one run. */
+    // Result of the live speed/memory probe: encode time and peak resident RAM.
+    private class ProbeResult {
+        public double seconds  = 0.0;
+        public int64  peak_rss = 0;
+    }
+
     private class IntermediateHolder {
         public string? path = null;
         public bool build_failed = false;
@@ -758,6 +858,7 @@ public class SmartOptimizer : GLib.Object {
         SmartOptimizerCache? cache,
         IntermediateHolder intermediate,
         SmartOptimizerVideoInfo info,
+        int           max_calibration_jobs,
         string?       temp_run_dir,
         Cancellable?  cancellable
     ) throws Error {
@@ -765,7 +866,10 @@ public class SmartOptimizer : GLib.Object {
         int[] base_crfs = SmartOptimizerLogic.pick_calibration_crfs (codec, tier);
         double[] base_sizes = new double[base_crfs.length];
 
-        int calibration_jobs = calibration_parallel_jobs ();
+        // Parallelism is the smaller of the CPU-based count and the RAM-based
+        // cap the live probe derived (each 4K/10-bit job can hold ~14 GiB).
+        int calibration_jobs = int.max (1,
+            int.min (calibration_parallel_jobs (), max_calibration_jobs));
         int calibration_encoder_threads = encoder_threads_per_job (calibration_jobs);
 
         // Reuse points a previous run already measured; only the missing
@@ -1093,7 +1197,10 @@ public class SmartOptimizer : GLib.Object {
         double extrapolation_weight,
         int positions_count,
         bool adaptive_expanded,
-        bool used_intermediate
+        bool used_intermediate,
+        double probe_secs_per_segment,
+        int64 probe_peak_rss_bytes,
+        int calibration_job_cap
     ) {
         var notes = new StringBuilder ();
 
@@ -1115,6 +1222,11 @@ public class SmartOptimizer : GLib.Object {
             notes.append (" (confidence: %s)".printf (
                 "%.0f%%".printf (profile.type_confidence * 100)));
         notes.append ("\n");
+        // Calibration instrument for grain detection: raw TOUT (temporal
+        // outlier fraction) from signalstats. Log-only for now — no decision
+        // is gated on it yet.
+        notes.append ("  Grain/noise (TOUT): %.4f (±%.4f)\n".printf (
+            profile.noise_mean, profile.noise_stddev));
         if (tier >= SizeTier.MEDIUM) {
             notes.append ("  Content influence dampened to %.0f%% (ample bitrate)\n"
                 .printf (content_factor * 100.0));
@@ -1362,6 +1474,17 @@ public class SmartOptimizer : GLib.Object {
         notes.append ("  Sample coverage: %.0f%% (%d × %.2fs segments%s)\n"
             .printf (conf.sample_coverage * 100.0, positions_count, tw.sample_segment_duration,
                      adaptive_expanded ? ", adaptively expanded" : ""));
+        // Live probe telemetry: what the one speed/memory probe measured and how
+        // it sized the calibration. Only present when the probe actually ran.
+        if (probe_secs_per_segment > 0.0) {
+            int uncapped_jobs = calibration_parallel_jobs ();
+            notes.append ("  Probe: %.2fs/segment, peak %.1f GiB/job → parallelism %d%s\n"
+                .printf (probe_secs_per_segment,
+                         probe_peak_rss_bytes / (1024.0 * 1024.0 * 1024.0),
+                         calibration_job_cap,
+                         calibration_job_cap < uncapped_jobs
+                             ? " (RAM-capped from %d)".printf (uncapped_jobs) : ""));
+        }
         if (tw.sample_segment_duration != (double) SEGMENT_DURATION) {
             notes.append ("  Sample segments shortened to %.2fs to stay within the trim window\n"
                 .printf (tw.sample_segment_duration));
@@ -1684,9 +1807,15 @@ public class SmartOptimizer : GLib.Object {
         Cancellable?  cancellable = null
     ) throws Error {
         // ── Signal stats (color + motion via YDIF) ──────────────────────
+        // signalstats attaches per-frame metadata; metadata=print surfaces it
+        // on stderr (as lavfi.signalstats.KEY=value lines). `select` decimates
+        // the *printed* frames AFTER signalstats — the stats themselves are
+        // still computed frame-to-frame, so YDIF/TOUT stay accurate; we just
+        // sample fewer of them (see ANALYSIS_PRINT_STRIDE for why).
+        string decimate = "select=not(mod(n\\,%d))".printf (ANALYSIS_PRINT_STRIDE);
         string[] sig_cmd = build_concat_analysis_cmd (
             path, positions, segment_duration,
-            "signalstats=stat=tout+vrep+brng",
+            "signalstats=stat=tout+vrep+brng,%s,metadata=print".printf (decimate),
             video_filter_chain
         );
         string sig_output = yield run_subprocess_stderr (sig_cmd, cancellable);
@@ -1694,13 +1823,14 @@ public class SmartOptimizer : GLib.Object {
         double[] all_ydif   = {};
         double[] all_ylow   = {};
         double[] all_yavg   = {};
+        double[] all_tout   = {};
         parse_signalstats (sig_output, ref all_satavg, ref all_ydif,
-            ref all_ylow, ref all_yavg);
+            ref all_ylow, ref all_yavg, ref all_tout);
 
         // ── Edge detection ──────────────────────────────────────────────
         string[] edge_cmd = build_concat_analysis_cmd (
             path, positions, segment_duration,
-            "edgedetect=low=0.08:high=0.25,signalstats",
+            "edgedetect=low=0.08:high=0.25,signalstats,%s,metadata=print".printf (decimate),
             video_filter_chain
         );
         string edge_output = yield run_subprocess_stderr (edge_cmd, cancellable);
@@ -1715,6 +1845,8 @@ public class SmartOptimizer : GLib.Object {
             all_satavg, out profile.saturation_mean,    out profile.saturation_stddev);
         SmartOptimizerLogic.compute_stats (
             all_ydif,   out profile.temporal_diff_mean, out profile.temporal_diff_stddev);
+        SmartOptimizerLogic.compute_stats (
+            all_tout,   out profile.noise_mean,         out profile.noise_stddev);
 
         SmartOptimizerLogic.compute_banding_metrics (
             ref profile, all_yavg, all_ylow, info.width, info.height);
@@ -2026,6 +2158,174 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /**
+     * Live probe for both adaptive-expansion budgeting and memory-safe
+     * parallelism: encode one short slice at the real target
+     * codec/preset/pix_fmt and measure both wall-time and peak RSS. Uses the
+     * same per-job thread count a calibration encode gets, so both figures are
+     * representative of one calibration job. Encodes from source (the lossless
+     * intermediate isn't built yet at this point), which includes decode cost
+     * — a conservative bias, the safe direction for both time and memory.
+     *
+     * Returns a ProbeResult: .seconds is the estimated time to encode one
+     * full-length sample segment; .peak_rss is one job's peak resident memory.
+     */
+    private async ProbeResult run_speed_memory_probe (
+        string        input_file,
+        string        codec,
+        int           preset_idx,
+        string        pix_fmt,
+        string        video_filter_chain,
+        double        segment_duration,
+        double        trim_start,
+        double        encode_duration,
+        string?       temp_run_dir,
+        Cancellable?  cancellable = null
+    ) throws Error {
+        double probe_secs = double.min (SPEED_PROBE_SECONDS, segment_duration);
+        if (probe_secs <= 0.0)
+            throw new IOError.FAILED ("Speed-probe duration is non-positive");
+
+        // Sample from the middle of the encode window — representative footage.
+        double[] one_position = { trim_start + encode_duration / 2.0 };
+        int threads = encoder_threads_per_job (calibration_parallel_jobs ());
+        string tmp = tmp_path ("speedprobe", temp_run_dir);
+
+        // CRF value is irrelevant to timing (preset dominates speed); use a
+        // representative mid value.
+        string[] cmd = build_concat_encode_cmd (
+            input_file, codec, 30, one_position, probe_secs, tmp,
+            video_filter_chain, preset_idx, pix_fmt, threads);
+
+        ProbeResult raw;
+        try {
+            raw = yield run_encode_measure_peak_rss (cmd, cancellable);
+        } catch (Error e) {
+            cleanup_file (tmp);
+            throw e;
+        }
+        cleanup_file (tmp);
+
+        var result = new ProbeResult ();
+        result.peak_rss = raw.peak_rss;
+        // Scale the short probe up to a full segment (encode time ~ duration).
+        result.seconds = raw.seconds * (segment_duration / probe_secs);
+        return result;
+    }
+
+    /**
+     * Run an encode to completion while sampling the process's resident memory,
+     * returning a ProbeResult with the wall-time (.seconds) and peak RSS in
+     * bytes (.peak_rss). The whole encode — dav1d decode threads and the SVT
+     * encoder — runs in the single ffmpeg process, so one PID's VmRSS captures
+     * the full job.
+     */
+    private async ProbeResult run_encode_measure_peak_rss (
+        string[]      cmd,
+        Cancellable?  cancellable = null
+    ) throws Error {
+        var launcher = new SubprocessLauncher (
+            SubprocessFlags.STDOUT_SILENCE | SubprocessFlags.STDERR_SILENCE);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
+        string? pid = proc.get_identifier ();
+
+        var result = new ProbeResult ();
+        var timer = new Timer ();
+
+        uint poll_id = 0;
+        if (pid != null) {
+            poll_id = Timeout.add (RSS_POLL_INTERVAL_MS, () => {
+                int64 rss = read_process_rss_bytes (pid);
+                if (rss > result.peak_rss)
+                    result.peak_rss = rss;
+                return Source.CONTINUE;
+            });
+        }
+
+        try {
+            yield proc.wait_check_async (cancellable);
+        } catch (Error e) {
+            if (poll_id != 0)
+                Source.remove (poll_id);
+            proc.force_exit ();
+            throw e;
+        }
+        if (poll_id != 0)
+            Source.remove (poll_id);
+        timer.stop ();
+        // One last sample in case the peak landed between polls.
+        if (pid != null) {
+            int64 rss = read_process_rss_bytes (pid);
+            if (rss > result.peak_rss)
+                result.peak_rss = rss;
+        }
+        result.seconds = timer.elapsed ();
+        return result;
+    }
+
+    /** Read a process's resident memory (bytes) from /proc; 0 if unavailable. */
+    private int64 read_process_rss_bytes (string pid) {
+        string contents;
+        try {
+            if (!FileUtils.get_contents ("/proc/" + pid + "/status", out contents))
+                return 0;
+        } catch (Error e) {
+            return 0;   // process already exited, or /proc unreadable
+        }
+        foreach (unowned string line in contents.split ("\n")) {
+            if (line.has_prefix ("VmRSS:")) {
+                string rest = line.substring (6).strip ();   // "12345 kB"
+                int sp = rest.index_of (" ");
+                string num = (sp > 0) ? rest.substring (0, sp) : rest;
+                return int64.parse (num) * 1024;             // /proc kB is KiB
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Currently-allocatable RAM in bytes (MemAvailable from /proc/meminfo);
+     * 0 if unavailable. MemAvailable — not MemTotal — is the right base: it
+     * already excludes what the desktop, browser, and everything else are
+     * using, so budgeting against it keeps calibration from spilling into swap.
+     */
+    private int64 read_mem_available_bytes () {
+        string contents;
+        try {
+            if (!FileUtils.get_contents ("/proc/meminfo", out contents))
+                return 0;
+        } catch (Error e) {
+            return 0;
+        }
+        foreach (unowned string line in contents.split ("\n")) {
+            if (line.has_prefix ("MemAvailable:")) {
+                string rest = line.substring (13).strip ();
+                int sp = rest.index_of (" ");
+                string num = (sp > 0) ? rest.substring (0, sp) : rest;
+                return int64.parse (num) * 1024;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Cap the CPU-based calibration parallelism so the parallel encodes fit in
+     * CALIBRATION_MEMORY_FRACTION of currently-available RAM, using the probe's
+     * measured per-job RSS. Falls back to the CPU-based count when the
+     * measurement or meminfo is unavailable (no worse than the prior behavior).
+     */
+    private int memory_capped_calibration_jobs (int64 per_job_rss_bytes) {
+        int cpu_jobs = calibration_parallel_jobs ();
+        if (per_job_rss_bytes <= 0)
+            return cpu_jobs;
+        int64 mem_available = read_mem_available_bytes ();
+        if (mem_available <= 0)
+            return cpu_jobs;
+        int64 budget = (int64) (mem_available * CALIBRATION_MEMORY_FRACTION);
+        int mem_jobs = (int) (budget / per_job_rss_bytes);
+        return mem_jobs.clamp (1, cpu_jobs);
+    }
+
+    /**
      * Encode sample segments at a given CRF with the target preset.
      * Returns estimated full-video size in KiB (extrapolated from sample).
      */
@@ -2332,7 +2632,8 @@ public class SmartOptimizer : GLib.Object {
     // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Parse signalstats output for SATAVG and YDIF fields across all frames.
+     * Parse signalstats output for SATAVG, YDIF, YLOW, YAVG, and TOUT
+     * fields across all frames.
      *
      * Uses a dual-strategy approach for robustness across ffmpeg builds:
      *   Primary:   lines prefixed with "Parsed_signalstats" (standard format)
@@ -2344,26 +2645,38 @@ public class SmartOptimizer : GLib.Object {
         ref double[] satavg_out,
         ref double[] ydif_out,
         ref double[] ylow_out,
-        ref double[] yavg_out
+        ref double[] yavg_out,
+        ref double[] tout_out
     ) {
         var sat_list  = new GenericArray<double?> ();
         var ydif_list = new GenericArray<double?> ();
         var ylow_list = new GenericArray<double?> ();
         var yavg_list = new GenericArray<double?> ();
+        var tout_list = new GenericArray<double?> ();
 
         foreach (unowned string line in text.split ("\n")) {
-            bool is_stats_line = line.contains ("Parsed_signalstats")
+            // Primary: metadata=print output — one "lavfi.signalstats.KEY=value"
+            // per line. Fallback: legacy colon-delimited multi-field lines.
+            bool is_metadata_line = line.contains ("lavfi.signalstats.");
+            bool is_legacy_line   = line.contains ("Parsed_signalstats")
                 || (line.contains ("SATAVG:") && line.contains ("YDIF:"));
-            if (!is_stats_line) continue;
+            if (!is_metadata_line && !is_legacy_line) continue;
 
-            double? sat  = parse_field_value (line, "SATAVG:");
-            double? ydif = parse_field_value (line, "YDIF:");
-            double? ylow = parse_field_value (line, "YLOW:");
-            double? yavg = parse_field_value (line, "YAVG:");
+            double? sat  = parse_field_value (line, "lavfi.signalstats.SATAVG=")
+                        ?? parse_field_value (line, "SATAVG:");
+            double? ydif = parse_field_value (line, "lavfi.signalstats.YDIF=")
+                        ?? parse_field_value (line, "YDIF:");
+            double? ylow = parse_field_value (line, "lavfi.signalstats.YLOW=")
+                        ?? parse_field_value (line, "YLOW:");
+            double? yavg = parse_field_value (line, "lavfi.signalstats.YAVG=")
+                        ?? parse_field_value (line, "YAVG:");
+            double? tout = parse_field_value (line, "lavfi.signalstats.TOUT=")
+                        ?? parse_field_value (line, "TOUT:");
             if (sat  != null) sat_list.add (sat);
             if (ydif != null) ydif_list.add (ydif);
             if (ylow != null) ylow_list.add (ylow);
             if (yavg != null) yavg_list.add (yavg);
+            if (tout != null) tout_list.add (tout);
         }
 
         if (sat_list.length > int.MAX) {
@@ -2371,6 +2684,7 @@ public class SmartOptimizer : GLib.Object {
             ydif_out = {};
             ylow_out = {};
             yavg_out = {};
+            tout_out = {};
             return;
         }
 
@@ -2382,6 +2696,7 @@ public class SmartOptimizer : GLib.Object {
             ydif_out = {};
             ylow_out = {};
             yavg_out = {};
+            tout_out = {};
             return;
         }
 
@@ -2393,6 +2708,7 @@ public class SmartOptimizer : GLib.Object {
             ydif_out = {};
             ylow_out = {};
             yavg_out = {};
+            tout_out = {};
             return;
         }
 
@@ -2404,11 +2720,24 @@ public class SmartOptimizer : GLib.Object {
             ydif_out = {};
             ylow_out = {};
             yavg_out = {};
+            tout_out = {};
             return;
         }
 
         yavg_out = new double[(int) yavg_list.length];
         for (int i = 0; i < yavg_list.length; i++) yavg_out[i] = yavg_list[i];
+
+        if (tout_list.length > int.MAX) {
+            satavg_out = {};
+            ydif_out = {};
+            ylow_out = {};
+            yavg_out = {};
+            tout_out = {};
+            return;
+        }
+
+        tout_out = new double[(int) tout_list.length];
+        for (int i = 0; i < tout_list.length; i++) tout_out[i] = tout_list[i];
     }
 
     /**
@@ -2421,14 +2750,17 @@ public class SmartOptimizer : GLib.Object {
         string      field_name,
         ref double[] values_out
     ) {
-        string key  = field_name + ":";
+        string key_metadata = "lavfi.signalstats." + field_name + "=";
+        string key_legacy   = field_name + ":";
         var    list = new GenericArray<double?> ();
 
         foreach (unowned string line in text.split ("\n")) {
-            bool is_stats_line = line.contains ("Parsed_signalstats")
-                || line.contains (key);
+            bool is_stats_line = line.contains (key_metadata)
+                || line.contains ("Parsed_signalstats")
+                || line.contains (key_legacy);
             if (!is_stats_line) continue;
-            double? val = parse_field_value (line, key);
+            double? val = parse_field_value (line, key_metadata)
+                       ?? parse_field_value (line, key_legacy);
             if (val != null) list.add (val);
         }
 
@@ -2461,17 +2793,34 @@ public class SmartOptimizer : GLib.Object {
      * Returns false if no digits were found (distinguishes parse failure
      * from a legitimately parsed 0.0). Uses g_ascii_strtod via
      * double.try_parse for locale independence.
+     *
+     * Handles scientific notation (e.g. "5.20833e-05") — signalstats reports
+     * small fractions like TOUT in exponential form, and stopping at the 'e'
+     * would truncate "5.2e-05" to "5.2", a ~100000x error.
      */
     private bool try_extract_number (string text, out double value) {
         value = 0.0;
         var  buf       = new StringBuilder ();
         bool in_number = false;
-        for (int i = 0; i < text.length && buf.len < 16; i++) {
+        bool exp_seen  = false;
+        for (int i = 0; i < text.length && buf.len < 24; i++) {
             char c = text[i];
             if (!in_number && (c == ' ' || c == '\t')) continue;
             if (c.isdigit () || c == '.' || (c == '-' && !in_number)) {
                 buf.append_c (c);
                 in_number = true;
+            } else if (in_number && !exp_seen && (c == 'e' || c == 'E')
+                       && i + 1 < text.length
+                       && (text[i + 1].isdigit ()
+                           || ((text[i + 1] == '-' || text[i + 1] == '+')
+                               && i + 2 < text.length && text[i + 2].isdigit ()))) {
+                // exponent marker, only when a valid exponent digit follows
+                buf.append_c (c);
+                exp_seen = true;
+                if (text[i + 1] == '-' || text[i + 1] == '+') {
+                    buf.append_c (text[i + 1]);
+                    i++;
+                }
             } else if (in_number) {
                 break;
             }

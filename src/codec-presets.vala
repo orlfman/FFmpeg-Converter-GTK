@@ -914,10 +914,11 @@ public class CodecPresets : Object {
             if (rec.content_type == ContentType.ANIME) {
                 set_dropdown_by_label (tab.tune_combo, "animation");
             } else if (tier >= SizeTier.LARGE
-                       && (rec.content_type == ContentType.LIVE_ACTION
-                           || rec.content_type == ContentType.MIXED)) {
+                       && SmartOptimizerLogic.grain_warranted (
+                           rec.grain_score, rec.content_type)) {
                 // At generous budgets, preserve natural film grain rather
-                // than smearing it for compression — improves perceived quality
+                // than smearing it — but only when grain is actually measured
+                // (SmartOptimizerLogic.grain_warranted), not just from category.
                 set_dropdown_by_label (tab.tune_combo, "grain");
             } else {
                 tab.tune_combo.set_selected (0);
@@ -1039,10 +1040,12 @@ public class CodecPresets : Object {
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
 
-            // Film grain — only for live-action/mixed at MEDIUM+ tiers
+            // Film grain — MEDIUM+ tiers, gated on the measured grain signal
+            // (clean sources are excluded even if live-action/mixed; grainy
+            // sources included even if the category was uncertain). See
+            // SmartOptimizerLogic.grain_warranted.
             bool use_grain = (tier >= SizeTier.MEDIUM)
-                && (rec.content_type == ContentType.LIVE_ACTION
-                    || rec.content_type == ContentType.MIXED);
+                && SmartOptimizerLogic.grain_warranted (rec.grain_score, rec.content_type);
 
             switch (tier) {
                 case SizeTier.TINY:

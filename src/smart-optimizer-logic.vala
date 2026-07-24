@@ -88,6 +88,7 @@ public struct OptimizationRecommendation {
     public string recommended_pix_fmt; // "yuv420p10le", "yuv420p", or "" (codec default)
     public string resolved_container;  // effective container after tier policy (e.g. "webm", "mp4", "mkv")
     public int target_size_kib;        // user-requested target size in KiB
+    public double grain_score;         // measured TOUT (temporal-outlier fraction) — grain/noise proxy
 }
 
 /**
@@ -164,6 +165,8 @@ public struct ContentProfile {
     public double      saturation_stddev;
     public double      temporal_diff_mean;   // YDIF average across frames
     public double      temporal_diff_stddev;
+    public double      noise_mean;           // TOUT (temporal outlier fraction) average — grain/noise proxy
+    public double      noise_stddev;
     public ContentType content_type;
     public double      type_confidence;
     public double      banding_risk;         // 0.0–1.0 composite score
@@ -210,6 +213,22 @@ namespace SmartOptimizerLogic {
     // across the video and more samples improve prediction accuracy.
     public const double ADAPTIVE_CV_THRESHOLD = 0.60;
     public const int    ADAPTIVE_CALIBRATION_EDGE_MARGIN = 1;
+
+    // Grain-synthesis gate thresholds on the measured grain signal (TOUT, the
+    // signalstats temporal-outlier fraction). Below LOW → source is clean, do
+    // NOT synthesize grain (overrides the content-category heuristic — this is
+    // what stops clean 4K footage from getting pointless film-grain synthesis).
+    // Above HIGH → clearly grainy, synthesize regardless of category. Between
+    // the two the signal is ambiguous and we defer to the category heuristic,
+    // so the change is regression-safe.
+    //
+    // PROVISIONAL — calibrated only against clean/digital sources so far
+    // (observed 0.0002–0.0014) plus synthetic grain (~0.003). Re-tune against a
+    // genuinely grainy film source using the "Grain/noise (TOUT)" value printed
+    // in the Smart Optimizer log: set LOW just above your clean maximum and
+    // HIGH at/below the grainy reading.
+    public const double GRAIN_SYNTH_LOW  = 0.0015;
+    public const double GRAIN_SYNTH_HIGH = 0.0040;
 
     // If the required video bitrate would fall below this threshold it is
     // physically impossible to produce acceptable-quality output.
@@ -898,10 +917,50 @@ namespace SmartOptimizerLogic {
             (int) (encode_duration / segment_duration));
         if (expanded_count <= current_count)
             return 0;
-        warning ("Smart Optimizer: high content variability (CV=%.2f) — "
-            + "expanded from %d to %d calibration segments",
-            motion_cv, current_count, expanded_count);
+        // This is the DESIRED count driven by content variability alone;
+        // budget_expanded_count() then trims it to what a live speed-probe
+        // says the time budget can afford. The caller logs the final count.
         return expanded_count;
+    }
+
+    /**
+     * Trim a desired expansion count to what the calibration time budget can
+     * afford, using a live per-segment encode time measured by a speed-probe.
+     *
+     * Calibration runs @n_encodes probe encodes in parallel batches of
+     * @parallelism, each batch encoding all segments; so the wall-time for a
+     * given segment count is roughly:
+     *
+     *     ceil(n_encodes / parallelism)  ×  segments  ×  secs_per_segment
+     *
+     * We invert that to find the largest segment count whose estimated
+     * wall-time stays under @budget_seconds, then clamp into
+     * [base_count, hard_cap]. base_count is the floor — the base samples are
+     * always encoded — and hard_cap is the absolute ceiling regardless of how
+     * fast the machine is.
+     *
+     * Degenerate inputs (non-positive probe time or budget, parallelism < 1)
+     * fall back to base_count: if we can't trust the measurement, don't expand.
+     */
+    public int budget_expanded_count (
+        int    desired,
+        int    base_count,
+        double secs_per_segment,
+        int    n_encodes,
+        int    parallelism,
+        double budget_seconds,
+        int    hard_cap
+    ) {
+        if (secs_per_segment <= 0.0 || budget_seconds <= 0.0
+            || parallelism < 1 || n_encodes < 1)
+            return base_count.clamp (0, hard_cap);
+
+        int waves = (n_encodes + parallelism - 1) / parallelism;  // ceil
+        double wall_per_segment = (double) waves * secs_per_segment;
+        int budget_segments = (int) Math.floor (budget_seconds / wall_per_segment);
+
+        int allowed = int.min (desired, budget_segments);
+        return allowed.clamp (base_count, hard_cap);
     }
 
     // ── Complexity-weighted extrapolation ────────────────────────────────────
@@ -1051,6 +1110,30 @@ namespace SmartOptimizerLogic {
         double smooth_factor = (1.0 - (profile.saturation_stddev / 40.0)).clamp (0.0, 1.0);
         profile.banding_risk = (dark_factor * 0.35 + ylow_factor * 0.30 + smooth_factor * 0.35)
             .clamp (0.0, 1.0);
+    }
+
+    /**
+     * Whether the measured grain signal warrants grain handling (AV1 film-grain
+     * synthesis, or x265/x264 `--tune grain`). Decides on the *measurement*
+     * when it's confident, and falls back to the content-category heuristic
+     * (live-action / mixed) only in the ambiguous middle band — so a clean
+     * source is never grain-synthesized just because it classified as mixed,
+     * and a grainy source gets grain even if the category was uncertain.
+     *
+     * This is only the grain-signal decision; callers apply their own tier
+     * gate (e.g. SVT-AV1 at MEDIUM+, x265 at LARGE+).
+     */
+    public bool grain_warranted (double grain_score, ContentType content_type) {
+        bool category_says_grain = (content_type == ContentType.LIVE_ACTION
+            || content_type == ContentType.MIXED);
+
+        if (grain_score <= 0.0)                 // no measurement → category heuristic
+            return category_says_grain;
+        if (grain_score >= GRAIN_SYNTH_HIGH)    // clearly grainy
+            return true;
+        if (grain_score <= GRAIN_SYNTH_LOW)     // clearly clean
+            return false;
+        return category_says_grain;             // ambiguous → category heuristic
     }
 
     public void compute_stats (double[] values, out double mean, out double stddev) {

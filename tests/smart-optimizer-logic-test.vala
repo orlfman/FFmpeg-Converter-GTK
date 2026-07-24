@@ -440,6 +440,63 @@ void test_adaptive_expansion_count () {
     assert (SmartOptimizerLogic.adaptive_expansion_count (steady, 6, 200.0, 8.0) == 0);
 }
 
+void test_budget_expanded_count () {
+    // n_encodes 7 in batches of 4 → ceil(7/4) = 2 waves.
+    // desired 16, base 3, hard cap 16, budget 90s.
+
+    // 720p/preset4-like: cheap, ~1.5s/segment → 2*1.5 = 3s/segment of wall;
+    // budget allows 30 → expands to the full desired 16.
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 1.5, 7, 4, 90.0, 16) == 16);
+
+    // 4K/preset7-like: expensive, ~27s/segment → 2*27 = 54s/segment;
+    // budget allows floor(90/54)=1 → clamps UP to the base floor 3 (no expansion).
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 27.0, 7, 4, 90.0, 16) == 3);
+
+    // Mid cost: ~6s/segment → 2*6 = 12s; budget allows floor(90/12)=7 → 7 (< desired 16).
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 6.0, 7, 4, 90.0, 16) == 7);
+
+    // Never exceed the desired count even when the machine is very fast.
+    assert (SmartOptimizerLogic.budget_expanded_count (8, 3, 0.01, 7, 4, 90.0, 16) == 8);
+
+    // Never exceed the hard cap even if desired somehow did.
+    assert (SmartOptimizerLogic.budget_expanded_count (20, 3, 0.01, 7, 4, 90.0, 16) == 16);
+
+    // Degenerate probe (0s) or bad inputs → fall back to base, no expansion.
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 0.0, 7, 4, 90.0, 16) == 3);
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 6.0, 7, 0, 90.0, 16) == 3);
+
+    // More parallelism → fewer waves → more segments affordable.
+    // Same 12s/segment cost, different core budgets:
+    //   4-wide: ceil(7/4)=2 waves → 24s/seg → floor(90/24)=3 → base 3.
+    //   8-wide: ceil(7/8)=1 wave  → 12s/seg → floor(90/12)=7 → 7.
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 12.0, 7, 4, 90.0, 16) == 3);
+    assert (SmartOptimizerLogic.budget_expanded_count (16, 3, 12.0, 7, 8, 90.0, 16) == 7);
+}
+
+void test_grain_warranted () {
+    // Clean sources (below LOW=0.0015) → no grain, EVEN when the category
+    // heuristic would say yes. This is the fix: clean 4K/HDR (TOUT ~0.0002)
+    // classified as Mixed no longer gets pointless film-grain synthesis.
+    assert (!SmartOptimizerLogic.grain_warranted (0.0002, ContentType.MIXED));
+    assert (!SmartOptimizerLogic.grain_warranted (0.0002, ContentType.LIVE_ACTION));
+    // Boundary: exactly LOW is treated as clean.
+    assert (!SmartOptimizerLogic.grain_warranted (0.0015, ContentType.MIXED));
+
+    // Clearly grainy (at/above HIGH=0.004) → grain, overriding category.
+    assert (SmartOptimizerLogic.grain_warranted (0.006, ContentType.MIXED));
+    assert (SmartOptimizerLogic.grain_warranted (0.004, ContentType.ANIME));
+
+    // Ambiguous middle band → defer to the category heuristic (regression-safe).
+    assert (SmartOptimizerLogic.grain_warranted (0.0025, ContentType.MIXED));
+    assert (SmartOptimizerLogic.grain_warranted (0.0025, ContentType.LIVE_ACTION));
+    assert (!SmartOptimizerLogic.grain_warranted (0.0025, ContentType.ANIME));
+    assert (!SmartOptimizerLogic.grain_warranted (0.0025, ContentType.SCREENCAST));
+
+    // No measurement (0.0) → category heuristic exactly as before.
+    assert (SmartOptimizerLogic.grain_warranted (0.0, ContentType.MIXED));
+    assert (!SmartOptimizerLogic.grain_warranted (0.0, ContentType.SCREENCAST));
+}
+
 void test_decide_bit_depth_rules () {
     var profile = ContentProfile ();
     var hdr = make_video_info ({});
@@ -690,6 +747,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/budget/infeasibility-message", test_infeasibility_message_suggests_options);
     Test.add_func ("/smart-optimizer-logic/preset/choose-index", test_choose_preset_index);
     Test.add_func ("/smart-optimizer-logic/segments/adaptive-expansion", test_adaptive_expansion_count);
+    Test.add_func ("/smart-optimizer-logic/segments/budget-expanded", test_budget_expanded_count);
+    Test.add_func ("/smart-optimizer-logic/grain/warranted", test_grain_warranted);
     Test.add_func ("/smart-optimizer-logic/bit-depth/rules", test_decide_bit_depth_rules);
     Test.add_func ("/smart-optimizer-logic/banding/dark-content", test_banding_metrics_dark_content);
     Test.add_func ("/smart-optimizer-logic/confidence/extrapolation", test_assess_confidence_interpolation_vs_extrapolation);
