@@ -41,6 +41,8 @@ sources = files(
   'src/status-area.vala',
   'src/console-tab.vala',
   'src/filter-builder.vala',
+  'src/logo-detector-logic.vala',
+  'src/logo-detector.vala',
   'src/video-filters.vala',
   'src/svt-av1-builder.vala',
   'src/audio-probe-types.vala',
@@ -124,6 +126,24 @@ if fs.exists('tests/subtitle-language-guesser-test.vala')
   )
 
   test('subtitle-language-guesser', subtitle_language_guesser_test)
+endif
+
+if fs.exists('tests/logo-detector-logic-test.vala')
+  logo_detector_logic_test = executable(
+    'logo-detector-logic-test',
+    files(
+      'src/logo-detector-logic.vala',
+      'tests/logo-detector-logic-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+    ],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('logo-detector-logic', logo_detector_logic_test)
 endif
 
 if fs.exists('tests/audio-builder-test.vala')
@@ -317,6 +337,8 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/status-area.vala',
       'src/console-tab.vala',
       'src/filter-builder.vala',
+      'src/logo-detector-logic.vala',
+      'src/logo-detector.vala',
       'src/video-filters.vala',
       'src/svt-av1-builder.vala',
       'src/audio-probe-types.vala',
@@ -392,6 +414,8 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/status-area.vala',
       'src/console-tab.vala',
       'src/filter-builder.vala',
+      'src/logo-detector-logic.vala',
+      'src/logo-detector.vala',
       'src/video-filters.vala',
       'src/svt-av1-builder.vala',
       'src/audio-probe-types.vala',
@@ -469,6 +493,8 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/status-area.vala',
       'src/console-tab.vala',
       'src/filter-builder.vala',
+      'src/logo-detector-logic.vala',
+      'src/logo-detector.vala',
       'src/video-filters.vala',
       'src/svt-av1-builder.vala',
       'src/audio-probe-types.vala',

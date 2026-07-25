@@ -64,6 +64,17 @@ namespace FilterBuilder {
         bool skip_crop,
         string codec_name) {
         string[] filters = {};
+
+        // Logo removal runs before everything else: the detected rectangles are
+        // in source-frame coordinates, so any rotation, crop or scale ahead of
+        // delogo would move the frame out from under them.
+        if (snapshot.delogo_enabled) {
+            foreach (string f in LogoDetectorLogic.build_delogo_filters (
+                         snapshot.delogo_regions)) {
+                filters += f;
+            }
+        }
+
         string[] rot_filters = get_rotation_filters_from_snapshot (snapshot);
         bool has_vflip = false;
         foreach (string f in rot_filters) {

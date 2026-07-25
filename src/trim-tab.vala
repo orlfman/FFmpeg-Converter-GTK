@@ -253,6 +253,7 @@ public class TrimTab : Box, ICodecTab {
     private bool cancel_pending = false;
     private bool speed_locked = false;      // true when speed filters force re-encode
     private bool watermark_locked = false;  // true when watermark forces re-encode
+    private bool logo_removal_locked = false;  // true when delogo forces re-encode
     private RunnerBinding? active_runner_binding = null;
     private GenericArray<ChapterRowBinding> chapter_row_bindings =
         new GenericArray<ChapterRowBinding> ();
@@ -2003,7 +2004,7 @@ public class TrimTab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void update_copy_mode_constraints () {
-        bool forced_reencode = speed_locked || watermark_locked;
+        bool forced_reencode = speed_locked || watermark_locked || logo_removal_locked;
         if (forced_reencode) {
             copy_mode_switch.set_active (false);
             copy_mode_switch.set_sensitive (false);
@@ -2019,6 +2020,11 @@ public class TrimTab : Box, ICodecTab {
 
     public void update_for_watermark (bool watermark_on) {
         watermark_locked = watermark_on;
+        update_copy_mode_constraints ();
+    }
+
+    public void update_for_logo_removal (bool logo_removal_on) {
+        logo_removal_locked = logo_removal_on;
         update_copy_mode_constraints ();
     }
 

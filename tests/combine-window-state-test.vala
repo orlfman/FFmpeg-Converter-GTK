@@ -1682,6 +1682,8 @@ private void test_conversion_runner_collage_command_uses_percentage_timestamps (
         "collage command captures the 96 percent frame");
     assert_array_has_adjacent_pair (argv, "-frames:v", "1",
         "collage command writes a single PNG frame");
+    assert_array_has_adjacent_pair (argv, "-update", "1",
+        "collage command tells image2 it is writing one image, not a sequence");
     assert_string_equal (
         argv[argv.length - 1],
         "/tmp/output-collage.png",

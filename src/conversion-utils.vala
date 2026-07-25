@@ -1023,6 +1023,11 @@ namespace ConversionUtils {
         cmd += "[outv]";
         cmd += "-frames:v";
         cmd += "1";
+        // Without -update the image2 muxer treats the path as a sequence
+        // template and warns that it has no %d in it.  The file comes out
+        // right either way; this just tells it a single image is intended.
+        cmd += "-update";
+        cmd += "1";
         cmd += collage_output_path;
 
         return cmd;

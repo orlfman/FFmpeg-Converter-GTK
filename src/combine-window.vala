@@ -234,8 +234,11 @@ public class CombineWindow : Adw.Window {
         set_operation_idle (op_state_source.is_operation_idle ());
         update_combine_sensitivity ();
 
-        // React to watermark changes while Combine is open
+        // React to watermark / logo removal changes while Combine is open
         general_tab.watermark_toggled.connect (() => {
+            sync_general_watermark_constraint ();
+        });
+        general_tab.logo_removal_toggled.connect (() => {
             sync_general_watermark_constraint ();
         });
     }
@@ -1588,10 +1591,14 @@ public class CombineWindow : Adw.Window {
     //  watermark is applied post-output automatically via the filter chain.
     //  When Combine is in copy mode, watermark cannot be applied — so if the
     //  user has watermark active, force re-encode.
+    //
+    //  Logo removal is subject to the same rule: delogo is a video filter, and
+    //  a stream copy never runs one.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void sync_general_watermark_constraint () {
-        bool active = general_tab.is_watermark_effectively_enabled ();
+        bool active = general_tab.is_watermark_effectively_enabled ()
+                      || general_tab.is_logo_removal_effectively_enabled ();
         bool was_active = watermark_forces_reencode;
         watermark_forces_reencode = active;
 

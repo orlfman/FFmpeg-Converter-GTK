@@ -56,6 +56,8 @@ public class AppController : Object {
     private string? drawtext_probe_cache_reason = null;
     private bool overlay_probe_cache_available = true;
     private string? overlay_probe_cache_reason = null;
+    private bool delogo_probe_cache_available = true;
+    private string? delogo_probe_cache_reason = null;
     private Cancellable? svt_crf_two_pass_probe_cancel = null;
     private int svt_crf_two_pass_probe_generation = 0;
     private string active_svt_crf_two_pass_cache_key = "";
@@ -142,9 +144,11 @@ public class AppController : Object {
     private void wire_all () {
         wire_file_input_changed ();
         wire_crop_detection ();
+        wire_logo_detection ();
         wire_audio_speed_constraint ();
         wire_video_speed_constraint ();
         wire_watermark_constraint ();
+        wire_logo_removal_constraint ();
         wire_drawtext_availability ();
         wire_svt_av1_crf_two_pass_capability ();
         wire_conversion_done ();
@@ -287,6 +291,10 @@ public class AppController : Object {
                 overlay_probe_cache_available,
                 overlay_probe_cache_reason
             );
+            general_tab.set_delogo_available (
+                delogo_probe_cache_available,
+                delogo_probe_cache_reason
+            );
             return;
         }
 
@@ -302,6 +310,8 @@ public class AppController : Object {
         string? dt_reason = null;
         bool ol_available = false;
         string? ol_reason = null;
+        bool dl_available = false;
+        string? dl_reason = null;
 
         try {
             string filters_output = yield run_subprocess_capture (
@@ -316,6 +326,10 @@ public class AppController : Object {
             ol_available = filters_output_supports_filter (filters_output, "overlay");
             if (!ol_available) {
                 ol_reason = "Unavailable — the selected FFmpeg build does not include the overlay filter";
+            }
+            dl_available = filters_output_supports_filter (filters_output, "delogo");
+            if (!dl_available) {
+                dl_reason = "Unavailable — the selected FFmpeg build does not include the delogo filter";
             }
         } catch (IOError.CANCELLED e) {
             if (drawtext_probe_cancel == cancellable) {
@@ -346,27 +360,34 @@ public class AppController : Object {
 
         apply_filter_probe_result (ffmpeg_path,
             dt_available, dt_reason,
-            ol_available, ol_reason);
+            ol_available, ol_reason,
+            dl_available, dl_reason);
     }
 
     private void apply_filter_probe_result (string ffmpeg_path,
                                             bool dt_available,
                                             string? dt_reason,
                                             bool ol_available,
-                                            string? ol_reason) {
+                                            string? ol_reason,
+                                            bool dl_available,
+                                            string? dl_reason) {
         drawtext_probe_cache_valid = true;
         drawtext_probe_cache_path = ffmpeg_path;
         drawtext_probe_cache_available = dt_available;
         drawtext_probe_cache_reason = dt_reason;
         overlay_probe_cache_available = ol_available;
         overlay_probe_cache_reason = ol_reason;
+        delogo_probe_cache_available = dl_available;
+        delogo_probe_cache_reason = dl_reason;
         general_tab.set_drawtext_available (dt_available, dt_reason);
         general_tab.set_overlay_available (ol_available, ol_reason);
+        general_tab.set_delogo_available (dl_available, dl_reason);
     }
 
     private void apply_filter_probe_error_result (string failure_reason) {
         general_tab.set_drawtext_available (false, failure_reason);
         general_tab.set_overlay_available (false, failure_reason);
+        general_tab.set_delogo_available (false, failure_reason);
     }
 
     private static bool filters_output_supports_filter (string output, string filter_name) {
@@ -480,6 +501,7 @@ public class AppController : Object {
             info_tab.load_input_info (path);
             info_tab.reset_output ();
             general_tab.reset_crop ();
+            general_tab.reset_logo_removal ();
             trim_tab.load_video (path);
             audio_tab.load_video (path);
             subtitles_tab.load_video (path);
@@ -527,6 +549,15 @@ public class AppController : Object {
         });
     }
 
+    // ── Watermark detection button → uses input file + console ──────────────
+
+    private void wire_logo_detection () {
+        general_tab.logo_detect_clicked.connect (() => {
+            string input_file = file_pickers.input_entry.get_text ();
+            general_tab.start_logo_detection (input_file, console_tab);
+        });
+    }
+
     // ── Audio speed → disable "Copy" in all codec tab audio lists ───────────
 
     private void wire_audio_speed_constraint () {
@@ -553,6 +584,14 @@ public class AppController : Object {
     private void wire_watermark_constraint () {
         general_tab.watermark_toggled.connect ((on) => {
             trim_tab.update_for_watermark (on);
+        });
+    }
+
+    // ── Logo removal → force re-encode in Trim tab ──────────────────────────
+
+    private void wire_logo_removal_constraint () {
+        general_tab.logo_removal_toggled.connect ((on) => {
+            trim_tab.update_for_logo_removal (on);
         });
     }
 

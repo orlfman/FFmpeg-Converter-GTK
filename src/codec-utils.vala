@@ -53,6 +53,10 @@ public class GeneralSettingsSnapshot : Object {
     public int watermark_font_size = 24;
     public string watermark_image_path = "";
     public int watermark_image_width = 150;
+    // Logo removal — the inverse of the watermark options above. Regions are
+    // "x:y:w:h" entries in source-frame coordinates, comma separated.
+    public bool delogo_enabled = false;
+    public string delogo_regions = "";
 }
 
 public class CodecTabSettingsSnapshot : Object {

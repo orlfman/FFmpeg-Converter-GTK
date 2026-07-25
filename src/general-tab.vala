@@ -54,6 +54,12 @@ public class GeneralTab : Box {
         "Unavailable — the selected FFmpeg build does not include the drawtext filter";
     private const string WATERMARK_OVERLAY_UNAVAILABLE =
         "Unavailable — the selected FFmpeg build does not include the overlay filter";
+    private const string DELOGO_SUBTITLE_DEFAULT =
+        "Find a station logo or watermark and paint it out";
+    private const string DELOGO_UNAVAILABLE =
+        "Unavailable — the selected FFmpeg build does not include the delogo filter";
+    private const string DELOGO_DETECT_SUBTITLE_DEFAULT =
+        "Scan the video for a watermark that stays in one place";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -152,6 +158,18 @@ public class GeneralTab : Box {
     private bool overlay_available = true;
     private string? overlay_unavailable_reason = null;
 
+    // ── Logo Removal (delogo) ───────────────────────────────────────────────
+    public Switch delogo_check        { get; private set; }
+    public Button detect_logo_button  { get; private set; }
+    public Entry  delogo_value        { get; private set; }
+
+    private Adw.ExpanderRow delogo_expander;
+    private Adw.ActionRow delogo_detect_row;
+    private uint delogo_detect_gen = 0;
+    private bool last_delogo_effective = false;
+    private bool delogo_available = true;
+    private string? delogo_unavailable_reason = null;
+
     // ── Forwarding Signals ─────────────────────────────────────────────────
     //    Emitted when the corresponding effective feature state changes.
     //    For speed controls, that means the toggle is on and the percent is
@@ -166,6 +184,10 @@ public class GeneralTab : Box {
     public signal void crop_detect_clicked ();
     /** Fired when effective watermark state changes. */
     public signal void watermark_toggled (bool active);
+    /** Fired when the Detect Watermark button is clicked. */
+    public signal void logo_detect_clicked ();
+    /** Fired when effective logo removal state changes. */
+    public signal void logo_removal_toggled (bool active);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -269,6 +291,16 @@ public class GeneralTab : Box {
 
         last_watermark_effective = active;
         watermark_toggled (active);
+    }
+
+    private void emit_logo_removal_if_changed () {
+        bool active = is_logo_removal_effectively_enabled ();
+        if (active == last_delogo_effective) {
+            return;
+        }
+
+        last_delogo_effective = active;
+        logo_removal_toggled (active);
     }
 
     private SpinButton create_speed_spin () {
@@ -683,7 +715,7 @@ public class GeneralTab : Box {
     private void build_watermark_group () {
         var group = new Adw.PreferencesGroup ();
         group.set_title ("Watermark");
-        group.set_description ("Overlay text or an image on the output video");
+        group.set_description ("Add a watermark to the output — or take one out of the source");
 
         watermark_check = new Switch ();
         watermark_check.set_active (false);
@@ -825,7 +857,56 @@ public class GeneralTab : Box {
         });
 
         group.add (watermark_expander);
+        build_logo_removal_rows (group);
         append (group);
+    }
+
+    // ── Logo Removal ─────────────────────────────────────────────────────────
+    //    The inverse of the rows above: instead of stamping a watermark on the
+    //    output, find the one already burned into the source and paint it out
+    //    with delogo.  The user is not expected to know where the watermark is
+    //    or how big it is — that is what the Detect button is for.
+
+    private void build_logo_removal_rows (Adw.PreferencesGroup group) {
+        delogo_check = new Switch ();
+        delogo_check.set_active (false);
+
+        delogo_expander = new Adw.ExpanderRow ();
+        delogo_expander.set_title ("Logo Removal");
+        delogo_expander.set_subtitle (DELOGO_SUBTITLE_DEFAULT);
+        delogo_expander.set_show_enable_switch (true);
+        delogo_expander.set_enable_expansion (false);
+
+        delogo_check.bind_property ("active", delogo_expander, "enable-expansion",
+            BindingFlags.BIDIRECTIONAL | BindingFlags.SYNC_CREATE);
+
+        // ── Detect ───────────────────────────────────────────────────────────
+        delogo_detect_row = new Adw.ActionRow ();
+        delogo_detect_row.set_title ("Auto-Detect");
+        delogo_detect_row.set_subtitle (DELOGO_DETECT_SUBTITLE_DEFAULT);
+
+        detect_logo_button = new Button.with_label ("Detect Watermark");
+        detect_logo_button.add_css_class ("suggested-action");
+        detect_logo_button.set_valign (Align.CENTER);
+        detect_logo_button.set_tooltip_text (
+            "Sample the video and locate a watermark that stays in one place");
+        delogo_detect_row.add_suffix (detect_logo_button);
+        delogo_expander.add_row (delogo_detect_row);
+
+        // ── Region ───────────────────────────────────────────────────────────
+        //    Filled in by detection.  Editable so an off-by-a-few result can be
+        //    nudged without re-scanning, but nobody has to touch it.
+        var region_row = new Adw.ActionRow ();
+        region_row.set_title ("Region");
+        region_row.set_subtitle ("Filled in automatically — x:y:w:h, comma separated");
+        delogo_value = new Entry ();
+        delogo_value.set_placeholder_text ("Press Detect Watermark");
+        delogo_value.set_valign (Align.CENTER);
+        delogo_value.set_width_chars (22);
+        region_row.add_suffix (delogo_value);
+        delogo_expander.add_row (region_row);
+
+        group.add (delogo_expander);
     }
 
     private void update_watermark_mode_visibility () {
@@ -971,6 +1052,17 @@ public class GeneralTab : Box {
             emit_watermark_if_changed ();
         });
         // Mode and image path changes are wired in build_watermark_group().
+
+        // ── Logo removal forwarding ─────────────────────────────────────────
+        detect_logo_button.clicked.connect (() => {
+            logo_detect_clicked ();
+        });
+        delogo_check.notify["active"].connect (() => {
+            emit_logo_removal_if_changed ();
+        });
+        delogo_value.changed.connect (() => {
+            emit_logo_removal_if_changed ();
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1054,6 +1146,8 @@ public class GeneralTab : Box {
         snapshot.watermark_font_size = (int) watermark_font_size.get_value ();
         snapshot.watermark_image_path = watermark_image_path;
         snapshot.watermark_image_width = (int) watermark_image_width.get_value ();
+        snapshot.delogo_enabled = is_logo_removal_effectively_enabled ();
+        snapshot.delogo_regions = get_delogo_regions_text ();
         return snapshot;
     }
 
@@ -1525,6 +1619,22 @@ public class GeneralTab : Box {
         detect_crop_button.sensitive = true;
     }
 
+    /**
+     * Clears a previous detection. Regions are in source-frame pixels, so they
+     * are meaningless against a different file — the caller resets on every
+     * input change.
+     */
+    public void reset_logo_removal () {
+        delogo_detect_gen++;
+        delogo_check.active = false;
+        delogo_value.text = "";
+        detect_logo_button.sensitive = true;
+        delogo_detect_row.set_subtitle (DELOGO_DETECT_SUBTITLE_DEFAULT);
+        delogo_expander.set_subtitle (
+            delogo_available ? DELOGO_SUBTITLE_DEFAULT : DELOGO_UNAVAILABLE);
+        emit_logo_removal_if_changed ();
+    }
+
     // ── Frame Rate ───────────────────────────────────────────────────────────
 
     public string get_custom_frame_rate_text () { return custom_frame_rate.text.strip (); }
@@ -1619,6 +1729,110 @@ public class GeneralTab : Box {
         int g = (int) Math.round (rgba.green * 255.0).clamp (0, 255);
         int b = (int) Math.round (rgba.blue * 255.0).clamp (0, 255);
         return "%02x%02x%02x".printf (r, g, b);
+    }
+
+    // ── Logo Removal ─────────────────────────────────────────────────────────
+
+    /**
+     * Logo removal only counts as active once detection (or a hand-typed
+     * region) has produced something delogo can actually use.
+     */
+    public bool is_logo_removal_effectively_enabled () {
+        if (!delogo_check.active || !delogo_available) return false;
+        return LogoDetectorLogic.parse_regions (delogo_value.text).length > 0;
+    }
+
+    public string get_delogo_regions_text () {
+        return delogo_value.text.strip ();
+    }
+
+    public void set_delogo_available (bool available, string? reason = null) {
+        delogo_available = available;
+        delogo_unavailable_reason = reason;
+
+        if (!available) {
+            delogo_check.set_active (false);
+            delogo_expander.set_enable_expansion (false);
+        }
+        delogo_expander.set_sensitive (available);
+
+        string hint = available
+            ? DELOGO_SUBTITLE_DEFAULT
+            : (delogo_unavailable_reason ?? DELOGO_UNAVAILABLE);
+        delogo_expander.set_subtitle (hint);
+        delogo_expander.set_tooltip_text (available ? null : hint);
+
+        emit_logo_removal_if_changed ();
+    }
+
+    /**
+     * Kicks off a watermark scan on a worker thread. Mirrors crop detection:
+     * a generation counter retires results that land after the user has moved
+     * on to another file.
+     */
+    public void start_logo_detection (string input_file, ConsoleTab console_tab) {
+        if (input_file.strip () == "") {
+            delogo_detect_row.set_subtitle ("Please select an input file first");
+            return;
+        }
+        if (!delogo_available) {
+            delogo_detect_row.set_subtitle (
+                delogo_unavailable_reason ?? DELOGO_UNAVAILABLE);
+            return;
+        }
+
+        detect_logo_button.sensitive = false;
+        delogo_detect_row.set_subtitle ("Scanning the video for a watermark…");
+
+        console_tab.add_line ("=== Watermark Detection Started ===");
+
+        uint generation = ++delogo_detect_gen;
+        new Thread<void> ("logo-detect-thread", () => {
+            perform_logo_detection (input_file, console_tab, generation);
+        });
+    }
+
+    private void perform_logo_detection (string input_file,
+                                         ConsoleTab console_tab,
+                                         uint generation) {
+        var settings = AppSettings.get_default ();
+
+        LogoDetectionResult result = LogoDetector.run (
+            input_file,
+            settings.ffmpeg_path,
+            settings.ffprobe_path,
+            (line) => {
+                string message = line;
+                Idle.add (() => {
+                    console_tab.add_line (message);
+                    return Source.REMOVE;
+                });
+            }
+        );
+
+        Idle.add (() => {
+            if (generation != delogo_detect_gen) return Source.REMOVE;
+            apply_logo_detection_result (result, console_tab);
+            return Source.REMOVE;
+        });
+    }
+
+    private void apply_logo_detection_result (LogoDetectionResult result,
+                                              ConsoleTab console_tab) {
+        detect_logo_button.sensitive = true;
+
+        if (result.success) {
+            delogo_value.set_text (result.regions);
+            delogo_detect_row.set_subtitle (result.message);
+            delogo_check.set_active (true);
+            console_tab.add_line ("✅ " + result.message + " — " + result.regions);
+        } else {
+            delogo_value.set_text ("");
+            delogo_detect_row.set_subtitle (result.message);
+            console_tab.add_line ("⚠️ " + result.message);
+        }
+
+        emit_logo_removal_if_changed ();
     }
 
 #if COMBINE_WINDOW_TEST_BUILD
