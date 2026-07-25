@@ -83,12 +83,22 @@ public class EncodeProfileSnapshot : Object {
     public bool preserve_all_audio_tracks = false;
     public string video_filters = "";
     public string video_filters_skip_crop = "";
-    // Crop & Trim supplies its own per-segment crop, which has to sit between
-    // delogo and the rest of the chain — delogo's coordinates are source-frame,
-    // everything after the crop works on cropped geometry. Neither of the two
-    // chains above can express that, so the pieces are carried separately and
-    // reassembled around the segment crop in TrimRunner.build_segment_vf.
-    public string video_delogo_filters = "";
+    // Logo removal cannot always be pre-rendered with the rest of the chain,
+    // because two of its properties depend on the caller rather than the
+    // settings:
+    //
+    //   • Position. delogo's rectangles are source-frame, so a per-segment crop
+    //     has to be spliced in *after* them (Crop & Trim supplies one).
+    //   • Time. A timed region's interval is on the source timeline, but any
+    //     path that seeks its input with -ss ahead of -i is handed frames whose
+    //     timestamps start near zero — measured, not assumed.
+    //
+    // So the regions travel as data and the two chains around them are carried
+    // separately, to be reassembled by
+    // FilterBuilder.build_video_filter_chain_for_segment.
+    public bool delogo_enabled = false;
+    public string delogo_regions = "";
+    public string video_filters_skip_delogo = "";
     public string video_filters_skip_crop_and_delogo = "";
     public string combine_video_filters_per_input = "";
     public string combine_video_filters_post_output = "";
@@ -460,8 +470,11 @@ namespace CodecUtils {
                 general_settings, false, snapshot.codec_name);
             snapshot.video_filters_skip_crop = FilterBuilder.build_video_filter_chain_from_snapshot (
                 general_settings, true, snapshot.codec_name);
-            snapshot.video_delogo_filters =
-                FilterBuilder.build_delogo_filter_chain_from_snapshot (general_settings);
+            snapshot.delogo_enabled = general_settings.delogo_enabled;
+            snapshot.delogo_regions = general_settings.delogo_regions;
+            snapshot.video_filters_skip_delogo =
+                FilterBuilder.build_video_filter_chain_from_snapshot (
+                    general_settings, false, snapshot.codec_name, true);
             snapshot.video_filters_skip_crop_and_delogo =
                 FilterBuilder.build_video_filter_chain_from_snapshot (
                     general_settings, true, snapshot.codec_name, true);

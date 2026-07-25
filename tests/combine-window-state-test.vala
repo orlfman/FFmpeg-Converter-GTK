@@ -4713,6 +4713,66 @@ private void test_encode_profile_carries_watermark_fields () {
     assert_true ((int) profile.watermark_margin == 15, "profile watermark_margin");
 }
 
+// The moving scan writes timed entries into the same Region field the static
+// scan uses, so everything downstream that asked "is there a region?" has to
+// recognise both forms — otherwise the whole feature silently does nothing.
+private void test_timed_regions_enable_logo_removal () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+    general.delogo_check.set_active (true);
+
+    general.delogo_value.set_text ("");
+    assert_false (general.is_logo_removal_effectively_enabled (),
+        "an empty region field leaves logo removal inactive");
+
+    general.delogo_value.set_text ("10:20:30:40");
+    assert_true (general.is_logo_removal_effectively_enabled (),
+        "a static region activates logo removal");
+
+    general.delogo_value.set_text ("12.5-28.0:1416:1:504:288");
+    assert_true (general.is_logo_removal_effectively_enabled (),
+        "a timed region activates logo removal");
+
+    general.delogo_value.set_text ("not a region");
+    assert_false (general.is_logo_removal_effectively_enabled (),
+        "unparseable text leaves logo removal inactive");
+
+    // And the timed text reaches the conversion path intact.
+    general.delogo_value.set_text ("12.5-28.0:1416:1:504:288");
+    var snapshot = general.snapshot_settings ();
+    assert_true (snapshot.delogo_enabled, "snapshot carries the enabled flag");
+    assert_string_equal (snapshot.delogo_regions, "12.5-28.0:1416:1:504:288",
+        "snapshot carries the timed region text verbatim");
+}
+
+private void test_both_logo_detect_buttons_reset_together () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var general = new GeneralTab ();
+    assert_string_equal (general.detect_logo_button.get_label (), "Detect Watermark",
+        "static detect button label");
+    assert_string_equal (general.detect_moving_logo_button.get_label (), "Detect Moving",
+        "moving detect button label");
+
+    // Either scan locks both buttons, since both write the same field.
+    general.detect_logo_button.sensitive = false;
+    general.detect_moving_logo_button.sensitive = false;
+    general.delogo_value.set_text ("12.5-28.0:1416:1:504:288");
+    general.delogo_check.set_active (true);
+
+    general.reset_logo_removal ();
+
+    assert_true (general.detect_logo_button.sensitive,
+        "reset re-enables the static detect button");
+    assert_true (general.detect_moving_logo_button.sensitive,
+        "reset re-enables the moving detect button");
+    assert_string_equal (general.delogo_value.get_text (), "",
+        "reset clears the region field");
+    assert_false (general.is_logo_removal_effectively_enabled (),
+        "reset leaves logo removal inactive");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -5032,6 +5092,10 @@ void main (string[] args) {
         test_image_watermark_snapshot_fields);
     Test.add_func ("/combine/image-watermark/encode-profile-carries-fields",
         test_encode_profile_carries_watermark_fields);
+    Test.add_func ("/general/logo-removal/timed-regions-count-as-enabled",
+        test_timed_regions_enable_logo_removal);
+    Test.add_func ("/general/logo-removal/both-detect-buttons-reset-together",
+        test_both_logo_detect_buttons_reset_together);
 
     Test.run ();
 }

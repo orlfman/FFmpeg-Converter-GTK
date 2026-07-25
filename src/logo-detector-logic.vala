@@ -45,6 +45,103 @@ public class LogoRegion : Object {
     }
 }
 
+/**
+ * A rectangle that only applies for part of the video.
+ *
+ * The static detector answers "where is the watermark"; this answers "where
+ * was it, when".  A logo that sits in one corner for a minute and then jumps
+ * to another is a sequence of these, each one a rectangle delogo can be
+ * switched on and off for with its enable= timeline expression.
+ *
+ * Times are in seconds on the *source* timeline, which is not necessarily the
+ * timeline the filter sees — see build_delogo_filters' time_offset.
+ */
+public class TimedLogoRegion : Object {
+    public double start { get; set; default = 0.0; }
+    public double end { get; set; default = 0.0; }
+    public int x { get; set; default = 0; }
+    public int y { get; set; default = 0; }
+    public int width { get; set; default = 0; }
+    public int height { get; set; default = 0; }
+    public double score { get; set; default = 0.0; }
+
+    /**
+     * How many sample windows agreed on this rectangle. One window is a
+     * coincidence; several in a row is a watermark. See
+     * MOVING_TRACK_MIN_WINDOWS.
+     */
+    public int window_count { get; set; default = 0; }
+
+    public TimedLogoRegion (double start, double end,
+                            int x, int y, int width, int height,
+                            double score = 0.0, int window_count = 0) {
+        this.start = start;
+        this.end = end;
+        this.x = x;
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.score = score;
+        this.window_count = window_count;
+    }
+
+    public LogoRegion to_region () {
+        return new LogoRegion (x, y, width, height, score);
+    }
+
+    /**
+     * The same interval and evidence, carrying a rectangle measured somewhere
+     * else — verification returns a tighter, better-averaged box than the
+     * short windows that proposed the interval.
+     */
+    public TimedLogoRegion with_region (LogoRegion replacement) {
+        return new TimedLogoRegion (start, end,
+                                    replacement.x, replacement.y,
+                                    replacement.width, replacement.height,
+                                    replacement.score, window_count);
+    }
+
+    /**
+     * Serializes to "start-end:x:y:w:h" — one field more than the static form,
+     * and the leading dash is what tells the two apart when parsing.
+     *
+     * Times carry one decimal: enough to land on the right side of a cut,
+     * short enough that the Region entry stays readable.
+     */
+    public string to_region_string () {
+        return "%s-%s:%d:%d:%d:%d".printf (
+            format_seconds (start), format_seconds (end), x, y, width, height);
+    }
+
+    /**
+     * g_ascii_formatd rather than printf: a comma decimal separator would
+     * produce a filter argument FFmpeg cannot parse under some locales.
+     */
+    private static string format_seconds (double value) {
+        char[] buffer = new char[32];
+        value.format (buffer, "%.1f");
+        return (string) buffer;
+    }
+}
+
+/**
+ * What one sample window saw: a rectangle, and when.
+ *
+ * The moving detector produces a pile of these — one per region per window —
+ * and association stitches them into TimedLogoRegions.
+ */
+public class LogoWindowDetection : Object {
+    public double start { get; set; default = 0.0; }
+    public double end { get; set; default = 0.0; }
+    public LogoRegion region { get; set; }
+
+    public LogoWindowDetection (double start, double end, LogoRegion region) {
+        this.start = start;
+        this.end = end;
+        this.region = region;
+    }
+}
+
 /** One stretch of the video to sample frames from. */
 public class LogoSampleWindow : Object {
     public double start { get; set; default = 0.0; }
@@ -333,6 +430,124 @@ namespace LogoDetectorLogic {
     private const int MIN_PADDING_PX = 2;
     private const double PADDING_FRACTION = 0.004;
 
+    // ── Moving watermarks ────────────────────────────────────────────────────
+    //    A second, opt-in mode for logos the static scan is designed to reject.
+    //
+    //    The trick is that "moving" usually means "moves between positions",
+    //    not "moves every frame": a banner sits in one corner for a minute and
+    //    then jumps.  Over a short enough window such a logo *is* static, so
+    //    the same detector finds it — the video is scanned in many short
+    //    windows instead of three long ones, and the per-window answers are
+    //    stitched back together into timed rectangles.
+    //
+    //    What that costs is the very thing the static thresholds rely on.  The
+    //    discriminator is "held still while the scene moved", and a four-second
+    //    window contains far less scene movement, so scenery averages away less
+    //    and keeps enough sharp edges to look like an overlay.  Measured on the
+    //    test corpus, every short window of both clean synthetic clips produces
+    //    a detection that the full-length scan correctly rejects.
+    //
+    //    That is what MOVING_TRACK_MIN_WINDOWS is for, and it is the reason
+    //    association is not optional polish: a real logo lands in the same place
+    //    window after window, while a false positive wanders and changes size.
+    //    Requiring agreement across windows is the only thing separating them.
+    public const double MOVING_WINDOW_SECONDS = 4.0;
+    private const double MOVING_WINDOW_STRIDE = 4.0;
+    private const double MOVING_MIN_WINDOW_SECONDS = 2.0;
+
+    /**
+     * Higher than the static path's 2fps. It buys no extra scene movement —
+     * the window is still four seconds — but it does steady the per-pixel
+     * deviation estimate, and a noisy estimate is itself a source of phantom
+     * static pixels. Sixteen frames per window against the static scan's ~60.
+     */
+    private const double MOVING_WINDOW_FPS = 4.0;
+
+    /**
+     * Ceiling on the number of windows, whatever the duration. Past this the
+     * stride is stretched to cover the whole video more thinly, because a scan
+     * nobody waits for is worse than a coarse one.
+     */
+    private const int MAX_MOVING_WINDOWS = 48;
+
+    /**
+     * Intersection-over-union required to call two windows' rectangles the
+     * same watermark, and so group them into one candidate interval.
+     *
+     * Grouping only — it is not what decides whether a candidate is real. IoU
+     * turned out unable to make that call: measured on the corpus, genuine
+     * consecutive sightings of the drifting "CANDID YORKSHIRE" banner overlap
+     * at 0.41, because the detector sometimes catches the whole yellow field and
+     * sometimes only its line of text, while successive false positives on the
+     * clean mandelbrot clip overlap at 0.52. The threshold that keeps the real
+     * one would admit the fake. Verification below is what separates them.
+     */
+    private const double MOVING_TRACK_MIN_IOU = 0.5;
+
+    /**
+     * Sightings more than this many window strides apart start a new candidate,
+     * which lets a track survive a window or two that missed the logo.
+     */
+    private const double MOVING_TRACK_MAX_GAP_WINDOWS = 2.0;
+
+    /**
+     * Candidates seen in fewer windows than this are dropped before
+     * verification. A cheap pre-filter, not a correctness gate: verification
+     * costs a decode, and a lone sighting is rarely worth one.
+     */
+    private const int MOVING_TRACK_MIN_WINDOWS = 2;
+
+    /**
+     * The shortest stretch a candidate is verified over.
+     *
+     * Verification re-runs the ordinary detector across a candidate's whole
+     * interval, which restores the very thing short windows take away: enough
+     * scene movement for "held still while the picture moved" to mean anything.
+     * Length is what makes it work, and the corpus shows where the line falls.
+     * The clean mandelbrot clip's false positive survives verification over its
+     * own 8.4s interval and is rejected over 16s. Candidates shorter than this
+     * are widened around their midpoint before being judged.
+     */
+    private const double MOVING_VERIFY_SECONDS = 16.0;
+
+    /**
+     * How much of the verified rectangle has to fall inside the proposed one to
+     * count as the same watermark — as a fraction of the smaller of the two,
+     * not of their union, because verification legitimately returns a tighter
+     * box than the union of noisy short-window sightings. On the corpus's one
+     * true positive the verified box sits entirely inside the proposal.
+     */
+    private const double MOVING_VERIFY_MIN_OVERLAP = 0.5;
+
+    /**
+     * How far apart two *verified* regions in the same place can be and still be
+     * treated as one stretch, in window strides.
+     *
+     * Fragmentation is the cost of grouping tightly, and it shows up as the
+     * watermark reappearing mid-output. Measured on a real 6-minute caption
+     * clip: the caption's box shrinks and grows as different glyphs register
+     * (131×40, then 64×34, then 29×33), which splits it into three candidates
+     * and leaves a 26-second hole where the caption was detected but not
+     * painted. Both sides of such a hole have already passed verification in the
+     * same place, which is strong enough evidence to bridge it.
+     *
+     * Counted in strides rather than seconds because a longer video is sampled
+     * more sparsely, so the same run of missed windows spans more wall clock.
+     * On the corpus this bridges gaps of 27s and 11s while refusing the 36s and
+     * 41s ones, where the logo really had gone away.
+     */
+    private const double MOVING_MERGE_MAX_GAP_WINDOWS = 5.0;
+
+    /**
+     * Slack added to each end of a track's interval, so a logo does not flicker
+     * back for the fraction of a second between the last window that saw it and
+     * the first that did not.
+     */
+    private const double MOVING_TRACK_TIME_PADDING = 0.4;
+
+    /** Each timed region is another delogo instance in the chain. */
+    private const int MAX_TIMED_REGIONS = 12;
+
     // ═════════════════════════════════════════════════════════════════════════
     //  SAMPLING PLAN
     // ═════════════════════════════════════════════════════════════════════════
@@ -375,8 +590,8 @@ namespace LogoDetectorLogic {
         }
 
         if (duration <= SHORT_VIDEO_SECONDS) {
-            double fps = (TARGET_FRAMES_SHORT / duration).clamp (MIN_SAMPLE_FPS, MAX_SAMPLE_FPS);
-            windows += new LogoSampleWindow (0.0, duration, fps);
+            windows += new LogoSampleWindow (0.0, duration,
+                                             sample_fps_for_length (duration));
             return windows;
         }
 
@@ -393,6 +608,121 @@ namespace LogoDetectorLogic {
             windows += new LogoSampleWindow (0.0, duration, WINDOW_FPS);
         }
         return windows;
+    }
+
+    /**
+     * The moving mode's sampling plan: many short windows marching through the
+     * whole video, rather than three long ones spread across it.
+     *
+     * Short is the point. A banner that sits in one corner for a minute and
+     * then jumps is not static over the video, but it is static over four
+     * seconds of it, which is what lets the ordinary detector see it at all.
+     *
+     * Past MAX_MOVING_WINDOWS the stride stretches instead of the window count
+     * growing, so a feature-length file is covered thinly end to end rather
+     * than thoroughly for its first three minutes.
+     */
+    public LogoSampleWindow[] plan_dense_sample_windows (double duration) {
+        LogoSampleWindow[] windows = {};
+
+        if (!duration.is_finite () || duration <= 0.0) {
+            // No timeline to march through — one window is all that can be
+            // planned, and association will treat it as a single sighting.
+            windows += new LogoSampleWindow (0.0, UNKNOWN_DURATION_WINDOW,
+                                             MOVING_WINDOW_FPS);
+            return windows;
+        }
+
+        if (duration < MOVING_WINDOW_SECONDS + MOVING_MIN_WINDOW_SECONDS) {
+            // Too short to carve up into windows that could disagree.
+            windows += new LogoSampleWindow (0.0, duration, MOVING_WINDOW_FPS);
+            return windows;
+        }
+
+        double stride = MOVING_WINDOW_STRIDE;
+        int count = (int) Math.ceil (duration / stride);
+        if (count > MAX_MOVING_WINDOWS) {
+            count = MAX_MOVING_WINDOWS;
+            stride = duration / count;
+        }
+
+        for (int i = 0; i < count; i++) {
+            double start = i * stride;
+            double length = double.min (MOVING_WINDOW_SECONDS, duration - start);
+            if (length < MOVING_MIN_WINDOW_SECONDS) break;
+            windows += new LogoSampleWindow (start, length, MOVING_WINDOW_FPS);
+        }
+
+        if (windows.length == 0) {
+            windows += new LogoSampleWindow (0.0, duration, MOVING_WINDOW_FPS);
+        }
+        return windows;
+    }
+
+    /** Frames per second that puts about TARGET_FRAMES_SHORT frames in a window. */
+    public double sample_fps_for_length (double length) {
+        if (!length.is_finite () || length <= 0.0) return WINDOW_FPS;
+        return (TARGET_FRAMES_SHORT / length).clamp (MIN_SAMPLE_FPS, MAX_SAMPLE_FPS);
+    }
+
+    /**
+     * The window a candidate interval is verified over: the interval itself,
+     * widened around its midpoint to MOVING_VERIFY_SECONDS if it is shorter,
+     * and sampled at the same frame count the static scan would use.
+     *
+     * Widening is what makes verification mean something. A four-second
+     * candidate re-checked over four seconds is the same measurement that
+     * proposed it, and passes for the same wrong reason.
+     */
+    public LogoSampleWindow plan_verification_window (double start, double end,
+                                                      double duration) {
+        double from = double.max (0.0, start);
+        double to = double.max (from + MOVING_MIN_WINDOW_SECONDS, end);
+
+        if (to - from < MOVING_VERIFY_SECONDS) {
+            double middle = (from + to) * 0.5;
+            from = middle - MOVING_VERIFY_SECONDS * 0.5;
+            to = middle + MOVING_VERIFY_SECONDS * 0.5;
+
+            if (from < 0.0) {
+                to -= from;
+                from = 0.0;
+            }
+        }
+
+        if (duration > 0.0 && duration.is_finite ()) {
+            if (to > duration) {
+                from = double.max (0.0, from - (to - duration));
+                to = duration;
+            }
+        }
+
+        double length = to - from;
+        return new LogoSampleWindow (from, length, sample_fps_for_length (length));
+    }
+
+    /**
+     * True when @verified describes the same watermark as @proposed.
+     *
+     * Measured as a fraction of the smaller rectangle: verification averages
+     * over a longer stretch and legitimately returns a tighter box than the
+     * union of the short windows that proposed it, which an
+     * intersection-over-union test would punish it for. Symmetric, so
+     * merge_timed_regions can use it for "same place" without picking an order.
+     */
+    public bool regions_overlap_enough (LogoRegion proposed, LogoRegion verified) {
+        int ix0 = int.max (proposed.x, verified.x);
+        int iy0 = int.max (proposed.y, verified.y);
+        int ix1 = int.min (proposed.x + proposed.width, verified.x + verified.width);
+        int iy1 = int.min (proposed.y + proposed.height, verified.y + verified.height);
+        if (ix1 <= ix0 || iy1 <= iy0) return false;
+
+        double intersection = (double) (ix1 - ix0) * (double) (iy1 - iy0);
+        double smaller = double.min ((double) proposed.width * proposed.height,
+                                     (double) verified.width * verified.height);
+        if (smaller <= 0.0) return false;
+
+        return intersection / smaller >= MOVING_VERIFY_MIN_OVERLAP;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -522,6 +852,220 @@ namespace LogoDetectorLogic {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  ASSOCIATION  (moving watermarks)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * One watermark's run of sightings, while it is still being extended.
+     * An implementation detail of associate_timed_regions; what comes out the
+     * other side is a TimedLogoRegion.
+     */
+    private class LogoTrackBuilder : Object {
+        public double start;
+        public double end;
+
+        /**
+         * The most recent sighting, which is what a candidate is matched
+         * against. Matching against the running union instead would let a track
+         * widen its own acceptance window sighting by sighting.
+         */
+        public LogoRegion last;
+        public int windows;
+
+        private int x0;
+        private int y0;
+        private int x1;
+        private int y1;
+        private double score_sum;
+
+        public LogoTrackBuilder (LogoWindowDetection detection) {
+            start = detection.start;
+            end = detection.end;
+            last = detection.region;
+            windows = 1;
+            score_sum = detection.region.score;
+
+            x0 = detection.region.x;
+            y0 = detection.region.y;
+            x1 = detection.region.x + detection.region.width;
+            y1 = detection.region.y + detection.region.height;
+        }
+
+        public void extend (LogoWindowDetection detection) {
+            end = double.max (end, detection.end);
+            last = detection.region;
+            windows++;
+            score_sum += detection.region.score;
+
+            // delogo gets one rectangle for the whole interval, so it has to
+            // cover the watermark everywhere it was seen — the union, not the
+            // latest sighting. The IoU floor on linking bounds how far that can
+            // grow.
+            x0 = int.min (x0, detection.region.x);
+            y0 = int.min (y0, detection.region.y);
+            x1 = int.max (x1, detection.region.x + detection.region.width);
+            y1 = int.max (y1, detection.region.y + detection.region.height);
+        }
+
+        public TimedLogoRegion build (double duration) {
+            double from = double.max (0.0, start - MOVING_TRACK_TIME_PADDING);
+            double to = end + MOVING_TRACK_TIME_PADDING;
+            if (duration > 0.0 && duration.is_finite () && to > duration) {
+                to = duration;
+            }
+
+            return new TimedLogoRegion (from, to, x0, y0, x1 - x0, y1 - y0,
+                                        score_sum / windows, windows);
+        }
+    }
+
+    /**
+     * Groups per-window sightings into candidate timed rectangles.
+     *
+     * These are proposals, not answers. A four-second window holds little scene
+     * movement, so the per-window pass reports far more than it should —
+     * measured on the corpus, nearly every short window of both clean synthetic
+     * clips yields a rectangle the full-length scan correctly rejects. No
+     * property of the grouping separates those from a real logo; that is what
+     * verification is for (see plan_verification_window). What grouping decides
+     * is *where the intervals fall*, and getting them roughly right is what
+     * gives verification a long enough stretch to judge.
+     *
+     * @window_stride  spacing between sample windows, which sets how long a run
+     *                 of misses a candidate can survive. Pass 0 to derive it
+     *                 from MOVING_WINDOW_SECONDS.
+     * @duration       when known, clamps the padded end of the last candidate.
+     */
+    public TimedLogoRegion[] associate_timed_regions (LogoWindowDetection[] detections,
+                                                      double window_stride = 0.0,
+                                                      double duration = 0.0) {
+        TimedLogoRegion[] result = {};
+        if (detections.length == 0) return result;
+
+        LogoWindowDetection[] ordered = {};
+        foreach (LogoWindowDetection detection in detections) {
+            ordered += detection;
+        }
+        sort_detections_by_start (ordered);
+
+        double stride = window_stride > 0.0 && window_stride.is_finite ()
+            ? window_stride
+            : MOVING_WINDOW_SECONDS;
+        double max_gap = MOVING_TRACK_MAX_GAP_WINDOWS * stride;
+        LogoTrackBuilder[] tracks = {};
+
+        foreach (LogoWindowDetection detection in ordered) {
+            int best = -1;
+            double best_iou = 0.0;
+
+            for (int i = 0; i < tracks.length; i++) {
+                // Only ever link forwards, and only across a small gap: the same
+                // corner reused an hour later is a different sighting, not a
+                // continuation.
+                if (detection.start - tracks[i].end > max_gap) continue;
+
+                double iou = region_iou (tracks[i].last, detection.region);
+                if (iou >= MOVING_TRACK_MIN_IOU && iou > best_iou) {
+                    best = i;
+                    best_iou = iou;
+                }
+            }
+
+            if (best >= 0) {
+                tracks[best].extend (detection);
+            } else {
+                tracks += new LogoTrackBuilder (detection);
+            }
+        }
+
+        foreach (LogoTrackBuilder track in tracks) {
+            if (track.windows < MOVING_TRACK_MIN_WINDOWS) continue;
+            result += track.build (duration);
+        }
+
+        if (result.length == 0) return result;
+
+        // More tracks than the chain should carry: keep the best-evidenced.
+        if (result.length > MAX_TIMED_REGIONS) {
+            sort_timed_by_evidence_desc (result);
+            TimedLogoRegion[] trimmed = {};
+            for (int i = 0; i < MAX_TIMED_REGIONS; i++) {
+                trimmed += result[i];
+            }
+            result = trimmed;
+        }
+
+        sort_timed_by_start (result);
+        return result;
+    }
+
+    /**
+     * Joins verified regions that describe the same watermark in the same place
+     * either side of a modest gap.
+     *
+     * Run *after* verification, never before. Grouping has to stay tight so that
+     * each candidate covers a stretch where the watermark actually held still —
+     * a candidate spanning a position change fails verification wholesale. The
+     * price of that tightness is fragmentation, and this pays it back: both ends
+     * of the gap have independently passed verification in the same place, so
+     * bridging is supported by evidence rather than assumed.
+     *
+     * @window_stride  spacing between sample windows; pass 0 to derive it.
+     */
+    public TimedLogoRegion[] merge_timed_regions (TimedLogoRegion[] regions,
+                                                  double window_stride = 0.0) {
+        TimedLogoRegion[] result = {};
+        if (regions.length == 0) return result;
+
+        TimedLogoRegion[] ordered = {};
+        foreach (TimedLogoRegion region in regions) {
+            ordered += region;
+        }
+        sort_timed_by_start (ordered);
+
+        double stride = window_stride > 0.0 && window_stride.is_finite ()
+            ? window_stride
+            : MOVING_WINDOW_SECONDS;
+        double max_gap = MOVING_MERGE_MAX_GAP_WINDOWS * stride;
+
+        result += ordered[0];
+        for (int i = 1; i < ordered.length; i++) {
+            TimedLogoRegion open = result[result.length - 1];
+            TimedLogoRegion next = ordered[i];
+
+            // Compared against the region as already merged, so three fragments
+            // of one caption collapse into one pass.
+            double gap = next.start - open.end;
+            bool same_place = regions_overlap_enough (open.to_region (),
+                                                     next.to_region ());
+
+            if (gap <= max_gap && same_place) {
+                result[result.length - 1] = merge_timed_pair (open, next);
+            } else {
+                result += next;
+            }
+        }
+        return result;
+    }
+
+    private TimedLogoRegion merge_timed_pair (TimedLogoRegion a, TimedLogoRegion b) {
+        int x0 = int.min (a.x, b.x);
+        int y0 = int.min (a.y, b.y);
+        int x1 = int.max (a.x + a.width, b.x + b.width);
+        int y1 = int.max (a.y + a.height, b.y + b.height);
+
+        int windows = a.window_count + b.window_count;
+        double score = windows > 0
+            ? (a.score * a.window_count + b.score * b.window_count) / windows
+            : double.max (a.score, b.score);
+
+        return new TimedLogoRegion (double.min (a.start, b.start),
+                                    double.max (a.end, b.end),
+                                    x0, y0, x1 - x0, y1 - y0,
+                                    score, windows);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  REGION TEXT  ↔  FILTER ARGUMENTS
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -557,14 +1101,137 @@ namespace LogoDetectorLogic {
         return result;
     }
 
-    /** One delogo instance per region; chained, they remove several logos. */
-    public string[] build_delogo_filters (string? regions_text) {
+    public string format_timed_regions (TimedLogoRegion[] regions) {
+        string[] parts = {};
+        foreach (TimedLogoRegion region in regions) {
+            parts += region.to_region_string ();
+        }
+        return string.joinv (",", parts);
+    }
+
+    /**
+     * Tolerant parser for the timed form, "start-end:x:y:w:h".
+     *
+     * Static entries in the same text are ignored rather than guessed at, so
+     * the two parsers can be run over one string and each takes only what it
+     * understands.
+     */
+    public TimedLogoRegion[] parse_timed_regions (string? text) {
+        TimedLogoRegion[] result = {};
+        if (text == null) return result;
+
+        foreach (string chunk in text.split (",")) {
+            string entry = chunk.strip ();
+            if (entry.length == 0) continue;
+
+            string[] parts = entry.split (":");
+            if (parts.length != 5) continue;
+
+            double start, end;
+            if (!parse_time_range (parts[0], out start, out end)) continue;
+
+            int x, y, w, h;
+            if (!parse_bounded_int (parts[1], 0, out x)) continue;
+            if (!parse_bounded_int (parts[2], 0, out y)) continue;
+            if (!parse_bounded_int (parts[3], 1, out w)) continue;
+            if (!parse_bounded_int (parts[4], 1, out h)) continue;
+
+            result += new TimedLogoRegion (start, end, x, y, w, h);
+            if (result.length >= MAX_TIMED_REGIONS) break;
+        }
+        return result;
+    }
+
+    /** True when @text holds at least one timed entry. */
+    public bool regions_are_timed (string? text) {
+        return parse_timed_regions (text).length > 0;
+    }
+
+    /** True when @text holds anything delogo can be driven from, either form. */
+    public bool has_any_regions (string? text) {
+        return parse_regions (text).length > 0 || parse_timed_regions (text).length > 0;
+    }
+
+    /**
+     * One delogo instance per region; chained, they remove several logos.
+     * Accepts both region forms and a mix of the two.
+     *
+     * @time_offset is subtracted from every timed region's interval, because
+     * delogo's enable= expression is evaluated against the timestamps the
+     * filter is handed, which are not always source timestamps. A trimmed
+     * segment is decoded with -ss ahead of -i, so its frames arrive starting
+     * near zero and a source-timeline interval would switch the filter on at
+     * the wrong moment — or never. Callers that feed delogo whole files pass 0.
+     *
+     * @span is how many seconds of video the caller will actually encode, or 0
+     * for "all of it". Intervals falling outside the encoded stretch are
+     * dropped rather than emitted as filters that can only ever be off.
+     */
+    public string[] build_delogo_filters (string? regions_text,
+                                          double time_offset = 0.0,
+                                          double span = 0.0) {
         string[] filters = {};
         foreach (LogoRegion region in parse_regions (regions_text)) {
             filters += "delogo=x=%d:y=%d:w=%d:h=%d".printf (
                 region.x, region.y, region.width, region.height);
         }
+
+        bool bounded = span > 0.0 && span.is_finite ();
+        foreach (TimedLogoRegion region in parse_timed_regions (regions_text)) {
+            double start = region.start - time_offset;
+            double end = region.end - time_offset;
+
+            if (end <= 0.0) continue;                 // ends before this stretch
+            if (bounded && start >= span) continue;   // starts after it
+            if (start < 0.0) start = 0.0;
+            if (bounded && end > span) end = span;
+
+            filters += "delogo=x=%d:y=%d:w=%d:h=%d:enable='between(t,%s,%s)'".printf (
+                region.x, region.y, region.width, region.height,
+                format_filter_seconds (start), format_filter_seconds (end));
+        }
         return filters;
+    }
+
+    public string describe_timed_regions (TimedLogoRegion[] regions) {
+        if (regions.length == 0) {
+            return "No moving watermark found";
+        }
+
+        double covered = 0.0;
+        foreach (TimedLogoRegion region in regions) {
+            covered += region.end - region.start;
+        }
+
+        if (regions.length == 1) {
+            TimedLogoRegion only = regions[0];
+            return "Found a %d×%d watermark at %d,%d over %ds".printf (
+                only.width, only.height, only.x, only.y, (int) Math.round (covered));
+        }
+        return "Found %d timed regions covering %ds".printf (
+            regions.length, (int) Math.round (covered));
+    }
+
+    /**
+     * True when any region runs up against a frame edge, where delogo has
+     * fewer than four sides to interpolate from and smears instead of filling.
+     *
+     * Worth saying out loud rather than discovering in the output: rendered
+     * against the drifting-banner clip, a correctly detected region touching two
+     * edges came out as a wash of colour across the whole rectangle. The
+     * detection was right and the removal was not.
+     */
+    public bool any_region_touches_edge (TimedLogoRegion[] regions,
+                                         int source_w, int source_h) {
+        // scale_regions_to_source already keeps a pixel of real frame on every
+        // side, so "touching" means within a hair of that clamp.
+        int slack = 3;
+        foreach (TimedLogoRegion region in regions) {
+            if (region.x <= slack || region.y <= slack) return true;
+            if (region.x + region.width >= source_w - slack) return true;
+            if (region.y + region.height >= source_h - slack) return true;
+        }
+        return false;
     }
 
     public string describe_regions (LogoRegion[] regions) {
@@ -582,6 +1249,57 @@ namespace LogoDetectorLogic {
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNALS
     // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Parses "12.5-28.0". Times are non-negative, so the first dash after the
+     * opening character is unambiguously the separator.
+     */
+    private bool parse_time_range (string token, out double start, out double end) {
+        start = 0.0;
+        end = 0.0;
+
+        string text = token.strip ();
+        int split = text.index_of_char ('-', 1);
+        if (split <= 0 || split >= text.length - 1) return false;
+
+        if (!parse_bounded_seconds (text.substring (0, split), out start)) return false;
+        if (!parse_bounded_seconds (text.substring (split + 1), out end)) return false;
+
+        return end > start;
+    }
+
+    private bool parse_bounded_seconds (string token, out double value) {
+        value = 0.0;
+        string text = token.strip ();
+        if (text.length == 0 || text.length > 12) return false;
+
+        int dots = 0;
+        for (int i = 0; i < text.length; i++) {
+            if (text[i] == '.') {
+                dots++;
+                continue;
+            }
+            if (!text[i].isdigit ()) return false;
+        }
+        if (dots > 1) return false;
+
+        double parsed = double.parse (text);
+        if (!parsed.is_finite () || parsed < 0.0) return false;
+
+        value = parsed;
+        return true;
+    }
+
+    /**
+     * Locale-independent, and with more precision than the Region entry shows:
+     * the entry rounds to a tenth for readability, but an offset subtracted for
+     * a trimmed segment can land anywhere.
+     */
+    private string format_filter_seconds (double value) {
+        char[] buffer = new char[32];
+        value.format (buffer, "%.3f");
+        return (string) buffer;
+    }
 
     private bool parse_bounded_int (string token, int minimum, out int value) {
         value = 0;
@@ -1066,6 +1784,71 @@ namespace LogoDetectorLogic {
             LogoRegion key = regions[i];
             int j = i - 1;
             while (j >= 0 && regions[j].score < key.score) {
+                regions[j + 1] = regions[j];
+                j--;
+            }
+            regions[j + 1] = key;
+        }
+    }
+
+    // ── Association helpers ──────────────────────────────────────────────────
+
+    /**
+     * Overlap as a fraction of the two rectangles' combined area.
+     *
+     * Chosen over centre distance because it notices when two sightings share a
+     * centre but not a size, which is exactly the shape of the corpus's false
+     * positives. See associate_timed_regions.
+     */
+    private double region_iou (LogoRegion a, LogoRegion b) {
+        int ix0 = int.max (a.x, b.x);
+        int iy0 = int.max (a.y, b.y);
+        int ix1 = int.min (a.x + a.width, b.x + b.width);
+        int iy1 = int.min (a.y + a.height, b.y + b.height);
+        if (ix1 <= ix0 || iy1 <= iy0) return 0.0;
+
+        double intersection = (double) (ix1 - ix0) * (double) (iy1 - iy0);
+        double combined = (double) a.width * a.height
+                          + (double) b.width * b.height
+                          - intersection;
+        if (combined <= 0.0) return 0.0;
+
+        return intersection / combined;
+    }
+
+    private void sort_detections_by_start (LogoWindowDetection[] detections) {
+        for (int i = 1; i < detections.length; i++) {
+            LogoWindowDetection key = detections[i];
+            int j = i - 1;
+            while (j >= 0 && detections[j].start > key.start) {
+                detections[j + 1] = detections[j];
+                j--;
+            }
+            detections[j + 1] = key;
+        }
+    }
+
+    private void sort_timed_by_start (TimedLogoRegion[] regions) {
+        for (int i = 1; i < regions.length; i++) {
+            TimedLogoRegion key = regions[i];
+            int j = i - 1;
+            while (j >= 0 && regions[j].start > key.start) {
+                regions[j + 1] = regions[j];
+                j--;
+            }
+            regions[j + 1] = key;
+        }
+    }
+
+    /** Most agreeing windows first, breaking ties on score. */
+    private void sort_timed_by_evidence_desc (TimedLogoRegion[] regions) {
+        for (int i = 1; i < regions.length; i++) {
+            TimedLogoRegion key = regions[i];
+            int j = i - 1;
+            while (j >= 0
+                   && (regions[j].window_count < key.window_count
+                       || (regions[j].window_count == key.window_count
+                           && regions[j].score < key.score))) {
                 regions[j + 1] = regions[j];
                 j--;
             }

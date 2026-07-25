@@ -625,8 +625,385 @@ private void test_frame_stats_rejects_wrong_sized_frames () {
     assert_equal_int (stats.frame_count, 0, "rejected frame is not counted");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  TIMED REGION TEXT  (moving watermarks)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+private void test_timed_regions_round_trip_through_parse () {
+    TimedLogoRegion[] regions = {
+        new TimedLogoRegion (12.5, 28.0, 1416, 1, 504, 288),
+        new TimedLogoRegion (45.25, 61.75, 8, 168, 448, 92)
+    };
+
+    string text = LogoDetectorLogic.format_timed_regions (regions);
+    assert_equal_string (text, "12.5-28.0:1416:1:504:288,45.2-61.8:8:168:448:92",
+        "formatted timed regions");
+
+    TimedLogoRegion[] parsed = LogoDetectorLogic.parse_timed_regions (text);
+    assert_equal_int (parsed.length, 2, "round-tripped timed count");
+    assert_equal_int (parsed[0].x, 1416, "round-tripped x");
+    assert_equal_int (parsed[1].height, 92, "round-tripped height");
+    assert_true (parsed[0].start > 12.4 && parsed[0].start < 12.6, "round-tripped start");
+    assert_true (parsed[1].end > 61.7 && parsed[1].end < 61.9, "round-tripped end");
+}
+
+private void test_parse_timed_regions_skips_junk_and_static_entries () {
+    // Static entries are left for parse_regions rather than guessed at, so the
+    // two parsers can run over one mixed string and each take only its own.
+    TimedLogoRegion[] regions = LogoDetectorLogic.parse_timed_regions (
+        " 10:20:30:40 , 1.0-2.0:5:6:7:8 , 3.0-2.0:1:2:3:4 , a-b:1:2:3:4 ,"
+        + " 5.0-6.0:1:2:0:4 , 1.2.3-4.0:1:2:3:4 , 9.0-9.0:1:2:3:4 ");
+
+    assert_equal_int (regions.length, 1, "only the one valid timed entry survives");
+    assert_equal_string (regions[0].to_region_string (), "1.0-2.0:5:6:7:8",
+        "surviving timed entry");
+}
+
+private void test_region_text_kind_helpers () {
+    assert_true (!LogoDetectorLogic.regions_are_timed ("10:20:30:40"),
+        "static text is not timed");
+    assert_true (LogoDetectorLogic.regions_are_timed ("1.0-2.0:5:6:7:8"),
+        "timed text is timed");
+    assert_true (LogoDetectorLogic.has_any_regions ("10:20:30:40"),
+        "static text counts as usable");
+    assert_true (LogoDetectorLogic.has_any_regions ("1.0-2.0:5:6:7:8"),
+        "timed text counts as usable");
+    assert_true (!LogoDetectorLogic.has_any_regions (" , junk , "),
+        "junk counts as nothing");
+    assert_true (!LogoDetectorLogic.has_any_regions (null), "null counts as nothing");
+}
+
+private void test_build_delogo_filters_emits_timeline_expressions () {
+    string[] filters = LogoDetectorLogic.build_delogo_filters (
+        "12.5-28.0:1416:1:504:288,45.0-61.0:8:168:448:92");
+
+    assert_equal_int (filters.length, 2, "timed delogo filter count");
+    assert_equal_string (filters[0],
+        "delogo=x=1416:y=1:w=504:h=288:enable='between(t,12.500,28.000)'",
+        "first timed delogo filter");
+    assert_equal_string (filters[1],
+        "delogo=x=8:y=168:w=448:h=92:enable='between(t,45.000,61.000)'",
+        "second timed delogo filter");
+}
+
+private void test_build_delogo_filters_mixes_static_and_timed () {
+    string[] filters = LogoDetectorLogic.build_delogo_filters (
+        "10:20:30:40,12.5-28.0:1416:1:504:288");
+
+    assert_equal_int (filters.length, 2, "mixed filter count");
+    assert_equal_string (filters[0], "delogo=x=10:y=20:w=30:h=40",
+        "static entry keeps its unconditional filter");
+    assert_true (filters[1].contains ("enable='between(t,12.500,28.000)'"),
+        "timed entry keeps its timeline expression");
+}
+
+// delogo's enable= is evaluated against the timestamps the filter is handed.
+// A trimmed segment is decoded with -ss ahead of -i, so its frames start near
+// zero and a source-timeline interval would fire at the wrong moment.
+private void test_build_delogo_filters_shifts_timed_regions_by_offset () {
+    string text = "12.5-28.0:1416:1:504:288,45.0-61.0:8:168:448:92";
+
+    string[] shifted = LogoDetectorLogic.build_delogo_filters (text, 10.0);
+    assert_equal_int (shifted.length, 2, "offset keeps both reachable regions");
+    assert_true (shifted[0].contains ("between(t,2.500,18.000)"),
+        "first interval shifted back by the offset");
+    assert_true (shifted[1].contains ("between(t,35.000,51.000)"),
+        "second interval shifted back by the offset");
+
+    // An interval the segment starts in the middle of clamps to zero rather
+    // than asking delogo to switch on at a negative timestamp.
+    string[] clamped = LogoDetectorLogic.build_delogo_filters (text, 20.0);
+    assert_equal_int (clamped.length, 2, "straddling interval is kept");
+    assert_true (clamped[0].contains ("between(t,0.000,8.000)"),
+        "straddling interval clamps its start to zero");
+
+    // An interval entirely before the segment can only ever be off, so it is
+    // dropped instead of emitting a dead filter.
+    string[] past = LogoDetectorLogic.build_delogo_filters (text, 40.0);
+    assert_equal_int (past.length, 1, "fully elapsed interval is dropped");
+    assert_true (past[0].contains ("between(t,5.000,21.000)"),
+        "remaining interval is the later one");
+
+    // A span bounds the other end: an interval starting after the encoded
+    // stretch would only ever emit a filter that stays off.
+    string[] bounded = LogoDetectorLogic.build_delogo_filters (text, 0.0, 20.0);
+    assert_equal_int (bounded.length, 1, "interval beyond the span is dropped");
+    assert_true (bounded[0].contains ("between(t,12.500,20.000)"),
+        "interval overlapping the span is clamped to it");
+
+    // Static entries have no timeline to shift.
+    string[] statics = LogoDetectorLogic.build_delogo_filters ("10:20:30:40", 99.0);
+    assert_equal_int (statics.length, 1, "static entry survives any offset");
+    assert_equal_string (statics[0], "delogo=x=10:y=20:w=30:h=40",
+        "static entry is unaffected by the offset");
+}
+
+private void test_describe_timed_regions_summarizes_coverage () {
+    TimedLogoRegion[] one = { new TimedLogoRegion (10.0, 30.0, 1416, 1, 504, 288) };
+    assert_equal_string (LogoDetectorLogic.describe_timed_regions (one),
+        "Found a 504×288 watermark at 1416,1 over 20s", "single timed summary");
+
+    TimedLogoRegion[] several = {
+        new TimedLogoRegion (0.0, 10.0, 1, 1, 100, 100),
+        new TimedLogoRegion (20.0, 35.0, 500, 1, 100, 100)
+    };
+    assert_equal_string (LogoDetectorLogic.describe_timed_regions (several),
+        "Found 2 timed regions covering 25s", "multiple timed summary");
+
+    TimedLogoRegion[] none = {};
+    assert_equal_string (LogoDetectorLogic.describe_timed_regions (none),
+        "No moving watermark found", "empty timed summary");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MOVING SCAN — planning, association, verification
+// ═══════════════════════════════════════════════════════════════════════════════
+
+private void test_dense_windows_cover_a_long_video_without_unbounded_growth () {
+    LogoSampleWindow[] windows = LogoDetectorLogic.plan_dense_sample_windows (292.0);
+
+    // A five-minute file at a four-second stride would be 73 windows; the cap
+    // stretches the stride instead so the whole file is still covered.
+    assert_equal_int (windows.length, 48, "dense window count is capped");
+    assert_true (windows[0].start == 0.0, "dense windows start at the beginning");
+    assert_true (windows[windows.length - 1].start > 280.0,
+        "dense windows reach the end of the video");
+
+    foreach (LogoSampleWindow window in windows) {
+        assert_true (window.length >= 2.0, "every dense window is long enough to analyze");
+        assert_true (window.fps > 2.0, "dense windows sample faster than the static scan");
+    }
+}
+
+private void test_dense_windows_march_at_a_fixed_stride_when_uncapped () {
+    LogoSampleWindow[] windows = LogoDetectorLogic.plan_dense_sample_windows (30.0);
+
+    assert_equal_int (windows.length, 8, "short-of-cap window count");
+    assert_true (windows[1].start - windows[0].start == 4.0, "uncapped stride");
+    assert_true (windows[0].length == 4.0, "uncapped window length");
+}
+
+private void test_dense_windows_fall_back_for_tiny_and_unknown_durations () {
+    // Too short to carve into windows that could disagree with each other.
+    LogoSampleWindow[] tiny = LogoDetectorLogic.plan_dense_sample_windows (5.0);
+    assert_equal_int (tiny.length, 1, "a very short video gets one window");
+    assert_true (tiny[0].length == 5.0, "the single window covers the whole video");
+
+    LogoSampleWindow[] unknown = LogoDetectorLogic.plan_dense_sample_windows (0.0);
+    assert_equal_int (unknown.length, 1, "unknown duration still produces a window");
+}
+
+private LogoWindowDetection sighting (double start, double end,
+                                     int x, int y, int w, int h) {
+    return new LogoWindowDetection (start, end, new LogoRegion (x, y, w, h, 1.0));
+}
+
+private void test_association_needs_agreement_between_windows () {
+    // Two windows in the same place: a candidate.
+    LogoWindowDetection[] agreeing = {
+        sighting (0.0, 4.0, 100, 100, 50, 50),
+        sighting (4.0, 8.0, 100, 100, 50, 50)
+    };
+    TimedLogoRegion[] linked = LogoDetectorLogic.associate_timed_regions (agreeing, 4.0);
+    assert_equal_int (linked.length, 1, "agreeing windows produce one candidate");
+    assert_equal_int (linked[0].window_count, 2, "candidate records both windows");
+    assert_equal_int (linked[0].x, 100, "candidate keeps the agreed position");
+
+    // One window on its own: not enough to spend a verification decode on.
+    LogoWindowDetection[] lone = { sighting (0.0, 4.0, 100, 100, 50, 50) };
+    assert_equal_int (LogoDetectorLogic.associate_timed_regions (lone, 4.0).length, 0,
+        "a single sighting is not a candidate");
+
+    // Same place, but far enough apart in time to be two separate sightings.
+    LogoWindowDetection[] distant = {
+        sighting (0.0, 4.0, 100, 100, 50, 50),
+        sighting (60.0, 64.0, 100, 100, 50, 50)
+    };
+    assert_equal_int (LogoDetectorLogic.associate_timed_regions (distant, 4.0).length, 0,
+        "sightings separated by a long gap do not link");
+
+    // Overlapping in time, nowhere near each other in space.
+    LogoWindowDetection[] elsewhere = {
+        sighting (0.0, 4.0, 100, 100, 50, 50),
+        sighting (4.0, 8.0, 900, 600, 50, 50)
+    };
+    assert_equal_int (LogoDetectorLogic.associate_timed_regions (elsewhere, 4.0).length, 0,
+        "sightings in different places do not link");
+}
+
+private void test_association_unions_boxes_and_pads_intervals () {
+    LogoWindowDetection[] shifting = {
+        sighting (10.0, 14.0, 100, 100, 50, 50),
+        sighting (14.0, 18.0, 110, 100, 50, 50)
+    };
+
+    TimedLogoRegion[] linked = LogoDetectorLogic.associate_timed_regions (
+        shifting, 4.0, 100.0);
+    assert_equal_int (linked.length, 1, "shifted-but-overlapping windows link");
+
+    // delogo gets one rectangle for the interval, so it has to cover both.
+    assert_equal_int (linked[0].x, 100, "union starts at the leftmost sighting");
+    assert_equal_int (linked[0].width, 60, "union spans both sightings");
+
+    // A little slack at each end so the logo does not flicker back between the
+    // last window that saw it and the first that did not.
+    assert_true (linked[0].start < 10.0 && linked[0].start > 9.0,
+        "interval start is padded");
+    assert_true (linked[0].end > 18.0 && linked[0].end < 19.0,
+        "interval end is padded");
+}
+
+private void test_association_clamps_padding_to_the_video () {
+    LogoWindowDetection[] atEdges = {
+        sighting (0.0, 4.0, 100, 100, 50, 50),
+        sighting (4.0, 8.0, 100, 100, 50, 50)
+    };
+
+    TimedLogoRegion[] linked = LogoDetectorLogic.associate_timed_regions (
+        atEdges, 4.0, 8.0);
+    assert_equal_int (linked.length, 1, "candidate at the video edges");
+    assert_true (linked[0].start == 0.0, "padding cannot run before the video starts");
+    assert_true (linked[0].end == 8.0, "padding cannot run past the video end");
+}
+
+private void test_verification_window_widens_short_candidates () {
+    // A four-second candidate re-checked over four seconds is the measurement
+    // that proposed it. Widening is what gives verification something to say.
+    LogoSampleWindow middle = LogoDetectorLogic.plan_verification_window (10.0, 14.0, 100.0);
+    assert_true (middle.length >= 16.0, "short candidate is widened");
+    assert_true (middle.start < 10.0, "widening reaches back before the candidate");
+    assert_true (middle.start + middle.length > 14.0, "widening reaches past it");
+
+    // Widening at the very start of the video shifts forward instead of
+    // running negative.
+    LogoSampleWindow atStart = LogoDetectorLogic.plan_verification_window (0.0, 4.0, 100.0);
+    assert_true (atStart.start == 0.0, "widening never starts before zero");
+    assert_true (atStart.length >= 16.0, "widening still reaches full length");
+
+    // And at the end it shifts back.
+    LogoSampleWindow atEnd = LogoDetectorLogic.plan_verification_window (90.0, 99.0, 100.0);
+    assert_true (atEnd.start + atEnd.length <= 100.0, "widening stays inside the video");
+    assert_true (atEnd.length >= 16.0, "widening still reaches full length at the end");
+
+    // A candidate already long enough is verified over exactly itself.
+    LogoSampleWindow long_enough = LogoDetectorLogic.plan_verification_window (10.0, 40.0, 100.0);
+    assert_true (long_enough.start == 10.0, "long candidate keeps its start");
+    assert_true (long_enough.length == 30.0, "long candidate keeps its length");
+
+    // A video shorter than the verification length gives up what it has.
+    LogoSampleWindow tiny = LogoDetectorLogic.plan_verification_window (0.0, 4.0, 10.0);
+    assert_true (tiny.length == 10.0, "verification cannot exceed the video");
+}
+
+private void test_verified_regions_are_matched_by_containment () {
+    // The corpus's one true positive: verification over a longer stretch
+    // returns a much tighter box than the union that proposed it, and that has
+    // to count as the same watermark rather than be punished for the difference.
+    var proposed = new LogoRegion (1192, 1, 727, 303);
+    var verified = new LogoRegion (1424, 188, 495, 100);
+    assert_true (LogoDetectorLogic.regions_overlap_enough (proposed, verified),
+        "a tighter verified box inside the proposal matches");
+
+    var elsewhere = new LogoRegion (10, 900, 100, 100);
+    assert_true (!LogoDetectorLogic.regions_overlap_enough (proposed, elsewhere),
+        "a region somewhere else does not match");
+
+    // A fifth of the way in is not the same watermark.
+    var straddling = new LogoRegion (1400, 250, 100, 100);
+    var mostly_outside = new LogoRegion (1480, 250, 100, 100);
+    assert_true (!LogoDetectorLogic.regions_overlap_enough (straddling, mostly_outside),
+        "a barely-overlapping region does not match");
+
+    // Exactly half counts — the floor is inclusive.
+    var half_in = new LogoRegion (1450, 250, 100, 100);
+    assert_true (LogoDetectorLogic.regions_overlap_enough (straddling, half_in),
+        "half of the smaller box inside the proposal matches");
+}
+
+// A watermark reappearing halfway through the output is the visible cost of
+// grouping tightly. These are the real numbers from a 6-minute caption clip,
+// where the caption's box shrank and grew with the glyphs that registered and
+// split one caption into three verified fragments with a 26-second hole.
+private void test_merge_joins_fragments_of_one_watermark () {
+    TimedLogoRegion[] fragments = {
+        new TimedLogoRegion (7.5, 192.8, 454, 1030, 131, 40, 1.0, 20),
+        new TimedLogoRegion (180.2, 216.4, 507, 1030, 78, 39, 1.0, 4),
+        new TimedLogoRegion (243.0, 365.5, 454, 1030, 131, 40, 1.0, 16)
+    };
+
+    // Stride of a 6-minute file scanned in 48 windows.
+    TimedLogoRegion[] merged = LogoDetectorLogic.merge_timed_regions (fragments, 7.85);
+
+    assert_equal_int (merged.length, 1, "three fragments of one caption become one");
+    assert_true (merged[0].start < 7.6 && merged[0].start > 7.4, "merged start");
+    assert_true (merged[0].end > 365.4 && merged[0].end < 365.6, "merged end");
+    assert_equal_int (merged[0].width, 131, "merged box covers every fragment");
+    assert_equal_int (merged[0].window_count, 40, "merged evidence is the sum");
+}
+
+private void test_merge_refuses_genuine_absences_and_other_places () {
+    // Real intervals from a clip where the banner had actually gone away: same
+    // corner either side, but 41s and 36s of nothing in between.
+    TimedLogoRegion[] apart = {
+        new TimedLogoRegion (4.6, 24.5, 1424, 1, 495, 167, 1.0, 4),
+        new TimedLogoRegion (65.1, 80.0, 1424, 1, 495, 287, 1.0, 3),
+        new TimedLogoRegion (115.5, 150.5, 1424, 188, 495, 100, 1.0, 6)
+    };
+    assert_equal_int (LogoDetectorLogic.merge_timed_regions (apart, 5.04).length, 3,
+        "long gaps are left alone");
+
+    // Adjacent in time, different corners: not the same watermark.
+    TimedLogoRegion[] elsewhere = {
+        new TimedLogoRegion (0.0, 20.0, 10, 10, 100, 100, 1.0, 4),
+        new TimedLogoRegion (22.0, 40.0, 1500, 900, 100, 100, 1.0, 4)
+    };
+    assert_equal_int (LogoDetectorLogic.merge_timed_regions (elsewhere, 4.0).length, 2,
+        "regions in different places are left alone");
+
+    TimedLogoRegion[] none = {};
+    assert_equal_int (LogoDetectorLogic.merge_timed_regions (none).length, 0,
+        "merging nothing yields nothing");
+}
+
 void main (string[] args) {
     Test.init (ref args);
+
+    Test.add_func ("/logo-detector-logic/merge-joins-fragments",
+                   test_merge_joins_fragments_of_one_watermark);
+    Test.add_func ("/logo-detector-logic/merge-refuses-real-gaps",
+                   test_merge_refuses_genuine_absences_and_other_places);
+
+    Test.add_func ("/logo-detector-logic/dense-windows-cover-long-video",
+                   test_dense_windows_cover_a_long_video_without_unbounded_growth);
+    Test.add_func ("/logo-detector-logic/dense-windows-fixed-stride",
+                   test_dense_windows_march_at_a_fixed_stride_when_uncapped);
+    Test.add_func ("/logo-detector-logic/dense-windows-fallbacks",
+                   test_dense_windows_fall_back_for_tiny_and_unknown_durations);
+    Test.add_func ("/logo-detector-logic/association-needs-agreement",
+                   test_association_needs_agreement_between_windows);
+    Test.add_func ("/logo-detector-logic/association-unions-and-pads",
+                   test_association_unions_boxes_and_pads_intervals);
+    Test.add_func ("/logo-detector-logic/association-clamps-padding",
+                   test_association_clamps_padding_to_the_video);
+    Test.add_func ("/logo-detector-logic/verification-window-widens",
+                   test_verification_window_widens_short_candidates);
+    Test.add_func ("/logo-detector-logic/verified-regions-matched-by-containment",
+                   test_verified_regions_are_matched_by_containment);
+
+    Test.add_func ("/logo-detector-logic/timed-regions-round-trip",
+                   test_timed_regions_round_trip_through_parse);
+    Test.add_func ("/logo-detector-logic/timed-regions-skip-junk",
+                   test_parse_timed_regions_skips_junk_and_static_entries);
+    Test.add_func ("/logo-detector-logic/region-text-kind-helpers",
+                   test_region_text_kind_helpers);
+    Test.add_func ("/logo-detector-logic/timed-delogo-filters",
+                   test_build_delogo_filters_emits_timeline_expressions);
+    Test.add_func ("/logo-detector-logic/mixed-delogo-filters",
+                   test_build_delogo_filters_mixes_static_and_timed);
+    Test.add_func ("/logo-detector-logic/timed-delogo-filters-offset",
+                   test_build_delogo_filters_shifts_timed_regions_by_offset);
+    Test.add_func ("/logo-detector-logic/describe-timed-regions",
+                   test_describe_timed_regions_summarizes_coverage);
 
     Test.add_func ("/logo-detector-logic/parse-regions-skips-junk",
                    test_parse_regions_keeps_valid_entries_and_skips_junk);

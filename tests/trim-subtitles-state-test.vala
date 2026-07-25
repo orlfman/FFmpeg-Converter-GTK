@@ -1121,7 +1121,10 @@ private void test_subtitles_order_and_completion_helpers () {
 // shot instead of the corner logo.
 private EncodeProfileSnapshot make_logo_removal_profile_for_test () {
     var profile = new EncodeProfileSnapshot ();
-    profile.video_delogo_filters = "delogo=x=1:y=1:w=170:h=218";
+    profile.delogo_enabled = true;
+    profile.delogo_regions = "1:1:170:218";
+    profile.video_filters_skip_delogo =
+        "crop=640:480:0:0,scale=1280:-2:flags=lanczos";
     profile.video_filters_skip_crop_and_delogo = "scale=1280:-2:flags=lanczos";
     profile.video_filters_skip_crop =
         "delogo=x=1:y=1:w=170:h=218,scale=1280:-2:flags=lanczos";
@@ -1163,6 +1166,7 @@ private void test_trim_segment_crop_follows_logo_removal () {
 private void test_trim_segment_crop_without_logo_removal () {
     var runner = new TrimRunner ();
     var profile = new EncodeProfileSnapshot ();
+    profile.video_filters_skip_delogo = "crop=640:480:0:0,scale=1280:-2:flags=lanczos";
     profile.video_filters_skip_crop_and_delogo = "scale=1280:-2:flags=lanczos";
     profile.video_filters_skip_crop = "scale=1280:-2:flags=lanczos";
     profile.video_filters = "crop=640:480:0:0,scale=1280:-2:flags=lanczos";
@@ -1181,6 +1185,44 @@ private void test_trim_segment_crop_without_logo_removal () {
     assert_string_equal (bare.build_segment_vf_for_test (bare_seg),
         "crop=1080:520:200:200",
         "segment crop stands alone without a re-encode profile");
+}
+
+// A timed region's interval is on the source timeline, but a segment decoded
+// with -ss ahead of -i is handed frames whose timestamps start near zero
+// (measured with showinfo, not assumed). Without the shift, delogo would switch
+// on at the wrong moment in the segment — or, for a late region, never.
+private void test_trim_segment_shifts_timed_regions_to_segment_time () {
+    var runner = new TrimRunner ();
+    var profile = new EncodeProfileSnapshot ();
+    profile.delogo_enabled = true;
+    profile.delogo_regions = "30.0-45.0:1416:1:504:288";
+    profile.video_filters_skip_delogo = "scale=1280:-2:flags=lanczos";
+    profile.video_filters_skip_crop_and_delogo = "scale=1280:-2:flags=lanczos";
+    runner.reencode_profile = profile;
+
+    // A segment starting at 25s sees the region from its own 5s mark.
+    var late = new TrimSegment (25.0, 50.0);
+    string vf = runner.build_segment_vf_for_test (late);
+    assert_string_equal (vf,
+        "delogo=x=1416:y=1:w=504:h=288:enable='between(t,5.000,20.000)',"
+        + "scale=1280:-2:flags=lanczos",
+        "timed region shifted into segment time");
+
+    // A segment that ends before the region begins gets no delogo at all,
+    // rather than a filter that can only ever be off.
+    var early = new TrimSegment (0.0, 10.0);
+    assert_string_equal (runner.build_segment_vf_for_test (early),
+        "scale=1280:-2:flags=lanczos",
+        "region the segment never reaches is dropped");
+
+    // Composes with a segment crop, still in the right order.
+    var cropped = new TrimSegment (25.0, 50.0);
+    cropped.crop_value = "1080:520:200:200";
+    string cropped_vf = runner.build_segment_vf_for_test (cropped);
+    assert_string_equal (cropped_vf,
+        "delogo=x=1416:y=1:w=504:h=288:enable='between(t,5.000,20.000)',"
+        + "crop=1080:520:200:200,scale=1280:-2:flags=lanczos",
+        "timed region precedes the segment crop and keeps its shifted interval");
 }
 
 // ── End-to-end: logo removal through the Crop & Trim export path ────────────
@@ -1212,11 +1254,13 @@ private EncodeProfileSnapshot make_logo_removal_export_profile_for_test (
     profile.codec_args = { "-c:v", "libx264", "-crf", "23", "-preset", "veryfast" };
     profile.audio_args = { "-an" };
 
-    // Rendered the same way CodecUtils.snapshot_encode_profile renders them.
+    // Populated the same way CodecUtils.snapshot_encode_profile populates it.
+    profile.delogo_enabled = general.delogo_enabled;
+    profile.delogo_regions = general.delogo_regions;
     profile.video_filters =
         FilterBuilder.build_video_filter_chain_from_snapshot (general);
-    profile.video_delogo_filters =
-        FilterBuilder.build_delogo_filter_chain_from_snapshot (general);
+    profile.video_filters_skip_delogo =
+        FilterBuilder.build_video_filter_chain_from_snapshot (general, false, "", true);
     profile.video_filters_skip_crop_and_delogo =
         FilterBuilder.build_video_filter_chain_from_snapshot (general, true, "", true);
     return profile;
@@ -1339,6 +1383,8 @@ void main (string[] args) {
         test_trim_segment_crop_follows_logo_removal);
     Test.add_func ("/trim/runner/segment-crop-without-logo-removal",
         test_trim_segment_crop_without_logo_removal);
+    Test.add_func ("/trim/runner/segment-shifts-timed-regions",
+        test_trim_segment_shifts_timed_regions_to_segment_time);
     Test.add_func ("/trim/runner/segment-crop-export-keeps-logo-removal-in-source-frame",
         test_trim_segment_crop_export_keeps_logo_removal_in_source_frame);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-off-maps-first-audio",

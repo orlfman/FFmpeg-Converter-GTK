@@ -20,6 +20,15 @@ public class LogoDetectionResult : Object {
 
     public int region_count { get; set; default = 0; }
     public int frames_analyzed { get; set; default = 0; }
+
+    /**
+     * True when @regions holds timed entries ("start-end:x:y:w:h") from the
+     * moving scan rather than plain rectangles from the static one.
+     */
+    public bool timed { get; set; default = false; }
+
+    /** Sample windows that yielded enough frames to analyze (moving scan). */
+    public int window_count { get; set; default = 0; }
 }
 
 public delegate void LogoDetectLogFunc (string line);
@@ -136,6 +145,234 @@ namespace LogoDetector {
         return result;
     }
 
+    /**
+     * Scans @input_file for a watermark that moves between positions — the
+     * opt-in second mode, for the logos run() is built to turn away.
+     *
+     * The video is read in many short windows instead of three long ones, the
+     * ordinary detector is run over each one separately, and the per-window
+     * answers are stitched into timed rectangles. A banner that holds one corner
+     * for a minute and then jumps is not static over the video but is static
+     * over four seconds of it, which is what makes it findable at all.
+     *
+     * Slower than run() by roughly the number of windows, and deliberately
+     * without run()'s wider retry pass: doubling the decode of forty windows to
+     * recover small captions is a poor trade when the static scan already finds
+     * those. Blocks; never throws.
+     */
+    public LogoDetectionResult run_moving (string input_file,
+                                          string ffmpeg_path,
+                                          string ffprobe_path,
+                                          LogoDetectLogFunc log) {
+        var result = new LogoDetectionResult ();
+        result.timed = true;
+
+        int source_w, source_h;
+        if (!probe_dimensions (ffprobe_path, input_file, out source_w, out source_h)) {
+            result.message = "Could not read the video resolution — is this a video file?";
+            return result;
+        }
+
+        int analysis_w, analysis_h;
+        LogoDetectorLogic.compute_analysis_size (source_w, source_h,
+                                                 out analysis_w, out analysis_h);
+        if (analysis_w < LogoDetectorLogic.MIN_ANALYSIS_DIM
+            || analysis_h < LogoDetectorLogic.MIN_ANALYSIS_DIM) {
+            result.message = "The video is too small to scan for a watermark";
+            return result;
+        }
+
+        double duration = FfprobeUtils.probe_duration (input_file);
+        LogoSampleWindow[] windows =
+            LogoDetectorLogic.plan_dense_sample_windows (duration);
+
+        log ("[Watermark] Moving scan — source %dx%d, %d window(s) at %dx%d".printf (
+            source_w, source_h, windows.length, analysis_w, analysis_h));
+
+        LogoWindowDetection[] detections = {};
+        int usable_windows = 0;
+
+        for (int i = 0; i < windows.length; i++) {
+            LogoSampleWindow window = windows[i];
+            var stats = new LogoFrameStats (analysis_w, analysis_h);
+
+            // Quietly: one line per window is progress, forty ffmpeg command
+            // lines is a wall of text.
+            string? failure = sample_window (ffmpeg_path, input_file, window,
+                                             analysis_w, analysis_h, stats, log,
+                                             true);
+            if (failure != null) {
+                result.message = failure;
+                return result;
+            }
+
+            result.frames_analyzed += stats.frame_count;
+            if (stats.frame_count < LogoDetectorLogic.MIN_USABLE_FRAMES) {
+                log ("[Watermark] Window %d/%d at %.1fs — only %d frames, skipped".printf (
+                    i + 1, windows.length, window.start, stats.frame_count));
+                continue;
+            }
+            usable_windows++;
+
+            string reason;
+            LogoRegion[] found = LogoDetectorLogic.detect_regions (
+                stats.compute_mean (), stats.compute_stddev (),
+                analysis_w, analysis_h, out reason);
+            LogoRegion[] scaled = LogoDetectorLogic.scale_regions_to_source (
+                found, analysis_w, analysis_h, source_w, source_h);
+
+            double window_end = window.start + window.length;
+            foreach (LogoRegion region in scaled) {
+                detections += new LogoWindowDetection (window.start, window_end, region);
+            }
+
+            log ("[Watermark] Window %d/%d at %.1fs — %s".printf (
+                i + 1, windows.length, window.start,
+                scaled.length > 0
+                    ? LogoDetectorLogic.format_regions (scaled)
+                    : "nothing"));
+        }
+
+        result.window_count = usable_windows;
+        if (usable_windows == 0) {
+            result.message = "No window yielded enough frames to analyze";
+            return result;
+        }
+
+        double stride = windows.length > 1
+            ? windows[1].start - windows[0].start
+            : 0.0;
+        TimedLogoRegion[] candidates = LogoDetectorLogic.associate_timed_regions (
+            detections, stride, duration);
+
+        log ("[Watermark] %d sighting(s) over %d window(s) → %d candidate(s)".printf (
+            detections.length, usable_windows, candidates.length));
+
+        if (candidates.length == 0) {
+            result.message = detections.length > 0
+                ? "Nothing stayed in one place across windows — %d one-off sighting(s) discarded".printf (detections.length)
+                : "No moving watermark found";
+            return result;
+        }
+
+        TimedLogoRegion[] verified = verify_candidates (
+            ffmpeg_path, input_file, candidates, duration,
+            analysis_w, analysis_h, source_w, source_h, result, log);
+
+        if (verified.length == 0) {
+            result.message =
+                "No moving watermark found — %d candidate(s) did not hold still over a longer look".printf (
+                    candidates.length);
+            return result;
+        }
+
+        // Grouping is deliberately tight so each candidate covers a stretch the
+        // watermark actually held still for; the price is that one watermark can
+        // arrive as several fragments with holes between them, and a hole is the
+        // watermark coming back mid-output. Both sides of such a hole have passed
+        // verification in the same place, so they are joined back up here.
+        TimedLogoRegion[] merged = LogoDetectorLogic.merge_timed_regions (
+            verified, stride);
+        if (merged.length < verified.length) {
+            log ("[Watermark] Joined %d verified region(s) into %d".printf (
+                verified.length, merged.length));
+        }
+
+        result.success = true;
+        result.region_count = merged.length;
+        result.regions = LogoDetectorLogic.format_timed_regions (merged);
+        result.message = LogoDetectorLogic.describe_timed_regions (merged);
+
+        // A watermark against a frame edge is found accurately and removed
+        // badly: delogo fills a rectangle by reading inwards from its sides, and
+        // at an edge one or two of those sides do not exist. Better to warn than
+        // to let it be discovered in the finished file.
+        if (LogoDetectorLogic.any_region_touches_edge (merged, source_w, source_h)) {
+            result.message += " — touches the frame edge, so removal may smear";
+        }
+        return result;
+    }
+
+    /**
+     * Re-runs the ordinary detector over each candidate's whole interval and
+     * keeps only the candidates that survive.
+     *
+     * This is where the moving scan gets its accuracy, and it is the reason the
+     * short-window pass is allowed to be as trigger-happy as it is. Over four
+     * seconds, ordinary scenery holds still enough to look like an overlay; over
+     * sixteen it does not, and the thresholds the static scan was calibrated
+     * with start meaning what they were measured to mean again.
+     *
+     * A candidate that fails is dropped rather than reported with a caveat.
+     * Anything that cannot pass the sharpness test has no business reaching
+     * delogo — that test is the only thing standing between the user and a
+     * smeared rectangle where the picture used to be.
+     */
+    private TimedLogoRegion[] verify_candidates (string ffmpeg_path,
+                                                 string input_file,
+                                                 TimedLogoRegion[] candidates,
+                                                 double duration,
+                                                 int analysis_w, int analysis_h,
+                                                 int source_w, int source_h,
+                                                 LogoDetectionResult result,
+                                                 LogoDetectLogFunc log) {
+        TimedLogoRegion[] verified = {};
+
+        for (int i = 0; i < candidates.length; i++) {
+            TimedLogoRegion candidate = candidates[i];
+            LogoSampleWindow window = LogoDetectorLogic.plan_verification_window (
+                candidate.start, candidate.end, duration);
+
+            var stats = new LogoFrameStats (analysis_w, analysis_h);
+            string? failure = sample_window (ffmpeg_path, input_file, window,
+                                             analysis_w, analysis_h, stats, log,
+                                             true);
+            if (failure != null) {
+                log ("[Watermark] Verify %d/%d — sampling failed: %s".printf (
+                    i + 1, candidates.length, failure));
+                continue;
+            }
+
+            result.frames_analyzed += stats.frame_count;
+            if (stats.frame_count < LogoDetectorLogic.MIN_USABLE_FRAMES) {
+                log ("[Watermark] Verify %d/%d — too few frames".printf (
+                    i + 1, candidates.length));
+                continue;
+            }
+
+            string reason;
+            LogoRegion[] found = LogoDetectorLogic.detect_regions (
+                stats.compute_mean (), stats.compute_stddev (),
+                analysis_w, analysis_h, out reason);
+            LogoRegion[] scaled = LogoDetectorLogic.scale_regions_to_source (
+                found, analysis_w, analysis_h, source_w, source_h);
+
+            LogoRegion proposed = candidate.to_region ();
+            LogoRegion? match = null;
+            foreach (LogoRegion region in scaled) {
+                if (LogoDetectorLogic.regions_overlap_enough (proposed, region)) {
+                    match = region;
+                    break;
+                }
+            }
+
+            if (match == null) {
+                log ("[Watermark] Verify %d/%d over %.1f–%.1fs — rejected (%s)".printf (
+                    i + 1, candidates.length, window.start,
+                    window.start + window.length,
+                    scaled.length > 0 ? "found something elsewhere" : reason));
+                continue;
+            }
+
+            verified += candidate.with_region (match);
+            log ("[Watermark] Verify %d/%d over %.1f–%.1fs — confirmed %s".printf (
+                i + 1, candidates.length, window.start,
+                window.start + window.length, match.to_region_string ()));
+        }
+
+        return verified;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  FFMPEG SAMPLING
     // ═════════════════════════════════════════════════════════════════════════
@@ -153,7 +390,8 @@ namespace LogoDetector {
                                    LogoSampleWindow window,
                                    int analysis_w, int analysis_h,
                                    LogoFrameStats stats,
-                                   LogoDetectLogFunc log) {
+                                   LogoDetectLogFunc log,
+                                   bool quiet = false) {
         string filter = "fps=%s,scale=%d:%d:flags=area,format=gray".printf (
             ConversionUtils.format_ffmpeg_double (window.fps, "%.4f"),
             analysis_w, analysis_h);
@@ -171,7 +409,9 @@ namespace LogoDetector {
             "-"
         };
 
-        log ("[Watermark] " + ConversionUtils.format_command_for_display (cmd));
+        if (!quiet) {
+            log ("[Watermark] " + ConversionUtils.format_command_for_display (cmd));
+        }
 
         int frames_before = stats.frame_count;
 
@@ -199,7 +439,9 @@ namespace LogoDetector {
                     .printf (process.get_exit_status ());
             }
 
-            log ("[Watermark] Sampled %d frames from %.1fs".printf (gained, window.start));
+            if (!quiet) {
+                log ("[Watermark] Sampled %d frames from %.1fs".printf (gained, window.start));
+            }
         } catch (GLib.Error e) {
             return "Watermark scan failed: " + e.message;
         }

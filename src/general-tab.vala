@@ -60,6 +60,8 @@ public class GeneralTab : Box {
         "Unavailable — the selected FFmpeg build does not include the delogo filter";
     private const string DELOGO_DETECT_SUBTITLE_DEFAULT =
         "Scan the video for a watermark that stays in one place";
+    private const string DELOGO_MOVING_SUBTITLE_DEFAULT =
+        "For a logo that jumps between positions — reads the whole video, so it takes longer";
 
     // ── Scaling ──────────────────────────────────────────────────────────────
     public DropDown   scale_mode       { get; private set; }
@@ -161,10 +163,12 @@ public class GeneralTab : Box {
     // ── Logo Removal (delogo) ───────────────────────────────────────────────
     public Switch delogo_check        { get; private set; }
     public Button detect_logo_button  { get; private set; }
+    public Button detect_moving_logo_button { get; private set; }
     public Entry  delogo_value        { get; private set; }
 
     private Adw.ExpanderRow delogo_expander;
     private Adw.ActionRow delogo_detect_row;
+    private Adw.ActionRow delogo_moving_row;
     private uint delogo_detect_gen = 0;
     private bool last_delogo_effective = false;
     private bool delogo_available = true;
@@ -186,6 +190,8 @@ public class GeneralTab : Box {
     public signal void watermark_toggled (bool active);
     /** Fired when the Detect Watermark button is clicked. */
     public signal void logo_detect_clicked ();
+
+    public signal void logo_detect_moving_clicked ();
     /** Fired when effective logo removal state changes. */
     public signal void logo_removal_toggled (bool active);
 
@@ -893,12 +899,30 @@ public class GeneralTab : Box {
         delogo_detect_row.add_suffix (detect_logo_button);
         delogo_expander.add_row (delogo_detect_row);
 
+        // ── Detect moving ────────────────────────────────────────────────────
+        //    The secondary path, for the logos the scan above is built to turn
+        //    away: ones that hold a position for a while and then jump. It reads
+        //    the whole video in short windows rather than sampling three
+        //    stretches of it, so it is the slower of the two and stays opt-in.
+        delogo_moving_row = new Adw.ActionRow ();
+        delogo_moving_row.set_title ("Moving Watermark");
+        delogo_moving_row.set_subtitle (DELOGO_MOVING_SUBTITLE_DEFAULT);
+
+        detect_moving_logo_button = new Button.with_label ("Detect Moving");
+        detect_moving_logo_button.set_valign (Align.CENTER);
+        detect_moving_logo_button.set_tooltip_text (
+            "Scan the whole video for a watermark that changes position, and "
+            + "switch removal on and off around it");
+        delogo_moving_row.add_suffix (detect_moving_logo_button);
+        delogo_expander.add_row (delogo_moving_row);
+
         // ── Region ───────────────────────────────────────────────────────────
         //    Filled in by detection.  Editable so an off-by-a-few result can be
         //    nudged without re-scanning, but nobody has to touch it.
         var region_row = new Adw.ActionRow ();
         region_row.set_title ("Region");
-        region_row.set_subtitle ("Filled in automatically — x:y:w:h, comma separated");
+        region_row.set_subtitle (
+            "Filled in automatically — x:y:w:h, or start-end:x:y:w:h when timed");
         delogo_value = new Entry ();
         delogo_value.set_placeholder_text ("Press Detect Watermark");
         delogo_value.set_valign (Align.CENTER);
@@ -1054,6 +1078,9 @@ public class GeneralTab : Box {
         // Mode and image path changes are wired in build_watermark_group().
 
         // ── Logo removal forwarding ─────────────────────────────────────────
+        detect_moving_logo_button.clicked.connect (() => {
+            logo_detect_moving_clicked ();
+        });
         detect_logo_button.clicked.connect (() => {
             logo_detect_clicked ();
         });
@@ -1628,8 +1655,9 @@ public class GeneralTab : Box {
         delogo_detect_gen++;
         delogo_check.active = false;
         delogo_value.text = "";
-        detect_logo_button.sensitive = true;
+        set_logo_detect_buttons_sensitive (true);
         delogo_detect_row.set_subtitle (DELOGO_DETECT_SUBTITLE_DEFAULT);
+        delogo_moving_row.set_subtitle (DELOGO_MOVING_SUBTITLE_DEFAULT);
         delogo_expander.set_subtitle (
             delogo_available ? DELOGO_SUBTITLE_DEFAULT : DELOGO_UNAVAILABLE);
         emit_logo_removal_if_changed ();
@@ -1739,7 +1767,9 @@ public class GeneralTab : Box {
      */
     public bool is_logo_removal_effectively_enabled () {
         if (!delogo_check.active || !delogo_available) return false;
-        return LogoDetectorLogic.parse_regions (delogo_value.text).length > 0;
+        // Either form counts: plain rectangles from the static scan, or timed
+        // ones from the moving scan.
+        return LogoDetectorLogic.has_any_regions (delogo_value.text);
     }
 
     public string get_delogo_regions_text () {
@@ -1770,67 +1800,91 @@ public class GeneralTab : Box {
      * a generation counter retires results that land after the user has moved
      * on to another file.
      */
-    public void start_logo_detection (string input_file, ConsoleTab console_tab) {
+    public void start_logo_detection (string input_file, ConsoleTab console_tab,
+                                      bool moving = false) {
+        Adw.ActionRow row = moving ? delogo_moving_row : delogo_detect_row;
+
         if (input_file.strip () == "") {
-            delogo_detect_row.set_subtitle ("Please select an input file first");
+            row.set_subtitle ("Please select an input file first");
             return;
         }
         if (!delogo_available) {
-            delogo_detect_row.set_subtitle (
-                delogo_unavailable_reason ?? DELOGO_UNAVAILABLE);
+            row.set_subtitle (delogo_unavailable_reason ?? DELOGO_UNAVAILABLE);
             return;
         }
 
-        detect_logo_button.sensitive = false;
-        delogo_detect_row.set_subtitle ("Scanning the video for a watermark…");
+        // Either scan blocks the other: they write to the same Region entry, and
+        // whichever finished last would win by accident.
+        set_logo_detect_buttons_sensitive (false);
+        row.set_subtitle (moving
+            ? "Reading the whole video for a watermark that moves…"
+            : "Scanning the video for a watermark…");
 
-        console_tab.add_line ("=== Watermark Detection Started ===");
+        console_tab.add_line (moving
+            ? "=== Moving Watermark Detection Started ==="
+            : "=== Watermark Detection Started ===");
 
         uint generation = ++delogo_detect_gen;
         new Thread<void> ("logo-detect-thread", () => {
-            perform_logo_detection (input_file, console_tab, generation);
+            perform_logo_detection (input_file, console_tab, generation, moving);
         });
+    }
+
+    private void set_logo_detect_buttons_sensitive (bool sensitive) {
+        detect_logo_button.sensitive = sensitive;
+        detect_moving_logo_button.sensitive = sensitive;
     }
 
     private void perform_logo_detection (string input_file,
                                          ConsoleTab console_tab,
-                                         uint generation) {
+                                         uint generation,
+                                         bool moving) {
         var settings = AppSettings.get_default ();
 
-        LogoDetectionResult result = LogoDetector.run (
-            input_file,
-            settings.ffmpeg_path,
-            settings.ffprobe_path,
-            (line) => {
-                string message = line;
-                Idle.add (() => {
-                    console_tab.add_line (message);
-                    return Source.REMOVE;
-                });
-            }
-        );
+        LogoDetectLogFunc log = (line) => {
+            string message = line;
+            Idle.add (() => {
+                console_tab.add_line (message);
+                return Source.REMOVE;
+            });
+        };
+
+        LogoDetectionResult result = moving
+            ? LogoDetector.run_moving (input_file, settings.ffmpeg_path,
+                                       settings.ffprobe_path, log)
+            : LogoDetector.run (input_file, settings.ffmpeg_path,
+                                settings.ffprobe_path, log);
 
         Idle.add (() => {
             if (generation != delogo_detect_gen) return Source.REMOVE;
-            apply_logo_detection_result (result, console_tab);
+            apply_logo_detection_result (result, console_tab, moving);
             return Source.REMOVE;
         });
     }
 
     private void apply_logo_detection_result (LogoDetectionResult result,
-                                              ConsoleTab console_tab) {
-        detect_logo_button.sensitive = true;
+                                              ConsoleTab console_tab,
+                                              bool moving) {
+        set_logo_detect_buttons_sensitive (true);
+        Adw.ActionRow row = moving ? delogo_moving_row : delogo_detect_row;
 
         if (result.success) {
             delogo_value.set_text (result.regions);
-            delogo_detect_row.set_subtitle (result.message);
+            row.set_subtitle (result.message);
             delogo_check.set_active (true);
             console_tab.add_line ("✅ " + result.message + " — " + result.regions);
         } else {
             delogo_value.set_text ("");
-            delogo_detect_row.set_subtitle (result.message);
+            row.set_subtitle (result.message);
             console_tab.add_line ("⚠️ " + result.message);
         }
+
+        // The other row still shows whatever it last said, which would read as
+        // two competing answers to the same question.
+        Adw.ActionRow other = moving ? delogo_detect_row : delogo_moving_row;
+        other.set_subtitle (moving
+            ? DELOGO_DETECT_SUBTITLE_DEFAULT
+            : DELOGO_MOVING_SUBTITLE_DEFAULT);
 
         emit_logo_removal_if_changed ();
     }

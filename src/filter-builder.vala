@@ -60,19 +60,49 @@ namespace FilterBuilder {
     }
 
     /**
-     * Logo removal on its own, for callers that have to splice their own crop
-     * into the chain and therefore cannot use the assembled version below.
+     * Reassembles a profile's video chain for a caller that seeks its input,
+     * crops per segment, or both — the two things logo removal cannot be
+     * pre-rendered against (see EncodeProfileSnapshot.delogo_regions).
      *
-     * Crop & Trim is the one that needs this: its crop is per-segment, so it
-     * is not known when this profile is built, yet it still has to land
-     * *after* delogo. See build_segment_vf in TrimRunner.
+     * @time_offset  seconds of input skipped with -ss ahead of -i. Timed
+     *               regions are shifted back by it; pass 0 for a whole file.
+     * @segment_crop "w:h:x:y" to splice in after logo removal, or null to keep
+     *               whatever crop the General tab already contributes.
+     * @span         seconds of video actually encoded, or 0 for all of it.
+     *               Timed regions outside that stretch are left out.
+     *
+     * With offset 0, no span and no segment crop this reproduces
+     * profile.video_filters exactly, because that chain is delogo followed by
+     * the skip-delogo chain.
      */
-    public string build_delogo_filter_chain_from_snapshot (
-        GeneralSettingsSnapshot snapshot) {
-        if (!snapshot.delogo_enabled) return "";
+    public string build_video_filter_chain_for_segment (EncodeProfileSnapshot profile,
+                                                        double time_offset = 0.0,
+                                                        string? segment_crop = null,
+                                                        double span = 0.0) {
+        string[] filters = {};
 
-        string[] filters = LogoDetectorLogic.build_delogo_filters (
-            snapshot.delogo_regions);
+        if (profile.delogo_enabled) {
+            foreach (string f in LogoDetectorLogic.build_delogo_filters (
+                         profile.delogo_regions, time_offset, span)) {
+                filters += f;
+            }
+        }
+
+        bool has_segment_crop = segment_crop != null
+            && segment_crop.strip ().length > 0;
+        if (has_segment_crop) {
+            string c = segment_crop.strip ();
+            if (c.has_prefix ("crop=")) c = c.substring (5);
+            filters += "crop=" + c;
+        }
+
+        string rest = has_segment_crop
+            ? profile.video_filters_skip_crop_and_delogo
+            : profile.video_filters_skip_delogo;
+        if (rest.length > 0) {
+            filters += rest;
+        }
+
         return filters.length > 0 ? string.joinv (",", filters) : "";
     }
 

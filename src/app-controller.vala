@@ -556,6 +556,10 @@ public class AppController : Object {
             string input_file = file_pickers.input_entry.get_text ();
             general_tab.start_logo_detection (input_file, console_tab);
         });
+        general_tab.logo_detect_moving_clicked.connect (() => {
+            string input_file = file_pickers.input_entry.get_text ();
+            general_tab.start_logo_detection (input_file, console_tab, true);
+        });
     }
 
     // ── Audio speed → disable "Copy" in all codec tab audio lists ───────────

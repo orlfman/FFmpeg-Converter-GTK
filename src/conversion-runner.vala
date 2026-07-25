@@ -370,7 +370,7 @@ public class ConversionRunner {
             cmd += config.profile.watermark_image_path;
 
             // Build filter_complex: existing video filters + overlay
-            string vf = config.profile.video_filters;
+            string vf = get_video_filters ();
             string fc;
             if (vf.length > 0) {
                 fc = "[0:v]" + vf + "[vf_out]; ";
@@ -398,8 +398,11 @@ public class ConversionRunner {
                 cmd += "-map";
                 cmd += get_explicit_audio_map_spec ();
             }
-        } else if (config.profile.video_filters != "") {
-            cmd += "-vf"; cmd += config.profile.video_filters;
+        } else {
+            string vf = get_video_filters ();
+            if (vf != "") {
+                cmd += "-vf"; cmd += vf;
+            }
         }
 
         // When preserve_all_audio_tracks is on and we are NOT in a
@@ -445,6 +448,26 @@ public class ConversionRunner {
 
         args += "-progress"; args += "pipe:2";
         return args;
+    }
+
+    /**
+     * The profile's video chain, with logo removal rebuilt against the
+     * timestamps the filter graph will actually see.
+     *
+     * The Seek option puts -ss ahead of -i, and frames then arrive starting near
+     * zero rather than at their source timestamps — so a timed region's
+     * interval has to be shifted back by the seek or it fires at the wrong
+     * moment. Without seeking this returns profile.video_filters unchanged.
+     */
+    private string get_video_filters () {
+        double offset = config.seek_enabled
+            ? ConversionUtils.parse_ffmpeg_timestamp (config.seek_timestamp)
+            : 0.0;
+        double span = config.time_enabled
+            ? ConversionUtils.parse_ffmpeg_timestamp (config.time_timestamp)
+            : 0.0;
+        return FilterBuilder.build_video_filter_chain_for_segment (
+            config.profile, offset, null, span);
     }
 
     private string[] build_peak_analysis_pre_input_args () {
