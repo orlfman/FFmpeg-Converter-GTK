@@ -372,6 +372,52 @@ namespace SmartOptimizerLogic {
         return kib_from_bytes (bytes) / KIB_PER_MIB;
     }
 
+    // ── Target size bounds and match-source targeting ────────────────────────
+
+    // Bounds shared by every Target Size control — the per-tab spin buttons,
+    // the stored preference, and the Preferences dialog.  The ceiling is high
+    // enough that "Match Source Size" can still reach multi-gigabyte sources.
+    public const int TARGET_MB_MIN = 1;
+    public const int TARGET_MB_MAX = 16384;
+
+    public int clamp_target_mb (int value) {
+        return value.clamp (TARGET_MB_MIN, TARGET_MB_MAX);
+    }
+
+    /**
+     * Whole-MiB target that matches a source file's size.
+     *
+     * The optimizer only accepts integer MB targets, so the source size is
+     * rounded to the nearest whole MiB (9.3 MB → 9, 9.7 MB → 10) and clamped
+     * into the range the Target Size controls accept.
+     */
+    public int match_source_target_mb (int64 file_size_bytes) {
+        if (file_size_bytes <= 0)
+            return TARGET_MB_MIN;
+        return clamp_target_mb ((int) Math.round (mib_from_bytes (file_size_bytes)));
+    }
+
+    /**
+     * Match-source target scaled to a trimmed window.
+     *
+     * A trimmed segment carries only part of the source, so matching the full
+     * source size would effectively remove the size constraint.  Scaling by
+     * duration preserves the source's bytes-per-second density.  Falls back to
+     * the unscaled target when either duration is unknown.
+     */
+    public int match_source_target_mb_for_window (int64 file_size_bytes,
+                                                  double window_duration,
+                                                  double total_duration) {
+        if (file_size_bytes <= 0)
+            return TARGET_MB_MIN;
+        if (window_duration <= 0.0 || total_duration <= 0.0)
+            return match_source_target_mb (file_size_bytes);
+
+        double fraction = double.min (1.0, window_duration / total_duration);
+        return clamp_target_mb (
+            (int) Math.round (mib_from_bytes (file_size_bytes) * fraction));
+    }
+
     public double kib_from_kbps_for_duration (double kbps, double duration_seconds) {
         if (duration_seconds <= 0.0)
             return 0.0;

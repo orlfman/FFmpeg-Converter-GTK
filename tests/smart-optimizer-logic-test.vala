@@ -182,6 +182,54 @@ void test_unit_conversions_round_trip () {
     assert (close_to (SmartOptimizerLogic.mib_from_bytes (1024 * 1024), 1.0, 1e-9));
 }
 
+void test_match_source_target_rounding () {
+    const int64 MIB = 1024 * 1024;
+
+    // Whole MiB stays put; fractions round to the nearest whole MB.
+    assert (SmartOptimizerLogic.match_source_target_mb (9 * MIB) == 9);
+    assert (SmartOptimizerLogic.match_source_target_mb ((int64) (9.3 * MIB)) == 9);
+    assert (SmartOptimizerLogic.match_source_target_mb ((int64) (9.7 * MIB)) == 10);
+    assert (SmartOptimizerLogic.match_source_target_mb ((int64) (9.5 * MIB)) == 10);
+    assert (SmartOptimizerLogic.match_source_target_mb ((int64) (264.6 * MIB)) == 265);
+    assert (SmartOptimizerLogic.match_source_target_mb ((int64) (377.2 * MIB)) == 377);
+
+    // Sub-MB and unknown sizes clamp to the minimum rather than 0.
+    assert (SmartOptimizerLogic.match_source_target_mb (0) == SmartOptimizerLogic.TARGET_MB_MIN);
+    assert (SmartOptimizerLogic.match_source_target_mb (-1) == SmartOptimizerLogic.TARGET_MB_MIN);
+    assert (SmartOptimizerLogic.match_source_target_mb (1024) == SmartOptimizerLogic.TARGET_MB_MIN);
+
+    // Oversized sources clamp to the ceiling the spin buttons accept.
+    assert (SmartOptimizerLogic.match_source_target_mb (64000 * MIB)
+            == SmartOptimizerLogic.TARGET_MB_MAX);
+}
+
+void test_match_source_target_scaled_to_window () {
+    const int64 MIB = 1024 * 1024;
+
+    // Half the duration → half the size.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        400 * MIB, 30.0, 60.0) == 200);
+    // A tenth of a 265 MB source, rounded.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        265 * MIB, 6.0, 60.0) == 27);
+    // Full window matches the unscaled target.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        265 * MIB, 60.0, 60.0) == 265);
+    // A window longer than the source never scales above the source size.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        100 * MIB, 120.0, 60.0) == 100);
+
+    // Unknown durations fall back to the unscaled target.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        100 * MIB, 0.0, 60.0) == 100);
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        100 * MIB, 30.0, 0.0) == 100);
+
+    // A very short window still asks for at least the minimum target.
+    assert (SmartOptimizerLogic.match_source_target_mb_for_window (
+        100 * MIB, 0.01, 3600.0) == SmartOptimizerLogic.TARGET_MB_MIN);
+}
+
 void test_container_overhead_scales_with_duration () {
     // 2-hour 30fps MP4 with one AAC track: moov sample tables are MBs,
     // not a fixed 120 KiB.
@@ -728,6 +776,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/trim-window/short-source", test_trim_window_short_source_shrinks_segment);
     Test.add_func ("/smart-optimizer-logic/trim-window/effective-duration", test_trim_window_effective_duration_caps_end);
     Test.add_func ("/smart-optimizer-logic/units/round-trip", test_unit_conversions_round_trip);
+    Test.add_func ("/smart-optimizer-logic/match-source/rounding", test_match_source_target_rounding);
+    Test.add_func ("/smart-optimizer-logic/match-source/window-scaled", test_match_source_target_scaled_to_window);
     Test.add_func ("/smart-optimizer-logic/container-overhead/duration-scaled", test_container_overhead_scales_with_duration);
     Test.add_func ("/smart-optimizer-logic/fit/recovers-exponential", test_fit_recovers_exponential);
     Test.add_func ("/smart-optimizer-logic/fit/monotonicity-guard", test_fit_monotonicity_guard);

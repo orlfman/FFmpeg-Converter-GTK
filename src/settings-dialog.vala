@@ -67,6 +67,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private SpinButton target_mb_spin;
     private Adw.SwitchRow auto_convert_switch;
     private Adw.SwitchRow strip_audio_switch;
+    private Adw.SwitchRow match_source_size_switch;
+    private Adw.PreferencesGroup target_size_group;
+    private Adw.PreferencesGroup target_presets_group;
 
     // ── Status labels for path validation ─────────────────────────────────────
     private Label ffmpeg_status;
@@ -1119,6 +1122,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         page.set_icon_name ("starred-symbolic");
 
         var group = new Adw.PreferencesGroup ();
+        target_size_group = group;
         group.set_title ("Target File Size");
         group.set_description (
             "The Smart Optimizer analyzes your video and recommends encoding " +
@@ -1131,7 +1135,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         target_row.set_subtitle ("Maximum output file size — smaller targets require more compression");
         target_row.add_prefix (new Image.from_icon_name ("drive-harddisk-symbolic"));
 
-        target_mb_spin = new SpinButton.with_range (1, 4096, 1);
+        target_mb_spin = new SpinButton.with_range (
+            SmartOptimizerLogic.TARGET_MB_MIN, SmartOptimizerLogic.TARGET_MB_MAX, 1);
         target_mb_spin.set_value (4);
         target_mb_spin.set_valign (Align.CENTER);
         target_mb_spin.set_width_chars (5);
@@ -1142,6 +1147,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         // ── Presets group ─────────────────────────────────────────────────
         var presets_group = new Adw.PreferencesGroup ();
+        target_presets_group = presets_group;
         presets_group.set_title ("Presets");
 
         // ── General purpose ──────────────────────────────────────────────
@@ -1214,6 +1220,17 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var behavior_group = new Adw.PreferencesGroup ();
         behavior_group.set_title ("Behavior");
 
+        match_source_size_switch = new Adw.SwitchRow ();
+        match_source_size_switch.set_title ("Match Source Size");
+        match_source_size_switch.set_subtitle (
+            "Force every codec tab to target the source file's own size, " +
+            "rounded to the nearest MB. Disable to control each tab independently.");
+        // A forced source-matched target makes the stored target irrelevant,
+        // so the whole Target File Size section is disabled while it is on.
+        match_source_size_switch.notify["active"].connect (
+            sync_target_size_sensitivity);
+        behavior_group.add (match_source_size_switch);
+
         auto_convert_switch = new Adw.SwitchRow ();
         auto_convert_switch.set_title ("Auto-Convert");
         auto_convert_switch.set_subtitle (
@@ -1278,13 +1295,27 @@ public class SettingsDialog : Adw.PreferencesDialog {
         update_name_preview ();
 
         target_mb_spin.set_value (s.smart_optimizer_target_mb);
+        match_source_size_switch.set_active (s.smart_optimizer_match_source_size);
         auto_convert_switch.set_active (s.smart_optimizer_auto_convert);
         strip_audio_switch.set_active (s.smart_optimizer_strip_audio);
+
+        // set_active() above only fires notify when the value actually changed,
+        // so apply the dependent state explicitly.
+        sync_target_size_sensitivity ();
 
         // Trigger initial validation
         validate_path (ffmpeg_entry,  ffmpeg_status,  "ffmpeg",  true,  ffmpeg_validation);
         validate_path (ffprobe_entry, ffprobe_status, "ffprobe", false, ffprobe_validation);
         validate_path (ffplay_entry,  ffplay_status,  "ffplay",  false, ffplay_validation);
+    }
+
+    private void sync_target_size_sensitivity () {
+        if (target_size_group == null || match_source_size_switch == null) return;
+
+        bool editable = !match_source_size_switch.get_active ();
+        target_size_group.set_sensitive (editable);
+        if (target_presets_group != null)
+            target_presets_group.set_sensitive (editable);
     }
 
     private void save_to_settings () {
@@ -1310,6 +1341,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             verify_unknown_audio_copy_switch.get_active ();
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
+        s.smart_optimizer_match_source_size = match_source_size_switch.get_active ();
         s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();
         s.smart_optimizer_strip_audio = strip_audio_switch.get_active ();
 

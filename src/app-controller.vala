@@ -748,9 +748,6 @@ public class AppController : Object {
         int target_mb = (smart_tab != null)
             ? smart_tab.get_target_mb ()
             : AppSettings.get_default ().smart_optimizer_target_mb;
-        status_area.set_status ("Smart Optimizer: analyzing video for %d MB %s target…"
-            .printf (target_mb, codec.up ()),
-            StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
         status_area.start_progress ();
         smart_optimizer_running (true);
 
@@ -809,7 +806,23 @@ public class AppController : Object {
                     ctx.effective_duration = requested;
                 }
             }
+
+            // Match Source Size aims at the whole file, but a seek/time trim
+            // encodes only part of it — scale the target to the portion being
+            // kept so it holds the source's bytes-per-second density instead
+            // of inheriting a target large enough to impose no constraint.
+            if (codec_tab != null
+                && codec_tab.match_source_size_active
+                && codec_tab.get_source_file_size_bytes () > 0
+                && full_dur > 0 && eff > 0) {
+                target_mb = SmartOptimizerLogic.match_source_target_mb_for_window (
+                    codec_tab.get_source_file_size_bytes (), eff, full_dur);
+            }
         }
+
+        status_area.set_status ("Smart Optimizer: analyzing video for %d MB %s target…"
+            .printf (target_mb, codec.up ()),
+            StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
 
         // Audio bitrate — determined by the optimizer based on size tier.
         // Do not override here; the optimizer picks the right audio budget

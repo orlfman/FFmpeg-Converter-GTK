@@ -747,6 +747,17 @@ public class TrimTab : Box, ICodecTab {
             ? selected_codec_tab.get_target_mb ()
             : AppSettings.get_default ().smart_optimizer_target_mb;
 
+        // "Match Source Size" targets the whole source file, but each segment
+        // only carries part of it — inheriting the whole-file target would
+        // impose no constraint at all, so each segment gets its own target
+        // (see segment_match_target_mb).
+        bool match_source_size = (selected_codec_tab != null)
+            && selected_codec_tab.match_source_size_active;
+        int64 source_size_bytes = (selected_codec_tab != null)
+            ? selected_codec_tab.get_source_file_size_bytes ()
+            : -1;
+        double source_duration = player.get_duration_seconds ();
+
         GeneralSettingsSnapshot? general_settings_snapshot = null;
         string shared_video_filter_chain = "";
         if (general_tab != null) {
@@ -826,7 +837,21 @@ public class TrimTab : Box, ICodecTab {
                 continue;
             }
 
-            // ── 2. Run SmartOptimizer on the temp file ─────────────────────
+            // ── 2. Target size for this segment ────────────────────────────
+            int seg_target_mb = target_mb;
+            if (match_source_size) {
+                int matched = segment_match_target_mb (
+                    tmp_seg, seg, source_size_bytes, source_duration);
+                if (matched > 0) {
+                    seg_target_mb = matched;
+                    console_tab.add_line (
+                        "[Smart Optimizer] %s — matching source size: %d MB for %s of source"
+                            .printf (seg_name, seg_target_mb,
+                                     format_duration (seg.get_duration ())));
+                }
+            }
+
+            // ── 3. Run SmartOptimizer on the temp file ─────────────────────
             var ctx = OptimizationContext ();
             if (shared_video_filter_chain.length > 0) {
                 ctx.video_filter_chain = shared_video_filter_chain;
@@ -844,18 +869,18 @@ public class TrimTab : Box, ICodecTab {
 
             try {
                 var rec = yield smart_optimizer.optimize_for_target_size (
-                    tmp_seg, target_mb, preferred_codec, ctx, cancel);
+                    tmp_seg, seg_target_mb, preferred_codec, ctx, cancel);
 
                 if (rec.is_impossible) {
                     console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — target %d MB is unreachable"
-                        .printf (seg_name, target_mb));
+                        .printf (seg_name, seg_target_mb));
                     string fail_details = SmartOptimizer.format_recommendation (rec);
                     foreach (unowned string line in fail_details.split ("\n")) {
                         console_tab.add_line ("[Smart Optimizer]   " + line);
                     }
                     skipped.add (seg_name);
                 } else {
-                    // ── 3. Build codec args from recommendation ────────────
+                    // ── 4. Build codec args from recommendation ────────────
                     string[] smart_args = CodecUtils.build_smart_codec_args (
                         rec, general_settings_snapshot);
                     ok_segs.add (seg);
@@ -890,7 +915,7 @@ public class TrimTab : Box, ICodecTab {
                 skipped.add (seg_name);
             }
 
-            // ── 4. Clean up temp file ──────────────────────────────────────
+            // ── 5. Clean up temp file ──────────────────────────────────────
             FileUtils.unlink (tmp_seg);
         }
 
@@ -923,8 +948,10 @@ public class TrimTab : Box, ICodecTab {
 
         // ── Check if anything survived ──────────────────────────────────────
         if (ok_segs.length == 0) {
-            status_area.set_status ("Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
-                .printf (target_mb),
+            status_area.set_status (match_source_size
+                ? "Smart Optimizer: all segments failed to meet their source-matched target — nothing to export."
+                : "Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
+                    .printf (target_mb),
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             fail_operation (operation_id);
             return;
@@ -945,6 +972,40 @@ public class TrimTab : Box, ICodecTab {
                        console_tab, ok_segs, force_reencode, operation_id,
                        output_policy,
                        ok_args, general_settings_snapshot);
+    }
+
+    /**
+     * Per-segment target size for "Match Source Size".
+     *
+     * The stream-copied analysis segment already holds exactly the bytes this
+     * segment weighs in the source, so measuring it beats estimating: a
+     * high-motion clip out of a variable-bitrate source carries far more than
+     * its share of the file, and a duration-based estimate would quietly ask
+     * for heavy compression instead of a like-for-like re-encode.  Scaling the
+     * whole-file size by duration is the fallback when the segment cannot be
+     * measured.  Returns 0 when neither is available, leaving the caller's
+     * target untouched.
+     */
+    private static int segment_match_target_mb (string segment_path,
+                                                TrimSegment seg,
+                                                int64 source_size_bytes,
+                                                double source_duration) {
+        try {
+            var info = GLib.File.new_for_path (segment_path).query_info (
+                "standard::size", GLib.FileQueryInfoFlags.NONE);
+            int64 segment_bytes = info.get_size ();
+            if (segment_bytes > 0)
+                return SmartOptimizerLogic.match_source_target_mb (segment_bytes);
+        } catch (Error e) {
+            // Fall through to the duration estimate below.
+        }
+
+        if (source_size_bytes > 0 && source_duration > 0.0) {
+            return SmartOptimizerLogic.match_source_target_mb_for_window (
+                source_size_bytes, seg.get_duration (), source_duration);
+        }
+
+        return 0;
     }
 
     private bool can_continue_active_operation (uint64 operation_id) {

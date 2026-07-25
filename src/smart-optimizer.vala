@@ -350,7 +350,7 @@ public class SmartOptimizer : GLib.Object {
 
         try {
             int requested_target_mb = target_mb;
-            target_mb = target_mb.clamp (1, 4096);
+            target_mb = SmartOptimizerLogic.clamp_target_mb (target_mb);
             if (target_mb != requested_target_mb) {
                 warning ("Smart Optimizer: target %d MB out of range, clamped to %d MB",
                     requested_target_mb, target_mb);

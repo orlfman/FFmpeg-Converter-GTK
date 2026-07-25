@@ -75,6 +75,7 @@ public class AppSettings : Object {
     private int    _smart_optimizer_target_mb = 4;
     private bool   _smart_optimizer_auto_convert = false;
     private bool   _smart_optimizer_strip_audio = false;
+    private bool   _smart_optimizer_match_source_size = false;
 
     // ── File location ─────────────────────────────────────────────────────────
     private string config_dir;
@@ -433,6 +434,27 @@ public class AppSettings : Object {
         }
     }
 
+    public bool smart_optimizer_match_source_size {
+        get {
+            bool match_source_size;
+            mutex.lock ();
+            try {
+                match_source_size = _smart_optimizer_match_source_size;
+            } finally {
+                mutex.unlock ();
+            }
+            return match_source_size;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _smart_optimizer_match_source_size = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  LOAD — Read settings from disk
     // ═════════════════════════════════════════════════════════════════════════
@@ -471,6 +493,8 @@ public class AppSettings : Object {
             read_int (kf, GROUP_SMART, "target_mb", 4));
         bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
         bool smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
+        bool smart_optimizer_match_source_size = read_bool (
+            kf, GROUP_SMART, "match_source_size", false);
 
         mutex.lock ();
         try {
@@ -487,6 +511,7 @@ public class AppSettings : Object {
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
             _smart_optimizer_strip_audio = smart_optimizer_strip_audio;
+            _smart_optimizer_match_source_size = smart_optimizer_match_source_size;
         } finally {
             mutex.unlock ();
         }
@@ -522,6 +547,7 @@ public class AppSettings : Object {
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
         bool smart_optimizer_strip_audio;
+        bool smart_optimizer_match_source_size;
 
         mutex.lock ();
         try {
@@ -538,6 +564,7 @@ public class AppSettings : Object {
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
             smart_optimizer_strip_audio = _smart_optimizer_strip_audio;
+            smart_optimizer_match_source_size = _smart_optimizer_match_source_size;
         } finally {
             mutex.unlock ();
         }
@@ -563,6 +590,7 @@ public class AppSettings : Object {
         kf.set_integer (GROUP_SMART, "target_mb", smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
+        kf.set_boolean (GROUP_SMART, "match_source_size", smart_optimizer_match_source_size);
 
         try {
             kf.save_to_file (config_file);
@@ -596,6 +624,7 @@ public class AppSettings : Object {
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = false;
             _smart_optimizer_strip_audio = false;
+            _smart_optimizer_match_source_size = false;
         } finally {
             mutex.unlock ();
         }
@@ -659,7 +688,7 @@ public class AppSettings : Object {
     }
 
     private static int clamp_smart_optimizer_target_mb (int value) {
-        return value.clamp (1, 4096);
+        return SmartOptimizerLogic.clamp_target_mb (value);
     }
 
     private static bool read_bool (KeyFile kf, string group,

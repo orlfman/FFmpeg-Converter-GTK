@@ -214,6 +214,14 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             owner.handle_auto_convert_active_notify (auto_convert_row, strip_audio_row);
         }
 
+        public void on_match_source_size_active_notify () {
+            owner.handle_match_source_size_active_notify ();
+        }
+
+        public void on_settings_changed_for_match_source_size () {
+            owner.handle_match_source_size_settings_changed ();
+        }
+
         public void on_settings_changed_for_auto_convert () {
             owner.handle_auto_convert_settings_changed (auto_convert_row);
         }
@@ -233,6 +241,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // ── Shared Smart Optimizer State ─────────────────────────────────────────
     public bool auto_convert_active { get; protected set; default = false; }
     public bool strip_audio_active  { get; protected set; default = false; }
+    public bool match_source_size_active { get; protected set; default = false; }
     private SmartOptimizerRowsBinding? smart_optimizer_rows_binding = null;
 
     // ── Shared Widgets (assigned by subclass during construction) ─────────────
@@ -245,7 +254,12 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     protected PixelFormatSelector pixel_format_selector;
 
     // ── Per-Tab Target Size ────────────────────────────────────────────────
+    private const string TARGET_ROW_SUBTITLE_MANUAL =
+        "Per-tab target — does not change your stored preference";
+
     private SpinButton target_mb_spin;
+    private Adw.ActionRow? target_row = null;
+    private Adw.SwitchRow? match_source_size_row = null;
     private int last_synced_target_mb;
     private ContainerDefaultMode last_synced_container_default_mode =
         ContainerDefaultMode.DEFAULT;
@@ -255,6 +269,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     private Label  file_size_label;
     private string current_file_size_css_class = "source-file-size-none";
     private uint   file_size_generation = 0;
+    private int64  source_file_size_bytes = -1;
 
     private uint pixel_format_sync_idle_id = 0;
 
@@ -317,6 +332,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public bool get_strip_audio_active ()        { return strip_audio_active; }
     public AudioSettings get_audio_settings_ref () { return audio_settings; }
     public int get_target_mb ()                  { return (int) target_mb_spin.get_value (); }
+    public int64 get_source_file_size_bytes ()   { return source_file_size_bytes; }
 
     // Each codec applies recommendations differently
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
@@ -457,13 +473,14 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         // Target Size — per-tab, volatile spin button.
         // Initializes from the stored preference but is independent of it.
         // Text is blue when the value matches the stored preference.
-        var target_row = new Adw.ActionRow ();
+        target_row = new Adw.ActionRow ();
         target_row.set_title ("Target Size (MB)");
-        target_row.set_subtitle ("Per-tab target — does not change your stored preference");
+        target_row.set_subtitle (TARGET_ROW_SUBTITLE_MANUAL);
         target_row.add_prefix (new Image.from_icon_name ("drive-harddisk-symbolic"));
 
         last_synced_target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
-        target_mb_spin = new SpinButton.with_range (1, 4096, 1);
+        target_mb_spin = new SpinButton.with_range (
+            SmartOptimizerLogic.TARGET_MB_MIN, SmartOptimizerLogic.TARGET_MB_MAX, 1);
         target_mb_spin.set_value (last_synced_target_mb);
         target_mb_spin.set_valign (Align.CENTER);
         target_mb_spin.set_width_chars (5);
@@ -481,12 +498,32 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             int new_stored = AppSettings.get_default ().smart_optimizer_target_mb;
             if (new_stored != last_synced_target_mb) {
                 last_synced_target_mb = new_stored;
-                target_mb_spin.set_value (new_stored);
+                // While matching the source size the box is driven by the file,
+                // not the preference — leave it alone.
+                if (!match_source_size_active)
+                    target_mb_spin.set_value (new_stored);
             }
             sync_target_mb_css ();
         });
 
         group.add (target_row);
+
+        // Match Source Size — per-tab, session-only.  While active the target
+        // box is locked and driven from the source file's own size, rounded to
+        // the nearest whole MB.  Forced on and locked when the global override
+        // in Preferences is enabled, same as Auto-Convert.
+        match_source_size_row = new Adw.SwitchRow ();
+        match_source_size_row.set_title ("Match Source Size");
+        match_source_size_row.set_subtitle (
+            "Re-encode to the source file's own size instead of a fixed target");
+
+        bool match_global_on = AppSettings.get_default ().smart_optimizer_match_source_size;
+        match_source_size_row.set_active (match_global_on);
+        match_source_size_row.set_sensitive (!match_global_on);
+        match_source_size_active = match_global_on;
+        apply_match_source_size ();
+
+        group.add (match_source_size_row);
 
         // Auto-convert toggle — per-tab, session-only.
         // When the global override in Preferences is ON, this is forced active
@@ -521,6 +558,11 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         binding.strip_audio_row = strip_audio_row;
         smart_optimizer_rows_binding = binding;
         auto_convert_row.notify["active"].connect (binding.on_auto_convert_active_notify);
+
+        match_source_size_row.notify["active"].connect (
+            binding.on_match_source_size_active_notify);
+        AppSettings.get_default ().settings_changed.connect (
+            binding.on_settings_changed_for_match_source_size);
 
         // React to global override changes from Preferences.
         AppSettings.get_default ().settings_changed.connect (
@@ -557,6 +599,60 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             auto_convert_row.set_sensitive (true);
             auto_convert_row.set_active (false);
         }
+    }
+
+    internal void handle_match_source_size_active_notify () {
+        if (match_source_size_row == null) return;
+        match_source_size_active = match_source_size_row.get_active ();
+        apply_match_source_size ();
+    }
+
+    internal void handle_match_source_size_settings_changed () {
+        if (match_source_size_row == null) return;
+        bool locked = AppSettings.get_default ().smart_optimizer_match_source_size;
+        if (locked) {
+            match_source_size_row.set_active (true);
+            match_source_size_row.set_sensitive (false);
+        } else if (!match_source_size_row.get_sensitive ()) {
+            match_source_size_row.set_sensitive (true);
+            match_source_size_row.set_active (false);
+        }
+    }
+
+    /**
+     * Reflect the current Match Source Size state onto the target size box.
+     *
+     * While matching, the box is locked and holds the source file's size
+     * rounded to the nearest whole MB (the optimizer only accepts integer
+     * targets).  Turning it off returns the box to manual control with the
+     * matched value still in place, so it can be adjusted from there.
+     */
+    private void apply_match_source_size () {
+        if (target_mb_spin == null || target_row == null) return;
+
+        target_mb_spin.set_sensitive (!match_source_size_active);
+
+        if (!match_source_size_active) {
+            target_row.set_subtitle (TARGET_ROW_SUBTITLE_MANUAL);
+            sync_target_mb_css ();
+            return;
+        }
+
+        if (source_file_size_bytes <= 0) {
+            // Nothing to match — hold the stored default rather than leaving a
+            // locked box showing the size of a file that is no longer loaded.
+            target_mb_spin.set_value (AppSettings.get_default ().smart_optimizer_target_mb);
+            target_row.set_subtitle ("Matching source size — no file selected yet");
+            sync_target_mb_css ();
+            return;
+        }
+
+        int matched = SmartOptimizerLogic.match_source_target_mb (source_file_size_bytes);
+        target_mb_spin.set_value (matched);
+        target_row.set_subtitle (
+            "Matching source size — %d MB, rounded from %s".printf (
+                matched, CodecUtils.format_file_size (source_file_size_bytes)));
+        sync_target_mb_css ();
     }
 
     internal void handle_strip_audio_active_notify (Adw.SwitchRow strip_audio_row) {
@@ -632,8 +728,19 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
      * Called by each codec tab's reset_defaults().
      */
     protected void reset_target_mb () {
+        // Clearing the toggle re-enables the box via its notify handler; when
+        // the global override holds it on, re-apply the matched value instead.
+        if (match_source_size_row != null
+            && !AppSettings.get_default ().smart_optimizer_match_source_size) {
+            match_source_size_row.set_active (false);
+        }
+
         last_synced_target_mb = AppSettings.get_default ().smart_optimizer_target_mb;
-        target_mb_spin.set_value (last_synced_target_mb);
+        if (match_source_size_active) {
+            apply_match_source_size ();
+        } else {
+            target_mb_spin.set_value (last_synced_target_mb);
+        }
     }
 
     private static bool file_size_css_injected = false;
@@ -694,7 +801,9 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         file_size_generation++;
 
         if (file_path.strip ().length == 0) {
+            source_file_size_bytes = -1;
             apply_file_size_display ("No file selected", "source-file-size-none");
+            apply_match_source_size ();
             return;
         }
 
@@ -712,12 +821,16 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             if (generation != file_size_generation) return;
 
             int64 bytes = fi.get_size ();
+            source_file_size_bytes = bytes;
             string formatted = "Source: %s".printf (
                 CodecUtils.format_file_size (bytes));
             apply_file_size_display (formatted, "source-file-size");
+            apply_match_source_size ();
         } catch (Error e) {
             if (generation != file_size_generation) return;
+            source_file_size_bytes = -1;
             apply_file_size_display ("File unavailable", "source-file-size-none");
+            apply_match_source_size ();
         }
     }
 
