@@ -59,16 +59,34 @@ namespace FilterBuilder {
             tab.snapshot_settings (pixel_format_settings), skip_crop, codec_name);
     }
 
+    /**
+     * Logo removal on its own, for callers that have to splice their own crop
+     * into the chain and therefore cannot use the assembled version below.
+     *
+     * Crop & Trim is the one that needs this: its crop is per-segment, so it
+     * is not known when this profile is built, yet it still has to land
+     * *after* delogo. See build_segment_vf in TrimRunner.
+     */
+    public string build_delogo_filter_chain_from_snapshot (
+        GeneralSettingsSnapshot snapshot) {
+        if (!snapshot.delogo_enabled) return "";
+
+        string[] filters = LogoDetectorLogic.build_delogo_filters (
+            snapshot.delogo_regions);
+        return filters.length > 0 ? string.joinv (",", filters) : "";
+    }
+
     private string[] get_rotation_crop_processing_hdr_filters (
         GeneralSettingsSnapshot snapshot,
         bool skip_crop,
-        string codec_name) {
+        string codec_name,
+        bool skip_delogo = false) {
         string[] filters = {};
 
         // Logo removal runs before everything else: the detected rectangles are
         // in source-frame coordinates, so any rotation, crop or scale ahead of
         // delogo would move the frame out from under them.
-        if (snapshot.delogo_enabled) {
+        if (snapshot.delogo_enabled && !skip_delogo) {
             foreach (string f in LogoDetectorLogic.build_delogo_filters (
                          snapshot.delogo_regions)) {
                 filters += f;
@@ -196,11 +214,12 @@ namespace FilterBuilder {
 
     public string build_video_filter_chain_from_snapshot (GeneralSettingsSnapshot snapshot,
                                                           bool skip_crop = false,
-                                                          string codec_name = "") {
+                                                          string codec_name = "",
+                                                          bool skip_delogo = false) {
         string[] filters = {};
 
         foreach (string f in get_rotation_crop_processing_hdr_filters (
-                     snapshot, skip_crop, codec_name)) {
+                     snapshot, skip_crop, codec_name, skip_delogo)) {
             filters += f;
         }
         foreach (string f in get_scale_filters (snapshot)) {

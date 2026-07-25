@@ -1113,6 +1113,212 @@ private void test_subtitles_order_and_completion_helpers () {
     assert_uint64_equal (active_apply, 0, "subtitles finish apply clears active id");
 }
 
+// Logo removal is expressed in source-frame coordinates, so a segment crop must
+// never be emitted ahead of it: cropping first moves the frame out from under
+// delogo, which then blurs whatever sits at those coordinates in the cropped
+// picture and leaves the watermark alone. Verified against real footage —
+// delogo after a crop=1080:520:200:200 paints a smear over the middle of the
+// shot instead of the corner logo.
+private EncodeProfileSnapshot make_logo_removal_profile_for_test () {
+    var profile = new EncodeProfileSnapshot ();
+    profile.video_delogo_filters = "delogo=x=1:y=1:w=170:h=218";
+    profile.video_filters_skip_crop_and_delogo = "scale=1280:-2:flags=lanczos";
+    profile.video_filters_skip_crop =
+        "delogo=x=1:y=1:w=170:h=218,scale=1280:-2:flags=lanczos";
+    profile.video_filters =
+        "delogo=x=1:y=1:w=170:h=218,crop=640:480:0:0,scale=1280:-2:flags=lanczos";
+    return profile;
+}
+
+private void test_trim_segment_crop_follows_logo_removal () {
+    var runner = new TrimRunner ();
+    runner.reencode_profile = make_logo_removal_profile_for_test ();
+
+    var cropped = new TrimSegment (1.0, 3.0);
+    cropped.crop_value = "1080:520:200:200";
+    string vf = runner.build_segment_vf_for_test (cropped);
+    assert_string_equal (vf,
+        "delogo=x=1:y=1:w=170:h=218,crop=1080:520:200:200,scale=1280:-2:flags=lanczos",
+        "segment crop is spliced in after logo removal");
+
+    int delogo_pos = vf.index_of ("delogo=");
+    int crop_pos = vf.index_of ("crop=");
+    assert_true (delogo_pos >= 0, "segment chain keeps logo removal");
+    assert_true (crop_pos > delogo_pos, "segment crop never precedes logo removal");
+
+    // An already-prefixed crop value must not double up the filter name.
+    var prefixed = new TrimSegment (1.0, 3.0);
+    prefixed.crop_value = "crop=1080:520:200:200";
+    assert_string_equal (runner.build_segment_vf_for_test (prefixed), vf,
+        "prefixed segment crop value produces the same chain");
+
+    // Without a segment crop the General tab's own chain is used untouched,
+    // crop and all — that path was already correct and must not change.
+    var plain = new TrimSegment (1.0, 3.0);
+    assert_string_equal (runner.build_segment_vf_for_test (plain),
+        "delogo=x=1:y=1:w=170:h=218,crop=640:480:0:0,scale=1280:-2:flags=lanczos",
+        "segment without a crop uses the full general chain");
+}
+
+private void test_trim_segment_crop_without_logo_removal () {
+    var runner = new TrimRunner ();
+    var profile = new EncodeProfileSnapshot ();
+    profile.video_filters_skip_crop_and_delogo = "scale=1280:-2:flags=lanczos";
+    profile.video_filters_skip_crop = "scale=1280:-2:flags=lanczos";
+    profile.video_filters = "crop=640:480:0:0,scale=1280:-2:flags=lanczos";
+    runner.reencode_profile = profile;
+
+    var cropped = new TrimSegment (1.0, 3.0);
+    cropped.crop_value = "1080:520:200:200";
+    assert_string_equal (runner.build_segment_vf_for_test (cropped),
+        "crop=1080:520:200:200,scale=1280:-2:flags=lanczos",
+        "logo removal off leaves no empty filter slot");
+
+    // No profile at all — the copy-mode-with-crop path.
+    var bare = new TrimRunner ();
+    var bare_seg = new TrimSegment (1.0, 3.0);
+    bare_seg.crop_value = "1080:520:200:200";
+    assert_string_equal (bare.build_segment_vf_for_test (bare_seg),
+        "crop=1080:520:200:200",
+        "segment crop stands alone without a re-encode profile");
+}
+
+// ── End-to-end: logo removal through the Crop & Trim export path ────────────
+//
+// The string tests above pin the filter chain. This one runs the real export
+// and measures pixels, because an ordering bug composes perfectly well on
+// paper — it just paints the wrong part of the picture.
+//
+// Measured on testvideo-raptor-watermark.webm (1280×720, opaque logo at
+// 1:1:170:218), each export compared against the same export with logo
+// removal switched off:
+//
+//   crop=1080:520:200:200 — logo outside the kept area
+//     delogo before crop → PSNR inf    nothing painted inside the crop
+//     delogo after crop  → PSNR 31.7   smear over the middle of the shot
+//   crop=1280:620:0:0 — logo inside the kept area
+//     delogo before crop → PSNR 28.7   logo actually painted out
+//
+// Checking both directions matters: "identical when the target is cropped
+// away" alone would also pass if delogo silently stopped running.
+private EncodeProfileSnapshot make_logo_removal_export_profile_for_test (
+        bool logo_removal_on) {
+    var general = new GeneralSettingsSnapshot ();
+    general.delogo_enabled = logo_removal_on;
+    general.delogo_regions = "1:1:170:218";
+
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "23", "-preset", "veryfast" };
+    profile.audio_args = { "-an" };
+
+    // Rendered the same way CodecUtils.snapshot_encode_profile renders them.
+    profile.video_filters =
+        FilterBuilder.build_video_filter_chain_from_snapshot (general);
+    profile.video_delogo_filters =
+        FilterBuilder.build_delogo_filter_chain_from_snapshot (general);
+    profile.video_filters_skip_crop_and_delogo =
+        FilterBuilder.build_video_filter_chain_from_snapshot (general, true, "", true);
+    return profile;
+}
+
+private void export_cropped_segment_for_test (string input_path,
+                                              string crop_value,
+                                              bool logo_removal_on,
+                                              string output_path) {
+    var runner = new TrimRunner ();
+    runner.input_file = input_path;
+    runner.copy_mode = false;
+
+    var segments = new GenericArray<TrimSegment> ();
+    var seg = new TrimSegment (1.0, 3.0);
+    seg.crop_value = crop_value;
+    segments.add (seg);
+    runner.set_segments (segments);
+    runner.reencode_profile =
+        make_logo_removal_export_profile_for_test (logo_removal_on);
+
+    int exit_code = runner.run_extract_segment_for_widget_test (0, output_path);
+    assert_true (exit_code == 0,
+        "trim logo removal export exit code for crop " + crop_value);
+}
+
+private double measure_video_psnr_for_test (string reference,
+                                            string compared,
+                                            string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffmpeg_path,
+        "-hide_banner",
+        "-i", reference,
+        "-i", compared,
+        "-lavfi", "psnr",
+        "-f", "null", "-"
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s failed to compare '%s' with '%s': %s",
+            context, reference, compared, stderr_buf.strip ());
+        return 0.0;
+    }
+
+    int marker = stderr_buf.last_index_of ("average:");
+    if (marker < 0) {
+        Test.fail_printf ("%s found no PSNR summary in ffmpeg output: %s",
+            context, stderr_buf.strip ());
+        return 0.0;
+    }
+
+    string tail = stderr_buf.substring (marker + 8).strip ();
+    int end = tail.index_of (" ");
+    string token = end > 0 ? tail.substring (0, end) : tail;
+    // Identical frames are reported as "inf" rather than a number.
+    if (token.has_prefix ("inf")) return double.INFINITY;
+    return double.parse (token);
+}
+
+private void test_trim_segment_crop_export_keeps_logo_removal_in_source_frame () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-delogo-crop-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("testvideo-raptor-watermark.webm");
+
+        // The crop discards the watermark's source coordinates, so a correctly
+        // ordered chain leaves the kept picture untouched.
+        string outside_on = Path.build_filename (tmp_dir, "outside-on.mkv");
+        string outside_off = Path.build_filename (tmp_dir, "outside-off.mkv");
+        export_cropped_segment_for_test (input_path, "1080:520:200:200", true, outside_on);
+        export_cropped_segment_for_test (input_path, "1080:520:200:200", false, outside_off);
+
+        double outside = measure_video_psnr_for_test (outside_off, outside_on,
+            "trim logo removal outside-crop comparison");
+        assert_true (outside > 60.0,
+            "logo removal paints nothing inside a crop that excludes it (PSNR %.1f dB)"
+                .printf (outside));
+
+        // The crop keeps them, so the watermark must still be painted out.
+        string inside_on = Path.build_filename (tmp_dir, "inside-on.mkv");
+        string inside_off = Path.build_filename (tmp_dir, "inside-off.mkv");
+        export_cropped_segment_for_test (input_path, "1280:620:0:0", true, inside_on);
+        export_cropped_segment_for_test (input_path, "1280:620:0:0", false, inside_off);
+
+        double inside = measure_video_psnr_for_test (inside_off, inside_on,
+            "trim logo removal inside-crop comparison");
+        assert_true (inside < 45.0,
+            "logo removal still paints the watermark when the crop keeps it (PSNR %.1f dB)"
+                .printf (inside));
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -1129,6 +1335,12 @@ void main (string[] args) {
         test_trim_image_watermark_export_maps_first_audio_only);
     Test.add_func ("/trim/runner/peak-detect-maps-first-audio",
         test_trim_peak_detect_maps_first_audio_only);
+    Test.add_func ("/trim/runner/segment-crop-follows-logo-removal",
+        test_trim_segment_crop_follows_logo_removal);
+    Test.add_func ("/trim/runner/segment-crop-without-logo-removal",
+        test_trim_segment_crop_without_logo_removal);
+    Test.add_func ("/trim/runner/segment-crop-export-keeps-logo-removal-in-source-frame",
+        test_trim_segment_crop_export_keeps_logo_removal_in_source_frame);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-off-maps-first-audio",
         test_subtitle_peak_detect_toggle_off_maps_first_audio_only);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-on-maps-all-audio",

@@ -934,15 +934,26 @@ public class TrimRunner : Object {
     private string build_segment_vf (TrimSegment seg) {
         string[] filters = {};
 
-        if (seg.has_crop ()) {
-            string c = seg.crop_value.strip ();
-            if (c.has_prefix ("crop=")) c = c.substring (5);
-            filters += "crop=" + c;
+        if (!seg.has_crop ()) {
+            return get_general_video_filters ();
         }
 
-        string general_vf = seg.has_crop ()
-            ? get_general_video_filters_skip_crop ()
-            : get_general_video_filters ();
+        // Logo removal has to come before the segment crop. The detected
+        // rectangles are in source-frame coordinates, so cropping first moves
+        // the frame out from under them: delogo then blurs whatever happens to
+        // sit at those coordinates in the cropped picture, leaving the
+        // watermark untouched and a smear somewhere in the middle of the shot.
+        // FilterBuilder applies the same ordering to the General tab's crop.
+        string delogo_vf = get_general_delogo_filters ();
+        if (delogo_vf.length > 0) {
+            filters += delogo_vf;
+        }
+
+        string c = seg.crop_value.strip ();
+        if (c.has_prefix ("crop=")) c = c.substring (5);
+        filters += "crop=" + c;
+
+        string general_vf = get_general_video_filters_skip_crop_and_delogo ();
         if (general_vf.length > 0) {
             filters += general_vf;
         }
@@ -1110,9 +1121,16 @@ public class TrimRunner : Object {
         return "";
     }
 
-    private string get_general_video_filters_skip_crop () {
+    private string get_general_delogo_filters () {
         if (reencode_profile != null) {
-            return reencode_profile.video_filters_skip_crop;
+            return reencode_profile.video_delogo_filters;
+        }
+        return "";
+    }
+
+    private string get_general_video_filters_skip_crop_and_delogo () {
+        if (reencode_profile != null) {
+            return reencode_profile.video_filters_skip_crop_and_delogo;
         }
         return "";
     }
@@ -1554,6 +1572,10 @@ public class TrimRunner : Object {
 
     internal string[] get_last_ffmpeg_argv_for_widget_test () {
         return last_ffmpeg_argv_for_test;
+    }
+
+    internal string build_segment_vf_for_test (TrimSegment seg) {
+        return build_segment_vf (seg);
     }
 
     internal int run_extract_segment_for_widget_test (int seg_index, string output) {

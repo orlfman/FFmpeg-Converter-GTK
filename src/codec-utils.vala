@@ -83,6 +83,13 @@ public class EncodeProfileSnapshot : Object {
     public bool preserve_all_audio_tracks = false;
     public string video_filters = "";
     public string video_filters_skip_crop = "";
+    // Crop & Trim supplies its own per-segment crop, which has to sit between
+    // delogo and the rest of the chain — delogo's coordinates are source-frame,
+    // everything after the crop works on cropped geometry. Neither of the two
+    // chains above can express that, so the pieces are carried separately and
+    // reassembled around the segment crop in TrimRunner.build_segment_vf.
+    public string video_delogo_filters = "";
+    public string video_filters_skip_crop_and_delogo = "";
     public string combine_video_filters_per_input = "";
     public string combine_video_filters_post_output = "";
     public string audio_filters = "";
@@ -453,6 +460,11 @@ namespace CodecUtils {
                 general_settings, false, snapshot.codec_name);
             snapshot.video_filters_skip_crop = FilterBuilder.build_video_filter_chain_from_snapshot (
                 general_settings, true, snapshot.codec_name);
+            snapshot.video_delogo_filters =
+                FilterBuilder.build_delogo_filter_chain_from_snapshot (general_settings);
+            snapshot.video_filters_skip_crop_and_delogo =
+                FilterBuilder.build_video_filter_chain_from_snapshot (
+                    general_settings, true, snapshot.codec_name, true);
             snapshot.combine_video_filters_per_input =
                 FilterBuilder.build_combine_per_input_video_filters_from_snapshot (
                     general_settings, true, snapshot.codec_name);
