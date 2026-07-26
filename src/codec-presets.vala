@@ -124,21 +124,16 @@ public class CodecPresets : Object {
             // Tune. x264 accepts only ONE tune, so an explicit delivery
             // request wins over the content-derived choice — the user asked
             // for cheap decode and that cannot be combined.
-            if (rec.fast_decode) {
-                set_dropdown_by_label (tab.tune_combo, "fastdecode");
-            } else {
-                switch (rec.content_type) {
-                    case ContentType.ANIME:
-                        set_dropdown_by_label (tab.tune_combo, "animation");
-                        break;
-                    case ContentType.SCREENCAST:
-                        set_dropdown_by_label (tab.tune_combo, "stillimage");
-                        break;
-                    default:
-                        tab.tune_combo.set_selected (0);
-                        break;
-                }
-            }
+            // Same decision the calibration probe encoded with, so the
+            // measurement describes this encode. See
+            // SmartOptimizerLogic.decide_encoder_tuning.
+            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                "x264", rec.effort, rec.content_type, rec.grain_score,
+                rec.source_bit_depth, rec.fast_decode);
+            if (tuning.tune.length > 0)
+                set_dropdown_by_label (tab.tune_combo, tuning.tune);
+            else
+                tab.tune_combo.set_selected (0);
 
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.cabac_switch.set_active (true);
@@ -378,22 +373,17 @@ public class CodecPresets : Object {
                 tab.crf_spin.set_value (rec.crf);
             }
 
-            // Tune. x265 accepts only ONE tune, so delivery wins — see x264.
-            if (rec.fast_decode) {
-                set_dropdown_by_label (tab.tune_combo, "fastdecode");
-            } else if (rec.content_type == ContentType.ANIME) {
-                set_dropdown_by_label (tab.tune_combo, "animation");
-            } else if (effort >= EncodeEffort.HIGH
-                       && SmartOptimizerLogic.grain_warranted (
-                           rec.grain_score, rec.content_type,
-                           rec.source_bit_depth)) {
-                // At generous budgets, preserve natural film grain rather
-                // than smearing it — but only when grain is actually measured
-                // (SmartOptimizerLogic.grain_warranted), not just from category.
-                set_dropdown_by_label (tab.tune_combo, "grain");
-            } else {
+            // Same decision the calibration probe encoded with.
+            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                "x265", rec.effort, rec.content_type, rec.grain_score,
+                rec.source_bit_depth, rec.fast_decode);
+            // decide_encoder_tuning already folds in the delivery override,
+            // the animation case, and preserving film grain at generous
+            // budgets when grain was actually measured.
+            if (tuning.tune.length > 0)
+                set_dropdown_by_label (tab.tune_combo, tuning.tune);
+            else
                 tab.tune_combo.set_selected (0);
-            }
 
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.sao_switch.set_active (true);
@@ -407,7 +397,7 @@ public class CodecPresets : Object {
                     set_dropdown_by_label (tab.ref_frames_combo, "3");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
-                    tab.psy_rd_spin.set_value (2.0);
+                    tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (false);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (40);
@@ -417,7 +407,7 @@ public class CodecPresets : Object {
                     set_dropdown_by_label (tab.ref_frames_combo, "4");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
-                    tab.psy_rd_spin.set_value (2.0);
+                    tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (false);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (50);
@@ -427,7 +417,7 @@ public class CodecPresets : Object {
                     set_dropdown_by_label (tab.ref_frames_combo, "4");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
-                    tab.psy_rd_spin.set_value (2.5);
+                    tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (60);
@@ -437,7 +427,7 @@ public class CodecPresets : Object {
                     set_dropdown_by_label (tab.ref_frames_combo, "5");
                     tab.deblock_alpha_spin.set_value (-1);
                     tab.deblock_beta_spin.set_value (-1);
-                    tab.psy_rd_spin.set_value (3.0);
+                    tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (80);
@@ -447,7 +437,7 @@ public class CodecPresets : Object {
                     set_dropdown_by_label (tab.ref_frames_combo, "5");
                     tab.deblock_alpha_spin.set_value (-1);
                     tab.deblock_beta_spin.set_value (-1);
-                    tab.psy_rd_spin.set_value (3.5);
+                    tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (120);
@@ -510,8 +500,14 @@ public class CodecPresets : Object {
             // instead of displacing them. Level 1 trades a little efficiency
             // for materially cheaper decode; Level 2 costs more than most
             // streaming cases justify.
+            // Same decision the calibration probe encoded with.
+            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                "svt-av1", rec.effort, rec.content_type, rec.grain_score,
+                rec.source_bit_depth, rec.fast_decode);
             set_dropdown_by_label (tab.fast_decode_combo,
-                rec.fast_decode ? "Level 1" : "Disabled");
+                tuning.fast_decode_level > 0
+                    ? "Level %d".printf (tuning.fast_decode_level)
+                    : "Disabled");
 
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.cdef_switch.set_active (true);
@@ -525,9 +521,7 @@ public class CodecPresets : Object {
             // (clean sources are excluded even if live-action/mixed; grainy
             // sources included even if the category was uncertain). See
             // SmartOptimizerLogic.grain_warranted.
-            bool use_grain = (effort >= EncodeEffort.MEDIUM)
-                && SmartOptimizerLogic.grain_warranted (
-                    rec.grain_score, rec.content_type, rec.source_bit_depth);
+            bool use_grain = tuning.film_grain;
 
             switch (effort) {
                 case EncodeEffort.MINIMAL:
@@ -541,7 +535,7 @@ public class CodecPresets : Object {
                 case EncodeEffort.LOW:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
-                        tab.grain_strength_spin.set_value (8);
+                        tab.grain_strength_spin.set_value (tuning.film_grain_strength);
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (false);
@@ -553,7 +547,7 @@ public class CodecPresets : Object {
                 case EncodeEffort.MEDIUM:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
-                        tab.grain_strength_spin.set_value (10);
+                        tab.grain_strength_spin.set_value (tuning.film_grain_strength);
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (true);
@@ -567,7 +561,7 @@ public class CodecPresets : Object {
                 case EncodeEffort.HIGH:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
-                        tab.grain_strength_spin.set_value (12);
+                        tab.grain_strength_spin.set_value (tuning.film_grain_strength);
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (true);
@@ -582,7 +576,7 @@ public class CodecPresets : Object {
                 case EncodeEffort.MAXIMUM:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
-                        tab.grain_strength_spin.set_value (15);
+                        tab.grain_strength_spin.set_value (tuning.film_grain_strength);
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (true);

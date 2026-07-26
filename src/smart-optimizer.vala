@@ -271,6 +271,19 @@ public class SmartOptimizer : GLib.Object {
     // Users who want 10+ can disable auto-convert and set it manually.
     private const int[] SVT_AV1_PRESETS = { 9, 8, 7, 6, 5, 4, 3, 2, 0 };
 
+    /**
+     * Encoder tuning for the run in progress, so every calibration probe
+     * encodes with the settings the recommendation will actually apply.
+     *
+     * Held per-run rather than threaded through nine command-building
+     * signatures. AppController owns a single SmartOptimizer and serialises
+     * runs through smart_opt_generation, cancelling any previous one before
+     * starting the next, so only one run reads this at a time. Each pipeline
+     * sets it before probing; null means "probe with codec/preset/CRF alone",
+     * which is the pre-existing behaviour.
+     */
+    private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
+
     // Calibration parallelism: encodes within a batch are independent.
     // One concurrent job per this many logical cores, capped below — a
     // single ffmpeg encode already scales across cores, so extra jobs
@@ -464,6 +477,15 @@ public class SmartOptimizer : GLib.Object {
             int preset_idx = SmartOptimizerLogic.choose_preset_index (
                 profile, tier, preferred_codec);
 
+            // Probe with the settings that will actually be applied. Content
+            // type, grain and effort are all settled by this point, so there
+            // is no ordering obstacle — the probe simply used to ignore them.
+            active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                preferred_codec,
+                SmartOptimizerLogic.effort_from_size_tier (tier),
+                profile.content_type, profile.noise_mean,
+                info.source_bit_depth, ctx.optimize_for_delivery);
+
             // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
             // One short probe encode at the real preset/res/bit-depth measures
             // BOTH per-segment encode time AND peak RSS. Time sizes how far the
@@ -544,7 +566,8 @@ public class SmartOptimizer : GLib.Object {
             var cache = SmartOptimizerCache.try_create (
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
-                tw.sample_segment_duration, positions, extrapolation_weight);
+                tw.sample_segment_duration, positions, extrapolation_weight,
+                SmartOptimizerLogic.encoder_tuning_key (active_tuning));
 
             // ── 6/7. Calibration, fit, solve, adaptive refinement ───────
             SmartOptimizerLogic.CalibrationModel model;
@@ -679,6 +702,7 @@ public class SmartOptimizer : GLib.Object {
                 source_bit_depth      = info.source_bit_depth
             };
         } finally {
+            active_tuning = null;
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
@@ -795,6 +819,13 @@ public class SmartOptimizer : GLib.Object {
                 bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
             int preset_idx = SmartOptimizerLogic.choose_preset_index (
                 profile, nominal_tier, preferred_codec);
+
+            // Same reasoning as Size Mode: probe what will be applied.
+            active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                preferred_codec,
+                SmartOptimizerLogic.effort_from_quality_intent (intent),
+                profile.content_type, profile.noise_mean,
+                info.source_bit_depth, ctx.optimize_for_delivery);
             var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
 
             // ── 6. Constrain samples to the VMAF reference budget ───────
@@ -843,7 +874,8 @@ public class SmartOptimizer : GLib.Object {
             var qcache = SmartOptimizerCache.try_create (
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
-                tw.sample_segment_duration, positions, 1.0);
+                tw.sample_segment_duration, positions, 1.0,
+                SmartOptimizerLogic.encoder_tuning_key (active_tuning));
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
                 preferred_codec, intent);
@@ -1206,6 +1238,7 @@ public class SmartOptimizer : GLib.Object {
                 source_bit_depth      = info.source_bit_depth
             };
         } finally {
+            active_tuning = null;
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
@@ -3704,11 +3737,20 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /** Append the encoder arguments for a calibration probe at @crf. */
+    /**
+     * Encoder arguments for a calibration probe.
+     *
+     * @tuning carries the settings the recommendation will actually apply.
+     * Without it the probe measures a stripped-down encode and the model
+     * describes something the user never receives — on animation that was a
+     * 34% size error. See SmartOptimizerLogic.decide_encoder_tuning.
+     */
     private void append_video_codec_args (
         GenericArray<string> cmd,
         string codec,
         int    crf,
-        int    preset_idx
+        int    preset_idx,
+        SmartOptimizerLogic.EncoderTuning? tuning = null
     ) {
         if (codec == "vp9") {
             cmd.add ("-c:v");      cmd.add ("libvpx-vp9");
@@ -3723,16 +3765,46 @@ public class SmartOptimizer : GLib.Object {
                 ? SVT_AV1_PRESETS[preset_idx].to_string ()
                 : SVT_AV1_PRESETS[0].to_string ());
             cmd.add ("-crf");      cmd.add (crf.to_string ());
+            if (tuning != null) {
+                var p = new GenericArray<string> ();
+                if (tuning.film_grain) {
+                    p.add ("film-grain=%d".printf (tuning.film_grain_strength));
+                    p.add ("film-grain-denoise=1");
+                }
+                if (tuning.fast_decode_level > 0)
+                    p.add ("fast-decode=%d".printf (tuning.fast_decode_level));
+                if (p.length > 0) {
+                    var joined = new StringBuilder ();
+                    for (int i = 0; i < p.length; i++) {
+                        if (i > 0) joined.append (":");
+                        joined.append (p[i]);
+                    }
+                    cmd.add ("-svtav1-params"); cmd.add (joined.str);
+                }
+            }
         } else if (codec == "x265") {
             cmd.add ("-c:v");    cmd.add ("libx265");
             cmd.add ("-preset"); cmd.add (preset_idx >= 0
                 ? X265_PRESETS[preset_idx] : "ultrafast");
             cmd.add ("-crf");    cmd.add (crf.to_string ());
+            if (tuning != null) {
+                if (tuning.tune.length > 0) {
+                    cmd.add ("-tune"); cmd.add (tuning.tune);
+                }
+                if (tuning.psy_rd > 0.0) {
+                    cmd.add ("-x265-params");
+                    cmd.add ("psy-rd=%s".printf (
+                        ConversionUtils.format_ffmpeg_double (tuning.psy_rd, "%.2f")));
+                }
+            }
         } else {
             cmd.add ("-c:v");    cmd.add ("libx264");
             cmd.add ("-preset"); cmd.add (preset_idx >= 0
                 ? X264_PRESETS[preset_idx] : "ultrafast");
             cmd.add ("-crf");    cmd.add (crf.to_string ());
+            if (tuning != null && tuning.tune.length > 0) {
+                cmd.add ("-tune"); cmd.add (tuning.tune);
+            }
         }
     }
 
@@ -3821,7 +3893,7 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-i"); cmd.add (intermediate_path);
         cmd.add ("-an");
 
-        append_video_codec_args (cmd, codec, crf, preset_idx);
+        append_video_codec_args (cmd, codec, crf, preset_idx, active_tuning);
 
         if (pix_fmt.length > 0) {
             cmd.add ("-pix_fmt"); cmd.add (pix_fmt);
@@ -3872,7 +3944,7 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");             // no audio for calibration
 
-        append_video_codec_args (cmd, codec, crf, preset_idx);
+        append_video_codec_args (cmd, codec, crf, preset_idx, active_tuning);
 
         if (pix_fmt.length > 0) {
             cmd.add ("-pix_fmt"); cmd.add (pix_fmt);

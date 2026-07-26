@@ -979,6 +979,64 @@ void test_svtav1_ladders_bracket_the_measured_answers () {
     }
 }
 
+void test_encoder_tuning_is_one_decision_for_probe_and_applier () {
+    // The defect this guards: the calibration probe encoded with codec,
+    // preset, CRF and pixel format only, while the applied recommendation
+    // added tunes, grain synthesis and psy-rd. Measured at identical CRF, the
+    // largest divergence was x264 tune=animation at −34.3% size, so the model
+    // described an encode the user never received.
+    //
+    // Both sides now read decide_encoder_tuning, so these assertions describe
+    // the probe and the applier simultaneously.
+
+    // Animation gets the animation tune on x264/x265 — the 34% case.
+    var anime = SmartOptimizerLogic.decide_encoder_tuning (
+        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 8, false);
+    assert (anime.tune == "animation");
+
+    // Screen content gets stillimage on x264.
+    var screen = SmartOptimizerLogic.decide_encoder_tuning (
+        "x264", EncodeEffort.MEDIUM, ContentType.SCREENCAST, 0.0005, 8, false);
+    assert (screen.tune == "stillimage");
+
+    // Delivery displaces the content tune, because only one is possible.
+    var fast = SmartOptimizerLogic.decide_encoder_tuning (
+        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 8, true);
+    assert (fast.tune == "fastdecode");
+
+    // x265 carries psy-rd, which scales with effort.
+    var x265_low = SmartOptimizerLogic.decide_encoder_tuning (
+        "x265", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0005, 8, false);
+    var x265_max = SmartOptimizerLogic.decide_encoder_tuning (
+        "x265", EncodeEffort.MAXIMUM, ContentType.LIVE_ACTION, 0.0005, 8, false);
+    assert (x265_max.psy_rd > x265_low.psy_rd);
+
+    // Grainy live action at high effort gets the grain tune on x265.
+    var grainy = SmartOptimizerLogic.decide_encoder_tuning (
+        "x265", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 8, false);
+    assert (grainy.tune == "grain");
+
+    // SVT-AV1 exposes fast-decode separately, so it COMPOSES with grain
+    // rather than displacing it — unlike x264/x265 where a tune is exclusive.
+    var av1 = SmartOptimizerLogic.decide_encoder_tuning (
+        "svt-av1", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 8, true);
+    assert (av1.film_grain);
+    assert (av1.film_grain_strength > 0);
+    assert (av1.fast_decode_level == 1);
+
+    // Grain is gated on effort: below Medium it stays off however grainy.
+    var av1_low = SmartOptimizerLogic.decide_encoder_tuning (
+        "svt-av1", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0060, 8, false);
+    assert (!av1_low.film_grain);
+
+    // And it respects the 8-bit-only limit on the grain measurement: a 10-bit
+    // source's TOUT is not comparable, so the category decides — and animation
+    // has no grain.
+    var av1_10bit = SmartOptimizerLogic.decide_encoder_tuning (
+        "svt-av1", EncodeEffort.HIGH, ContentType.ANIME, 0.0060, 10, false);
+    assert (!av1_10bit.film_grain);
+}
+
 void test_sum_profile_range_partial_buckets () {
     double[] profile = { 1.0, 2.0, 3.0 };
     double sum = SmartOptimizerLogic.sum_profile_range (profile, 0.5, 1.5);
@@ -1832,6 +1890,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-inert", test_size_ceiling_is_inert_when_output_already_fits);
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);
+    Test.add_func ("/smart-optimizer-logic/tuning/probe-matches-applier", test_encoder_tuning_is_one_decision_for_probe_and_applier);
     Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
     Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
     Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);

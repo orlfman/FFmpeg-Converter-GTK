@@ -1738,6 +1738,123 @@ namespace SmartOptimizerLogic {
         return preset_idx.clamp (0, 8);
     }
 
+    // ── Encoder tuning: one decision, two consumers ──────────────────────────
+
+    /**
+     * Encoder parameters that materially change what an encode produces.
+     *
+     * This exists so the CALIBRATION PROBE and the APPLIED RECOMMENDATION
+     * cannot disagree. They used to: the probe encoded with codec, preset, CRF
+     * and pixel format only, while apply_smart_* went on to add tunes, grain
+     * synthesis, psy-rd and fast-decode. The model was therefore fitted to one
+     * encoder configuration and the result produced by another.
+     *
+     * Measured divergence at identical CRF, probe settings vs applied:
+     *
+     *     x264 tune=animation            size −34.3%   VMAF +0.14
+     *     SVT-AV1 film-grain=12          size  −7.1%   VMAF −0.95
+     *     x265 psy-rd 2.5 + ref 4        size  +1.7%   VMAF +0.05
+     *     SVT-AV1 qm + lookahead         size  −0.3%   VMAF +0.03
+     *
+     * The quality axis survived the mismatch — every VMAF delta is under a
+     * point — but the size axis did not. On animation the predicted size was
+     * half again what the encode actually produced, so a Size Mode target
+     * landed about a third under what the user asked for: quality they paid
+     * for and did not receive.
+     *
+     * Only parameters that moved the result meaningfully are carried here.
+     * Quantisation matrices, lookahead depth, reference count, CDEF and the
+     * rest stayed within ±2% and are deliberately left to apply_smart_* alone
+     * — their cost in probe complexity is not repaid. That is a measured
+     * judgement, not an oversight; re-measure before assuming it still holds
+     * if those settings change substantially.
+     */
+    public struct EncoderTuning {
+        /** x264/x265 -tune value; "" for none. Only ONE tune is possible. */
+        public string tune;
+        /** SVT-AV1 film grain synthesis. */
+        public bool   film_grain;
+        public int    film_grain_strength;
+        /** x265 psy-rd; 0 leaves the encoder default. */
+        public double psy_rd;
+        /** SVT-AV1 fast-decode level; 0 = disabled. */
+        public int    fast_decode_level;
+    }
+
+    /** Stable identity for a tuning, for use in the calibration cache key. */
+    public string encoder_tuning_key (EncoderTuning t) {
+        return "%s|%d|%d|%.2f|%d".printf (
+            t.tune, t.film_grain ? 1 : 0, t.film_grain_strength,
+            t.psy_rd, t.fast_decode_level);
+    }
+
+    /** x265 psy-rd by effort, mirroring apply_smart_x265. */
+    public double psy_rd_for_effort (EncodeEffort effort) {
+        switch (effort) {
+            case EncodeEffort.MINIMAL: return 2.0;
+            case EncodeEffort.LOW:     return 2.0;
+            case EncodeEffort.MEDIUM:  return 2.5;
+            case EncodeEffort.HIGH:    return 3.0;
+            case EncodeEffort.MAXIMUM: return 3.5;
+            default:                   return 2.0;
+        }
+    }
+
+    /** SVT-AV1 film grain strength by effort, mirroring apply_smart_svt_av1. */
+    public int film_grain_strength_for_effort (EncodeEffort effort) {
+        switch (effort) {
+            case EncodeEffort.LOW:     return 8;
+            case EncodeEffort.MEDIUM:  return 10;
+            case EncodeEffort.HIGH:    return 12;
+            case EncodeEffort.MAXIMUM: return 15;
+            default:                   return 8;
+        }
+    }
+
+    /**
+     * Decide the encoder tuning for a recommendation.
+     *
+     * Every input is known before calibration runs — content classification,
+     * grain measurement and effort are all settled by then — so the probe can
+     * use the real settings rather than a stripped-down approximation.
+     */
+    public EncoderTuning decide_encoder_tuning (
+        string       codec,
+        EncodeEffort effort,
+        ContentType  content_type,
+        double       grain_score,
+        int          source_bit_depth,
+        bool         fast_decode
+    ) {
+        var t = EncoderTuning () {
+            tune = "", film_grain = false, film_grain_strength = 0,
+            psy_rd = 0.0, fast_decode_level = 0
+        };
+        bool grain = grain_warranted (grain_score, content_type, source_bit_depth);
+
+        if (codec == "x264") {
+            // Only one tune is possible, and an explicit delivery request wins
+            // over the content-derived choice.
+            if (fast_decode)                                 t.tune = "fastdecode";
+            else if (content_type == ContentType.ANIME)      t.tune = "animation";
+            else if (content_type == ContentType.SCREENCAST) t.tune = "stillimage";
+        } else if (codec == "x265") {
+            if (fast_decode)                            t.tune = "fastdecode";
+            else if (content_type == ContentType.ANIME) t.tune = "animation";
+            else if (effort >= EncodeEffort.HIGH && grain) t.tune = "grain";
+            t.psy_rd = psy_rd_for_effort (effort);
+        } else if (codec == "svt-av1") {
+            // AV1 exposes fast-decode separately from tuning, so unlike
+            // x264/x265 it composes rather than displacing anything.
+            t.fast_decode_level = fast_decode ? 1 : 0;
+            if (effort >= EncodeEffort.MEDIUM && grain) {
+                t.film_grain = true;
+                t.film_grain_strength = film_grain_strength_for_effort (effort);
+            }
+        }
+        return t;
+    }
+
     // ── Mode-agnostic effort mapping ─────────────────────────────────────────
 
     /**

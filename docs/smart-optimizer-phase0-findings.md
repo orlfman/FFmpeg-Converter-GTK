@@ -1031,6 +1031,72 @@ the ladder is this far out, which is the real cost of leaving VP9 unmeasured.
 
 ---
 
+## Part 11 — The probe measured different encoder settings from those applied
+
+**Severity: high on the size axis, negligible on the quality axis.** Reported
+by Codex; confirmed and quantified here.
+
+Calibration probes encoded with codec, preset, CRF and pixel format only, while
+`apply_smart_*` went on to add tunes, film-grain synthesis, psy-rd, lookahead,
+quantisation matrices, AQ and fast-decode. The model was therefore fitted to
+one encoder configuration and the result produced by another. The verification
+probe used the same simplified command, so it confirmed the mismatch rather
+than catching it.
+
+Measured at identical CRF, probe settings versus applied:
+
+| setting | size Δ | VMAF Δ |
+|---|---|---|
+| **x264 `tune animation`** | **−34.3%** | +0.14 |
+| SVT-AV1 `film-grain=12` | −7.1% | −0.95 |
+| x265 psy-rd 2.5 + ref 4 | +1.7% | +0.05 |
+| SVT-AV1 qm + lookahead | −0.3% | +0.03 |
+
+### The quality axis survived; the size axis did not
+
+Every VMAF delta is under a point, so solved CRFs and verified scores were
+fine. Size was not: on animation the probe produced files ~34% larger than the
+real encode, so **a Size Mode target landed about a third under what was
+asked for** — quality paid for and not received.
+
+This also explains why a live SVT-AV1 run predicted within 1%: it was
+live-action at Medium effort, where the only extras were quantisation matrices
+and lookahead at −0.3%. It happened to land in the benign case.
+
+**The classifier fix made this worse.** Before Part 4, `ANIME` was
+arithmetically unreachable, so `tune animation` almost never fired and the
+34% path stayed hidden. Correcting the classifier activated it.
+
+### Fix
+
+One decision, two consumers: `decide_encoder_tuning` takes
+`(codec, effort, content_type, grain_score, source_bit_depth, fast_decode)` and
+returns the tune, grain settings, psy-rd and fast-decode level. The probe
+builds its ffmpeg arguments from it and `apply_smart_*` sets its widgets from
+it, so they cannot drift apart again — patching the probe setting-by-setting
+would have recreated exactly the divergence that caused this.
+
+Verified at the source. A live probe command now reads:
+
+```
+-preset medium -crf 21 -tune animation -x265-params psy-rd=2.50
+```
+
+where it previously read `-preset medium -crf 21`.
+
+Only parameters measured as material are carried. Quantisation matrices,
+lookahead, reference count and CDEF stayed within ±2% and are left to
+`apply_smart_*` alone — a measured judgement rather than an oversight.
+
+### Knock-on: the calibration cache key
+
+Tuning changes what a probe measures, so a cached sample taken under different
+tuning is a different measurement. The cache key now includes the tuning
+identity; without it, changing content type or toggling Streaming would have
+served stale sizes from a differently-tuned probe.
+
+---
+
 ## Tooling notes
 
 - `analyze-corpus.py --degrade-probe` produces the matched pairs. Without it the

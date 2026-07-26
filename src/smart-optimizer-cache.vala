@@ -69,7 +69,8 @@ public class SmartOptimizerCache : GLib.Object {
         double   encode_duration,
         double   segment_duration,
         double[] positions,
-        double   extrapolation_weight
+        double   extrapolation_weight,
+        string   encoder_tuning = ""
     ) {
         int64 file_size, mtime;
         if (!stat_input (input_file, out file_size, out mtime))
@@ -77,7 +78,8 @@ public class SmartOptimizerCache : GLib.Object {
         string key = build_cache_key (
             input_file, file_size, mtime, codec, preset_idx, pix_fmt,
             video_filter_chain, trim_start, encode_duration,
-            segment_duration, positions, extrapolation_weight);
+            segment_duration, positions, extrapolation_weight,
+            encoder_tuning);
         return new SmartOptimizerCache (key);
     }
 
@@ -98,7 +100,8 @@ public class SmartOptimizerCache : GLib.Object {
         double   encode_duration,
         double   segment_duration,
         double[] positions,
-        double   extrapolation_weight
+        double   extrapolation_weight,
+        string   encoder_tuning
     ) {
         var sb = new StringBuilder ();
         sb.append ("v%d".printf (CACHE_FORMAT_VERSION));
@@ -113,6 +116,10 @@ public class SmartOptimizerCache : GLib.Object {
         sb.append (FIELD_SEP); sb.append ("%.3f".printf (encode_duration));
         sb.append (FIELD_SEP); sb.append ("%.3f".printf (segment_duration));
         sb.append (FIELD_SEP); sb.append ("%.4f".printf (extrapolation_weight));
+        // Encoder tuning changes what a probe measures — tune=animation alone
+        // moves size by a third — so a sample taken under different tuning is
+        // a different measurement and must not be reused.
+        sb.append (FIELD_SEP); sb.append (encoder_tuning);
         for (int i = 0; i < positions.length; i++) {
             sb.append (FIELD_SEP);
             sb.append ("%.2f".printf (positions[i]));
