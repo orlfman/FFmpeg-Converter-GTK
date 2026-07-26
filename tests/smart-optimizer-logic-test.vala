@@ -937,6 +937,48 @@ void test_limit_positions_preserves_spread () {
         assert (three[i] > three[i - 1]);
 }
 
+void test_svtav1_ladders_bracket_the_measured_answers () {
+    // Corpus-measured SVT-AV1 answers (19 files, CRF 24–48 sweep). Each
+    // bracket must actually contain the mean answer for its intent — the
+    // original ladders did not, sitting 8–16 CRF low, so the solve landed
+    // outside the window on nearly every source and paid for a refinement
+    // probe to recover.
+    //                      intent, measured mean answer
+    double[,] measured = {
+        { 0, 50.1 },   // Low
+        { 1, 43.8 },   // Medium
+        { 2, 34.1 },   // High
+        { 3, 30.6 }    // Ultra (biased high — see the ladder comment)
+    };
+    SmartOptimizerLogic.QualityIntent[] intents = {
+        SmartOptimizerLogic.QualityIntent.LOW,
+        SmartOptimizerLogic.QualityIntent.MEDIUM,
+        SmartOptimizerLogic.QualityIntent.HIGH,
+        SmartOptimizerLogic.QualityIntent.ULTRA
+    };
+    for (int i = 0; i < measured.length[0]; i++) {
+        var ladder = SmartOptimizerLogic.pick_quality_calibration_crfs (
+            "svt-av1", intents[(int) measured[i, 0]]);
+        double answer = measured[i, 1];
+        assert (ladder[0] <= answer);
+        assert (ladder[ladder.length - 1] >= answer);
+    }
+
+    // The specific live case that exposed the problem: a Medium solve landed
+    // on CRF 41, outside the old {26,32,38}.
+    var med = SmartOptimizerLogic.pick_quality_calibration_crfs (
+        "svt-av1", SmartOptimizerLogic.QualityIntent.MEDIUM);
+    assert (med[0] <= 41 && med[med.length - 1] >= 41);
+
+    // Every point must stay inside the codec's own range.
+    int lo, hi;
+    SmartOptimizerLogic.crf_range_for_codec ("svt-av1", out lo, out hi);
+    foreach (var intent in intents) {
+        foreach (int c in SmartOptimizerLogic.pick_quality_calibration_crfs ("svt-av1", intent))
+            assert (c >= lo && c <= hi);
+    }
+}
+
 void test_sum_profile_range_partial_buckets () {
     double[] profile = { 1.0, 2.0, 3.0 };
     double sum = SmartOptimizerLogic.sum_profile_range (profile, 0.5, 1.5);
@@ -1789,6 +1831,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-clamps", test_size_ceiling_clamps_and_reports_achieved_quality);
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-inert", test_size_ceiling_is_inert_when_output_already_fits);
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
+    Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);
     Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
     Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
     Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);

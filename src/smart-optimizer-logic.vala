@@ -3220,11 +3220,17 @@ namespace SmartOptimizerLogic {
      * the measured spread across content classes does: 1.1 CRF at Low, 11.2 at
      * Ultra (anime 12.3 vs live-action 23.5).
      *
-     * Only the x264/x265 ladder is corpus-calibrated; the VP9 and SVT-AV1
-     * offsets follow pick_calibration_crfs by analogy and are unvalidated.
+     * The x264/x265 and SVT-AV1 ladders are corpus-calibrated. **VP9's is
+     * not** — it still follows pick_calibration_crfs by analogy and has never
+     * been measured, so treat its centring as a guess. SVT-AV1's was also a
+     * guess until measured, and turned out to be 8–16 CRF off, which is the
+     * scale of error to expect from VP9's.
+     *
      * Adaptive refinement (pick_adaptive_calibration_crfs) corrects a
      * mis-centred bracket by probing near the first solve, so an imperfect
-     * starting ladder costs an extra probe rather than a bad answer.
+     * starting ladder costs an extra probe rather than a bad answer — but it
+     * costs that probe on nearly every run when the ladder is as far out as
+     * SVT-AV1's was.
      */
     public int[] pick_quality_calibration_crfs (string codec, QualityIntent intent) {
         if (codec == "vp9") {
@@ -3237,12 +3243,30 @@ namespace SmartOptimizerLogic {
             }
         }
         if (codec == "svt-av1") {
+            // CORPUS-MEASURED (19 files, CRF 24–48). The original values here
+            // were scaled from the x265 ladder by analogy and were centred
+            // 8–16 CRF too low — the LOW bracket topped out at 42 while the
+            // measured answer averages 50.1, so the solve fell outside the
+            // window on nearly every source:
+            //
+            //   intent   old bracket   measured mean   measured range
+            //   Low      30–42         50.1            41.9–53.8
+            //   Medium   26–38         43.8            33.9–53.6
+            //   High     20–34         34.1            22.5–43.6
+            //   Ultra    14–30         30.6*           17.1–38.7
+            //
+            // * Ultra's mean is biased upward because animation cannot reach
+            //   VMAF 97 at all under the HD model (see vmaf_model_path), so
+            //   only the easier content contributes a figure.
+            //
+            // Brackets are deliberately wide — the measured spread is ~20 CRF
+            // at every intent above Low, far wider than x265's.
             switch (intent) {
-                case QualityIntent.LOW:    return { 30, 36, 42 };
-                case QualityIntent.MEDIUM: return { 26, 32, 38 };
-                case QualityIntent.HIGH:   return { 20, 27, 34 };
-                case QualityIntent.ULTRA:  return { 14, 22, 30 };
-                default:                   return { 26, 32, 38 };
+                case QualityIntent.LOW:    return { 42, 48, 54 };
+                case QualityIntent.MEDIUM: return { 34, 44, 54 };
+                case QualityIntent.HIGH:   return { 24, 34, 44 };
+                case QualityIntent.ULTRA:  return { 18, 28, 38 };
+                default:                   return { 34, 44, 54 };
             }
         }
         // x264 / x265 — the ladder Phase 0 actually measured.

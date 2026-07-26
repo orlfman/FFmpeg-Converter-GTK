@@ -963,6 +963,53 @@ that Phase 0 calibrated against the non-NEG models.
 
 ---
 
+## Part 10 — The SVT-AV1 calibration ladders were 8–16 CRF off
+
+Phase 0 measured the CRF ladders for x264/x265 only. The SVT-AV1 and VP9 ones
+were scaled from those by analogy, and a live run exposed the consequence: an
+SVT-AV1 Medium solve landed on CRF 41 from a `{26,32,38}` bracket, reporting
+58% confidence despite verifying to within 0.11 VMAF.
+
+A dedicated sweep (19 files, CRF 24–48, libsvtav1) shows every ladder centred
+too low:
+
+| intent | old bracket | measured mean | measured range |
+|---|---|---|---|
+| Low | 30–42 | **50.1** | 41.9–53.8 |
+| Medium | 26–38 | **43.8** | 33.9–53.6 |
+| High | 20–34 | **34.1** | 22.5–43.6 |
+| Ultra | 14–30 | 30.6* | 17.1–38.7 |
+
+The Low bracket **topped out at 42 while the mean answer is 50.1**, so the
+solve fell outside the window on nearly every source.
+
+\* Ultra's figure is biased upward: animation cannot reach VMAF 97 under the HD
+model at all (Part 9), so those files contribute no Ultra value and only the
+easier content is averaged. This is why Ultra's mean sits *below* High's.
+
+New ladders, centred on the measured means and deliberately wide — the spread
+is ~20 CRF at every intent above Low, far wider than x265's:
+
+```
+Low     { 42, 48, 54 }
+Medium  { 34, 44, 54 }
+High    { 24, 34, 44 }
+Ultra   { 18, 28, 38 }
+```
+
+### VP9 remains unmeasured
+
+Its ladder is still derived by analogy and has never been checked. SVT-AV1's
+was a guess of exactly the same kind and turned out to be 8–16 CRF out, which
+is the error to expect from VP9's. The code says so rather than lumping both
+codecs under one "unvalidated" note now that SVT-AV1 is measured.
+
+Adaptive refinement makes a mis-centred ladder recoverable — it probes near the
+first solve and refits — but it pays that extra probe on nearly every run when
+the ladder is this far out, which is the real cost of leaving VP9 unmeasured.
+
+---
+
 ## Tooling notes
 
 - `analyze-corpus.py --degrade-probe` produces the matched pairs. Without it the
