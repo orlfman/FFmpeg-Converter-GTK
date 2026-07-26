@@ -38,6 +38,7 @@ check_dependency pkg-config
 check_pkg_config_dependency gtk4 GTK4
 check_pkg_config_dependency libadwaita-1 libadwaita
 check_pkg_config_dependency json-glib-1.0 json-glib
+check_pkg_config_dependency libsoup-3.0 "libsoup 3"
 check_dependency ffmpeg
 check_dependency ffprobe
 check_dependency gst-inspect-1.0
