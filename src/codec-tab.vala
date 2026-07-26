@@ -28,6 +28,24 @@ public interface ISmartCodecTab : Object {
     public abstract bool get_auto_convert_active ();
     public abstract bool get_strip_audio_active ();
     public abstract int get_target_mb ();
+    /**
+     * True when the user pinned a quality target instead of a size target.
+     * The two are mutually exclusive: one axis is the constraint, the other
+     * is the prediction.
+     */
+    public abstract bool get_quality_mode_active ();
+    /** Meaningful only when get_quality_mode_active() is true. */
+    public abstract SmartOptimizerLogic.QualityIntent get_quality_intent ();
+    /**
+     * User's content assertion. Applies to BOTH modes — the classifier cannot
+     * detect animation, so this is the reliable path to correct handling.
+     */
+    public abstract ContentOverride get_content_override ();
+    /**
+     * Delivery constraint — composable with either axis, which is why it is a
+     * toggle rather than an entry in the quality list.
+     */
+    public abstract bool get_optimize_for_delivery ();
     public abstract AudioSettings get_audio_settings_ref ();
     public abstract void apply_smart_recommendation (OptimizationRecommendation rec);
     public abstract void update_source_file_size (string file_path);

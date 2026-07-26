@@ -820,8 +820,26 @@ public class AppController : Object {
             }
         }
 
-        status_area.set_status ("Smart Optimizer: analyzing video for %d MB %s target…"
-            .printf (target_mb, codec.up ()),
+        // Which axis did the user pin? Quality Mode solves for a perceptual
+        // score and reports size; Size Mode does the reverse. They are
+        // mutually exclusive by construction in the UI.
+        // Content assertion applies to both modes.
+        ctx.content_override = (smart_tab != null)
+            ? smart_tab.get_content_override () : ContentOverride.AUTO;
+
+        ctx.optimize_for_delivery = (smart_tab != null)
+            && smart_tab.get_optimize_for_delivery ();
+
+        bool quality_mode = (smart_tab != null) && smart_tab.get_quality_mode_active ();
+        var quality_intent = (smart_tab != null)
+            ? smart_tab.get_quality_intent ()
+            : SmartOptimizerLogic.QualityIntent.MEDIUM;
+
+        status_area.set_status (quality_mode
+            ? "Smart Optimizer: measuring quality for %s %s…".printf (
+                quality_intent.to_label (), codec.up ())
+            : "Smart Optimizer: analyzing video for %d MB %s target…".printf (
+                target_mb, codec.up ()),
             StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
 
         // Audio bitrate — determined by the optimizer based on size tier.
@@ -854,13 +872,18 @@ public class AppController : Object {
         }
 
         try {
-            var rec = yield smart_optimizer.optimize_for_target_size (
-                input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);
+            var rec = quality_mode
+                ? yield smart_optimizer.optimize_for_quality (
+                    input_file, quality_intent, preferred_codec, ctx, smart_opt_cancel)
+                : yield smart_optimizer.optimize_for_target_size (
+                    input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);
 
             status_area.stop_progress ();
 
             if (rec.is_impossible) {
-                status_area.set_status ("Smart Optimizer: target may be unreachable.",
+                status_area.set_status (quality_mode
+                    ? "Smart Optimizer: could not measure quality for this video."
+                    : "Smart Optimizer: target may be unreachable.",
                     StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 console_tab.add_line ("[Smart Optimizer] " + rec.notes);
                 if (my_generation == smart_opt_generation)
@@ -881,8 +904,13 @@ public class AppController : Object {
                 general_tab.preserve_metadata.set_active (false);
             }
 
-            status_area.set_status ("Smart Optimizer: CRF %d / %s — est. %d KiB"
-                .printf (rec.crf, rec.preset, rec.estimated_size_kib),
+            // Both numbers, always — the pinned one and the predicted one.
+            status_area.set_status (rec.vmaf_measured
+                ? "Smart Optimizer: CRF %d / %s — VMAF %.1f, est. %.1f MiB".printf (
+                    rec.crf, rec.preset, rec.estimated_vmaf,
+                    rec.estimated_size_kib / 1024.0)
+                : "Smart Optimizer: CRF %d / %s — est. %d KiB".printf (
+                    rec.crf, rec.preset, rec.estimated_size_kib),
                 StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
 
             // Log full details to console

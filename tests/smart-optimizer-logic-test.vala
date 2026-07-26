@@ -299,6 +299,576 @@ void test_fit_rmse_reports_noise () {
     assert (rmse > 0.03);
 }
 
+// ── Mode-agnostic effort axis ────────────────────────────────────────────────
+
+void test_effort_from_size_tier_is_monotonic_and_total () {
+    // The mapping must be 1:1 and order-preserving: it is the only thing
+    // guaranteeing Size Mode behaves identically after the feature tables
+    // moved from SizeTier onto EncodeEffort.
+    assert (SmartOptimizerLogic.effort_from_size_tier (SizeTier.TINY)
+        == EncodeEffort.MINIMAL);
+    assert (SmartOptimizerLogic.effort_from_size_tier (SizeTier.SMALL)
+        == EncodeEffort.LOW);
+    assert (SmartOptimizerLogic.effort_from_size_tier (SizeTier.MEDIUM)
+        == EncodeEffort.MEDIUM);
+    assert (SmartOptimizerLogic.effort_from_size_tier (SizeTier.LARGE)
+        == EncodeEffort.HIGH);
+    assert (SmartOptimizerLogic.effort_from_size_tier (SizeTier.XLARGE)
+        == EncodeEffort.MAXIMUM);
+
+    // Order preservation matters because two live gates are comparisons, not
+    // equality tests: SVT-AV1 grain at >= MEDIUM and x265 grain tune at >= HIGH.
+    SizeTier[] ascending = {
+        SizeTier.TINY, SizeTier.SMALL, SizeTier.MEDIUM,
+        SizeTier.LARGE, SizeTier.XLARGE
+    };
+    for (int i = 1; i < ascending.length; i++) {
+        assert (SmartOptimizerLogic.effort_from_size_tier (ascending[i])
+              > SmartOptimizerLogic.effort_from_size_tier (ascending[i - 1]));
+    }
+}
+
+void test_tier_forces_compat_container_only_for_small_targets () {
+    // Container forcing is a size policy, not a quality one — it must stay
+    // bound to the tier and never leak onto the effort axis.
+    assert (SmartOptimizerLogic.tier_forces_compat_container (SizeTier.TINY));
+    assert (SmartOptimizerLogic.tier_forces_compat_container (SizeTier.SMALL));
+    assert (!SmartOptimizerLogic.tier_forces_compat_container (SizeTier.MEDIUM));
+    assert (!SmartOptimizerLogic.tier_forces_compat_container (SizeTier.LARGE));
+    assert (!SmartOptimizerLogic.tier_forces_compat_container (SizeTier.XLARGE));
+}
+
+// ── Least-squares core ───────────────────────────────────────────────────────
+
+void test_least_squares_core_recovers_known_quadratic () {
+    // y = 3 − 0.5x + 0.02x² sampled exactly; the fit must return the
+    // coefficients regardless of what transform produced y.
+    double[] xs = { 10.0, 20.0, 30.0, 40.0, 50.0 };
+    double[] ys = new double[xs.length];
+    for (int i = 0; i < xs.length; i++)
+        ys[i] = 3.0 - 0.5 * xs[i] + 0.02 * xs[i] * xs[i];
+
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_quadratic_least_squares (
+        xs, ys, out qa, out qb, out qc, out degenerate);
+
+    assert (!degenerate);
+    assert (close_to (qa, 3.0, 1e-6));
+    assert (close_to (qb, -0.5, 1e-6));
+    assert (close_to (qc, 0.02, 1e-6));
+}
+
+void test_least_squares_core_handles_logit_transform () {
+    // The Phase 2 use case: VMAF is bounded and saturates, so the quality
+    // solver fits logit(vmaf/100) rather than the raw score.  Verify the core
+    // round-trips a logit-space line back to the VMAF that produced it.
+    double[] xs = { 18.0, 24.0, 30.0 };
+    double[] vmafs = new double[xs.length];
+    double[] ys = new double[xs.length];
+    for (int i = 0; i < xs.length; i++) {
+        double logit = 4.0 - 0.12 * xs[i];
+        vmafs[i] = 100.0 / (1.0 + Math.exp (-logit));
+        ys[i] = Math.log ((vmafs[i] / 100.0) / (1.0 - vmafs[i] / 100.0));
+    }
+
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_quadratic_least_squares (
+        xs, ys, out qa, out qb, out qc, out degenerate);
+    assert (!degenerate);
+
+    // Predict at a held-out CRF and convert back out of logit space.
+    double x = 27.0;
+    double pred_logit = qa + qb * x + qc * x * x;
+    double pred_vmaf = 100.0 / (1.0 + Math.exp (-pred_logit));
+    double want_vmaf = 100.0 / (1.0 + Math.exp (-(4.0 - 0.12 * x)));
+    assert (close_to (pred_vmaf, want_vmaf, 1e-6));
+}
+
+void test_least_squares_core_degenerate_falls_back_to_line () {
+    // Identical y at every x: the normal-equation system collapses and the
+    // fallback must return a flat line rather than inf/nan.
+    double[] xs = { 10.0, 10.0, 10.0 };
+    double[] ys = { 5.0, 5.0, 5.0 };
+
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_quadratic_least_squares (
+        xs, ys, out qa, out qb, out qc, out degenerate);
+
+    assert (degenerate);
+    assert (qc == 0.0);
+    assert (qa.is_finite () && qb.is_finite ());
+    assert (close_to (qb, 0.0, 1e-9));
+    assert (close_to (qa, 5.0, 1e-9));
+}
+
+void test_log_curve_wrapper_matches_core () {
+    // fit_quadratic_log_curve is now a y = ln(size) wrapper; it must agree
+    // exactly with feeding the core the same transformed data by hand.
+    int[] crfs = { 16, 21, 26, 30 };
+    double[] sizes = new double[4];
+    for (int i = 0; i < 4; i++) sizes[i] = Math.exp (10.0 - 0.1 * crfs[i]);
+
+    double wa, wb, wc;
+    bool w_degenerate;
+    SmartOptimizerLogic.fit_quadratic_log_curve (
+        crfs, sizes, out wa, out wb, out wc, out w_degenerate);
+
+    double[] xs = new double[4];
+    double[] ys = new double[4];
+    for (int i = 0; i < 4; i++) {
+        xs[i] = (double) crfs[i];
+        ys[i] = Math.log (sizes[i]);
+    }
+    double ca, cb, cc;
+    bool c_degenerate;
+    SmartOptimizerLogic.fit_quadratic_least_squares (
+        xs, ys, out ca, out cb, out cc, out c_degenerate);
+
+    assert (w_degenerate == c_degenerate);
+    assert (wa == ca && wb == cb && wc == cc);
+}
+
+// ── Quality solver ───────────────────────────────────────────────────────────
+//
+// Fixtures are MEASURED libx265 sweep points from the Phase 0 corpus
+// (/mnt/storage3/testvideos, docs/smart-optimizer-phase0-findings.md).
+// Testing the solver against real CRF↔VMAF responses rather than synthetic
+// curves is the point: the whole premise is that these curves differ wildly
+// per source, and a solver that only works on smooth invented data is useless.
+
+// anime-testvid1.mkv — 43 Mbps BD-tier anime. Steep response.
+const int[]    ANIME_CRFS  = { 16, 20, 24, 28, 34 };
+const double[] ANIME_VMAFS = { 95.901, 94.319, 92.128, 88.727, 79.376 };
+const double[] ANIME_SIZES = { 134961.7, 51508.3, 19027.1, 9371.9, 4245.7 };
+
+// women-1080p-testvid0.mp4 — 13 Mbps live-action master. Flat then cliff.
+const int[]    LIVE_CRFS  = { 16, 20, 24, 28, 34 };
+const double[] LIVE_VMAFS = { 98.648, 98.198, 96.072, 90.870, 75.838 };
+
+// women-4k-testvid0.mp4 — saturates at CRF 16 (VMAF 99.985).
+const int[]    SAT_CRFS  = { 16, 20, 24, 28, 34 };
+const double[] SAT_VMAFS = { 99.985, 99.528, 97.321, 93.536, 84.156 };
+
+// Screencast-testvid0.webm — VMAF over-rewards screen content badly.
+const int[]    SCREEN_CRFS  = { 16, 20, 24, 28, 34 };
+const double[] SCREEN_VMAFS = { 99.985, 99.743, 98.837, 97.229, 92.689 };
+
+void test_quality_intent_targets_ascend () {
+    assert (SmartOptimizerLogic.QualityIntent.LOW.target_vmaf () == 88.0);
+    assert (SmartOptimizerLogic.QualityIntent.MEDIUM.target_vmaf () == 92.0);
+    assert (SmartOptimizerLogic.QualityIntent.HIGH.target_vmaf () == 95.0);
+    assert (SmartOptimizerLogic.QualityIntent.ULTRA.target_vmaf () == 97.0);
+
+    // Quality Mode never reaches MINIMAL — that is a size-target concept.
+    assert (SmartOptimizerLogic.effort_from_quality_intent (
+        SmartOptimizerLogic.QualityIntent.LOW) == EncodeEffort.LOW);
+    assert (SmartOptimizerLogic.effort_from_quality_intent (
+        SmartOptimizerLogic.QualityIntent.ULTRA) == EncodeEffort.MAXIMUM);
+}
+
+void test_vmaf_fit_recovers_measured_curve () {
+    // The fit must reproduce its own measured points closely. Phase 0 put the
+    // corpus mean residual at 0.228 VMAF points; assert comfortably inside 1.0.
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_vmaf_curve (
+        ANIME_CRFS, ANIME_VMAFS, out qa, out qb, out qc, out degenerate);
+    assert (!degenerate);
+
+    double rmse = SmartOptimizerLogic.vmaf_fit_rmse (
+        ANIME_CRFS, ANIME_VMAFS, qa, qb, qc);
+    assert (rmse < 1.0);
+
+    for (int i = 0; i < ANIME_CRFS.length; i++) {
+        double pred = SmartOptimizerLogic.evaluate_vmaf_at_crf (
+            qa, qb, qc, ANIME_CRFS[i]);
+        assert (Math.fabs (pred - ANIME_VMAFS[i]) < 1.5);
+    }
+}
+
+void test_vmaf_evaluation_is_clamped_to_metric_range () {
+    // An unconstrained quadratic will predict above 100 when extrapolated
+    // below the calibration window. VMAF has no such values.
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_vmaf_curve (
+        LIVE_CRFS, LIVE_VMAFS, out qa, out qb, out qc, out degenerate);
+    for (int crf = 0; crf <= 51; crf++) {
+        double v = SmartOptimizerLogic.evaluate_vmaf_at_crf (qa, qb, qc, crf);
+        assert (v >= 0.0 && v <= 100.0);
+    }
+}
+
+void test_saturated_points_are_rejected () {
+    // women-4k-testvid0 reads VMAF 99.985 at CRF 16 — no gradient. Keeping it
+    // cost 3.43 VMAF of prediction error in the Phase 0 held-out test.
+    int[] kept_crfs;
+    double[] kept_vmafs;
+    int kept = SmartOptimizerLogic.filter_saturated_vmaf_points (
+        SAT_CRFS, SAT_VMAFS, out kept_crfs, out kept_vmafs);
+
+    // 99.985 (CRF 16) and 99.528 (CRF 20) are both at or above the 99.5
+    // threshold, so 3 of the 5 points survive.
+    assert (kept == 3);
+    assert (kept_crfs[0] == 24);
+    // Still enough to fit — exactly the minimum Phase 0 validated.
+    assert (kept >= SmartOptimizerLogic.VMAF_MIN_CALIBRATION_POINTS);
+    for (int i = 0; i < kept_vmafs.length; i++)
+        assert (kept_vmafs[i] < SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD);
+}
+
+void test_solve_reproduces_measured_crf_for_target () {
+    // The measured anime curve passes through (24, 92.128). Solving for
+    // VMAF 92 must therefore land essentially on CRF 24.
+    var m = SmartOptimizerLogic.solve_quality_crf (
+        ANIME_CRFS, ANIME_VMAFS, 92.0, "x265");
+    assert (!m.degenerate);
+    assert (m.predicted_crf >= 23 && m.predicted_crf <= 25);
+
+    // And (28, 88.727) → solving for 88 lands just above 28.
+    var m2 = SmartOptimizerLogic.solve_quality_crf (
+        ANIME_CRFS, ANIME_VMAFS, 88.0, "x265");
+    assert (m2.predicted_crf >= 28 && m2.predicted_crf <= 30);
+}
+
+void test_solve_separates_content_at_high_intent () {
+    // The core justification for solving instead of tabulating: at Ultra the
+    // measured spread across content classes was 11.2 CRF. Anime tolerates a
+    // far lower CRF than live-action for the same perceptual target, so a
+    // single static "Ultra = CRF n" table cannot serve both.
+    var anime = SmartOptimizerLogic.solve_quality_crf (
+        ANIME_CRFS, ANIME_VMAFS, 97.0, "x265");
+    var live = SmartOptimizerLogic.solve_quality_crf (
+        LIVE_CRFS, LIVE_VMAFS, 97.0, "x265");
+
+    assert (anime.predicted_crf < live.predicted_crf);
+    assert (live.predicted_crf - anime.predicted_crf >= 5);
+
+    // At Low intent the same two converge — which is why the solver earns its
+    // cost at High/Ultra specifically.
+    var anime_low = SmartOptimizerLogic.solve_quality_crf (
+        ANIME_CRFS, ANIME_VMAFS, 88.0, "x265");
+    var live_low = SmartOptimizerLogic.solve_quality_crf (
+        LIVE_CRFS, LIVE_VMAFS, 88.0, "x265");
+    assert (Math.fabs (
+        (double) (live_low.predicted_crf - anime_low.predicted_crf)) <= 3.0);
+}
+
+void test_solve_refuses_to_fit_when_all_points_saturate () {
+    // Every point visually lossless: no gradient anywhere. The solver must
+    // report degenerate so the caller probes higher CRFs rather than fitting
+    // noise.
+    int[] crfs = { 14, 16, 18, 20 };
+    double[] vmafs = { 99.99, 99.98, 99.97, 99.95 };
+    var m = SmartOptimizerLogic.solve_quality_crf (crfs, vmafs, 95.0, "x265");
+    assert (m.degenerate);
+    assert (m.saturated_points_dropped == 4);
+}
+
+void test_screencast_target_caps_crf_and_keeps_vmaf_as_floor () {
+    var p = ContentProfile () { content_type = ContentType.SCREENCAST };
+    var t = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.HIGH, p);
+    assert (!t.vmaf_reliable);
+    assert (t.crf_cap == 22);
+
+    // The measured screencast curve reaches VMAF 95 only past CRF 30 — a
+    // score that would pass the High intent while the text is mangled.
+    var m = SmartOptimizerLogic.solve_quality_crf (
+        SCREEN_CRFS, SCREEN_VMAFS, 95.0, "x265");
+    assert (m.predicted_crf > 28);
+
+    // The cap must pull it back.
+    int capped = SmartOptimizerLogic.apply_quality_crf_cap (m.predicted_crf, t);
+    assert (capped == 22);
+
+    // VMAF stays a FLOOR: when the solve already asks for better quality than
+    // the cap, the solve wins.
+    assert (SmartOptimizerLogic.apply_quality_crf_cap (18, t) == 18);
+}
+
+void test_non_screencast_target_is_unmodified () {
+    var p = ContentProfile () { content_type = ContentType.LIVE_ACTION };
+    var t = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.ULTRA, p);
+    assert (t.vmaf_reliable);
+    assert (t.crf_cap == 0);
+    assert (t.target_vmaf == 97.0);
+    assert (SmartOptimizerLogic.apply_quality_crf_cap (12, t) == 12);
+}
+
+void test_quality_ceiling_scales_to_trim_window () {
+    int64 src = (int64) (1000.0 * 1024.0);          // 1000 KiB source
+    double full = SmartOptimizerLogic.quality_ceiling_kib (src, 0, 0);
+    assert (close_to (full, 2000.0, 1e-6));          // 2x source
+
+    // Half the file trimmed away → half the ceiling, so a short clip cannot
+    // spend the whole file's allowance.
+    double half = SmartOptimizerLogic.quality_ceiling_kib (src, 50.0, 100.0);
+    assert (close_to (half, 1000.0, 1e-6));
+
+    assert (SmartOptimizerLogic.quality_ceiling_kib (0, 10.0, 100.0) == 0.0);
+}
+
+void test_size_ceiling_clamps_and_reports_achieved_quality () {
+    // Fit both curves from the same measured anime probes.
+    double sa, sb, sc;
+    bool sdeg;
+    SmartOptimizerLogic.fit_calibration_curve (
+        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
+    double va, vb, vc;
+    bool vdeg;
+    SmartOptimizerLogic.fit_vmaf_curve (
+        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
+
+    // Ultra on this source solves near CRF 16, which the measured curve puts
+    // at ~135 MB. A 20 MB ceiling must force the CRF up.
+    var o = SmartOptimizerLogic.apply_quality_size_ceiling (
+        16, 20000.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (o.clamped);
+    assert (o.final_crf > 16);
+    assert (o.estimated_size_kib <= 20000.0);
+    // And it must report the quality actually achieved, not the one requested.
+    assert (o.achieved_vmaf < 95.0);
+    assert (o.achieved_vmaf > 0.0);
+}
+
+void test_size_ceiling_is_inert_when_output_already_fits () {
+    double sa, sb, sc;
+    bool sdeg;
+    SmartOptimizerLogic.fit_calibration_curve (
+        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
+    double va, vb, vc;
+    bool vdeg;
+    SmartOptimizerLogic.fit_vmaf_curve (
+        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
+
+    // Generous ceiling → the solved CRF must pass through untouched, byte for
+    // byte. This is what makes the multiplier safe to retune later.
+    var o = SmartOptimizerLogic.apply_quality_size_ceiling (
+        24, 10000000.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (!o.clamped);
+    assert (o.final_crf == 24);
+
+    // Unknown source size (ceiling 0) must also be inert, not treated as zero
+    // allowance.
+    var o2 = SmartOptimizerLogic.apply_quality_size_ceiling (
+        24, 0.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (!o2.clamped);
+    assert (o2.final_crf == 24);
+}
+
+void test_quality_calibration_ladders_widen_toward_ultra () {
+    foreach (string codec in new string[] { "x265", "x264", "vp9", "svt-av1" }) {
+        var low = SmartOptimizerLogic.pick_quality_calibration_crfs (
+            codec, SmartOptimizerLogic.QualityIntent.LOW);
+        var ultra = SmartOptimizerLogic.pick_quality_calibration_crfs (
+            codec, SmartOptimizerLogic.QualityIntent.ULTRA);
+
+        // Three points — Phase 0 showed that is sufficient for a quality solve.
+        assert (low.length == SmartOptimizerLogic.VMAF_MIN_CALIBRATION_POINTS);
+        assert (ultra.length == SmartOptimizerLogic.VMAF_MIN_CALIBRATION_POINTS);
+
+        // Ascending, and Ultra brackets lower CRFs than Low.
+        for (int i = 1; i < low.length; i++) assert (low[i] > low[i - 1]);
+        for (int i = 1; i < ultra.length; i++) assert (ultra[i] > ultra[i - 1]);
+        assert (ultra[0] < low[0]);
+
+        // Ultra's bracket is wider, because the measured cross-content spread
+        // is 11.2 CRF there versus 1.1 at Low.
+        assert ((ultra[ultra.length - 1] - ultra[0]) > (low[low.length - 1] - low[0]));
+
+        // Every point must sit inside the codec's own valid range.
+        int lo, hi;
+        SmartOptimizerLogic.crf_range_for_codec (codec, out lo, out hi);
+        foreach (int c in ultra) assert (c >= lo && c <= hi);
+        foreach (int c in low) assert (c >= lo && c <= hi);
+    }
+}
+
+void test_fit_residual_is_ignored_on_a_three_point_solve () {
+    // A quadratic through exactly 3 points interpolates them exactly, so the
+    // residual is zero by construction and proves nothing. Confidence must not
+    // read that as a perfect fit.
+    int[] crfs = { 17, 23, 29 };
+    double[] vmafs = { 98.608, 98.218, 91.544 };   // measured, women-1080p
+    var m = SmartOptimizerLogic.solve_quality_crf (crfs, vmafs, 95.0, "x265");
+    assert (!m.degenerate);
+    assert (m.fit_rmse < 1e-6);              // structurally zero
+    assert (m.cal_crfs.length == 3);
+
+    // Solving VMAF 95 on this curve lands between the 23 and 29 samples.
+    assert (m.predicted_crf >= 25 && m.predicted_crf <= 28);
+}
+
+void test_verification_delta_drives_confidence () {
+    int[] crfs = { 17, 23, 29 };
+    double[] vmafs = { 98.608, 98.218, 91.544 };
+    var m = SmartOptimizerLogic.solve_quality_crf (crfs, vmafs, 95.0, "x265");
+
+    double no_verify = SmartOptimizerLogic.assess_quality_confidence (
+        m, 0.5, true, null);
+
+    // A verification that reproduces the prediction leaves confidence alone.
+    var good = new SmartOptimizerLogic.VmafVerification ();
+    good.done = true;
+    good.delta = 0.2;
+    double agreed = SmartOptimizerLogic.assess_quality_confidence (
+        m, 0.5, true, good);
+    assert (close_to (agreed, no_verify, 1e-9));
+
+    // A solve whose own answer does not reproduce must be trusted less,
+    // however tidy the curve looked.
+    var bad = new SmartOptimizerLogic.VmafVerification ();
+    bad.done = true;
+    bad.delta = -4.5;
+    double disagreed = SmartOptimizerLogic.assess_quality_confidence (
+        m, 0.5, true, bad);
+    assert (disagreed < agreed);
+
+    // Screencast: VMAF cannot rank the content, so the CRF cap is doing the
+    // real work and the metric-derived answer deserves less trust.
+    double unreliable = SmartOptimizerLogic.assess_quality_confidence (
+        m, 0.5, false, good);
+    assert (unreliable < agreed);
+}
+
+void test_content_override_beats_the_classifier () {
+    // Measured anime readings that the classifier lands on ANIME anyway.
+    var p = ContentProfile () {
+        edge_mean = 2.67, saturation_mean = 13.74,
+        saturation_stddev = 8.59, temporal_diff_mean = 4.55
+    };
+    SmartOptimizerLogic.classify_content (ref p);
+    assert (p.type_confidence <= SmartOptimizerLogic.ANIME_MAX_CONFIDENCE);
+
+    // A user assertion is better evidence than any signal available here, so
+    // it replaces the verdict AND lifts confidence to full — which lets
+    // choose_preset_index interpolate all the way to the content ideal.
+    SmartOptimizerLogic.apply_content_override (ref p, ContentOverride.SCREENCAST);
+    assert (p.content_type == ContentType.SCREENCAST);
+    assert (p.type_confidence == 1.0);
+
+    // AUTO must leave the measurement untouched.
+    var q = ContentProfile () {
+        edge_mean = 5.63, saturation_mean = 13.95,
+        saturation_stddev = 1.86, temporal_diff_mean = 10.15
+    };
+    SmartOptimizerLogic.classify_content (ref q);
+    var before = q.content_type;
+    double conf_before = q.type_confidence;
+    SmartOptimizerLogic.apply_content_override (ref q, ContentOverride.AUTO);
+    assert (q.content_type == before);
+    assert (q.type_confidence == conf_before);
+}
+
+void test_delivery_prefers_8bit_but_never_breaks_hdr () {
+    var ten = BitDepthDecision () {
+        pix_fmt = PixelFormat.YUV420P10LE, is_10bit = true,
+        reason = "High banding risk"
+    };
+    var sdr = SmartOptimizerVideoInfo ();
+
+    // Delivery off: untouched.
+    var a = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        ten, false, sdr, false);
+    assert (a.is_10bit);
+
+    // Delivery on, SDR source: drop to 8-bit for compatibility.
+    var b = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        ten, true, sdr, false);
+    assert (!b.is_10bit);
+    assert (b.pix_fmt == PixelFormat.YUV420P);
+
+    // HDR without tone mapping: 10-bit is NOT optional. Shipping a broken
+    // picture is worse than one some devices decode in software.
+    var hdr = SmartOptimizerVideoInfo () { color_transfer = "smpte2084" };
+    var c = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        ten, true, hdr, false);
+    assert (c.is_10bit);
+
+    // Same source WITH tone mapping is being converted to SDR anyway.
+    var d = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        ten, true, hdr, true);
+    assert (!d.is_10bit);
+
+    // BT.2020 wide gamut is the same story as HDR.
+    var wide = SmartOptimizerVideoInfo () { color_primaries = "bt2020" };
+    var e = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        ten, true, wide, false);
+    assert (e.is_10bit);
+
+    // An already-8-bit decision is never "upgraded".
+    var eight = BitDepthDecision () {
+        pix_fmt = PixelFormat.YUV420P, is_10bit = false, reason = "Standard"
+    };
+    var f = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+        eight, true, sdr, false);
+    assert (!f.is_10bit);
+}
+
+void test_nominal_tier_agrees_with_effort_axis () {
+    // The whole point of the nominal tier: it must reach the SAME point on the
+    // shared effort axis as the intent does, or Quality Mode and Size Mode
+    // would drive the encoder feature tables differently for equal effort.
+    SmartOptimizerLogic.QualityIntent[] intents = {
+        SmartOptimizerLogic.QualityIntent.LOW,
+        SmartOptimizerLogic.QualityIntent.MEDIUM,
+        SmartOptimizerLogic.QualityIntent.HIGH,
+        SmartOptimizerLogic.QualityIntent.ULTRA
+    };
+    foreach (var i in intents) {
+        assert (SmartOptimizerLogic.effort_from_size_tier (
+                    SmartOptimizerLogic.nominal_size_tier_for_intent (i))
+                == SmartOptimizerLogic.effort_from_quality_intent (i));
+    }
+
+    // Audio planning floors at MEDIUM: Quality Mode has no byte budget, so
+    // multi-track preservation must never be refused on size grounds.
+    assert (SmartOptimizerLogic.quality_audio_tier (
+        SmartOptimizerLogic.QualityIntent.LOW) >= SizeTier.MEDIUM);
+    assert (SmartOptimizerLogic.quality_audio_tier (
+        SmartOptimizerLogic.QualityIntent.ULTRA) == SizeTier.XLARGE);
+}
+
+void test_intermediate_segment_budget () {
+    // 4K 10-bit at 60 fps: a single 8s lossless segment is ~2 GiB, so a 4 GiB
+    // budget affords very few. Quality Mode must reduce segments rather than
+    // abandon the intermediate — it is the VMAF reference.
+    int uhd = SmartOptimizerLogic.max_segments_for_intermediate_budget (
+        3840, 2160, 60.0, 10, 8.0, SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES);
+    assert (uhd >= 1 && uhd <= 3);
+
+    // 1080p 8-bit at 24 fps is far cheaper and should afford many more.
+    int hd = SmartOptimizerLogic.max_segments_for_intermediate_budget (
+        1920, 1080, 24.0, 8, 8.0, SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES);
+    assert (hd > uhd);
+
+    // Unknown geometry yields 0 (caller treats as "cannot size it").
+    assert (SmartOptimizerLogic.max_segments_for_intermediate_budget (
+        0, 0, 0.0, 8, 8.0, SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES) == 0);
+}
+
+void test_limit_positions_preserves_spread () {
+    double[] pos = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
+
+    // No-op when already within budget.
+    assert (SmartOptimizerLogic.limit_positions (pos, 20).length == 10);
+    assert (SmartOptimizerLogic.limit_positions (pos, 0).length == 10);
+
+    // Trimming must keep the span, not just the first N — otherwise the VMAF
+    // reference would only cover the opening of the video.
+    double[] three = SmartOptimizerLogic.limit_positions (pos, 3);
+    assert (three.length == 3);
+    assert (three[0] == 10);
+    assert (three[2] == 100);
+    for (int i = 1; i < three.length; i++)
+        assert (three[i] > three[i - 1]);
+}
+
 void test_sum_profile_range_partial_buckets () {
     double[] profile = { 1.0, 2.0, 3.0 };
     double sum = SmartOptimizerLogic.sum_profile_range (profile, 0.5, 1.5);
@@ -583,19 +1153,124 @@ void test_audio_measurement_floor () {
     assert (SmartOptimizerLogic.floor_measured_audio_kbps (90, 64) == 90);
 }
 
-void test_mixed_confidence_floor () {
-    // Scores tuned to land just inside the mixed band (anime score 0.46),
-    // where the raw confidence formula would report ~10%.
-    var p = ContentProfile () {
-        edge_mean = 18.8,
-        saturation_mean = 60.0,
-        saturation_stddev = 23.9,
-        temporal_diff_mean = 9.1,
-        temporal_diff_stddev = 2.0
+// ── Content classification, against real corpus measurements ────────────────
+//
+// Every row below is a MEASURED reading from the 16-file corpus
+// (/mnt/storage3/testvideos, see docs/smart-optimizer-phase0-findings.md).
+// These are the regression fixture: the previous thresholds were calibrated
+// for an edge scale the measurement never produces, which made SCREENCAST and
+// ANIME unreachable and misfiled screencasts as anime.
+
+private ContentProfile corpus_profile (double edge, double sat,
+                                       double sat_sd, double ydif) {
+    return ContentProfile () {
+        edge_mean = edge,
+        saturation_mean = sat,
+        saturation_stddev = sat_sd,
+        temporal_diff_mean = ydif,
+        temporal_diff_stddev = 0.0
     };
+}
+
+private ContentType classify_corpus (double edge, double sat,
+                                     double sat_sd, double ydif) {
+    var p = corpus_profile (edge, sat, sat_sd, ydif);
     SmartOptimizerLogic.classify_content (ref p);
-    assert (p.content_type == ContentType.MIXED);
-    assert (p.type_confidence >= 0.25);
+    return p.content_type;
+}
+
+void test_classify_screencast_is_reachable () {
+    // Screencast-testvid0.webm — the case the old gate could never reach
+    // (it demanded edge > 25.0; nothing in the corpus exceeds 12.96).
+    var p = corpus_profile (5.28, 14.45, 2.52, 0.85);
+    SmartOptimizerLogic.classify_content (ref p);
+    assert (p.content_type == ContentType.SCREENCAST);
+    assert (p.type_confidence >= 0.5);
+
+    // short-testvid0.mkv is the nearest confusable on motion (ydif 1.95) but
+    // carries almost no edge structure — the edge conjunct must exclude it.
+    assert (classify_corpus (1.40, 6.70, 1.38, 1.95) != ContentType.SCREENCAST);
+}
+
+void test_classify_screencast_not_labelled_anime () {
+    // Direct regression on the old behaviour: the screencast scored 0.653 on
+    // the anime heuristic and came back ANIME.
+    assert (classify_corpus (5.28, 14.45, 2.52, 0.85) != ContentType.ANIME);
+}
+
+void test_classify_anime_is_reachable () {
+    // Both real anime sources. Under the old thresholds ANIME was
+    // arithmetically unreachable — max achievable score equalled the
+    // threshold it had to exceed — so both landed in MIXED.
+    assert (classify_corpus (2.67, 13.74, 8.59, 4.55) == ContentType.ANIME);
+    assert (classify_corpus (3.15, 7.27, 3.03, 3.13) == ContentType.ANIME);
+}
+
+void test_classify_anime_confidence_is_capped () {
+    // The corpus shows animation is not reliably separable from slow, flat
+    // live-action. Confidence must stay low so choose_preset_index keeps the
+    // preset near the tier baseline rather than jumping to the anime ideal.
+    var p = corpus_profile (2.67, 13.74, 8.59, 4.55);
+    SmartOptimizerLogic.classify_content (ref p);
+    assert (p.content_type == ContentType.ANIME);
+    assert (p.type_confidence <= SmartOptimizerLogic.ANIME_MAX_CONFIDENCE);
+}
+
+void test_classify_live_action_high_motion () {
+    // Every corpus file above the motion threshold, lowest first.
+    assert (classify_corpus (5.51, 11.46, 4.86,  6.37) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (0.21, 34.27, 1.57,  7.54) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (2.10, 11.86, 8.63,  9.72) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (5.63, 13.95, 1.86, 10.15) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (12.96, 19.78, 1.40, 10.46) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (8.27, 13.78, 6.17, 11.64) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (0.35,  9.38, 2.93, 11.71) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (2.37, 33.23, 9.89, 13.83) == ContentType.LIVE_ACTION);
+    assert (classify_corpus (12.12, 17.54, 9.77, 18.45) == ContentType.LIVE_ACTION);
+}
+
+void test_classify_mixed_is_the_honest_default () {
+    // Low motion, no distinguishing structure. MIXED is a legitimate verdict,
+    // not a failure — it damps preset interpolation toward the tier baseline.
+    // short-testvid0: too little edge content for either screencast or anime.
+    assert (classify_corpus (1.40, 6.70, 1.38, 1.95) == ContentType.MIXED);
+    // random-testvid1: same, fractionally more motion.
+    assert (classify_corpus (1.62, 9.46, 0.49, 2.81) == ContentType.MIXED);
+    // random-testvid2: edge above the animation band.
+    assert (classify_corpus (4.80, 20.04, 7.27, 2.70) == ContentType.MIXED);
+}
+
+void test_classify_no_longer_collapses_to_mixed () {
+    // The old classifier put 10 of 16 corpus files in MIXED. Assert the
+    // distribution is actually discriminating now.
+    double[,] corpus = {
+        //  edge,   sat, satSD,  ydif
+        {  5.28, 14.45,  2.52,  0.85 },   // screencast
+        {  2.67, 13.74,  8.59,  4.55 },   // anime
+        {  3.15,  7.27,  3.03,  3.13 },   // anime
+        {  1.40,  6.70,  1.38,  1.95 },   // film, slow
+        {  5.51, 11.46,  4.86,  6.37 },   // film
+        {  0.35,  9.38,  2.93, 11.71 },   // film
+        {  2.37, 33.23,  9.89, 13.83 },   // film
+        {  2.10, 11.86,  8.63,  9.72 },   // live
+        {  0.21, 34.27,  1.57,  7.54 },   // live
+        {  8.27, 13.78,  6.17, 11.64 },   // live
+        {  5.63, 13.95,  1.86, 10.15 },   // live
+        { 12.96, 19.78,  1.40, 10.46 },   // live
+        {  2.46,  9.21,  1.65,  3.65 },   // misc
+        {  1.62,  9.46,  0.49,  2.81 },   // misc
+        { 12.12, 17.54,  9.77, 18.45 },   // misc
+        {  4.80, 20.04,  7.27,  2.70 }    // misc
+    };
+    int mixed = 0;
+    for (int i = 0; i < corpus.length[0]; i++) {
+        if (classify_corpus (corpus[i, 0], corpus[i, 1],
+                             corpus[i, 2], corpus[i, 3]) == ContentType.MIXED)
+            mixed++;
+    }
+    // Was 10/16. Anything approaching that means the classifier has gone
+    // degenerate again.
+    assert (mixed <= 4);
 }
 
 void test_downscale_advisory () {
@@ -634,6 +1309,99 @@ void test_intermediate_estimate () {
     // Long 4K 10-bit sample sets blow past the guard
     assert (SmartOptimizerLogic.estimate_intermediate_bytes (3840, 2160, 30.0, 10, 128.0)
         > SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES);
+}
+
+void test_cache_stores_vmaf_and_stays_compatible () {
+    string input = "";
+    string store = "";
+    try {
+        Posix.close (FileUtils.open_tmp ("smartopt-vcache-input-XXXXXX.dat", out input));
+        FileUtils.set_contents (input, "dummy quality cache input");
+        Posix.close (FileUtils.open_tmp ("smartopt-vcache-store-XXXXXX.json", out store));
+        FileUtils.unlink (store);
+    } catch (Error e) {
+        assert_not_reached ();
+    }
+    SmartOptimizerCache.cache_file_override = store;
+
+    double[] positions = { 10.0, 50.0, 90.0 };
+    var c1 = SmartOptimizerCache.try_create (
+        input, "x265", 5, "yuv420p", "", 0.0, 100.0, 8.0, positions, 1.0);
+    assert (c1 != null);
+
+    // A size-only sample (what Size Mode writes) and a quality sample.
+    c1.record (30, 1000.0);
+    c1.record_with_vmaf (23, 2000.0, 96.88);
+    c1.save ();
+
+    var c2 = SmartOptimizerCache.try_create (
+        input, "x265", 5, "yuv420p", "", 0.0, 100.0, 8.0, positions, 1.0);
+    assert (c2 != null);
+
+    double size, vmaf;
+    // The quality sample round-trips with its score.
+    assert (c2.lookup_with_vmaf (23, out size, out vmaf));
+    assert (close_to (size, 2000.0, 1e-6));
+    assert (close_to (vmaf, 96.88, 1e-6));
+
+    // The size-only sample must MISS the quality lookup: without a score the
+    // quality solver would still have to encode it, so there is nothing saved.
+    assert (!c2.lookup_with_vmaf (30, out size, out vmaf));
+    // …but it is still a perfectly good size hit.
+    assert (c2.lookup (30, out size) && close_to (size, 1000.0, 1e-6));
+
+    // Both remain visible to the plain size lookup.
+    assert (c2.lookup (23, out size) && close_to (size, 2000.0, 1e-6));
+    assert (c2.sample_count == 2);
+
+    // A later size-only write must not silently discard a measured score.
+    c2.record (23, 2100.0);
+    c2.save ();
+    var c3 = SmartOptimizerCache.try_create (
+        input, "x265", 5, "yuv420p", "", 0.0, 100.0, 8.0, positions, 1.0);
+    assert (c3 != null);
+    assert (c3.lookup_with_vmaf (23, out size, out vmaf));
+    assert (close_to (size, 2100.0, 1e-6));
+    assert (close_to (vmaf, 96.88, 1e-6));
+
+    SmartOptimizerCache.cache_file_override = null;
+    FileUtils.unlink (input);
+    FileUtils.unlink (store);
+}
+
+void test_cache_reads_legacy_two_element_samples () {
+    // Entries written before quality mode existed are [crf, size] pairs with
+    // no third element. They must still load, as size-only samples.
+    string input = "";
+    string store = "";
+    try {
+        Posix.close (FileUtils.open_tmp ("smartopt-legacy-input-XXXXXX.dat", out input));
+        FileUtils.set_contents (input, "legacy cache input");
+        Posix.close (FileUtils.open_tmp ("smartopt-legacy-store-XXXXXX.json", out store));
+    } catch (Error e) {
+        assert_not_reached ();
+    }
+    SmartOptimizerCache.cache_file_override = store;
+
+    double[] positions = { 10.0, 50.0, 90.0 };
+    // Write a legacy-shaped store through the old API, then confirm the new
+    // reader treats it as size-only rather than choking or inventing a score.
+    var writer = SmartOptimizerCache.try_create (
+        input, "x265", 5, "yuv420p", "", 0.0, 100.0, 8.0, positions, 1.0);
+    assert (writer != null);
+    writer.record (28, 4321.0);
+    writer.save ();
+
+    var reader = SmartOptimizerCache.try_create (
+        input, "x265", 5, "yuv420p", "", 0.0, 100.0, 8.0, positions, 1.0);
+    assert (reader != null);
+    double size, vmaf;
+    assert (reader.lookup (28, out size) && close_to (size, 4321.0, 1e-6));
+    assert (!reader.lookup_with_vmaf (28, out size, out vmaf));
+
+    SmartOptimizerCache.cache_file_override = null;
+    FileUtils.unlink (input);
+    FileUtils.unlink (store);
 }
 
 void test_calibration_cache_round_trip () {
@@ -782,6 +1550,12 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/fit/recovers-exponential", test_fit_recovers_exponential);
     Test.add_func ("/smart-optimizer-logic/fit/monotonicity-guard", test_fit_monotonicity_guard);
     Test.add_func ("/smart-optimizer-logic/fit/rmse-noise", test_fit_rmse_reports_noise);
+    Test.add_func ("/smart-optimizer-logic/effort/from-size-tier", test_effort_from_size_tier_is_monotonic_and_total);
+    Test.add_func ("/smart-optimizer-logic/effort/compat-container", test_tier_forces_compat_container_only_for_small_targets);
+    Test.add_func ("/smart-optimizer-logic/fit/core-quadratic", test_least_squares_core_recovers_known_quadratic);
+    Test.add_func ("/smart-optimizer-logic/fit/core-logit", test_least_squares_core_handles_logit_transform);
+    Test.add_func ("/smart-optimizer-logic/fit/core-degenerate", test_least_squares_core_degenerate_falls_back_to_line);
+    Test.add_func ("/smart-optimizer-logic/fit/log-wrapper-matches-core", test_log_curve_wrapper_matches_core);
     Test.add_func ("/smart-optimizer-logic/profile/sum-range", test_sum_profile_range_partial_buckets);
     Test.add_func ("/smart-optimizer-logic/profile/extrapolation-weight", test_extrapolation_weight);
     Test.add_func ("/smart-optimizer-logic/positions/coverage", test_pick_sample_positions_coverage);
@@ -805,10 +1579,38 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/confidence/coverage", test_assess_confidence_coverage_penalty);
     Test.add_func ("/smart-optimizer-logic/policy/two-pass", test_decide_two_pass_policies);
     Test.add_func ("/smart-optimizer-logic/audio/measurement-floor", test_audio_measurement_floor);
-    Test.add_func ("/smart-optimizer-logic/content/mixed-confidence-floor", test_mixed_confidence_floor);
+    Test.add_func ("/smart-optimizer-logic/content/screencast-reachable", test_classify_screencast_is_reachable);
+    Test.add_func ("/smart-optimizer-logic/content/screencast-not-anime", test_classify_screencast_not_labelled_anime);
+    Test.add_func ("/smart-optimizer-logic/content/anime-reachable", test_classify_anime_is_reachable);
+    Test.add_func ("/smart-optimizer-logic/content/anime-confidence-capped", test_classify_anime_confidence_is_capped);
+    Test.add_func ("/smart-optimizer-logic/content/live-action-motion", test_classify_live_action_high_motion);
+    Test.add_func ("/smart-optimizer-logic/content/mixed-default", test_classify_mixed_is_the_honest_default);
+    Test.add_func ("/smart-optimizer-logic/content/not-degenerate", test_classify_no_longer_collapses_to_mixed);
+    Test.add_func ("/smart-optimizer-logic/quality/intent-targets", test_quality_intent_targets_ascend);
+    Test.add_func ("/smart-optimizer-logic/quality/fit-measured-curve", test_vmaf_fit_recovers_measured_curve);
+    Test.add_func ("/smart-optimizer-logic/quality/evaluation-clamped", test_vmaf_evaluation_is_clamped_to_metric_range);
+    Test.add_func ("/smart-optimizer-logic/quality/reject-saturated", test_saturated_points_are_rejected);
+    Test.add_func ("/smart-optimizer-logic/quality/solve-measured-crf", test_solve_reproduces_measured_crf_for_target);
+    Test.add_func ("/smart-optimizer-logic/quality/content-separation", test_solve_separates_content_at_high_intent);
+    Test.add_func ("/smart-optimizer-logic/quality/all-saturated-degenerate", test_solve_refuses_to_fit_when_all_points_saturate);
+    Test.add_func ("/smart-optimizer-logic/quality/screencast-cap", test_screencast_target_caps_crf_and_keeps_vmaf_as_floor);
+    Test.add_func ("/smart-optimizer-logic/quality/target-unmodified", test_non_screencast_target_is_unmodified);
+    Test.add_func ("/smart-optimizer-logic/quality/ceiling-window", test_quality_ceiling_scales_to_trim_window);
+    Test.add_func ("/smart-optimizer-logic/quality/ceiling-clamps", test_size_ceiling_clamps_and_reports_achieved_quality);
+    Test.add_func ("/smart-optimizer-logic/quality/ceiling-inert", test_size_ceiling_is_inert_when_output_already_fits);
+    Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
+    Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
+    Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
+    Test.add_func ("/smart-optimizer-logic/content/override", test_content_override_beats_the_classifier);
+    Test.add_func ("/smart-optimizer-logic/delivery/bit-depth", test_delivery_prefers_8bit_but_never_breaks_hdr);
+    Test.add_func ("/smart-optimizer-logic/quality/nominal-tier-agrees", test_nominal_tier_agrees_with_effort_axis);
+    Test.add_func ("/smart-optimizer-logic/quality/intermediate-budget", test_intermediate_segment_budget);
+    Test.add_func ("/smart-optimizer-logic/quality/limit-positions", test_limit_positions_preserves_spread);
     Test.add_func ("/smart-optimizer-logic/advisory/downscale", test_downscale_advisory);
     Test.add_func ("/smart-optimizer-logic/intermediate/size-estimate", test_intermediate_estimate);
     Test.add_func ("/smart-optimizer-logic/cache/round-trip", test_calibration_cache_round_trip);
+    Test.add_func ("/smart-optimizer-logic/cache/vmaf-samples", test_cache_stores_vmaf_and_stays_compatible);
+    Test.add_func ("/smart-optimizer-logic/cache/legacy-samples", test_cache_reads_legacy_two_element_samples);
 
     Test.run ();
 }

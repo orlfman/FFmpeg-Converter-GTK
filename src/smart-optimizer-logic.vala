@@ -67,6 +67,55 @@ public enum SizeTier {
     }
 }
 
+/**
+ * Encoder effort / quality level — the single axis every downstream
+ * `CodecPresets.apply_smart_*` function switches on.
+ *
+ * This is deliberately NOT a size concept.  It expresses how much work the
+ * encoder should do and how generously it should spend on perceptual quality:
+ * reference frames, motion search, subpel refinement, lookahead, psy-rd,
+ * quantization matrices, grain synthesis, and audio budget.
+ *
+ * Both operating modes produce one:
+ *   - Size Mode    derives it from SizeTier (see effort_from_size_tier).
+ *   - Quality Mode derives it from the user's quality intent.
+ *
+ * Downstream feature tables therefore never learn which mode ran, which is
+ * what keeps `apply_smart_*` a single code path instead of forking per mode.
+ */
+public enum EncodeEffort {
+    MINIMAL,
+    LOW,
+    MEDIUM,
+    HIGH,
+    MAXIMUM;
+
+    public string to_label () {
+        switch (this) {
+            case MINIMAL: return "Minimal";
+            case LOW:     return "Low";
+            case MEDIUM:  return "Medium";
+            case HIGH:    return "High";
+            case MAXIMUM: return "Maximum";
+            default:      return "Unknown";
+        }
+    }
+}
+
+/**
+ * Which axis the user constrained.  The other one is the readout — both are
+ * always reported, so the result can show "50 MB → est. VMAF 93" or
+ * "VMAF 95 → est. 78 MB" from the same recommendation.
+ */
+public enum PinnedAxis {
+    SIZE,
+    QUALITY;
+
+    public string to_label () {
+        return (this == QUALITY) ? "Quality" : "Size";
+    }
+}
+
 public struct OptimizationRecommendation {
     public string codec;
     public int crf;
@@ -89,6 +138,52 @@ public struct OptimizationRecommendation {
     public string resolved_container;  // effective container after tier policy (e.g. "webm", "mp4", "mkv")
     public int target_size_kib;        // user-requested target size in KiB
     public double grain_score;         // measured TOUT (temporal-outlier fraction) — grain/noise proxy
+
+    // ── Mode-agnostic decision axis ──────────────────────────────────────────
+    // Every downstream apply_smart_* switches on `effort`, never on size_tier,
+    // so the encoder feature tables work identically in both modes.
+    public EncodeEffort effort;
+    // Force the codec-default container (webm/mp4) for compatibility, ignoring
+    // the user's container choice.  A size-target policy (imageboard-tier
+    // output), NOT a quality concept — hence its own flag rather than a tier
+    // comparison inside the preset appliers.
+    public bool force_compat_container;
+
+    // ── Dual-axis reporting ──────────────────────────────────────────────────
+    // Both numbers are reported regardless of mode; `pinned_axis` says which
+    // one was the constraint and which is the prediction.
+    public PinnedAxis pinned_axis;
+    public double estimated_vmaf;      // 0.0 when not measured
+    public bool   vmaf_measured;       // false until the quality solver lands
+
+    /** Delivery constraint is active — favour cheap decode and compatibility. */
+    public bool   fast_decode;
+}
+
+/**
+ * User assertion about what the content actually is.
+ *
+ * This exists because the classifier provably cannot identify animation.
+ * Phase 0 tested edge density, saturation level, saturation variance, motion,
+ * repeated-frame ratio and histogram entropy against a 16-file corpus: every
+ * one of them puts anime on top of slow, flat live-action.  Auto-detection of
+ * that class is not currently possible, so the override is the reliable path
+ * rather than a convenience.
+ */
+public enum ContentOverride {
+    AUTO,
+    LIVE_ACTION,
+    ANIME,
+    SCREENCAST;
+
+    public string to_label () {
+        switch (this) {
+            case LIVE_ACTION: return "Live-action";
+            case ANIME:       return "Anime / Animation";
+            case SCREENCAST:  return "Screencast / Static";
+            default:          return "Auto-detect";
+        }
+    }
 }
 
 /**
@@ -96,6 +191,20 @@ public struct OptimizationRecommendation {
  * calibration accuracy. All fields have safe defaults.
  */
 public struct OptimizationContext {
+    /** User's content assertion; AUTO leaves the classifier's verdict alone. */
+    public ContentOverride content_override;
+
+    /**
+     * Delivery constraint: the output is for streaming or playback on modest
+     * hardware, so decode cost and compatibility matter more than squeezing
+     * the last few percent of efficiency.
+     *
+     * Deliberately a composable toggle rather than a list entry alongside the
+     * quality intents: "Streaming + High" is a coherent request, and a
+     * mutually-exclusive list makes it unexpressible.
+     */
+    public bool optimize_for_delivery;
+
     /** FFmpeg video filter chain (e.g. "scale=iw*0.5:-2,crop=...").
      *  Empty string means no filters. Applied to calibration encodes
      *  so size estimates reflect the actual output resolution/processing. */
@@ -1067,52 +1176,126 @@ namespace SmartOptimizerLogic {
 
     // ── Content classification & banding ─────────────────────────────────────
 
+    // ── Content classification thresholds ────────────────────────────────────
+    //
+    // CALIBRATED against a 16-file corpus (see docs/smart-optimizer-phase0-
+    // findings.md).  The previous thresholds were written for an edge scale
+    // spanning 5–35; the actual `edgedetect`→YAVG measurement spans 0.21–12.96,
+    // which made the edge term contribute exactly 0.000 on 10 of 16 files,
+    // rendered SCREENCAST unreachable (it required edge > 25.0), and made
+    // ANIME arithmetically unreachable (its maximum achievable score equalled
+    // the threshold it had to exceed).  Screencasts were consequently
+    // misfiled as anime and 10/16 files collapsed to MIXED.
+    //
+    // Every value below is quoted against measured corpus readings so the next
+    // person can see the margin they are working with.
+
+    // Screencast: near-static frames carrying substantial UI/text edge content.
+    //   corpus: screencast ydif 0.85 / edge 5.28
+    //           next-lowest ydif is short-testvid0 at 1.95, but its edge is
+    //           1.40 — the edge conjunct is what separates them, since the
+    //           motion margin alone is thin.
+    public const double SCREENCAST_MAX_MOTION = 2.0;
+    public const double SCREENCAST_MIN_EDGE   = 3.0;
+
+    // Live-action: sustained real-world motion.
+    //   corpus: lowest live/film ydif is 6.37 (tvshow); highest anime is 4.55.
+    public const double LIVE_ACTION_MIN_MOTION = 6.0;
+
+    // Animation: held frames plus visible line work — present but not
+    // texture-rich edges.
+    //   corpus: anime ydif 3.13 / 4.55, edge 2.67 / 3.15
+    // ⚠️ WEAK SIGNAL.  The corpus shows animation is NOT reliably separable
+    // from slow, flat live-action using any measurement available here —
+    // edge, saturation level, saturation variance, motion, VREP and histogram
+    // entropy were all tested and all overlap.  This rule therefore has low
+    // recall by design and its confidence is capped (ANIME_MAX_CONFIDENCE) so
+    // downstream preset interpolation stays conservative.  Reliable animation
+    // handling needs an explicit user content override, not a better guess.
+    public const double ANIME_MAX_MOTION = 5.0;
+    public const double ANIME_MIN_EDGE   = 2.0;
+    public const double ANIME_MAX_EDGE   = 4.5;
+    public const double ANIME_MAX_CONFIDENCE = 0.5;
+
     /**
      * Heuristic content classifier.
      *
-     * Anime/animation signals:
-     *   - High edge density (sharp ink lines on flat fills)
-     *   - Low saturation variance (limited palette)
-     *   - Low temporal difference with occasional large jumps (held frames)
+     * Ordered most-confident rule first, because the classes differ wildly in
+     * how well the available signals identify them:
      *
-     * Screencast signals:
-     *   - Very high edge density (text, UI borders)
-     *   - Very low temporal difference (mostly static)
-     *   - Low saturation (grey UI)
+     *   SCREENCAST  — cleanly separable (near-zero motion + real edge content).
+     *   LIVE_ACTION — cleanly separable at the high-motion end.
+     *   ANIME       — weakly separable; see ANIME_* constants above.
+     *   MIXED       — the honest answer for low-motion content we cannot place.
      *
-     * Live-action: moderate everything, high saturation variance.
+     * MIXED is a legitimate verdict, not a failure. It damps preset
+     * interpolation toward the tier baseline, which is the correct behaviour
+     * when the content is genuinely ambiguous.
      */
     public void classify_content (ref ContentProfile p) {
-        double edge_score   = ((p.edge_mean - 5.0) / 30.0).clamp (0.0, 1.0);
-        double sat_score    = (1.0 - ((p.saturation_stddev - 5.0) / 35.0)).clamp (0.0, 1.0);
-        double motion_score = (1.0 - ((p.temporal_diff_mean - 1.0) / 15.0)).clamp (0.0, 1.0);
-
-        double screen_score = 0.0;
-        if (p.temporal_diff_mean < 2.0 && p.edge_mean > 25.0 && p.saturation_mean < 40.0) {
-            screen_score = 0.9;
-        } else if (p.temporal_diff_mean < 3.0 && p.edge_mean > 20.0) {
-            screen_score = 0.5;
+        // 1. Screencast — static frames with UI/text structure.
+        if (p.temporal_diff_mean < SCREENCAST_MAX_MOTION
+                && p.edge_mean > SCREENCAST_MIN_EDGE) {
+            p.content_type = ContentType.SCREENCAST;
+            // Confidence grows as motion approaches zero; a perfectly static
+            // capture is unmistakable, one near the boundary less so.
+            p.type_confidence = (1.0 - p.temporal_diff_mean / SCREENCAST_MAX_MOTION)
+                .clamp (0.5, 1.0);
+            return;
         }
 
-        double anime_score = (edge_score * 0.35 + sat_score * 0.35 + motion_score * 0.30);
+        // 2. Live-action — sustained real-world motion. Confidence ramps up
+        //    over the band above the threshold and saturates well clear of it.
+        if (p.temporal_diff_mean > LIVE_ACTION_MIN_MOTION) {
+            p.content_type = ContentType.LIVE_ACTION;
+            p.type_confidence =
+                (0.6 + 0.4 * ((p.temporal_diff_mean - LIVE_ACTION_MIN_MOTION) / 6.0))
+                .clamp (0.6, 1.0);
+            return;
+        }
 
-        if (screen_score > 0.7) {
-            p.content_type    = ContentType.SCREENCAST;
-            p.type_confidence = screen_score;
-        } else if (anime_score > 0.65) {
-            p.content_type    = ContentType.ANIME;
-            p.type_confidence = anime_score;
-        } else if (anime_score > 0.45 && anime_score < 0.65) {
-            p.content_type    = ContentType.MIXED;
-            // Peaks at 1.0 in the band centre, falls toward the edges —
-            // floored at 0.25 because landing in the mixed band at all is
-            // evidence of mixedness, and a 0% label reads as a classifier
-            // failure while zeroing the preset interpolation.
-            p.type_confidence = (1.0 - Math.fabs (anime_score - 0.55) / 0.10)
-                .clamp (0.25, 1.0);
-        } else {
-            p.content_type    = ContentType.LIVE_ACTION;
-            p.type_confidence = 1.0 - anime_score;
+        // 3. Animation — low motion with line-art-like edge density.
+        //    Deliberately low confidence: see ANIME_* above.
+        if (p.temporal_diff_mean < ANIME_MAX_MOTION
+                && p.edge_mean >= ANIME_MIN_EDGE
+                && p.edge_mean <= ANIME_MAX_EDGE) {
+            p.content_type = ContentType.ANIME;
+            p.type_confidence = ANIME_MAX_CONFIDENCE;
+            return;
+        }
+
+        // 4. Everything else — low motion, no distinguishing structure.
+        p.content_type = ContentType.MIXED;
+        p.type_confidence = 0.5;
+    }
+
+    /**
+     * Replace the classifier's verdict with the user's assertion.
+     *
+     * Confidence goes to 1.0 because the user told us — that is strictly
+     * better evidence than any measurement available here, and it lets
+     * choose_preset_index interpolate all the way to the content ideal instead
+     * of hedging toward the tier baseline.
+     */
+    public void apply_content_override (
+        ref ContentProfile p,
+        ContentOverride    ov
+    ) {
+        switch (ov) {
+            case ContentOverride.LIVE_ACTION:
+                p.content_type = ContentType.LIVE_ACTION;
+                p.type_confidence = 1.0;
+                break;
+            case ContentOverride.ANIME:
+                p.content_type = ContentType.ANIME;
+                p.type_confidence = 1.0;
+                break;
+            case ContentOverride.SCREENCAST:
+                p.content_type = ContentType.SCREENCAST;
+                p.type_confidence = 1.0;
+                break;
+            default:
+                break;   // AUTO — leave the measurement alone
         }
     }
 
@@ -1325,6 +1508,38 @@ namespace SmartOptimizerLogic {
         };
     }
 
+    /**
+     * Delivery override on the bit-depth decision.
+     *
+     * 8-bit decodes on far more hardware than 10-bit, so a stream aimed at
+     * unknown devices should prefer it — but NOT when the source genuinely
+     * requires 10-bit. HDR without tone mapping and BT.2020 without tone
+     * mapping both lose real information at 8-bit, and shipping a broken
+     * picture is worse than shipping one some devices decode in software.
+     */
+    public BitDepthDecision apply_delivery_bit_depth_preference (
+        BitDepthDecision        decision,
+        bool                    delivery,
+        SmartOptimizerVideoInfo info,
+        bool                    tone_mapping_active
+    ) {
+        if (!delivery || !decision.is_10bit)
+            return decision;
+
+        bool is_hdr = (info.color_transfer == "smpte2084"
+                    || info.color_transfer == "arib-std-b67");
+        bool is_wide_gamut = (info.color_primaries == "bt2020");
+        if ((is_hdr || is_wide_gamut) && !tone_mapping_active)
+            return decision;   // 10-bit is not optional here
+
+        return BitDepthDecision () {
+            pix_fmt  = PixelFormat.YUV420P,
+            is_10bit = false,
+            reason   = "8-bit for playback compatibility (delivery mode) — "
+                     + "overriding: " + decision.reason
+        };
+    }
+
     // ── Preset selection ─────────────────────────────────────────────────────
 
     /**
@@ -1410,6 +1625,42 @@ namespace SmartOptimizerLogic {
             (ideal_preset_idx - safe_preset_idx) * profile.type_confidence * content_factor);
         // All preset tables have 9 entries (indices 0–8).
         return preset_idx.clamp (0, 8);
+    }
+
+    // ── Mode-agnostic effort mapping ─────────────────────────────────────────
+
+    /**
+     * Size Mode's bridge onto the shared effort axis.
+     *
+     * Deliberately 1:1 with SizeTier so this refactor is behaviour-preserving:
+     * every feature table that used to switch on the tier now switches on the
+     * effort level it maps to, and produces byte-identical settings.  Quality
+     * Mode reaches the same axis from user intent instead.
+     *
+     * The mapping is one-way on purpose.  Effort has no inverse — several
+     * intents can land on the same effort level, and in Quality Mode there is
+     * no size tier to recover.
+     */
+    public EncodeEffort effort_from_size_tier (SizeTier tier) {
+        switch (tier) {
+            case SizeTier.TINY:   return EncodeEffort.MINIMAL;
+            case SizeTier.SMALL:  return EncodeEffort.LOW;
+            case SizeTier.MEDIUM: return EncodeEffort.MEDIUM;
+            case SizeTier.LARGE:  return EncodeEffort.HIGH;
+            case SizeTier.XLARGE: return EncodeEffort.MAXIMUM;
+            default:              return EncodeEffort.LOW;
+        }
+    }
+
+    /**
+     * Tiny/Small targets force the codec-default container (webm/mp4) for
+     * imageboard and web compatibility, overriding the user's choice.
+     *
+     * Size-target policy, not quality policy — Quality Mode always leaves this
+     * false and respects the user's container selection.
+     */
+    public bool tier_forces_compat_container (SizeTier tier) {
+        return tier <= SizeTier.SMALL;
     }
 
     // ── Tier policy helpers ──────────────────────────────────────────────────
@@ -1777,13 +2028,24 @@ namespace SmartOptimizerLogic {
     }
 
     /**
-     * Fit ln(size) = a + b*CRF + c*CRF^2 using least squares over an
-     * arbitrary number of calibration points. Falls back to a two-point
-     * exponential when the quadratic system is degenerate.
+     * Least-squares quadratic fit y = a + b·x + c·x² over pre-transformed data.
+     *
+     * The objective-function-agnostic core of the calibration solver.  Callers
+     * supply whatever y-transform linearizes their response:
+     *
+     *   - Size:    y = ln(size)          — exponential CRF↔size response.
+     *   - Quality: y = logit(vmaf/100)   — VMAF is bounded [0,100] and
+     *                                      saturates near the top, so a raw
+     *                                      fit overshoots badly at high
+     *                                      targets.
+     *
+     * Falls back to a straight line through the first and last points when the
+     * 3×3 normal-equation system is degenerate (e.g. every sample produced an
+     * identical value, or fewer than three distinct x values).
      */
-    public void fit_quadratic_log_curve (
-        int[]    cal_crfs,
-        double[] cal_sizes,
+    public void fit_quadratic_least_squares (
+        double[] xs,
+        double[] ys,
         out double qa,
         out double qb,
         out double qc,
@@ -1791,9 +2053,9 @@ namespace SmartOptimizerLogic {
     ) {
         double sx = 0, sx2 = 0, sx3 = 0, sx4 = 0;
         double sy = 0, sxy = 0, sx2y = 0;
-        for (int ci = 0; ci < cal_crfs.length; ci++) {
-            double x = (double) cal_crfs[ci];
-            double y = Math.log (cal_sizes[ci]);
+        for (int i = 0; i < xs.length; i++) {
+            double x = xs[i];
+            double y = ys[i];
             double x2 = x * x;
             sx   += x;
             sx2  += x2;
@@ -1803,7 +2065,7 @@ namespace SmartOptimizerLogic {
             sxy  += x * y;
             sx2y += x2 * y;
         }
-        double n_pts = (double) cal_crfs.length;
+        double n_pts = (double) xs.length;
 
         qa = 0;
         qb = 0;
@@ -1831,12 +2093,23 @@ namespace SmartOptimizerLogic {
             }
             if (Math.fabs (m[col, col]) < 1e-12) {
                 warning ("Least-squares system degenerate, falling back to two-point");
-                double B_fb = Math.pow (
-                    cal_sizes[cal_sizes.length - 1] / cal_sizes[0],
-                    1.0 / (cal_crfs[cal_crfs.length - 1] - cal_crfs[0]));
-                double A_fb = cal_sizes[0] / Math.pow (B_fb, cal_crfs[0]);
-                qa = Math.log (A_fb);
-                qb = Math.log (B_fb);
+                // Straight line through the endpoints in transformed space.
+                // Algebraically identical to the old raw-size two-point
+                // exponential (qb = ln(B), qa = ln(A)) but computed directly in
+                // log space, so it skips a pow/exp round-trip.
+                double x0 = xs[0];
+                double x1 = xs[xs.length - 1];
+                double dx = x1 - x0;
+                if (Math.fabs (dx) < 1e-12) {
+                    // Every x identical — no slope is recoverable; hold the
+                    // mean.  The old code divided by zero here and produced
+                    // inf/nan.  Upstream dedupes CRFs, so this is defensive.
+                    qb = 0.0;
+                    qa = (xs.length > 0) ? sy / n_pts : 0.0;
+                } else {
+                    qb = (ys[ys.length - 1] - ys[0]) / dx;
+                    qa = ys[0] - qb * x0;
+                }
                 qc = 0.0;
                 degenerate = true;
                 break;
@@ -1853,6 +2126,28 @@ namespace SmartOptimizerLogic {
             qb = (m[1, 3] - m[1, 2] * qc) / m[1, 1];
             qa = (m[0, 3] - m[0, 1] * qb - m[0, 2] * qc) / m[0, 0];
         }
+    }
+
+    /**
+     * Fit ln(size) = a + b*CRF + c*CRF^2 using least squares over an
+     * arbitrary number of calibration points.  Thin y = ln(size) wrapper over
+     * fit_quadratic_least_squares.
+     */
+    public void fit_quadratic_log_curve (
+        int[]    cal_crfs,
+        double[] cal_sizes,
+        out double qa,
+        out double qb,
+        out double qc,
+        out bool   degenerate
+    ) {
+        var xs = new double[cal_crfs.length];
+        var ys = new double[cal_crfs.length];
+        for (int i = 0; i < cal_crfs.length; i++) {
+            xs[i] = (double) cal_crfs[i];
+            ys[i] = Math.log (cal_sizes[i]);
+        }
+        fit_quadratic_least_squares (xs, ys, out qa, out qb, out qc, out degenerate);
     }
 
     /**
@@ -2168,5 +2463,649 @@ namespace SmartOptimizerLogic {
         }
 
         return policy;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // QUALITY SOLVER
+    //
+    // The second objective function.  Size Mode pins a byte count and lets
+    // quality float; Quality Mode pins a perceptual score and lets size float.
+    // Both run the same pipeline, the same probe encodes, the same
+    // least-squares core and the same confidence model — only the target
+    // differs.
+    //
+    // Every constant below is quoted against the Phase 0 corpus measurements
+    // (16 files x 5 CRF points, libx265; docs/smart-optimizer-phase0-findings.md).
+    // ════════════════════════════════════════════════════════════════════════
+
+    // VMAF at or above this carries no gradient — the metric has saturated and
+    // the encoder is already past visually lossless.  Calibration points up
+    // here must be discarded: they anchor the fit on a clipped value.  Measured
+    // consequence of NOT doing this: women-4k-testvid0 (VMAF 100.0 at CRF 16)
+    // mispredicted its held-out point by 3.43 VMAF, against a corpus mean of
+    // 0.318.
+    public const double VMAF_SATURATION_THRESHOLD = 99.5;
+
+    // A quality solve needs at least this many usable (non-saturated) points
+    // to fit.  Phase 0 measured 3-point fits at 0.318 VMAF mean prediction
+    // error, so three is genuinely enough — where the size solve needs 4-6.
+    public const int VMAF_MIN_CALIBRATION_POINTS = 3;
+
+    // Quality Mode's runaway guard: never exceed this multiple of the source.
+    // A post-solve clamp, NOT a solve constraint — letting it participate in
+    // the solve would make it a competing objective fighting the quality axis.
+    // Placeholder pending corpus evidence on where legitimate cases top out;
+    // tunable without perturbing any run that lands under the ceiling.
+    public const double QUALITY_MODE_MAX_SOURCE_MULTIPLIER = 2.0;
+
+    /**
+     * What the user asked for, as a perceptual target rather than a byte count.
+     *
+     * The VMAF values are Phase 0 defaults: 88/92/95/97 spans "acceptable" to
+     * "archival", and the measured CRF spread across content classes at each
+     * target is what justifies solving instead of tabulating —
+     * 1.1 CRF of spread at Low, but 11.2 at Ultra.
+     */
+    public enum QualityIntent {
+        LOW,
+        MEDIUM,
+        HIGH,
+        ULTRA;
+
+        public double target_vmaf () {
+            switch (this) {
+                case LOW:    return 88.0;
+                case MEDIUM: return 92.0;
+                case HIGH:   return 95.0;
+                case ULTRA:  return 97.0;
+                default:     return 92.0;
+            }
+        }
+
+        public string to_label () {
+            switch (this) {
+                case LOW:    return "Low";
+                case MEDIUM: return "Medium";
+                case HIGH:   return "High";
+                case ULTRA:  return "Ultra";
+                default:     return "Medium";
+            }
+        }
+    }
+
+    /**
+     * Quality Mode's bridge onto the shared effort axis, mirroring
+     * effort_from_size_tier.  MINIMAL is deliberately unreachable here — it
+     * exists for imageboard-scale size targets, not for any quality intent.
+     */
+    public EncodeEffort effort_from_quality_intent (QualityIntent intent) {
+        switch (intent) {
+            case QualityIntent.LOW:    return EncodeEffort.LOW;
+            case QualityIntent.MEDIUM: return EncodeEffort.MEDIUM;
+            case QualityIntent.HIGH:   return EncodeEffort.HIGH;
+            case QualityIntent.ULTRA:  return EncodeEffort.MAXIMUM;
+            default:                   return EncodeEffort.MEDIUM;
+        }
+    }
+
+    /**
+     * The effective target for this intent on this content.
+     *
+     * VMAF is trained on natural video and does not transfer uniformly, so the
+     * intent's nominal target is not always the right one to solve for.
+     */
+    public struct QualityTarget {
+        public double target_vmaf;
+        /** False when VMAF cannot be trusted to rank this content. */
+        public bool   vmaf_reliable;
+        /** CRF ceiling applied when VMAF is unreliable; 0 = no cap. */
+        public int    crf_cap;
+        public string reason;
+    }
+
+    // Screencast CRF caps.  Phase 0 measured a 3837x2160 screen capture at
+    // VMAF 92.69 at CRF 34 and 97.23 at CRF 28 — scores that would satisfy the
+    // Medium and High intents while the text is visibly mangled.  VMAF
+    // massively over-rewards synthetic screen content, so the intent->VMAF
+    // scale is meaningless here and a rule-based ceiling takes over, with VMAF
+    // retained only as a floor.
+    //
+    // PROVISIONAL: these are defensible values for text legibility, not
+    // perceptually validated ones.  Settling them needs subjective comparison,
+    // which Phase 0 could not provide.
+    public int screencast_crf_cap (QualityIntent intent) {
+        switch (intent) {
+            case QualityIntent.LOW:    return 30;
+            case QualityIntent.MEDIUM: return 26;
+            case QualityIntent.HIGH:   return 22;
+            case QualityIntent.ULTRA:  return 18;
+            default:                   return 26;
+        }
+    }
+
+    public QualityTarget resolve_quality_target (
+        QualityIntent  intent,
+        ContentProfile profile
+    ) {
+        double nominal = intent.target_vmaf ();
+
+        if (profile.content_type == ContentType.SCREENCAST) {
+            return QualityTarget () {
+                target_vmaf   = nominal,
+                vmaf_reliable = false,
+                crf_cap       = screencast_crf_cap (intent),
+                reason        = ("VMAF over-rewards screen content "
+                    + "(measured 92.7 at CRF 34); capping CRF at %d and using "
+                    + "VMAF %.0f only as a floor").printf (
+                        screencast_crf_cap (intent), nominal)
+            };
+        }
+
+        // Animation: VMAF is widely held to under-penalise flat cel-shaded
+        // content, which would argue for a raised target.  Phase 0 could not
+        // measure the offset — that needs subjective comparison, not a metric
+        // sweep — so no adjustment is applied rather than inventing one.
+        // Revisit with perceptual data.
+        return QualityTarget () {
+            target_vmaf   = nominal,
+            vmaf_reliable = true,
+            crf_cap       = 0,
+            reason        = "VMAF %.0f target".printf (nominal)
+        };
+    }
+
+    /**
+     * Drop calibration points whose VMAF has saturated.
+     *
+     * Above VMAF_SATURATION_THRESHOLD the response is flat, so those samples
+     * contribute no gradient and drag the fit.  Points are kept in ascending
+     * CRF order.  Returns the number kept; when fewer than
+     * VMAF_MIN_CALIBRATION_POINTS survive the caller must probe higher CRFs
+     * rather than fit what is left.
+     */
+    public int filter_saturated_vmaf_points (
+        int[]      crfs,
+        double[]   vmafs,
+        out int[]  kept_crfs,
+        out double[] kept_vmafs
+    ) {
+        var kc = new GenericArray<int> ();
+        var kv = new GenericArray<double?> ();
+        for (int i = 0; i < crfs.length && i < vmafs.length; i++) {
+            if (vmafs[i] > 0.0 && vmafs[i] < VMAF_SATURATION_THRESHOLD) {
+                kc.add (crfs[i]);
+                kv.add (vmafs[i]);
+            }
+        }
+        kept_crfs = new int[kc.length];
+        kept_vmafs = new double[kv.length];
+        for (int i = 0; i < kc.length; i++) {
+            kept_crfs[i] = kc[i];
+            kept_vmafs[i] = kv[i];
+        }
+        return kept_crfs.length;
+    }
+
+    /** Fitted CRF↔VMAF model and the CRF solved for the target. */
+    public class VmafModel {
+        public int[]    cal_crfs = {};
+        public double[] cal_vmafs = {};
+        public double   qa;
+        public double   qb;
+        public double   qc;
+        public bool     degenerate;
+        public int      predicted_crf;
+        public double   predicted_vmaf;
+        public bool     crf_at_min;
+        public bool     crf_at_max;
+        public int      saturated_points_dropped;
+        public double   fit_rmse;          // in VMAF points
+    }
+
+    /**
+     * Fit CRF↔VMAF with a plain quadratic on the RAW score.
+     *
+     * Phase 0 tested this against the transform the plan originally specified.
+     * Over 16 files:  raw-linear 1.925, logit-linear 1.075, quadratic 0.228
+     * VMAF points of mean residual.  Logit's saturation correction is real for
+     * mid-range files but diverges as VMAF approaches 100 (logit -> infinity),
+     * so a single near-100 sample wrecks it — 6.777 on women-4k-testvid0.  The
+     * raw quadratic is the most robust across the corpus (worst case 0.380).
+     */
+    public void fit_vmaf_curve (
+        int[]    cal_crfs,
+        double[] cal_vmafs,
+        out double qa,
+        out double qb,
+        out double qc,
+        out bool   degenerate
+    ) {
+        var xs = new double[cal_crfs.length];
+        var ys = new double[cal_crfs.length];
+        for (int i = 0; i < cal_crfs.length; i++) {
+            xs[i] = (double) cal_crfs[i];
+            ys[i] = cal_vmafs[i];
+        }
+        fit_quadratic_least_squares (xs, ys, out qa, out qb, out qc, out degenerate);
+    }
+
+    /**
+     * Evaluate the fitted VMAF curve, clamped to the metric's real range.
+     * An unconstrained quadratic will happily predict 101.
+     */
+    public double evaluate_vmaf_at_crf (double qa, double qb, double qc, double crf) {
+        double v = qa + qb * crf + qc * crf * crf;
+        if (!v.is_finite ())
+            return 0.0;
+        return v.clamp (0.0, 100.0);
+    }
+
+    /**
+     * Root-mean-square residual of the VMAF fit, in VMAF points.
+     *
+     * ⚠️ With exactly VMAF_MIN_CALIBRATION_POINTS (3) points a quadratic is
+     * fully determined, so every residual is zero by construction and this
+     * carries NO information about fit quality.  A 0.00 residual on a 3-point
+     * solve means "3 points" and nothing more.  The real generalisation check
+     * is the verification probe (see VmafVerification): encode once at the
+     * solved CRF and compare measured VMAF against the prediction.
+     */
+    public double vmaf_fit_rmse (
+        int[] cal_crfs, double[] cal_vmafs, double qa, double qb, double qc
+    ) {
+        if (cal_crfs.length == 0)
+            return 0.0;
+        double ss = 0.0;
+        for (int i = 0; i < cal_crfs.length; i++) {
+            double resid = cal_vmafs[i]
+                - (qa + qb * cal_crfs[i] + qc * cal_crfs[i] * cal_crfs[i]);
+            ss += resid * resid;
+        }
+        int model_params = (qc == 0.0) ? 2 : 3;
+        int dof = int.max (1, cal_crfs.length - model_params);
+        return Math.sqrt (ss / dof);
+    }
+
+    /**
+     * Solve the fitted curve for the CRF that achieves @target_vmaf.
+     *
+     * Reuses solve_crf_from_curve — the root selection there (prefer a root
+     * inside the valid range, else the nearest) is objective-agnostic; only
+     * the y value being solved for changes.  Size Mode passes ln(target
+     * bytes); Quality Mode passes the target VMAF directly.
+     */
+    public VmafModel solve_quality_crf (
+        int[]         cal_crfs,
+        double[]      cal_vmafs,
+        double        target_vmaf,
+        string        codec
+    ) {
+        var m = new VmafModel ();
+
+        int[] kept_crfs;
+        double[] kept_vmafs;
+        int kept = filter_saturated_vmaf_points (
+            cal_crfs, cal_vmafs, out kept_crfs, out kept_vmafs);
+        m.saturated_points_dropped = cal_crfs.length - kept;
+        m.cal_crfs = kept_crfs;
+        m.cal_vmafs = kept_vmafs;
+
+        int crf_min, crf_max;
+        crf_range_for_codec (codec, out crf_min, out crf_max);
+
+        if (kept < VMAF_MIN_CALIBRATION_POINTS) {
+            // Not enough gradient to fit.  Caller must probe higher CRFs.
+            m.degenerate = true;
+            m.predicted_crf = (crf_min + crf_max) / 2;
+            m.predicted_vmaf = 0.0;
+            return m;
+        }
+
+        fit_vmaf_curve (kept_crfs, kept_vmafs,
+            out m.qa, out m.qb, out m.qc, out m.degenerate);
+        m.fit_rmse = vmaf_fit_rmse (kept_crfs, kept_vmafs, m.qa, m.qb, m.qc);
+
+        double cal_mid = (double) (kept_crfs[0] + kept_crfs[kept_crfs.length - 1]) / 2.0;
+        double raw = solve_crf_from_curve (
+            m.qa, m.qb, m.qc, target_vmaf, cal_mid, crf_min, crf_max);
+
+        int solved = (int) Math.round (raw);
+        m.crf_at_min = solved <= crf_min;
+        m.crf_at_max = solved >= crf_max;
+        m.predicted_crf = solved.clamp (crf_min, crf_max);
+        m.predicted_vmaf = evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, m.predicted_crf);
+        return m;
+    }
+
+    /**
+     * Apply a content-driven CRF cap (currently screencast only).
+     * VMAF stays a floor: whichever CRF gives the better picture wins, and a
+     * lower CRF is always the better picture.
+     */
+    public int apply_quality_crf_cap (int solved_crf, QualityTarget target) {
+        if (target.vmaf_reliable || target.crf_cap <= 0)
+            return solved_crf;
+        return int.min (solved_crf, target.crf_cap);
+    }
+
+    // ── Size ceiling ─────────────────────────────────────────────────────────
+
+    /**
+     * The Quality Mode output ceiling in KiB, scaled to a trimmed window.
+     *
+     * A trimmed segment carries only part of the source, so measuring the
+     * ceiling against the whole file would effectively remove it — the same
+     * reasoning as match_source_target_mb_for_window.
+     */
+    public double quality_ceiling_kib (
+        int64  file_size_bytes,
+        double window_duration,
+        double total_duration
+    ) {
+        if (file_size_bytes <= 0)
+            return 0.0;
+        double full = kib_from_bytes (file_size_bytes)
+            * QUALITY_MODE_MAX_SOURCE_MULTIPLIER;
+        if (window_duration <= 0.0 || total_duration <= 0.0)
+            return full;
+        return full * double.min (1.0, window_duration / total_duration);
+    }
+
+    /** Result of testing a solved CRF against the size ceiling. */
+    public class QualityCeilingOutcome {
+        public bool   clamped;
+        public int    final_crf;
+        public double estimated_size_kib;
+        public double achieved_vmaf;
+        public double ceiling_kib;
+    }
+
+    /**
+     * Post-solve size clamp.
+     *
+     * Solve for quality first; only if the predicted output exceeds the
+     * ceiling do we walk CRF upward until it fits, then report the quality
+     * actually achieved.  Deliberately NOT part of the solve: a ceiling that
+     * participates in the objective becomes a second target competing with the
+     * quality axis, which is the two-constraint problem two-pass exists to
+     * resolve in Size Mode.
+     *
+     * @size_qa/qb/qc is the log-space CRF↔size curve the same probes produced.
+     */
+    public QualityCeilingOutcome apply_quality_size_ceiling (
+        int    solved_crf,
+        double ceiling_kib,
+        double size_qa, double size_qb, double size_qc,
+        double vmaf_qa, double vmaf_qb, double vmaf_qc,
+        int    crf_min,
+        int    crf_max
+    ) {
+        var o = new QualityCeilingOutcome ();
+        o.ceiling_kib = ceiling_kib;
+        o.final_crf = solved_crf;
+
+        double size_kib = 0.0;
+        try_evaluate_model_size_kib (
+            size_qa, size_qb, size_qc, solved_crf, "quality ceiling", out size_kib);
+        o.estimated_size_kib = size_kib;
+        o.achieved_vmaf = evaluate_vmaf_at_crf (
+            vmaf_qa, vmaf_qb, vmaf_qc, solved_crf);
+
+        // Ceiling unknown or already satisfied.
+        if (ceiling_kib <= 0.0 || size_kib <= 0.0 || size_kib <= ceiling_kib)
+            return o;
+
+        for (int crf = solved_crf + 1; crf <= crf_max; crf++) {
+            double kib = 0.0;
+            if (!try_evaluate_model_size_kib (
+                    size_qa, size_qb, size_qc, crf, "quality ceiling", out kib))
+                break;
+            if (kib <= ceiling_kib) {
+                o.clamped = true;
+                o.final_crf = crf;
+                o.estimated_size_kib = kib;
+                o.achieved_vmaf = evaluate_vmaf_at_crf (
+                    vmaf_qa, vmaf_qb, vmaf_qc, crf);
+                return o;
+            }
+        }
+
+        // Nothing in range fits — report the least-bad option honestly.
+        o.clamped = true;
+        o.final_crf = crf_max;
+        try_evaluate_model_size_kib (
+            size_qa, size_qb, size_qc, crf_max, "quality ceiling",
+            out o.estimated_size_kib);
+        o.achieved_vmaf = evaluate_vmaf_at_crf (
+            vmaf_qa, vmaf_qb, vmaf_qc, crf_max);
+        return o;
+    }
+
+    /**
+     * Nominal SizeTier for a quality intent.
+     *
+     * Several helpers are still tier-typed (decide_bit_depth,
+     * choose_preset_index, tier_content_influence, plan_audio).  Rather than
+     * fork them, Quality Mode hands them the tier that maps to the SAME point
+     * on the shared effort axis, so both modes drive identical downstream
+     * behaviour:
+     *
+     *     effort_from_size_tier (nominal_size_tier_for_intent (i))
+     *         == effort_from_quality_intent (i)          for every intent
+     *
+     * (asserted by the unit tests).
+     *
+     * ⚠️ Two call sites must NOT use this tier:
+     *   - resolve_effective_container — LOW maps to SMALL, which would force
+     *     the imageboard compatibility container.  Quality Mode has no size
+     *     constraint and must respect the user's container choice.
+     *   - the keep-all-audio gate in plan_audio, which requires tier >= MEDIUM.
+     *     Use quality_audio_tier() instead: with no size budget there is no
+     *     reason to drop audio tracks.
+     */
+    public SizeTier nominal_size_tier_for_intent (QualityIntent intent) {
+        switch (intent) {
+            case QualityIntent.LOW:    return SizeTier.SMALL;
+            case QualityIntent.MEDIUM: return SizeTier.MEDIUM;
+            case QualityIntent.HIGH:   return SizeTier.LARGE;
+            case QualityIntent.ULTRA:  return SizeTier.XLARGE;
+            default:                   return SizeTier.MEDIUM;
+        }
+    }
+
+    /**
+     * Tier used only for audio planning in Quality Mode — the nominal tier
+     * floored at MEDIUM.  Quality Mode has no byte budget to protect, so
+     * multi-track preservation should never be refused on size grounds.
+     */
+    public SizeTier quality_audio_tier (QualityIntent intent) {
+        SizeTier t = nominal_size_tier_for_intent (intent);
+        return (t < SizeTier.MEDIUM) ? SizeTier.MEDIUM : t;
+    }
+
+    /**
+     * How many sample segments fit inside the lossless-intermediate budget.
+     *
+     * Quality Mode REQUIRES the intermediate: it is the VMAF reference, and
+     * libvmaf needs a reference with identical resolution and frame rate to
+     * the distorted input.  Size Mode can skip it and pay the re-filter cost
+     * instead, but Quality Mode has no such fallback — without a reference
+     * there is nothing to measure against.
+     *
+     * So instead of abandoning the intermediate when it would be too large
+     * (what Size Mode does), Quality Mode reduces the segment count until it
+     * fits.  Returns 0 when the inputs are unknown.
+     */
+    public int max_segments_for_intermediate_budget (
+        int    width,
+        int    height,
+        double fps,
+        int    source_bit_depth,
+        double segment_duration,
+        double max_bytes
+    ) {
+        double per_segment = estimate_intermediate_bytes (
+            width, height, fps, source_bit_depth, segment_duration);
+        if (per_segment <= 0.0 || max_bytes <= 0.0)
+            return 0;
+        return int.max (1, (int) Math.floor (max_bytes / per_segment));
+    }
+
+    /** Truncate @positions to at most @max_count entries, preserving spread. */
+    public double[] limit_positions (double[] positions, int max_count) {
+        if (max_count <= 0 || positions.length <= max_count)
+            return positions;
+        // Keep an evenly spaced subset rather than the first N, so the samples
+        // still span the whole encode window.
+        var kept = new double[max_count];
+        double step = (double) (positions.length - 1) / (double) (max_count - 1);
+        for (int i = 0; i < max_count; i++) {
+            int idx = (int) Math.round (step * i);
+            kept[i] = positions[idx.clamp (0, positions.length - 1)];
+        }
+        return kept;
+    }
+
+    /**
+     * Confidence in a quality solve.
+     *
+     * Deliberately a SEPARATE number from assess_confidence, which scores the
+     * SIZE prediction (extrapolation distance, coverage, fit residual, the
+     * x265 psy-rd penalty).  Conflating the two would report size-model
+     * uncertainty as quality uncertainty and vice versa — they answer
+     * different questions and can disagree sharply on the same run.
+     *
+     * Note this is still confidence in the PREDICTION, not in the content
+     * classification; profile.type_confidence remains the right input for
+     * damping content-driven decisions.
+     */
+    /**
+     * Outcome of the verification probe: one encode at the solved CRF, scored
+     * against the same reference.
+     *
+     * This is the quality solver's real accuracy check.  The fit residual
+     * cannot serve — with a 3-point ladder the quadratic interpolates its own
+     * points exactly — so the only honest measure of whether the answer is
+     * right is to encode at that answer and score it.
+     */
+    public class VmafVerification {
+        public bool   done;
+        public int    verified_crf;
+        public double predicted_vmaf;
+        public double measured_vmaf;
+        /** measured − predicted; negative means the solve was optimistic. */
+        public double delta;
+    }
+
+    // Verification deltas beyond this many VMAF points mean the curve did not
+    // generalise to the answer it produced.  Phase 0's held-out prediction
+    // error averaged 0.318 VMAF, so a point-and-a-half is well outside normal.
+    public const double VMAF_VERIFY_TOLERANCE = 1.5;
+
+    public double assess_quality_confidence (
+        VmafModel          model,
+        double             sample_coverage,
+        bool               vmaf_reliable_for_content,
+        VmafVerification?  verification = null
+    ) {
+        if (model.degenerate)
+            return 0.3;
+
+        double confidence = 1.0;
+
+        // Extrapolation beyond the measured bracket, mirroring the size
+        // solver's treatment.
+        if (model.cal_crfs.length >= 2) {
+            int first = model.cal_crfs[0];
+            int last  = model.cal_crfs[model.cal_crfs.length - 1];
+            int range = int.max (1, last - first);
+            if (model.predicted_crf < first - range
+                    || model.predicted_crf > last + range) {
+                confidence *= 0.5;
+            } else if (model.predicted_crf < first - 2
+                    || model.predicted_crf > last + 2) {
+                confidence *= 0.75;
+            } else if (model.predicted_crf < first || model.predicted_crf > last) {
+                confidence *= 0.9;
+            }
+        }
+
+        // Fit residual, in VMAF points.  Only meaningful when the fit is
+        // overdetermined — at exactly 3 points the quadratic interpolates its
+        // own samples and the residual is zero by construction, so applying
+        // this term there would silently reward having too little data.
+        if (model.cal_crfs.length > 3 && model.fit_rmse > 1.0) {
+            confidence *= (1.0 - 0.4 * ((model.fit_rmse - 1.0) / 4.0)).clamp (0.6, 1.0);
+        }
+
+        // Verification: the real generalisation check.  A solve whose own
+        // answer does not reproduce when encoded is not trustworthy however
+        // tidy the curve looked.
+        if (verification != null && verification.done) {
+            double err = Math.fabs (verification.delta);
+            if (err > VMAF_VERIFY_TOLERANCE) {
+                confidence *= (1.0 - 0.5 * ((err - VMAF_VERIFY_TOLERANCE) / 5.0))
+                    .clamp (0.4, 1.0);
+            }
+        }
+
+        // Sample coverage — same ramp the size solver uses.
+        if (sample_coverage > 0.0 && sample_coverage < 0.30) {
+            confidence *= (0.65 + 0.35 * ((sample_coverage - 0.10) / 0.20))
+                .clamp (0.65, 1.0);
+        }
+
+        // Content the metric cannot rank (screencast): the CRF cap is doing
+        // the real work, so the VMAF-derived answer deserves little trust.
+        if (!vmaf_reliable_for_content)
+            confidence *= 0.5;
+
+        return confidence.clamp (0.0, 1.0);
+    }
+
+    // ── Quality-mode calibration ladder ──────────────────────────────────────
+
+    /**
+     * Three CRF points bracketing the expected answer for this intent.
+     *
+     * Phase 0 measured 3-point fits at 0.318 VMAF mean prediction error, so
+     * three suffices where the size solve needs 4-6 — the CRF↔VMAF response is
+     * far better behaved than CRF↔size.  Brackets widen toward Ultra because
+     * the measured spread across content classes does: 1.1 CRF at Low, 11.2 at
+     * Ultra (anime 12.3 vs live-action 23.5).
+     *
+     * Only the x264/x265 ladder is corpus-calibrated; the VP9 and SVT-AV1
+     * offsets follow pick_calibration_crfs by analogy and are unvalidated.
+     * Adaptive refinement (pick_adaptive_calibration_crfs) corrects a
+     * mis-centred bracket by probing near the first solve, so an imperfect
+     * starting ladder costs an extra probe rather than a bad answer.
+     */
+    public int[] pick_quality_calibration_crfs (string codec, QualityIntent intent) {
+        if (codec == "vp9") {
+            switch (intent) {
+                case QualityIntent.LOW:    return { 28, 34, 40 };
+                case QualityIntent.MEDIUM: return { 24, 30, 36 };
+                case QualityIntent.HIGH:   return { 19, 26, 32 };
+                case QualityIntent.ULTRA:  return { 13, 21, 28 };
+                default:                   return { 24, 30, 36 };
+            }
+        }
+        if (codec == "svt-av1") {
+            switch (intent) {
+                case QualityIntent.LOW:    return { 30, 36, 42 };
+                case QualityIntent.MEDIUM: return { 26, 32, 38 };
+                case QualityIntent.HIGH:   return { 20, 27, 34 };
+                case QualityIntent.ULTRA:  return { 14, 22, 30 };
+                default:                   return { 26, 32, 38 };
+            }
+        }
+        // x264 / x265 — the ladder Phase 0 actually measured.
+        switch (intent) {
+            case QualityIntent.LOW:    return { 24, 30, 36 };
+            case QualityIntent.MEDIUM: return { 21, 27, 33 };
+            case QualityIntent.HIGH:   return { 17, 23, 29 };
+            case QualityIntent.ULTRA:  return { 11, 18, 25 };
+            default:                   return { 21, 27, 33 };
+        }
     }
 }

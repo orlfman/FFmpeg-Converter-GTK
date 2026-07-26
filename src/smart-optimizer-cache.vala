@@ -32,9 +32,22 @@ public class SmartOptimizerCache : GLib.Object {
     /** Test hook: overrides the on-disk cache file location. */
     public static string? cache_file_override = null;
 
+    /**
+     * One measured probe. A size is always present; VMAF only when the run
+     * that produced it was a quality solve, since Size Mode never measures it.
+     */
+    private class Sample : GLib.Object {
+        public double size_kib;
+        public double vmaf;          // 0.0 = not measured
+        public Sample (double size_kib, double vmaf) {
+            this.size_kib = size_kib;
+            this.vmaf = vmaf;
+        }
+    }
+
     private string key;
-    private HashTable<int, double?> samples =
-        new HashTable<int, double?> (direct_hash, direct_equal);
+    private HashTable<int, Sample> samples =
+        new HashTable<int, Sample> (direct_hash, direct_equal);
     private bool dirty = false;
 
     private SmartOptimizerCache (string key) {
@@ -108,19 +121,47 @@ public class SmartOptimizerCache : GLib.Object {
     }
 
     public bool lookup (int crf, out double size_kib) {
-        double? v = samples.lookup (crf);
+        Sample? v = samples.lookup (crf);
         if (v == null) {
             size_kib = 0.0;
             return false;
         }
-        size_kib = v;
+        size_kib = v.size_kib;
+        return true;
+    }
+
+    /**
+     * Quality-mode lookup: succeeds only when the stored sample carries a VMAF
+     * score. A size-only hit is useless to the quality solver — it would still
+     * have to encode the probe to measure the score, so there would be nothing
+     * to save.
+     */
+    public bool lookup_with_vmaf (int crf, out double size_kib, out double vmaf) {
+        size_kib = 0.0;
+        vmaf = 0.0;
+        Sample? v = samples.lookup (crf);
+        if (v == null || v.vmaf <= 0.0)
+            return false;
+        size_kib = v.size_kib;
+        vmaf = v.vmaf;
         return true;
     }
 
     public void record (int crf, double size_kib) {
         if (size_kib <= 0)
             return;
-        samples.replace (crf, size_kib);
+        // Preserve any VMAF already measured for this CRF — a later size-only
+        // write must not silently discard it.
+        Sample? existing = samples.lookup (crf);
+        double keep_vmaf = (existing != null) ? existing.vmaf : 0.0;
+        samples.replace (crf, new Sample (size_kib, keep_vmaf));
+        dirty = true;
+    }
+
+    public void record_with_vmaf (int crf, double size_kib, double vmaf) {
+        if (size_kib <= 0)
+            return;
+        samples.replace (crf, new Sample (size_kib, vmaf > 0.0 ? vmaf : 0.0));
         dirty = true;
     }
 
@@ -181,10 +222,14 @@ public class SmartOptimizerCache : GLib.Object {
         builder.add_int_value (get_real_time () / 1000000);
         builder.set_member_name ("samples");
         builder.begin_array ();
-        samples.foreach ((crf, size) => {
+        samples.foreach ((crf, sample) => {
             builder.begin_array ();
             builder.add_int_value (crf);
-            builder.add_double_value (size);
+            builder.add_double_value (sample.size_kib);
+            // Third element only when measured, so entries written by
+            // size-only runs stay byte-identical to the old format.
+            if (sample.vmaf > 0.0)
+                builder.add_double_value (sample.vmaf);
             builder.end_array ();
         });
         builder.end_array ();
@@ -237,8 +282,12 @@ public class SmartOptimizerCache : GLib.Object {
                         continue;
                     int crf = (int) s.get_int_element (0);
                     double size_kib = s.get_double_element (1);
+                    // Older entries are 2-element [crf, size]; quality runs
+                    // append the score. Both shapes load.
+                    double vmaf = (s.get_length () >= 3)
+                        ? s.get_double_element (2) : 0.0;
                     if (size_kib > 0)
-                        samples.insert (crf, size_kib);
+                        samples.insert (crf, new Sample (size_kib, vmaf));
                 }
                 return;
             }

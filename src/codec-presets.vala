@@ -575,11 +575,12 @@ public class CodecPresets : Object {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  SMART OPTIMIZER — TIER-AWARE AUDIO HELPER
+    //  SMART OPTIMIZER — EFFORT-AWARE AUDIO HELPER
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Configure audio for a Smart Optimizer preset based on size tier.
+     * Configure audio for a Smart Optimizer recommendation based on the
+     * shared encoder effort level (see SmartOptimizerLogic.EncodeEffort).
      *
      * Uses the native audio codec for the container: Opus for WebM,
      * AAC for MP4. This ensures maximum compatibility — Opus is the
@@ -594,7 +595,7 @@ public class CodecPresets : Object {
         // When the optimizer determined source audio can be stream-copied,
         // try to set Copy.  If Copy is not available in the dropdown
         // (e.g. speed change or normalization is active), fall through
-        // to the tier-based re-encode below.
+        // to the effort-based re-encode below.
         if (rec.stream_copy_audio) {
             var model = audio.codec_combo.get_model () as StringList;
             if (model != null) {
@@ -605,25 +606,25 @@ public class CodecPresets : Object {
                     }
                 }
             }
-            // Copy not available — fall through to tier-based re-encode
+            // Copy not available — fall through to effort-based re-encode
         }
 
         bool is_webm = (container == "webm");
         string codec = is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC;
-        switch (rec.size_tier) {
-            case SizeTier.TINY:
+        switch (rec.effort) {
+            case EncodeEffort.MINIMAL:
                 configure_audio (audio, codec, "64 kbps");
                 break;
-            case SizeTier.SMALL:
+            case EncodeEffort.LOW:
                 configure_audio (audio, codec, "128 kbps");
                 break;
-            case SizeTier.MEDIUM:
+            case EncodeEffort.MEDIUM:
                 configure_audio (audio, codec, "192 kbps");
                 break;
-            case SizeTier.LARGE:
+            case EncodeEffort.HIGH:
                 configure_audio (audio, codec, "256 kbps");
                 break;
-            case SizeTier.XLARGE:
+            case EncodeEffort.MAXIMUM:
                 configure_audio (audio, codec, "320 kbps");
                 break;
         }
@@ -639,10 +640,12 @@ public class CodecPresets : Object {
         tab.audio_settings.begin_smart_optimizer_override_application ();
         try {
             tab.reset_defaults ();
-            SizeTier tier = rec.size_tier;
+            EncodeEffort effort = rec.effort;
 
-            // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
-            if (tier <= SizeTier.SMALL) {
+            // Container — forced to mp4 when the recommendation demands a
+            // compatibility container (small size targets); otherwise respect
+            // the user's choice.
+            if (rec.force_compat_container) {
                 tab.container_combo.set_selected (1);   // mp4
             } else {
                 tab.container_combo.set_selected (saved_container);
@@ -663,28 +666,34 @@ public class CodecPresets : Object {
                 tab.crf_spin.set_value (rec.crf);
             }
 
-            // Content-aware tune
-            switch (rec.content_type) {
-                case ContentType.ANIME:
-                    set_dropdown_by_label (tab.tune_combo, "animation");
-                    break;
-                case ContentType.SCREENCAST:
-                    set_dropdown_by_label (tab.tune_combo, "stillimage");
-                    break;
-                default:
-                    tab.tune_combo.set_selected (0);
-                    break;
+            // Tune. x264 accepts only ONE tune, so an explicit delivery
+            // request wins over the content-derived choice — the user asked
+            // for cheap decode and that cannot be combined.
+            if (rec.fast_decode) {
+                set_dropdown_by_label (tab.tune_combo, "fastdecode");
+            } else {
+                switch (rec.content_type) {
+                    case ContentType.ANIME:
+                        set_dropdown_by_label (tab.tune_combo, "animation");
+                        break;
+                    case ContentType.SCREENCAST:
+                        set_dropdown_by_label (tab.tune_combo, "stillimage");
+                        break;
+                    default:
+                        tab.tune_combo.set_selected (0);
+                        break;
+                }
             }
 
-            // ── Tier-scaled encoder features ─────────────────────────────────
+            // ── Effort-scaled encoder features ───────────────────────────────
             tab.cabac_switch.set_active (true);
             tab.mbtree_switch.set_active (true);
             tab.weightp_switch.set_active (true);
             tab.deblock_expander.set_enable_expansion (true);
             tab.psy_rd_expander.set_enable_expansion (true);
 
-            switch (tier) {
-                case SizeTier.TINY:
+            switch (effort) {
+                case EncodeEffort.MINIMAL:
                     set_dropdown_by_label (tab.ref_frames_combo, "3");
                     tab.bframes_spin.set_value (3);
                     set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
@@ -700,7 +709,7 @@ public class CodecPresets : Object {
                     tab.open_gop_switch.set_active (false);
                     break;
 
-                case SizeTier.SMALL:
+                case EncodeEffort.LOW:
                     set_dropdown_by_label (tab.ref_frames_combo, "4");
                     tab.bframes_spin.set_value (4);
                     set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
@@ -716,7 +725,7 @@ public class CodecPresets : Object {
                     tab.open_gop_switch.set_active (false);
                     break;
 
-                case SizeTier.MEDIUM:
+                case EncodeEffort.MEDIUM:
                     set_dropdown_by_label (tab.ref_frames_combo, "5");
                     tab.bframes_spin.set_value (5);
                     set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
@@ -732,7 +741,7 @@ public class CodecPresets : Object {
                     tab.open_gop_switch.set_active (false);
                     break;
 
-                case SizeTier.LARGE:
+                case EncodeEffort.HIGH:
                     set_dropdown_by_label (tab.ref_frames_combo, "6");
                     tab.bframes_spin.set_value (6);
                     set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
@@ -748,7 +757,7 @@ public class CodecPresets : Object {
                     tab.open_gop_switch.set_active (true);
                     break;
 
-                case SizeTier.XLARGE:
+                case EncodeEffort.MAXIMUM:
                     set_dropdown_by_label (tab.ref_frames_combo, "8");
                     tab.bframes_spin.set_value (8);
                     set_dropdown_by_label (tab.b_adapt_combo, "Optimal");
@@ -785,10 +794,12 @@ public class CodecPresets : Object {
         tab.audio_settings.begin_smart_optimizer_override_application ();
         try {
             tab.reset_defaults ();
-            SizeTier tier = rec.size_tier;
+            EncodeEffort effort = rec.effort;
 
-            // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
-            if (tier <= SizeTier.SMALL) {
+            // Container — forced to webm when the recommendation demands a
+            // compatibility container (small size targets); otherwise respect
+            // the user's choice.
+            if (rec.force_compat_container) {
                 tab.container_combo.set_selected (0);   // webm
             } else {
                 tab.container_combo.set_selected (saved_container);
@@ -824,42 +835,42 @@ public class CodecPresets : Object {
                 tab.tune_content_combo.set_selected (0);
             }
 
-            // ── Tier-scaled encoder features ─────────────────────────────────
+            // ── Effort-scaled encoder features ───────────────────────────────
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
             tab.lookahead_expander.set_enable_expansion (true);
             tab.lag_in_frames_spin.set_value (25);   // VP9 max is 25
 
-            switch (tier) {
-                case SizeTier.TINY:
+            switch (effort) {
+                case EncodeEffort.MINIMAL:
                     tab.altref_expander.set_enable_expansion (true);
                     tab.arnr_maxframes_spin.set_value (7);
                     tab.arnr_strength_spin.set_value (5);
                     tab.aq_mode_combo.set_selected (0);
                     break;
 
-                case SizeTier.SMALL:
+                case EncodeEffort.LOW:
                     tab.altref_expander.set_enable_expansion (true);
                     tab.arnr_maxframes_spin.set_value (7);
                     tab.arnr_strength_spin.set_value (5);
                     set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
                     break;
 
-                case SizeTier.MEDIUM:
+                case EncodeEffort.MEDIUM:
                     tab.altref_expander.set_enable_expansion (true);
                     tab.arnr_maxframes_spin.set_value (9);
                     tab.arnr_strength_spin.set_value (6);
                     set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
                     break;
 
-                case SizeTier.LARGE:
+                case EncodeEffort.HIGH:
                     tab.altref_expander.set_enable_expansion (true);
                     tab.arnr_maxframes_spin.set_value (12);
                     tab.arnr_strength_spin.set_value (6);
                     set_dropdown_by_label (tab.aq_mode_combo, "Complexity");
                     break;
 
-                case SizeTier.XLARGE:
+                case EncodeEffort.MAXIMUM:
                     tab.altref_expander.set_enable_expansion (true);
                     tab.arnr_maxframes_spin.set_value (15);
                     tab.arnr_strength_spin.set_value (6);
@@ -887,10 +898,12 @@ public class CodecPresets : Object {
         tab.audio_settings.begin_smart_optimizer_override_application ();
         try {
             tab.reset_defaults ();
-            SizeTier tier = rec.size_tier;
+            EncodeEffort effort = rec.effort;
 
-            // Container — force mp4 for Tiny/Small (imageboard compat); respect user choice for Medium+
-            if (tier <= SizeTier.SMALL) {
+            // Container — forced to mp4 when the recommendation demands a
+            // compatibility container (small size targets); otherwise respect
+            // the user's choice.
+            if (rec.force_compat_container) {
                 tab.container_combo.set_selected (1);   // mp4
             } else {
                 tab.container_combo.set_selected (saved_container);
@@ -910,10 +923,12 @@ public class CodecPresets : Object {
                 tab.crf_spin.set_value (rec.crf);
             }
 
-            // Content-aware tune
-            if (rec.content_type == ContentType.ANIME) {
+            // Tune. x265 accepts only ONE tune, so delivery wins — see x264.
+            if (rec.fast_decode) {
+                set_dropdown_by_label (tab.tune_combo, "fastdecode");
+            } else if (rec.content_type == ContentType.ANIME) {
                 set_dropdown_by_label (tab.tune_combo, "animation");
-            } else if (tier >= SizeTier.LARGE
+            } else if (effort >= EncodeEffort.HIGH
                        && SmartOptimizerLogic.grain_warranted (
                            rec.grain_score, rec.content_type)) {
                 // At generous budgets, preserve natural film grain rather
@@ -924,15 +939,15 @@ public class CodecPresets : Object {
                 tab.tune_combo.set_selected (0);
             }
 
-            // ── Tier-scaled encoder features ─────────────────────────────────
+            // ── Effort-scaled encoder features ───────────────────────────────
             tab.sao_switch.set_active (true);
             tab.deblock_expander.set_enable_expansion (true);
             tab.psy_rd_expander.set_enable_expansion (true);
             tab.cutree_switch.set_active (true);
             tab.weightp_switch.set_active (true);
 
-            switch (tier) {
-                case SizeTier.TINY:
+            switch (effort) {
+                case EncodeEffort.MINIMAL:
                     set_dropdown_by_label (tab.ref_frames_combo, "3");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
@@ -942,7 +957,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (40);
                     break;
 
-                case SizeTier.SMALL:
+                case EncodeEffort.LOW:
                     set_dropdown_by_label (tab.ref_frames_combo, "4");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
@@ -952,7 +967,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (50);
                     break;
 
-                case SizeTier.MEDIUM:
+                case EncodeEffort.MEDIUM:
                     set_dropdown_by_label (tab.ref_frames_combo, "4");
                     tab.deblock_alpha_spin.set_value (0);
                     tab.deblock_beta_spin.set_value (0);
@@ -962,7 +977,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (60);
                     break;
 
-                case SizeTier.LARGE:
+                case EncodeEffort.HIGH:
                     set_dropdown_by_label (tab.ref_frames_combo, "5");
                     tab.deblock_alpha_spin.set_value (-1);
                     tab.deblock_beta_spin.set_value (-1);
@@ -972,7 +987,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (80);
                     break;
 
-                case SizeTier.XLARGE:
+                case EncodeEffort.MAXIMUM:
                     set_dropdown_by_label (tab.ref_frames_combo, "5");
                     tab.deblock_alpha_spin.set_value (-1);
                     tab.deblock_beta_spin.set_value (-1);
@@ -1003,10 +1018,12 @@ public class CodecPresets : Object {
         tab.audio_settings.begin_smart_optimizer_override_application ();
         try {
             tab.reset_defaults ();
-            SizeTier tier = rec.size_tier;
+            EncodeEffort effort = rec.effort;
 
-            // Container — force webm for Tiny/Small (imageboard compat); respect user choice for Medium+
-            if (tier <= SizeTier.SMALL) {
+            // Container — forced to webm when the recommendation demands a
+            // compatibility container (small size targets); otherwise respect
+            // the user's choice.
+            if (rec.force_compat_container) {
                 tab.container_combo.set_selected (1);   // webm
             } else {
                 tab.container_combo.set_selected (saved_container);
@@ -1032,7 +1049,15 @@ public class CodecPresets : Object {
                 set_dropdown_by_label (tab.scm_combo, "Auto-Detect");
             }
 
-            // ── Tier-scaled encoder features ─────────────────────────────────
+            // AV1 exposes fast-decode as its own control rather than a tune,
+            // so unlike x264/x265 it composes with the content settings
+            // instead of displacing them. Level 1 trades a little efficiency
+            // for materially cheaper decode; Level 2 costs more than most
+            // streaming cases justify.
+            set_dropdown_by_label (tab.fast_decode_combo,
+                rec.fast_decode ? "Level 1" : "Disabled");
+
+            // ── Effort-scaled encoder features ───────────────────────────────
             tab.cdef_switch.set_active (true);
             tab.restoration_switch.set_active (true);
             tab.tf_switch.set_active (true);
@@ -1040,15 +1065,15 @@ public class CodecPresets : Object {
             tab.tpl_switch.set_active (true);
             tab.low_latency_switch.set_active (false);
 
-            // Film grain — MEDIUM+ tiers, gated on the measured grain signal
+            // Film grain — MEDIUM+ effort, gated on the measured grain signal
             // (clean sources are excluded even if live-action/mixed; grainy
             // sources included even if the category was uncertain). See
             // SmartOptimizerLogic.grain_warranted.
-            bool use_grain = (tier >= SizeTier.MEDIUM)
+            bool use_grain = (effort >= EncodeEffort.MEDIUM)
                 && SmartOptimizerLogic.grain_warranted (rec.grain_score, rec.content_type);
 
-            switch (tier) {
-                case SizeTier.TINY:
+            switch (effort) {
+                case EncodeEffort.MINIMAL:
                     tab.grain_expander.set_enable_expansion (false);
                     tab.qm_expander.set_enable_expansion (false);
                     tab.sharpness_expander.set_enable_expansion (false);
@@ -1056,7 +1081,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (60);
                     break;
 
-                case SizeTier.SMALL:
+                case EncodeEffort.LOW:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
                         tab.grain_strength_spin.set_value (8);
@@ -1068,7 +1093,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (80);
                     break;
 
-                case SizeTier.MEDIUM:
+                case EncodeEffort.MEDIUM:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
                         tab.grain_strength_spin.set_value (10);
@@ -1082,7 +1107,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (100);
                     break;
 
-                case SizeTier.LARGE:
+                case EncodeEffort.HIGH:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
                         tab.grain_strength_spin.set_value (12);
@@ -1097,7 +1122,7 @@ public class CodecPresets : Object {
                     tab.lookahead_spin.set_value (120);
                     break;
 
-                case SizeTier.XLARGE:
+                case EncodeEffort.MAXIMUM:
                     tab.grain_expander.set_enable_expansion (use_grain);
                     if (use_grain) {
                         tab.grain_strength_spin.set_value (15);

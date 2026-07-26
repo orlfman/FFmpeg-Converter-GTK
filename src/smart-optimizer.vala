@@ -446,12 +446,19 @@ public class SmartOptimizer : GLib.Object {
                     type_confidence = 0.0
                 };
             }
+            // The user's assertion beats the measurement — see
+            // SmartOptimizerLogic.ContentOverride for why that is not just a
+            // convenience for animation.
+            SmartOptimizerLogic.apply_content_override (
+                ref profile, ctx.content_override);
 
             // ── 4b. Bit depth & content-aware, tier-scaled preset ───────
             // Decided before expansion so the speed-probe below encodes at the
             // real target preset/pix_fmt. Neither depends on sample positions.
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
                 info, profile, tier, preferred_codec, ctx.tone_mapping_active);
+            bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+                bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
             int preset_idx = SmartOptimizerLogic.choose_preset_index (
                 profile, tier, preferred_codec);
 
@@ -656,13 +663,606 @@ public class SmartOptimizer : GLib.Object {
                 strip_metadata        = (tier == SizeTier.TINY),
                 recommended_pix_fmt   = bit_depth.pix_fmt,
                 resolved_container    = resolved_container,
-                target_size_kib       = (int) budget.target_total_kib
+                target_size_kib       = (int) budget.target_total_kib,
+                // Shared decision axis — see SmartOptimizerLogic.EncodeEffort.
+                effort                = SmartOptimizerLogic.effort_from_size_tier (tier),
+                force_compat_container =
+                    SmartOptimizerLogic.tier_forces_compat_container (tier),
+                // This is the size solver: size was pinned, quality is the
+                // readout.  VMAF stays unmeasured until the quality solver.
+                pinned_axis           = PinnedAxis.SIZE,
+                estimated_vmaf        = 0.0,
+                vmaf_measured         = false,
+                fast_decode           = ctx.optimize_for_delivery
             };
         } finally {
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // QUALITY MODE PIPELINE
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * The second solver: pin a perceptual target, let size float, solve for the
+     * CRF that achieves it ON THIS SOURCE.
+     *
+     * Shares the analysis prologue with optimize_for_target_size — probe, trim
+     * window, sampling, content analysis, bit depth, preset — and diverges only
+     * at the objective. Where the size solver fits ln(size) against CRF and
+     * solves for a byte count, this fits VMAF against CRF and solves for a
+     * score. Same probes, same least-squares core, same sample segments.
+     *
+     * Differences from Size Mode, all deliberate:
+     *   - The lossless intermediate is mandatory (it is the VMAF reference),
+     *     and the segment count is reduced to fit its budget rather than
+     *     abandoning it.
+     *   - No two-pass. Two-pass exists to hit a byte count.
+     *   - No container forcing. That is imageboard-size policy.
+     *   - The calibration cache is not used: it stores sizes only, and a
+     *     cached size still leaves the VMAF unmeasured, so there is nothing to
+     *     save. Extending it to hold VMAF is a worthwhile follow-up.
+     */
+    public async OptimizationRecommendation optimize_for_quality (
+        string                            input_file,
+        SmartOptimizerLogic.QualityIntent intent          = SmartOptimizerLogic.QualityIntent.MEDIUM,
+        string                            preferred_codec = "x265",
+        OptimizationContext               ctx             = OptimizationContext (),
+        Cancellable?                      cancellable     = null
+    ) throws Error {
+        string? temp_run_dir = ConversionUtils.create_managed_temp_run_dir (
+            "smart-optimizer", "quality");
+        var intermediate = new IntermediateHolder ();
+
+        try {
+            // ── 1. Probe ────────────────────────────────────────────────
+            SmartOptimizerVideoInfo info;
+            try {
+                info = yield probe_video (input_file, cancellable);
+            } catch (Error e) {
+                if (e is IOError.CANCELLED) throw e;
+                warning ("Probe failed: %s", e.message);
+                return make_error_rec (preferred_codec,
+                    "Could not read video file: %s".printf (e.message));
+            }
+            if (info.duration <= 0) {
+                return make_error_rec (preferred_codec,
+                    "Video has zero duration — ffprobe could not determine the length.");
+            }
+
+            // ── 2. Trim window, audio, container ────────────────────────
+            var tw = SmartOptimizerLogic.resolve_trim_window (
+                ctx, info.duration, (double) SEGMENT_DURATION);
+
+            // Nominal tier feeds the still-tier-typed helpers; it maps to the
+            // same point on the shared effort axis as the intent does.
+            SizeTier nominal_tier =
+                SmartOptimizerLogic.nominal_size_tier_for_intent (intent);
+
+            // Container: respect the user's choice. Quality Mode has no size
+            // constraint, so the imageboard compatibility forcing must not
+            // apply — hence NOT resolve_effective_container(nominal_tier).
+            string resolved_container =
+                (ctx.output_container != null && ctx.output_container.length > 0)
+                    ? ctx.output_container
+                    : SmartOptimizerLogic.codec_default_container (preferred_codec);
+
+            // Audio planned at the floored tier: with no byte budget there is
+            // no reason to refuse multi-track preservation.
+            var plan = SmartOptimizerLogic.plan_audio (
+                info, ctx, SmartOptimizerLogic.quality_audio_tier (intent),
+                resolved_container);
+            string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
+
+            // ── 3. Sample positions ─────────────────────────────────────
+            double[] positions = SmartOptimizerLogic.pick_sample_positions_in_window (
+                tw.trim_start, tw.encode_duration, tw.sample_segment_duration);
+
+            // ── 4. Content analysis ─────────────────────────────────────
+            ContentProfile profile;
+            try {
+                cancellable_check (cancellable);
+                profile = yield analyze_content (
+                    input_file, positions, tw.sample_segment_duration,
+                    info, vf, cancellable);
+            } catch (IOError.CANCELLED e) {
+                throw e;
+            } catch (Error e) {
+                warning ("Content analysis failed, assuming live-action: %s", e.message);
+                profile = ContentProfile () {
+                    content_type    = ContentType.LIVE_ACTION,
+                    type_confidence = 0.0
+                };
+            }
+            // The user's assertion beats the measurement — see
+            // SmartOptimizerLogic.ContentOverride for why that is not just a
+            // convenience for animation.
+            SmartOptimizerLogic.apply_content_override (
+                ref profile, ctx.content_override);
+
+            // ── 5. Bit depth, preset, effective target ──────────────────
+            var bit_depth = SmartOptimizerLogic.decide_bit_depth (
+                info, profile, nominal_tier, preferred_codec, ctx.tone_mapping_active);
+            bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
+                bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
+            int preset_idx = SmartOptimizerLogic.choose_preset_index (
+                profile, nominal_tier, preferred_codec);
+            var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
+
+            // ── 6. Constrain samples to the VMAF reference budget ───────
+            // The intermediate is the reference, so it must be built. When it
+            // would be too large, reduce segments instead of skipping it.
+            int max_segments = SmartOptimizerLogic.max_segments_for_intermediate_budget (
+                info.width, info.height, info.fps, info.source_bit_depth,
+                tw.sample_segment_duration, SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES);
+            int positions_before = positions.length;
+            if (max_segments > 0)
+                positions = SmartOptimizerLogic.limit_positions (positions, max_segments);
+            bool positions_trimmed = (positions.length < positions_before);
+            if (positions_trimmed) {
+                warning ("Smart Optimizer: reduced sampling from %d to %d segments "
+                    + "to keep the VMAF reference under %.1f GiB",
+                    positions_before, positions.length,
+                    SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES / (1024.0 * 1024.0 * 1024.0));
+            }
+
+            // The reference is built lazily, on the first probe that actually
+            // misses the cache. A fully-cached re-run needs no encoding at all,
+            // so building it up front would be pure waste — and for 4K it is
+            // the single most expensive step in the pipeline.
+
+            // ── 7. Probe the CRF↔VMAF (and CRF↔size) response ───────────
+            double sample_duration = double.min (
+                (double) positions.length * tw.sample_segment_duration,
+                tw.encode_duration);
+            int threads = encoder_threads_per_job (1);
+
+            // Cache keyed on everything that shapes a measurement. Preset is
+            // part of that key and preset varies with intent, so switching
+            // intent correctly misses — a different preset genuinely produces
+            // different sizes AND different scores. The win is re-running the
+            // SAME intent after changing something the key does not cover
+            // (container, audio, delivery toggle), which currently costs a
+            // full 3-5 probe re-measure.
+            var qcache = SmartOptimizerCache.try_create (
+                input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
+                vf, tw.trim_start, tw.encode_duration,
+                tw.sample_segment_duration, positions, 1.0);
+
+            int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
+                preferred_codec, intent);
+            double[] vmafs = {};
+            double[] sizes = {};
+            int[] measured_crfs = {};
+            int cached_points = 0;
+
+            try {
+                foreach (int crf in crfs) {
+                    double c_size = 0.0, c_vmaf = 0.0;
+                    if (qcache != null
+                            && qcache.lookup_with_vmaf (crf, out c_size, out c_vmaf)) {
+                        measured_crfs += crf;
+                        vmafs += c_vmaf;
+                        sizes += c_size;
+                        cached_points++;
+                        continue;
+                    }
+                    yield ensure_quality_reference (
+                        intermediate, input_file, positions,
+                        tw.sample_segment_duration, vf, bit_depth.pix_fmt,
+                        info, temp_run_dir, cancellable);
+                    var m = yield calibration_probe_with_vmaf (
+                        preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
+                        intermediate.path, tw.encode_duration, sample_duration,
+                        1.0, info.width, threads, temp_run_dir, cancellable);
+                    if (!m.vmaf_measured)
+                        continue;
+                    measured_crfs += crf;
+                    vmafs += m.vmaf;
+                    sizes += m.size_kib;
+                    if (qcache != null)
+                        qcache.record_with_vmaf (crf, m.size_kib, m.vmaf);
+                }
+            } catch (IOError.CANCELLED e) {
+                throw e;
+            } catch (Error e) {
+                return make_error_rec (preferred_codec,
+                    "Quality calibration failed: %s".printf (e.message));
+            }
+
+            // ── 7b. Recover from an over-saturated bracket ──────────────
+            // Every probe landing above VMAF 99.5 means the ladder sat too far
+            // into visually-lossless territory to carry any gradient. Probe
+            // higher CRFs rather than fit a flat line.
+            var m0 = SmartOptimizerLogic.solve_quality_crf (
+                measured_crfs, vmafs, target.target_vmaf, preferred_codec);
+            bool refined = false;
+            if (m0.degenerate && measured_crfs.length > 0) {
+                int highest = measured_crfs[measured_crfs.length - 1];
+                int crf_min, crf_max;
+                SmartOptimizerLogic.crf_range_for_codec (
+                    preferred_codec, out crf_min, out crf_max);
+                int[] extra = {
+                    int.min (highest + 6, crf_max),
+                    int.min (highest + 12, crf_max)
+                };
+                try {
+                    foreach (int crf in extra) {
+                        if (SmartOptimizerLogic.calibration_contains_crf (measured_crfs, crf))
+                            continue;
+                        yield ensure_quality_reference (
+                            intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, bit_depth.pix_fmt,
+                            info, temp_run_dir, cancellable);
+                        var m = yield calibration_probe_with_vmaf (
+                            preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
+                            intermediate.path, tw.encode_duration, sample_duration,
+                            1.0, info.width, threads, temp_run_dir, cancellable);
+                        if (!m.vmaf_measured)
+                            continue;
+                        measured_crfs += crf;
+                        vmafs += m.vmaf;
+                        sizes += m.size_kib;
+                        if (qcache != null)
+                            qcache.record_with_vmaf (crf, m.size_kib, m.vmaf);
+                        refined = true;
+                    }
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    warning ("Smart Optimizer: saturation refinement failed: %s", e.message);
+                }
+                if (refined) {
+                    m0 = SmartOptimizerLogic.solve_quality_crf (
+                        measured_crfs, vmafs, target.target_vmaf, preferred_codec);
+                }
+            }
+
+            // Every probe saturating is NOT a failure — it means the target
+            // was already cleared everywhere we looked. The right answer is
+            // the highest CRF probed: the cheapest encode that still exceeds
+            // the target. Erroring out here would throw away a usable result.
+            //
+            // Screen content reaches this routinely. Phase 0 measured a
+            // screencast at VMAF 92.7 even at x265 CRF 34, and SVT-AV1 stays
+            // above 99.5 past CRF 46 — which is exactly why that content type
+            // gets a rule-based CRF cap with VMAF as a floor that never binds.
+            bool all_saturated = (measured_crfs.length > 0
+                && m0.saturated_points_dropped == measured_crfs.length);
+
+            if (m0.degenerate && !all_saturated) {
+                return make_error_rec (preferred_codec,
+                    "Could not measure a usable quality curve for this video.\n"
+                    + "Too few probes produced a score — the source may be "
+                    + "corrupt or too short to sample.");
+            }
+
+            if (all_saturated) {
+                // Model the response as flat at the measured value: within the
+                // probed range that is precisely what saturation means. The
+                // verification probe below re-measures at the final CRF, so a
+                // flat model that turns out to be wrong self-corrects.
+                m0.degenerate = false;
+                m0.cal_crfs = measured_crfs;
+                m0.cal_vmafs = vmafs;
+                m0.qa = vmafs[vmafs.length - 1];
+                m0.qb = 0.0;
+                m0.qc = 0.0;
+                m0.predicted_crf = measured_crfs[measured_crfs.length - 1];
+                m0.predicted_vmaf = m0.qa;
+                warning ("Smart Optimizer: every probe cleared VMAF %.1f — "
+                    + "recommending the highest probed CRF (%d, VMAF %.2f)",
+                    SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD,
+                    m0.predicted_crf, m0.predicted_vmaf);
+            }
+
+            // ── 8. Size curve from the same probes ──────────────────────
+            double sa = 0.0, sb = 0.0, sc = 0.0;
+            bool size_degenerate = true;
+            if (measured_crfs.length >= 2) {
+                SmartOptimizerLogic.fit_calibration_curve (
+                    measured_crfs, sizes, out sa, out sb, out sc, out size_degenerate);
+            }
+
+            // ── 9. Content CRF cap, then the size ceiling ───────────────
+            int capped_crf = SmartOptimizerLogic.apply_quality_crf_cap (
+                m0.predicted_crf, target);
+            bool crf_capped = (capped_crf != m0.predicted_crf);
+
+            int crf_lo, crf_hi;
+            SmartOptimizerLogic.crf_range_for_codec (
+                preferred_codec, out crf_lo, out crf_hi);
+            double ceiling_kib = SmartOptimizerLogic.quality_ceiling_kib (
+                info.file_size_bytes, tw.encode_duration, info.duration);
+
+            var ceiling = SmartOptimizerLogic.apply_quality_size_ceiling (
+                capped_crf, size_degenerate ? 0.0 : ceiling_kib,
+                sa, sb, sc, m0.qa, m0.qb, m0.qc, crf_lo, crf_hi);
+
+            int final_crf = ceiling.final_crf;
+            double achieved_vmaf = ceiling.achieved_vmaf;
+
+            // ── 9b. Verification ───────────────────────────────────────
+            // Encode once at the CRF we are actually going to recommend and
+            // score it. This is the quality solver's only real accuracy
+            // check: with a 3-point ladder the quadratic interpolates its own
+            // samples exactly, so the fit residual proves nothing. Reuses a
+            // measured point when the answer happens to land on one.
+            var verification = new SmartOptimizerLogic.VmafVerification ();
+            verification.verified_crf = final_crf;
+            verification.predicted_vmaf = achieved_vmaf;
+            for (int i = 0; i < measured_crfs.length; i++) {
+                if (measured_crfs[i] == final_crf) {
+                    verification.done = true;
+                    verification.measured_vmaf = vmafs[i];
+                    break;
+                }
+            }
+            if (!verification.done && qcache != null) {
+                // A previous run very likely verified this same CRF — the
+                // solve is deterministic for a given key, so the answer lands
+                // in the same place. Reuse it rather than re-encoding.
+                double vc_size = 0.0, vc_vmaf = 0.0;
+                if (qcache.lookup_with_vmaf (final_crf, out vc_size, out vc_vmaf)) {
+                    verification.done = true;
+                    verification.measured_vmaf = vc_vmaf;
+                    ceiling.estimated_size_kib = vc_size;
+                    cached_points++;
+                }
+            }
+            if (!verification.done) {
+                try {
+                    yield ensure_quality_reference (
+                        intermediate, input_file, positions,
+                        tw.sample_segment_duration, vf, bit_depth.pix_fmt,
+                        info, temp_run_dir, cancellable);
+                    var v = yield calibration_probe_with_vmaf (
+                        preferred_codec, final_crf, preset_idx, bit_depth.pix_fmt,
+                        intermediate.path, tw.encode_duration, sample_duration,
+                        1.0, info.width, threads, temp_run_dir, cancellable);
+                    if (v.vmaf_measured) {
+                        verification.done = true;
+                        verification.measured_vmaf = v.vmaf;
+                        if (qcache != null)
+                            qcache.record_with_vmaf (final_crf, v.size_kib, v.vmaf);
+                        // The measured size at the final CRF beats the modelled
+                        // one — it is the encode we are recommending.
+                        ceiling.estimated_size_kib = v.size_kib;
+                    }
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    warning ("Smart Optimizer: quality verification failed: %s", e.message);
+                }
+            }
+            if (verification.done) {
+                verification.delta =
+                    verification.measured_vmaf - verification.predicted_vmaf;
+                // Report what was measured, not what was modelled.
+                achieved_vmaf = verification.measured_vmaf;
+            }
+
+            // ── 10. Confidence ─────────────────────────────────────────
+            double coverage = (tw.encode_duration > 0.0)
+                ? double.min (1.0, sample_duration / tw.encode_duration) : 0.0;
+            double confidence = SmartOptimizerLogic.assess_quality_confidence (
+                m0, coverage, target.vmaf_reliable, verification);
+            if (all_saturated) {
+                // A flat model carries no gradient; the answer is a floor, not
+                // a solve. Say so through the confidence figure.
+                confidence *= 0.6;
+            }
+
+            // ── 11. Estimated size ─────────────────────────────────────
+            double audio_kib = SmartOptimizerLogic.compute_reserved_audio_kib (
+                plan.selected_sources, plan.use_stream_copy, plan.per_stream_kbps,
+                plan.total_budget_kbps, tw.encode_duration);
+            double overhead_kib = SmartOptimizerLogic.container_overhead_kib_estimate (
+                resolved_container, tw.encode_duration, info.fps,
+                plan.selected_sources, plan.use_stream_copy, plan.effective_track_count);
+            int estimated_total_kib = 0;
+            SmartOptimizerLogic.try_cast_nonnegative_int (
+                ceiling.estimated_size_kib + audio_kib + overhead_kib,
+                "quality estimated size", out estimated_total_kib);
+
+            if (qcache != null)
+                qcache.save ();
+
+            string preset_label = format_preset_label (preferred_codec, preset_idx);
+            string notes = build_quality_notes (
+                preferred_codec, intent, target, info, tw, plan, profile,
+                bit_depth, preset_label, m0, measured_crfs, vmafs, sizes,
+                ceiling, final_crf, achieved_vmaf, estimated_total_kib,
+                confidence, coverage, positions.length, positions_trimmed,
+                crf_capped, refined, ceiling_kib, verification, all_saturated,
+                cached_points);
+
+            return OptimizationRecommendation () {
+                codec                 = preferred_codec,
+                crf                   = final_crf,
+                preset                = preset_label,
+                // Two-pass exists to hit a byte count; there is no byte count.
+                two_pass              = false,
+                target_bitrate_kbps   = 0,
+                estimated_size_kib    = estimated_total_kib,
+                notes                 = notes,
+                is_impossible         = false,
+                content_type          = profile.content_type,
+                grain_score           = profile.noise_mean,
+                confidence            = confidence,
+                // Size Mode's reporting field; unused when quality is pinned.
+                size_tier             = nominal_tier,
+                recommended_audio_kbps = plan.per_stream_kbps,
+                total_audio_budget_kbps = plan.total_budget_kbps,
+                audio_track_count     = plan.effective_track_count,
+                preserve_all_audio_tracks_effective = plan.preserve_all_effective,
+                stream_copy_audio     = plan.use_stream_copy,
+                strip_metadata        = false,
+                recommended_pix_fmt   = bit_depth.pix_fmt,
+                resolved_container    = resolved_container,
+                target_size_kib       = 0,
+                effort                = SmartOptimizerLogic.effort_from_quality_intent (intent),
+                // Imageboard compatibility forcing is a size policy.
+                force_compat_container = false,
+                pinned_axis           = PinnedAxis.QUALITY,
+                estimated_vmaf        = achieved_vmaf,
+                vmaf_measured         = true,
+                fast_decode           = ctx.optimize_for_delivery
+            };
+        } finally {
+            if (intermediate.path != null)
+                cleanup_file (intermediate.path);
+            cleanup_temp_run_dir (temp_run_dir);
+        }
+    }
+
+    /**
+     * Build the VMAF reference on first need, and fail loudly if it cannot be
+     * built — Quality Mode has no fallback, since without a reference there is
+     * nothing to measure against.
+     */
+    private async void ensure_quality_reference (
+        IntermediateHolder holder,
+        string        input_file,
+        double[]      positions,
+        double        segment_duration,
+        string        vf,
+        string        pix_fmt,
+        SmartOptimizerVideoInfo info,
+        string?       temp_run_dir,
+        Cancellable?  cancellable
+    ) throws Error {
+        if (holder.path != null)
+            return;
+        yield ensure_intermediate (
+            holder, input_file, positions, segment_duration, vf, pix_fmt,
+            info, temp_run_dir, cancellable, true);
+        if (holder.path == null) {
+            throw new IOError.FAILED (
+                "Could not build a lossless reference for quality measurement.\n"
+                + "Quality Mode needs one to compare against; try a size target instead.");
+        }
+    }
+
+    /** Human-readable explanation of a quality solve. */
+    private string build_quality_notes (
+        string                              codec,
+        SmartOptimizerLogic.QualityIntent   intent,
+        SmartOptimizerLogic.QualityTarget   target,
+        SmartOptimizerVideoInfo             info,
+        SmartOptimizerLogic.TrimWindow      tw,
+        SmartOptimizerLogic.AudioPlan       plan,
+        ContentProfile                      profile,
+        BitDepthDecision                    bit_depth,
+        string                              preset_label,
+        SmartOptimizerLogic.VmafModel       model,
+        int[]                               crfs,
+        double[]                            vmafs,
+        double[]                            sizes,
+        SmartOptimizerLogic.QualityCeilingOutcome ceiling,
+        int                                 final_crf,
+        double                              achieved_vmaf,
+        int                                 estimated_total_kib,
+        double                              confidence,
+        double                              coverage,
+        int                                 segment_count,
+        bool                                positions_trimmed,
+        bool                                crf_capped,
+        bool                                refined,
+        double                              ceiling_kib,
+        SmartOptimizerLogic.VmafVerification verification,
+        bool                                all_saturated,
+        int                                 cached_points
+    ) {
+        var n = new StringBuilder ();
+
+        n.append ("── Intent: %s (VMAF %.0f) ──\n".printf (
+            intent.to_label (), target.target_vmaf));
+        n.append ("  %s\n".printf (target.reason));
+        n.append ("  Quality pinned; size is the prediction.\n");
+
+        n.append ("\n── Content ──\n");
+        n.append ("  %s".printf (profile.content_type.to_label ()));
+        if (profile.type_confidence > 0)
+            n.append (" (confidence: %.0f%%)".printf (profile.type_confidence * 100));
+        n.append ("\n");
+        n.append ("  Grain/noise (TOUT): %.4f\n".printf (profile.noise_mean));
+
+        n.append ("\n── Measured quality curve ──\n");
+        for (int i = 0; i < crfs.length; i++) {
+            n.append ("  CRF %2d → VMAF %6.2f  (%.1f MiB projected)\n".printf (
+                crfs[i], vmafs[i], sizes[i] / 1024.0));
+        }
+        if (all_saturated) {
+            n.append (("  ⚠ Every probe cleared VMAF %.1f — the metric cannot "
+                 + "separate these encodes.\n").printf (
+                    SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD));
+            n.append ("  Recommending the highest CRF probed: the cheapest "
+                + "encode that still exceeds the target.\n");
+        } else if (model.saturated_points_dropped > 0) {
+            n.append ("  %d point(s) discarded above VMAF %.1f — no gradient there\n"
+                .printf (model.saturated_points_dropped,
+                         SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD));
+        }
+        if (refined)
+            n.append ("  Bracket re-probed at higher CRFs after saturation\n");
+        if (cached_points > 0) {
+            n.append ("  %d point(s) reused from a previous run\n".printf (
+                cached_points));
+        }
+        n.append ("  Fit residual: ±%.2f VMAF\n".printf (model.fit_rmse));
+
+        n.append ("\n── Decision ──\n");
+        n.append ("  Solved CRF %d for VMAF %.1f\n".printf (
+            model.predicted_crf, target.target_vmaf));
+        if (crf_capped) {
+            n.append ("  Capped to CRF %d — %s\n".printf (
+                SmartOptimizerLogic.apply_quality_crf_cap (model.predicted_crf, target),
+                "VMAF is unreliable on this content, so a CRF ceiling applies"));
+        }
+        if (ceiling.clamped) {
+            n.append (("  Raised to CRF %d to stay under the %.0f MiB size ceiling "
+                 + "(%.0f%% of source)\n").printf (
+                    ceiling.final_crf, ceiling_kib / 1024.0,
+                    SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER * 100.0));
+            n.append ("  → achieving VMAF %.1f rather than the %.1f requested\n"
+                .printf (achieved_vmaf, target.target_vmaf));
+        }
+        // preset_label already reads "preset 6" / "cpu-used 2" / "slow"
+        // depending on codec, so it must not be prefixed again.
+        n.append ("  Final: %s CRF %d, %s, %s\n".printf (
+            codec, final_crf, preset_label,
+            bit_depth.is_10bit ? "10-bit" : "8-bit"));
+        n.append ("  %s\n".printf (bit_depth.reason));
+
+        if (verification.done) {
+            n.append ("  Verified at CRF %d: measured VMAF %.2f "
+                .printf (verification.verified_crf, verification.measured_vmaf));
+            n.append ("(predicted %.2f, %+.2f)\n".printf (
+                verification.predicted_vmaf, verification.delta));
+            if (Math.fabs (verification.delta)
+                    > SmartOptimizerLogic.VMAF_VERIFY_TOLERANCE) {
+                n.append ("  ⚠ The curve did not generalise to its own answer — "
+                    + "confidence reduced\n");
+            }
+        }
+
+        n.append ("\n── Prediction ──\n");
+        n.append ("  Estimated size: %.1f MiB\n".printf (estimated_total_kib / 1024.0));
+        n.append ("  Estimated VMAF: %.1f\n".printf (achieved_vmaf));
+        n.append ("  Confidence: %.0f%%\n".printf (confidence * 100.0));
+        n.append ("  Sampled %.0f%% of the encode window (%d × %.1fs segments%s)\n"
+            .printf (coverage * 100.0, segment_count, tw.sample_segment_duration,
+                     positions_trimmed ? ", reduced to fit the reference budget" : ""));
+        n.append ("  Audio: %d kbps/stream × %d\n".printf (
+            plan.per_stream_kbps, plan.effective_track_count));
+        n.append ("  Single-pass CRF — two-pass targets a byte count, "
+            + "which quality mode does not have.\n");
+
+        return n.str;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -783,9 +1383,17 @@ public class SmartOptimizer : GLib.Object {
         string        pix_fmt,
         SmartOptimizerVideoInfo info,
         string?       temp_run_dir,
-        Cancellable?  cancellable
+        Cancellable?  cancellable,
+        bool          force = false
     ) throws Error {
-        if (holder.path != null || holder.build_failed || vf.length == 0)
+        // @force is Quality Mode: the intermediate is not an optimisation
+        // there, it is the VMAF reference. libvmaf needs a reference matching
+        // the distorted input's resolution and frame rate exactly, and the
+        // filtered sample concat is the only thing that does. Size Mode leaves
+        // force=false and keeps the "skip it and re-filter" fallback.
+        if (holder.path != null || holder.build_failed)
+            return;
+        if (vf.length == 0 && !force)
             return;
 
         double sample_duration = (double) positions.length * segment_duration;
@@ -814,15 +1422,35 @@ public class SmartOptimizer : GLib.Object {
         } catch (Error e) {
             cleanup_file (tmp);
             holder.build_failed = true;
-            warning ("Smart Optimizer: intermediate build failed (%s) — "
-                + "probes will re-run the filter chain", e.message);
+            // Size Mode falls back to re-filtering per probe; Quality Mode has
+            // no fallback because this file IS the VMAF reference.
+            warning ("Smart Optimizer: intermediate build failed (%s) — %s",
+                e.message,
+                force ? "quality measurement cannot proceed"
+                      : "probes will re-run the filter chain");
             return;
         }
 
-        if (!FileUtils.test (tmp, FileTest.EXISTS)) {
+        // ffmpeg exits 0 on "Output file is empty, nothing was encoded" (it
+        // does exactly that for odd-dimension sources under x264), so file
+        // existence alone is not proof the build worked.
+        int64 built_size = 0;
+        if (FileUtils.test (tmp, FileTest.EXISTS)) {
+            var probe = File.new_for_path (tmp);
+            try {
+                var pinfo = probe.query_info (
+                    FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
+                built_size = pinfo.get_size ();
+            } catch (Error e) {
+                built_size = 0;
+            }
+        }
+        if (built_size <= 0) {
+            cleanup_file (tmp);
             holder.build_failed = true;
-            warning ("Smart Optimizer: intermediate build produced no file — "
-                + "probes will re-run the filter chain");
+            warning ("Smart Optimizer: intermediate build produced no data — %s",
+                force ? "quality measurement cannot proceed"
+                      : "probes will re-run the filter chain");
             return;
         }
         holder.path = tmp;
@@ -1533,9 +2161,16 @@ public class SmartOptimizer : GLib.Object {
         } else {
             sb.append ("Est. size:      %d KiB\n".printf (rec.estimated_size_kib));
         }
+        if (rec.vmaf_measured) {
+            sb.append ("Est. VMAF:      %.1f\n".printf (rec.estimated_vmaf));
+        }
+        sb.append ("Pinned axis:    %s\n".printf (rec.pinned_axis.to_label ()));
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
         sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
-        sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
+        sb.append ("Effort:         %s\n".printf (rec.effort.to_label ()));
+        if (rec.pinned_axis == PinnedAxis.SIZE) {
+            sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
+        }
         sb.append ("Audio tracks:   %d (%s)\n".printf (
             rec.audio_track_count,
             rec.audio_track_count == 0
@@ -2388,6 +3023,186 @@ public class SmartOptimizer : GLib.Object {
     }
 
     // ════════════════════════════════════════════════════════════════════════
+    // VMAF MEASUREMENT  (Quality Mode)
+    // ════════════════════════════════════════════════════════════════════════
+
+    // libvmaf ships a built-in default model, so a missing file on disk is not
+    // fatal — we simply omit the model= parameter and let it choose. The 4K
+    // model is trained for a 4K viewing distance and is the right choice for
+    // large frames; below that the HD model applies.
+    private const string VMAF_MODEL_4K_PATH  = "/usr/share/model/vmaf_4k_v0.6.1.json";
+    private const int    VMAF_4K_MIN_WIDTH   = 2560;
+
+    /** One probe's measurements: extrapolated size plus perceptual score. */
+    private class ProbeMeasurement {
+        public double size_kib;
+        public double vmaf;
+        public bool   vmaf_measured;
+    }
+
+    /**
+     * Model path for this frame size, or null to use libvmaf's built-in
+     * default. Only returns a path that actually exists.
+     */
+    private string? vmaf_model_path (int width) {
+        if (width >= VMAF_4K_MIN_WIDTH
+                && FileUtils.test (VMAF_MODEL_4K_PATH, FileTest.EXISTS)) {
+            return VMAF_MODEL_4K_PATH;
+        }
+        return null;
+    }
+
+    /**
+     * Measure VMAF of @distorted against @reference.
+     *
+     * libvmaf takes the DISTORTED stream first and the reference second, and
+     * requires both to match in resolution and frame rate — which is exactly
+     * why Quality Mode forces the lossless intermediate: it is the only thing
+     * guaranteed to match the probe's frames.
+     *
+     * Returns the pooled mean. Phase 0 calibrated the intent targets against
+     * the mean, so the harmonic mean (which punishes bad frames harder) would
+     * need its own target scale before it could be substituted.
+     *
+     * Returns 0.0 on any failure — the caller treats an unmeasured probe as a
+     * missing point rather than aborting the whole run.
+     */
+    private async double measure_vmaf (
+        string        distorted,
+        string        reference,
+        int           width,
+        int           threads,
+        string?       temp_run_dir,
+        Cancellable?  cancellable
+    ) throws Error {
+        cancellable_check (cancellable);
+        string log = tmp_path ("vmaf", temp_run_dir) + ".json";
+
+        var filter = new StringBuilder ();
+        filter.append ("[0:v][1:v]libvmaf=");
+        string? model = vmaf_model_path (width);
+        if (model != null)
+            filter.append ("model=path=%s:".printf (model));
+        filter.append ("n_threads=%d:log_fmt=json:log_path=%s".printf (
+            int.max (1, threads), log));
+
+        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string[] cmd = {
+            ffmpeg, "-hide_banner", "-v", "error", "-nostdin",
+            "-i", distorted, "-i", reference,
+            "-lavfi", filter.str,
+            "-f", "null", "-"
+        };
+
+        try {
+            yield run_subprocess_wait (cmd, cancellable);
+        } catch (IOError.CANCELLED e) {
+            cleanup_file (log);
+            throw e;
+        } catch (Error e) {
+            cleanup_file (log);
+            warning ("Smart Optimizer: VMAF measurement failed: %s", e.message);
+            return 0.0;
+        }
+
+        double score = 0.0;
+        try {
+            string contents;
+            if (FileUtils.get_contents (log, out contents)) {
+                var parser = new Json.Parser ();
+                parser.load_from_data (contents);
+                var root = parser.get_root ().get_object ();
+                if (root != null && root.has_member ("pooled_metrics")) {
+                    var pooled = root.get_object_member ("pooled_metrics");
+                    if (pooled != null && pooled.has_member ("vmaf")) {
+                        var v = pooled.get_object_member ("vmaf");
+                        if (v != null && v.has_member ("mean"))
+                            score = v.get_double_member ("mean");
+                    }
+                }
+            }
+        } catch (Error e) {
+            warning ("Smart Optimizer: could not parse VMAF log: %s", e.message);
+        }
+        cleanup_file (log);
+
+        if (!score.is_finite () || score < 0.0 || score > 100.0) {
+            warning ("Smart Optimizer: implausible VMAF %.3f — discarding", score);
+            return 0.0;
+        }
+        return score;
+    }
+
+    /**
+     * Encode one calibration probe and measure BOTH axes from it.
+     *
+     * Size Mode's calibration_encode deletes the probe as soon as it has the
+     * byte count; Quality Mode needs the file alive a moment longer to run
+     * libvmaf against it. Same encode, same frames, two numbers — which is
+     * what lets every run report both a size and a quality figure regardless
+     * of which one the user pinned.
+     */
+    private async ProbeMeasurement calibration_probe_with_vmaf (
+        string        codec,
+        int           crf,
+        int           preset_idx,
+        string        pix_fmt,
+        string        intermediate_path,
+        double        full_duration,
+        double        sample_duration,
+        double        extrapolation_weight,
+        int           width,
+        int           encoder_threads,
+        string?       temp_run_dir,
+        Cancellable?  cancellable
+    ) throws Error {
+        var m = new ProbeMeasurement ();
+        string tmp = tmp_path ("qcal_%d".printf (crf), temp_run_dir);
+
+        string[] cmd = build_intermediate_probe_cmd (
+            intermediate_path, codec, crf, preset_idx, pix_fmt,
+            encoder_threads, tmp);
+
+        try {
+            yield run_subprocess_wait (cmd, cancellable);
+        } catch (Error e) {
+            cleanup_file (tmp);
+            throw e;
+        }
+
+        int64 file_size = 0;
+        var file = File.new_for_path (tmp);
+        if (file.query_exists ()) {
+            var finfo = file.query_info (
+                FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
+            file_size = finfo.get_size ();
+        }
+        if (file_size <= 0) {
+            cleanup_file (tmp);
+            throw new IOError.FAILED (
+                "Quality calibration encode produced empty file at CRF %d", crf);
+        }
+
+        double sample_kib = SmartOptimizerLogic.kib_from_bytes (file_size);
+        double scale = (sample_duration > 0.0)
+            ? full_duration / sample_duration : 1.0;
+        m.size_kib = sample_kib * scale * extrapolation_weight;
+
+        try {
+            m.vmaf = yield measure_vmaf (
+                tmp, intermediate_path, width, encoder_threads,
+                temp_run_dir, cancellable);
+            m.vmaf_measured = (m.vmaf > 0.0);
+        } catch (IOError.CANCELLED e) {
+            cleanup_file (tmp);
+            throw e;
+        }
+
+        cleanup_file (tmp);
+        return m;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     // FFMPEG COMMAND BUILDERS
     // ════════════════════════════════════════════════════════════════════════
 
@@ -2515,8 +3330,26 @@ public class SmartOptimizer : GLib.Object {
 
         add_segment_inputs (cmd, path, positions, seg_dur);
 
+        // Force even dimensions. The intermediate is always encoded with
+        // libx264 -qp 0 (8-bit) or FFV1 (10-bit) regardless of the OUTPUT
+        // codec, and x264 refuses odd dimensions with yuv420p — "width not
+        // divisible by 2" — while VP9 and AV1 sources happily carry them.
+        // Screen captures land on odd sizes routinely, so without this the
+        // intermediate fails for every codec, taking Quality Mode with it
+        // (the intermediate is its VMAF reference).
+        //
+        // The expression is self-neutralising: trunc(iw/2)*2 == iw when iw is
+        // already even, so this is a no-op for the overwhelming majority of
+        // sources. Crop rather than scale — dropping one pixel column is
+        // lossless for the pixels that remain, where rescaling would resample
+        // the whole frame and stop the intermediate being a faithful
+        // reference.
+        string even_chain = (video_filter_chain.length > 0)
+            ? video_filter_chain + ",crop=trunc(iw/2)*2:trunc(ih/2)*2"
+            : "crop=trunc(iw/2)*2:trunc(ih/2)*2";
+
         cmd.add ("-filter_complex");
-        cmd.add (concat_filter_spec (positions.length, video_filter_chain));
+        cmd.add (concat_filter_spec (positions.length, even_chain));
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");
 
@@ -3053,7 +3886,16 @@ public class SmartOptimizer : GLib.Object {
             strip_metadata         = false,
             recommended_pix_fmt    = "",
             resolved_container     = SmartOptimizerLogic.codec_default_container (codec),
-            target_size_kib        = 0
+            target_size_kib        = 0,
+            // Inert — callers bail on is_impossible before applying a
+            // recommendation.  Kept consistent with the TINY tier above so a
+            // future path that does read these gets no surprises.
+            effort                 = EncodeEffort.MINIMAL,
+            force_compat_container = true,
+            pinned_axis            = PinnedAxis.SIZE,
+            estimated_vmaf         = 0.0,
+            vmaf_measured          = false,
+            fast_decode            = false
         };
     }
 }

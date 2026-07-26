@@ -260,6 +260,28 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     private SpinButton target_mb_spin;
     private Adw.ActionRow? target_row = null;
     private Adw.SwitchRow? match_source_size_row = null;
+    private Adw.ComboRow? quality_intent_row = null;
+    private Adw.ComboRow? content_override_row = null;
+    private Adw.SwitchRow? delivery_row = null;
+
+    // Index maps directly onto ContentOverride.
+    private const string[] CONTENT_OVERRIDE_LABELS = {
+        "Auto-detect",
+        "Live-action",
+        "Anime / Animation",
+        "Screencast / Static"
+    };
+
+    // Index 0 is "Off" (size mode); 1..4 map to the quality intents. The two
+    // axes are mutually exclusive — whichever the user pins becomes the
+    // constraint and the other becomes the prediction.
+    private const string[] QUALITY_INTENT_LABELS = {
+        "Off — target a size instead",
+        "Low — acceptable (VMAF 88)",
+        "Medium — good (VMAF 92)",
+        "High — visually near-transparent (VMAF 95)",
+        "Ultra — archival (VMAF 97)"
+    };
     private int last_synced_target_mb;
     private ContainerDefaultMode last_synced_container_default_mode =
         ContainerDefaultMode.DEFAULT;
@@ -332,6 +354,66 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public bool get_strip_audio_active ()        { return strip_audio_active; }
     public AudioSettings get_audio_settings_ref () { return audio_settings; }
     public int get_target_mb ()                  { return (int) target_mb_spin.get_value (); }
+
+    public bool get_quality_mode_active () {
+        return quality_intent_row != null && quality_intent_row.get_selected () > 0;
+    }
+
+    public bool get_optimize_for_delivery () {
+        return delivery_row != null && delivery_row.get_active ();
+    }
+
+    public ContentOverride get_content_override () {
+        uint sel = (content_override_row != null)
+            ? content_override_row.get_selected () : 0;
+        switch (sel) {
+            case 1:  return ContentOverride.LIVE_ACTION;
+            case 2:  return ContentOverride.ANIME;
+            case 3:  return ContentOverride.SCREENCAST;
+            default: return ContentOverride.AUTO;
+        }
+    }
+
+    public SmartOptimizerLogic.QualityIntent get_quality_intent () {
+        uint sel = (quality_intent_row != null) ? quality_intent_row.get_selected () : 0;
+        switch (sel) {
+            case 1:  return SmartOptimizerLogic.QualityIntent.LOW;
+            case 2:  return SmartOptimizerLogic.QualityIntent.MEDIUM;
+            case 3:  return SmartOptimizerLogic.QualityIntent.HIGH;
+            case 4:  return SmartOptimizerLogic.QualityIntent.ULTRA;
+            default: return SmartOptimizerLogic.QualityIntent.MEDIUM;
+        }
+    }
+
+    /**
+     * Enforce the mutual exclusion between the two axes: pinning a quality
+     * target makes the size controls meaningless, because size becomes the
+     * prediction rather than the constraint.
+     */
+    private void sync_quality_mode_sensitivity () {
+        bool quality = get_quality_mode_active ();
+        if (target_row != null)
+            target_row.set_sensitive (!quality);
+        if (target_mb_spin != null)
+            target_mb_spin.set_sensitive (!quality && !match_source_size_active);
+        if (match_source_size_row != null) {
+            match_source_size_row.set_sensitive (
+                !quality && !AppSettings.get_default ().smart_optimizer_match_source_size);
+        }
+        if (target_row != null) {
+            if (quality) {
+                target_row.set_subtitle (
+                    "Ignored — quality is pinned, so size is the prediction");
+            } else if (match_source_size_active) {
+                // Rebuild from the source file rather than reading back the
+                // row's own subtitle, which at this point still holds the
+                // "Ignored" text from quality mode.
+                apply_match_source_size ();
+            } else {
+                target_row.set_subtitle (TARGET_ROW_SUBTITLE_MANUAL);
+            }
+        }
+    }
     public int64 get_source_file_size_bytes ()   { return source_file_size_bytes; }
 
     // Each codec applies recommendations differently
@@ -470,6 +552,46 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         smart_row.set_activatable_widget (smart_btn);
         group.add (smart_row);
 
+        // Quality Target — the second solver. Selecting anything other than
+        // "Off" pins a perceptual score and lets size float, which is the
+        // mirror image of the size target below. The two are mutually
+        // exclusive: whichever the user pins is the constraint, the other is
+        // reported as the prediction.
+        quality_intent_row = new Adw.ComboRow ();
+        quality_intent_row.set_title ("Quality Target");
+        quality_intent_row.set_subtitle (
+            "Measure this video and solve for the CRF that hits the target");
+        quality_intent_row.add_prefix (new Image.from_icon_name ("emblem-ok-symbolic"));
+        quality_intent_row.set_model (new StringList (QUALITY_INTENT_LABELS));
+        quality_intent_row.set_selected (0);
+        quality_intent_row.notify["selected"].connect (() => {
+            sync_quality_mode_sensitivity ();
+        });
+        group.add (quality_intent_row);
+
+        // Content Type — a user assertion, not a quality setting, so it
+        // applies in both modes. Auto-detection cannot identify animation
+        // (every available signal overlaps slow, flat live-action), which
+        // makes this the reliable path rather than a convenience.
+        content_override_row = new Adw.ComboRow ();
+        content_override_row.set_title ("Content Type");
+        content_override_row.set_subtitle (
+            "Override detection — animation in particular cannot be detected reliably");
+        content_override_row.add_prefix (new Image.from_icon_name ("view-list-symbolic"));
+        content_override_row.set_model (new StringList (CONTENT_OVERRIDE_LABELS));
+        content_override_row.set_selected (0);
+        group.add (content_override_row);
+
+        // Streaming — a delivery constraint, composable with either axis.
+        // "Streaming + High" is a coherent request; folding this into the
+        // quality list would make it unexpressible.
+        delivery_row = new Adw.SwitchRow ();
+        delivery_row.set_title ("Optimize for Streaming");
+        delivery_row.set_subtitle (
+            "Cheaper decode and wider device compatibility, at a small cost in efficiency");
+        delivery_row.set_active (false);
+        group.add (delivery_row);
+
         // Target Size — per-tab, volatile spin button.
         // Initializes from the stored preference but is independent of it.
         // Text is blue when the value matches the stored preference.
@@ -573,6 +695,9 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         AppSettings.get_default ().settings_changed.connect (
             binding.on_settings_changed_for_strip_audio);
         group.add (strip_audio_row);
+
+        // Reflect the initial (size-mode) state onto the controls.
+        sync_quality_mode_sensitivity ();
     }
 
     internal void handle_auto_convert_active_notify (Adw.SwitchRow auto_convert_row,
@@ -630,7 +755,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     private void apply_match_source_size () {
         if (target_mb_spin == null || target_row == null) return;
 
-        target_mb_spin.set_sensitive (!match_source_size_active);
+        target_mb_spin.set_sensitive (
+            !match_source_size_active && !get_quality_mode_active ());
 
         if (!match_source_size_active) {
             target_row.set_subtitle (TARGET_ROW_SUBTITLE_MANUAL);
