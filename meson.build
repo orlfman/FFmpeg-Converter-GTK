@@ -22,6 +22,7 @@ dependencies = [
   dependency('gtk4'),
   dependency('libadwaita-1', version : '>= 1.5'),
   dependency('json-glib-1.0'),
+  dependency('libsoup-3.0'),
 ]
 sources = files(
   'src/main.vala',
@@ -61,6 +62,7 @@ sources = files(
   'src/color-correction-dialog.vala',
   'src/information-tab.vala',
   'src/about-dialog.vala',
+  'src/update-checker.vala',
   'src/hamburger-menu.vala',
   'src/video-player.vala',
   'src/crop-overlay.vala',
@@ -98,6 +100,26 @@ executable('ffmpeg-converter-gtk',
   install : true,
   install_dir : get_option('bindir')
 )
+
+if fs.exists('tests/update-checker-test.vala')
+  update_checker_test = executable(
+    'update-checker-test',
+    files(
+      'src/update-checker.vala',
+      'tests/update-checker-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+      dependency('gio-2.0'),
+      dependency('json-glib-1.0'),
+      dependency('libsoup-3.0'),
+    ],
+    build_by_default : false,
+  )
+
+  test('update-checker', update_checker_test)
+endif
 
 install_data(
   'Resources/ffmpeg-converter-gtk.desktop',
@@ -357,6 +379,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/color-correction-dialog.vala',
       'src/information-tab.vala',
       'src/about-dialog.vala',
+      'src/update-checker.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',
@@ -434,6 +457,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/color-correction-dialog.vala',
       'src/information-tab.vala',
       'src/about-dialog.vala',
+      'src/update-checker.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',
@@ -513,6 +537,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/color-correction-dialog.vala',
       'src/information-tab.vala',
       'src/about-dialog.vala',
+      'src/update-checker.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',

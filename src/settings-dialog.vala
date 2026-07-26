@@ -63,6 +63,15 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
 
+    // ── Manual update check ───────────────────────────────────────────────────
+    private Adw.ActionRow update_row;
+    private Button update_check_button;
+    private Button update_release_button;
+    private Gtk.Spinner update_spinner;
+    private Cancellable? update_check_cancellable = null;
+    private uint update_check_generation = 0;
+    private string update_release_url = ProjectUrls.RELEASES;
+
     // ── Smart Optimizer ────────────────────────────────────────────────────────
     private SpinButton target_mb_spin;
     private Adw.SwitchRow auto_convert_switch;
@@ -108,6 +117,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
             cancel_validation (ffmpeg_validation);
             cancel_validation (ffprobe_validation);
             cancel_validation (ffplay_validation);
+            cancel_update_check ();
             save_to_settings ();
         });
     }
@@ -306,7 +316,120 @@ public class SettingsDialog : Adw.PreferencesDialog {
         compatibility_group.add (verify_unknown_audio_copy_switch);
         page.add (compatibility_group);
 
+        var updates_group = new Adw.PreferencesGroup ();
+        updates_group.set_title ("Software Updates");
+        updates_group.set_description (
+            "Check GitHub for a newer published release. Nothing is downloaded or installed automatically."
+        );
+
+        update_row = new Adw.ActionRow ();
+        update_row.set_title ("FFmpeg Converter GTK");
+        update_row.set_subtitle (
+            "Installed version: %s".printf (AppVersion.VERSION));
+        update_row.add_prefix (
+            new Image.from_icon_name ("system-software-update-symbolic"));
+
+        update_spinner = new Gtk.Spinner ();
+        update_spinner.set_valign (Align.CENTER);
+        update_spinner.set_visible (false);
+        update_row.add_suffix (update_spinner);
+
+        update_release_button = new Button.with_label ("View Release");
+        update_release_button.set_valign (Align.CENTER);
+        update_release_button.set_visible (false);
+        update_release_button.clicked.connect (() => {
+            open_update_release_page ();
+        });
+        update_row.add_suffix (update_release_button);
+
+        update_check_button = new Button.with_label ("Check for Updates");
+        update_check_button.set_valign (Align.CENTER);
+        update_check_button.add_css_class ("suggested-action");
+        update_check_button.clicked.connect (() => {
+            check_for_updates.begin ();
+        });
+        update_row.add_suffix (update_check_button);
+
+        updates_group.add (update_row);
+        page.add (updates_group);
+
         return page;
+    }
+
+    private void cancel_update_check () {
+        update_check_generation++;
+        if (update_check_cancellable != null) {
+            update_check_cancellable.cancel ();
+            update_check_cancellable = null;
+        }
+    }
+
+    private async void check_for_updates () {
+        cancel_update_check ();
+        var cancellable = new Cancellable ();
+        update_check_cancellable = cancellable;
+        uint generation = ++update_check_generation;
+
+        update_check_button.set_sensitive (false);
+        update_release_button.set_visible (false);
+        update_spinner.set_visible (true);
+        update_spinner.start ();
+        update_row.set_subtitle (
+            "Checking GitHub… Installed version: %s".printf (AppVersion.VERSION));
+
+        try {
+            var checker = new UpdateChecker (AppVersion.VERSION);
+            UpdateCheckResult result = yield checker.check_latest (cancellable);
+            if (generation != update_check_generation || cancellable.is_cancelled ())
+                return;
+
+            switch (result.availability) {
+                case UpdateAvailability.UPDATE_AVAILABLE:
+                    update_row.set_subtitle (
+                        "Version %s is available — installed version: %s".printf (
+                            result.latest_version, result.current_version));
+                    update_release_url = result.release_url;
+                    update_release_button.set_visible (true);
+                    break;
+                case UpdateAvailability.NEWER_THAN_LATEST:
+                    update_row.set_subtitle (
+                        "Installed version %s is newer than the latest release (%s).".printf (
+                            result.current_version, result.latest_version));
+                    break;
+                case UpdateAvailability.UP_TO_DATE:
+                default:
+                    update_row.set_subtitle (
+                        "You are up to date — version %s is the latest release.".printf (
+                            result.current_version));
+                    break;
+            }
+            update_check_button.set_label ("Check Again");
+        } catch (IOError.CANCELLED e) {
+            // Closing the dialog cancels the request; no stale UI update.
+        } catch (Error e) {
+            if (generation == update_check_generation) {
+                update_row.set_subtitle (
+                    "Could not check for updates: %s".printf (e.message));
+                update_check_button.set_label ("Try Again");
+            }
+        } finally {
+            if (generation == update_check_generation) {
+                update_spinner.stop ();
+                update_spinner.set_visible (false);
+                update_check_button.set_sensitive (true);
+                if (update_check_cancellable == cancellable)
+                    update_check_cancellable = null;
+            }
+        }
+    }
+
+    private void open_update_release_page () {
+        try {
+            AppInfo.launch_default_for_uri (update_release_url, null);
+        } catch (Error e) {
+            update_row.set_subtitle (
+                "Could not open the release page: %s".printf (e.message));
+        }
     }
 
     /**

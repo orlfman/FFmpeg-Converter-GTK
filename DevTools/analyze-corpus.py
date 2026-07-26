@@ -552,7 +552,10 @@ def main():
 
     degsweep_csv = out_dir / "degsweep.csv"
     signals_done = load_done(signals_csv, ["file"])
-    sweep_done = load_done(sweep_csv, ["file", "crf"])
+    # Codec is part of the key: the same (file, crf) measured under a
+    # different encoder is a different measurement, and without this a second
+    # codec's sweep is silently skipped as already-done.
+    sweep_done = load_done(sweep_csv, ["file", "codec", "crf"])
     degsweep_done = load_done(degsweep_csv, ["file"])
 
     print(f"corpus : {corpus}  ({len(files)} files)")
@@ -574,7 +577,7 @@ def main():
         need_signals = args.stage in ("signals", "all") and \
             (name,) not in signals_done
         pending_crfs = [c for c in crfs
-                        if (name, str(c)) not in sweep_done] \
+                        if (name, args.codec, str(c)) not in sweep_done] \
             if args.stage in ("sweep", "all") else []
         need_degsweep = args.stage == "degsweep" and \
             (name,) not in degsweep_done

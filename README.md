@@ -111,7 +111,7 @@ Just pick the mode and go.
 ### Dependency
 
 ```bash
-meson, ninja, valac, pkg-config, GTK4, libadwaita, json-glib, FFmpeg, FFprobe, and GStreamer 
+meson, ninja, valac, pkg-config, GTK4, libadwaita, json-glib, libsoup 3, FFmpeg, FFprobe, and GStreamer
 ```
 
 ### Install (Arch Linux / AUR)
