@@ -2605,9 +2605,44 @@ namespace SmartOptimizerLogic {
     // Quality Mode's runaway guard: never exceed this multiple of the source.
     // A post-solve clamp, NOT a solve constraint — letting it participate in
     // the solve would make it a competing objective fighting the quality axis.
-    // Placeholder pending corpus evidence on where legitimate cases top out;
-    // tunable without perturbing any run that lands under the ceiling.
-    public const double QUALITY_MODE_MAX_SOURCE_MULTIPLIER = 2.0;
+    //
+    // Set at 1.0: a quality re-encode that comes out LARGER than its source is
+    // almost never what was wanted. The source already encodes that content at
+    // some quality, so exceeding it means spending bits to preserve what the
+    // source's own encoder judged not worth keeping — including its artifacts.
+    // Unlike a perceptual threshold this needs no calibration; it is an
+    // economic statement, not a claim about how anything looks.
+    //
+    // Started at 2.0 on the assumption that only pathological cases would
+    // reach it. They are not the only ones: Ultra on a 1080p anime source
+    // solved CRF 14 and produced 1027 MiB from an 881 MiB input — 1.17x, well
+    // under 2.0, and pure waste (the same source scores 95.97 at CRF 18). The
+    // cause is the VMAF model under-scoring animation (see vmaf_model_path in
+    // smart-optimizer.vala), but the guard should not depend on diagnosing
+    // that.
+    //
+    // Known trade-off: transcoding to a LESS efficient codec (an AV1 source
+    // re-encoded to x264) legitimately needs more bits for equal quality, and
+    // will now be clamped. That degrades honestly rather than silently — the
+    // clamp raises CRF and reports the quality actually achieved, so the user
+    // is told the target was unreachable within the source's size rather than
+    // handed a surprise.
+    public const double QUALITY_MODE_MAX_SOURCE_MULTIPLIER = 1.0;
+
+    /**
+     * Headroom shaved off the video ceiling to absorb model error.
+     *
+     * The clamp picks a CRF from the FITTED size curve, but the verification
+     * probe then replaces that estimate with a real measurement, and the real
+     * encode routinely lands a little above the model. Without headroom the
+     * finished file creeps past the ceiling — measured at 883.8 MiB against an
+     * 881.7 MiB source, a violation of the one thing this guard exists to
+     * prevent.
+     *
+     * Size Mode shaves the same 3% off its video bitrate for strict targets,
+     * for exactly this reason (decide_two_pass).
+     */
+    public const double QUALITY_CEILING_SAFETY_MARGIN = 0.97;
 
     /**
      * What the user asked for, as a perceptual target rather than a byte count.

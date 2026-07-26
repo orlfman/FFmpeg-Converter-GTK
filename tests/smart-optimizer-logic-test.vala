@@ -603,12 +603,23 @@ void test_non_screencast_target_is_unmodified () {
 void test_quality_ceiling_scales_to_trim_window () {
     int64 src = (int64) (1000.0 * 1024.0);          // 1000 KiB source
     double full = SmartOptimizerLogic.quality_ceiling_kib (src, 0, 0);
-    assert (close_to (full, 2000.0, 1e-6));          // 2x source
+    // A quality re-encode must not come out larger than its source.
+    assert (close_to (full, 1000.0, 1e-6));
 
     // Half the file trimmed away → half the ceiling, so a short clip cannot
     // spend the whole file's allowance.
     double half = SmartOptimizerLogic.quality_ceiling_kib (src, 50.0, 100.0);
-    assert (close_to (half, 1000.0, 1e-6));
+    assert (close_to (half, 500.0, 1e-6));
+
+    // The multiplier is the only thing that sets this, so the relationship
+    // holds if it is retuned later.
+    assert (close_to (full,
+        1000.0 * SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER, 1e-6));
+
+    // Headroom must be real but small — enough to absorb model error without
+    // materially lowering the quality the user asked for.
+    assert (SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN < 1.0);
+    assert (SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN >= 0.95);
 
     assert (SmartOptimizerLogic.quality_ceiling_kib (0, 10.0, 100.0) == 0.0);
 }

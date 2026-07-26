@@ -976,11 +976,33 @@ public class SmartOptimizer : GLib.Object {
             int crf_lo, crf_hi;
             SmartOptimizerLogic.crf_range_for_codec (
                 preferred_codec, out crf_lo, out crf_hi);
+
+            // Reserve audio and container overhead BEFORE clamping. The size
+            // curve models video only, while the ceiling is derived from the
+            // source's TOTAL size — comparing one against the other lets the
+            // finished file exceed the ceiling by however much audio and
+            // muxing overhead it carries. Size Mode subtracts them from the
+            // budget for the same reason (compute_size_budget).
+            double audio_kib = SmartOptimizerLogic.compute_reserved_audio_kib (
+                plan.selected_sources, plan.use_stream_copy, plan.per_stream_kbps,
+                plan.total_budget_kbps, tw.encode_duration);
+            double overhead_kib = SmartOptimizerLogic.container_overhead_kib_estimate (
+                resolved_container, tw.encode_duration, info.fps,
+                plan.selected_sources, plan.use_stream_copy,
+                plan.effective_track_count);
+
             double ceiling_kib = SmartOptimizerLogic.quality_ceiling_kib (
                 info.file_size_bytes, tw.encode_duration, info.duration);
+            // Shave headroom as well: verification replaces the modelled size
+            // with a real measurement, and the real encode lands slightly
+            // above the model often enough to push the total past the ceiling.
+            double video_ceiling_kib = (ceiling_kib > 0.0)
+                ? double.max (0.0, (ceiling_kib - audio_kib - overhead_kib)
+                    * SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN)
+                : 0.0;
 
             var ceiling = SmartOptimizerLogic.apply_quality_size_ceiling (
-                capped_crf, size_degenerate ? 0.0 : ceiling_kib,
+                capped_crf, size_degenerate ? 0.0 : video_ceiling_kib,
                 sa, sb, sc, m0.qa, m0.qb, m0.qc, crf_lo, crf_hi);
 
             int final_crf = ceiling.final_crf;
@@ -1058,12 +1080,6 @@ public class SmartOptimizer : GLib.Object {
             }
 
             // ── 11. Estimated size ─────────────────────────────────────
-            double audio_kib = SmartOptimizerLogic.compute_reserved_audio_kib (
-                plan.selected_sources, plan.use_stream_copy, plan.per_stream_kbps,
-                plan.total_budget_kbps, tw.encode_duration);
-            double overhead_kib = SmartOptimizerLogic.container_overhead_kib_estimate (
-                resolved_container, tw.encode_duration, info.fps,
-                plan.selected_sources, plan.use_stream_copy, plan.effective_track_count);
             int estimated_total_kib = 0;
             SmartOptimizerLogic.try_cast_nonnegative_int (
                 ceiling.estimated_size_kib + audio_kib + overhead_kib,
