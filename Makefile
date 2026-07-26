@@ -21,6 +21,7 @@ setup:
 	@pkg-config --exists gtk4 || { echo "Error: gtk4 development files are not installed"; exit 1; }
 	@pkg-config --exists libadwaita-1 || { echo "Error: libadwaita-1 development files are not installed"; exit 1; }
 	@pkg-config --exists json-glib-1.0 || { echo "Error: json-glib-1.0 development files are not installed"; exit 1; }
+	@pkg-config --exists libsoup-3.0 || { echo "Error: libsoup-3.0 development files are not installed"; exit 1; }
 	@command -v ffmpeg >/dev/null || { echo "Error: ffmpeg is not installed"; exit 1; }
 	@command -v ffprobe >/dev/null || { echo "Error: ffprobe is not installed"; exit 1; }
 	@command -v gst-inspect-1.0 >/dev/null || { echo "Error: GStreamer runtime tools are not installed (missing gst-inspect-1.0)"; exit 1; }
