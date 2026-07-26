@@ -1270,7 +1270,30 @@ void test_classify_live_action_high_motion () {
     assert (classify_corpus (8.27, 13.78, 6.17, 11.64) == ContentType.LIVE_ACTION);
     assert (classify_corpus (0.35,  9.38, 2.93, 11.71) == ContentType.LIVE_ACTION);
     assert (classify_corpus (2.37, 33.23, 9.89, 13.83) == ContentType.LIVE_ACTION);
+}
+
+void test_classify_misses_high_motion_animation () {
+    // KNOWN LIMITATION, asserted so it cannot regress silently.
+    //
+    // random-testvid3.webm is a fast-cut anime opening — verified by eye, not
+    // inferred. It was originally mislabelled "misc" in the corpus, which is
+    // how it came to sit in the live-action assertions above.
+    //
+    // Its motion (ydif 18.45) is the highest in the corpus, so the
+    // LIVE_ACTION rule claims it before the animation rule is ever reached.
+    // The two anime files that WERE labelled as such are both low-motion
+    // (3.13, 4.55), so the animation rule was calibrated without ever seeing
+    // this case.
     assert (classify_corpus (12.12, 17.54, 9.77, 18.45) == ContentType.LIVE_ACTION);
+
+    // Not fixed here on purpose. The one signal that would separate it is
+    // spatial information — si 101.8 against a maximum of 74.2 for every
+    // non-screencast file — but that is a rule fitted to a single sample, and
+    // inventing thresholds from n=1 is the failure mode this corpus exists to
+    // prevent. It needs more high-motion animation before it can be trusted.
+    //
+    // Until then the Content override is the answer, which is the same
+    // conclusion every other animation-detection attempt reached.
 }
 
 void test_classify_mixed_is_the_honest_default () {
@@ -1303,7 +1326,7 @@ void test_classify_no_longer_collapses_to_mixed () {
         { 12.96, 19.78,  1.40, 10.46 },   // live
         {  2.46,  9.21,  1.65,  3.65 },   // misc
         {  1.62,  9.46,  0.49,  2.81 },   // misc
-        { 12.12, 17.54,  9.77, 18.45 },   // misc
+        { 12.12, 17.54,  9.77, 18.45 },   // anime (high-motion) — misdetected
         {  4.80, 20.04,  7.27,  2.70 }    // misc
     };
     int mixed = 0;
@@ -1630,6 +1653,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/content/anime-reachable", test_classify_anime_is_reachable);
     Test.add_func ("/smart-optimizer-logic/content/anime-confidence-capped", test_classify_anime_confidence_is_capped);
     Test.add_func ("/smart-optimizer-logic/content/live-action-motion", test_classify_live_action_high_motion);
+    Test.add_func ("/smart-optimizer-logic/content/high-motion-anime-limitation", test_classify_misses_high_motion_animation);
     Test.add_func ("/smart-optimizer-logic/content/mixed-default", test_classify_mixed_is_the_honest_default);
     Test.add_func ("/smart-optimizer-logic/content/not-degenerate", test_classify_no_longer_collapses_to_mixed);
     Test.add_func ("/smart-optimizer-logic/quality/intent-targets", test_quality_intent_targets_ascend);

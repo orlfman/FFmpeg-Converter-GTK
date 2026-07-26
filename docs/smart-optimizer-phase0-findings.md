@@ -359,10 +359,15 @@ targets the actual physical behaviour instead of just moving a number.
 
 ### TOUT does not separate grain from compression noise
 
-The highest TOUT in the corpus (`random-testvid3`, 0.00279) is a 640×360 VP8
-whose noise is compression artifacts, not grain. The second highest
-(`movie-1080p`, 0.00194) is an AV1 film that almost certainly carries film-grain
-synthesis — genuine grain. TOUT ranks them adjacently.
+The highest TOUT in the corpus (`random-testvid3`, 0.00279) is **anime** — flat
+cel content, which has no grain at all; its TOUT is compression noise and
+dithering on flat fills. The second highest (`movie-1080p`, 0.00194) is a film
+whose grain is visible on inspection at 3× magnification: uniform fine speckle
+across flat fabric. TOUT ranks them adjacently.
+
+That the corpus **maximum** TOUT belongs to grain-free animation is a stronger
+statement of the confound than the original one, which was based on a
+mis-derived bitrate for that file.
 
 This is exactly the confound the plan's "noise character" signal (Phase 4d) was
 meant to resolve, and it confirms that keeping grain synthesis gated on TOUT
@@ -496,6 +501,33 @@ Mitigated instead by **capping ANIME confidence at 0.5**
 baseline toward the content ideal *scaled by confidence*, so a capped-confidence
 ANIME moves the preset only halfway. The residual cost of the false positive is
 `tune animation` on flat live-action, which is mild.
+
+### Corpus correction: there is a THIRD anime file, and it is misdetected
+
+`random-testvid3.webm` is a fast-cut **anime opening**, verified by looking at
+frames rather than inferred from the filename. It had been filed under the
+generic "random" prefix and treated as `misc` throughout the earlier analysis.
+
+This matters because it is the only **high-motion** animation in the corpus:
+
+| file | motion (ydif) | classified as |
+|---|---|---|
+| anime-testvid0 | 4.55 | ANIME ✓ |
+| anime-testvid1 | 3.13 | ANIME ✓ |
+| **random-testvid3** | **18.45** (corpus max) | **LIVE_ACTION ✗** |
+
+The `ydif > 6.0` live-action rule claims it long before the animation rule is
+reached, and the animation rule was calibrated on two low-motion samples that
+never exercised this case. A regression test now asserts the misclassification
+explicitly (`content/high-motion-anime-limitation`) so it cannot change
+silently — an earlier version of that test asserted this file as *correctly*
+live-action, which was encoding the bug as expected behaviour.
+
+**Not fixed, deliberately.** The one signal that separates it is spatial
+information: si 101.8 against a maximum of 74.2 across every non-screencast
+file. But that is a rule fitted to a single sample, and inventing thresholds
+from n=1 is exactly the failure mode this corpus exists to prevent. It needs
+more high-motion animation before it can be trusted.
 
 ### Animation detection remains weak, by design
 

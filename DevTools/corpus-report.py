@@ -55,8 +55,18 @@ def num(row, key, default=0.0):
         return default
 
 
+# Files whose true content differs from what the filename suggests. Verified
+# by eye, not inferred: random-testvid3 is a fast-cut anime opening that was
+# originally filed under the generic "random" prefix.
+CONTENT_CORRECTIONS = {
+    "random-testvid3.webm": "anime",
+}
+
+
 def classify(name):
     """Coarse content label from the corpus filename convention."""
+    if name in CONTENT_CORRECTIONS:
+        return CONTENT_CORRECTIONS[name]
     n = name.lower()
     if "anime" in n:
         return "anime"
