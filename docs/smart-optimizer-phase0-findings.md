@@ -661,6 +661,11 @@ anime needs CRF 12.3 while live-action needs 23.5 — an 11-point gap, and the
 per-file extremes are wider still (`anime-testvid1` 11.1 vs `musicvideo` 26.6, a
 **15.5-point** range).
 
+⚠️ **Partly corrected by Part 9.** The anime figures here are inflated by the HD
+VMAF model under-scoring animation by the equivalent of 6–8 CRF. The spread
+between live-action and film classes is real; the anime column is not a clean
+measure of content difference and should not be quoted as one.
+
 This is the quantified case for the solver:
 
 - A static "Ultra = CRF 18" table would leave anime visibly short of its target
@@ -847,6 +852,85 @@ file holding the corpus-maximum TOUT, which was the stated test. The top three
 files turned out to be exactly the three 10-bit files in the corpus. Normalised,
 the visibly grainy film sits **10th of 19**. Phase 4d is dead; the bug it
 exposed was worth more than the signal.
+
+---
+
+## Part 9 — The VMAF model choice is not free, and it distorts animation
+
+**Phase 5 item, measured.** The plan flagged the 4K model and the NEG variants
+as decisions to make; they were made by convention and never tested.
+
+Scoring **identical** x265 encodes under each model (only the scoring differs,
+so any difference is attributable to the model alone):
+
+| | live action 1080p | animation 1080p | live action 4K |
+|---|---|---|---|
+| HD → 4K model | +1.3 CRF | **+7.8 CRF** | +1.8 CRF |
+| HD → HD-neg | −1.3 CRF | −2.4 CRF | −1.4 CRF |
+
+On photographic content the choice moves the answer 1–2 CRF. On animation it
+moves it **6–8**.
+
+### The HD model under-scores animation
+
+```
+same encodes, 1080p anime
+  default(HD)   CRF17 → 94.87   CRF23 → 92.05    Ultra (97): UNREACHABLE
+  4K model      CRF17 → 97.76   CRF23 → 95.67    Ultra: CRF 19.7
+```
+
+The HD model cannot score 1080p animation above ~95 even at CRF 17, where the
+picture is visually near-perfect. Live action at the same CRF scores 98.58.
+
+The intent→VMAF scale (88/92/95/97) comes from VMAF literature built almost
+entirely on photographic content. Pushing animation through a model that
+under-scores it therefore demands a **higher real quality than the intent name
+implies**.
+
+### Measured consequence
+
+Ultra on a 1080p anime source, end to end:
+
+```
+CRF 11 → VMAF 97.28   (1605 MiB projected)
+CRF 18 → VMAF 95.97   ( 517 MiB projected)
+CRF 25 → VMAF 92.70   ( 197 MiB projected)
+→ solved CRF 14, verified 96.86 (delta −0.10), output 1027 MiB
+```
+
+The solver is working correctly — the verification delta is 0.10 — but the
+**output is larger than the 881 MiB source**, for no visible gain over CRF 18.
+The 2× size ceiling does not fire because 1027 < 1762.
+
+### This corrects an earlier conclusion in this document
+
+Part 6 reported the intent→CRF spread widening to 11.2 CRF at Ultra (anime 12.3
+vs live-action 23.5) and presented that as the core justification for solving
+rather than tabulating. **A substantial part of that spread is metric artifact,
+not content difference.** The solver argument still stands on the live-action
+and film numbers, but the anime figure should not be quoted as evidence of
+content variation.
+
+### Not fixed, and why
+
+Switching animation to the 4K model would score it more plausibly, but that
+model is trained for a 4K viewing distance and using it on 1080p is wrong by
+libvmaf's own design. The correct remedy is a **content-aware target offset** —
+the Phase 5 item that has been open throughout — and its magnitude needs
+subjective comparison, which no metric sweep can supply.
+
+What the measurement DOES settle is the **direction**, which is the opposite of
+the plan's assumption. The plan expected VMAF to *under-penalise* flat animation
+and called for raising the anime target. The HD model over-penalises it, so the
+target should if anything be **lowered**.
+
+### NEG variants
+
+NEG scores 1–2.4 CRF lower across the board, i.e. more conservative. It resists
+enhancement gaming, which is a real argument for encoder decisions where nothing
+is being enhanced. Left unchanged for now: it shifts every intent's effective
+quality upward, which would silently re-scale the entire 88/92/95/97 mapping
+that Phase 0 calibrated against the non-NEG models.
 
 ---
 

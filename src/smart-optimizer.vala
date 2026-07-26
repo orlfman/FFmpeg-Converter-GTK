@@ -3068,6 +3068,30 @@ public class SmartOptimizer : GLib.Object {
     // fatal — we simply omit the model= parameter and let it choose. The 4K
     // model is trained for a 4K viewing distance and is the right choice for
     // large frames; below that the HD model applies.
+    //
+    // ⚠️ This choice is NOT free, and it matters far more on animation than on
+    // photographic content. Scoring identical x265 encodes under each model:
+    //
+    //             live action (1080p)      animation (1080p)
+    //   HD→4K        +1.3 CRF                 +7.8 CRF
+    //   HD→HD-neg    −1.3 CRF                 −2.4 CRF
+    //
+    // The HD model cannot score 1080p animation above ~95 even at CRF 17,
+    // where the picture is visually near-perfect; the same encoder setting
+    // scores 98.6 on live action. The intent→VMAF scale (88/92/95/97) comes
+    // from VMAF literature built almost entirely on photographic content, so
+    // applying it to animation through a model that under-scores animation
+    // demands a higher real quality than the intent name implies.
+    //
+    // Consequence, measured end to end: Ultra on a 1080p anime source solves
+    // CRF 14 and produces an output LARGER than the source, for no visible
+    // gain over CRF 18. See docs/smart-optimizer-phase0-findings.md.
+    //
+    // Not "fixed" by switching models: the 4K model scores animation more
+    // plausibly, but it is trained for a 4K viewing distance and using it on
+    // 1080p is wrong by libvmaf's own design. The correct remedy is a
+    // content-aware target offset, which needs subjective comparison to size —
+    // a measurement this corpus cannot provide.
     private const string VMAF_MODEL_4K_PATH  = "/usr/share/model/vmaf_4k_v0.6.1.json";
     private const int    VMAF_4K_MIN_WIDTH   = 2560;
 
