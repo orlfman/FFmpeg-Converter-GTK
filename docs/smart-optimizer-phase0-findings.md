@@ -997,6 +997,27 @@ High    { 24, 34, 44 }
 Ultra   { 18, 28, 38 }
 ```
 
+### x264 shares x265's ladder, and that is correct
+
+Phase 0 swept `libx265` only — 80 rows, zero x264 — yet both codecs share a
+ladder, so x264's centring was an assumption of exactly the kind that proved
+8–16 CRF wrong for SVT-AV1.
+
+Checked directly, scoring identical content at identical CRF under both
+encoders (3 sources × CRF 20/26/32):
+
+```
+mean delta   −0.07 VMAF      worst case   −1.45
+```
+
+They track each other almost exactly, so sharing the ladder is right.
+
+This contradicts the familiar *"x265 CRF 28 ≈ x264 CRF 23"* guidance — but that
+guidance is about **file size at equal quality**, and x265 reaches the same
+quality with fewer bits. CRF is a quality parameter in both encoders, so the
+CRF achieving a given VMAF is nearly identical; the codec difference lands on
+the size axis, which the solver measures separately.
+
 ### VP9 remains unmeasured
 
 Its ladder is still derived by analogy and has never been checked. SVT-AV1's

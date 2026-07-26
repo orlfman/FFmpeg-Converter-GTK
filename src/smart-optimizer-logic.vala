@@ -3269,7 +3269,21 @@ namespace SmartOptimizerLogic {
                 default:                   return { 34, 44, 54 };
             }
         }
-        // x264 / x265 — the ladder Phase 0 actually measured.
+        // x264 / x265 share one ladder. Phase 0 swept libx265 only, so this
+        // was measured on x265 and merely assumed for x264 — the same kind of
+        // assumption that proved 8–16 CRF wrong for SVT-AV1.
+        //
+        // Checked rather than assumed: scoring identical content at identical
+        // CRF under both encoders (3 sources x CRF 20/26/32) puts x264 within
+        // −0.07 VMAF of x265 on average, worst case −1.45. Sharing the ladder
+        // is correct.
+        //
+        // This runs against the familiar "x265 CRF 28 ≈ x264 CRF 23" guidance,
+        // which is about FILE SIZE at equal quality — x265 reaches the same
+        // quality with fewer bits. CRF is a quality parameter in both, so the
+        // CRF that hits a given VMAF is nearly the same either way, and the
+        // codec difference lands on the size axis, which the solver measures
+        // separately.
         switch (intent) {
             case QualityIntent.LOW:    return { 24, 30, 36 };
             case QualityIntent.MEDIUM: return { 21, 27, 33 };
