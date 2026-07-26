@@ -1179,6 +1179,50 @@ private ContentType classify_corpus (double edge, double sat,
     return p.content_type;
 }
 
+void test_classify_screencast_prefers_siti_when_available () {
+    // Measured corpus values. `si` separates screen content by a far wider
+    // margin than edge density, which does not separate it at all.
+    var p = corpus_profile (5.28, 14.45, 2.52, 0.85);
+    p.spatial_info = 115.4;
+    SmartOptimizerLogic.classify_content (ref p);
+    assert (p.content_type == ContentType.SCREENCAST);
+    assert (p.type_confidence >= 0.9);
+
+    // random-testvid3 has the second-highest si in the corpus (101.8) but the
+    // highest motion (18.45) — high spatial detail with heavy motion is live
+    // action, not a screen capture. The motion conjunct separates them, and it
+    // comes from YDIF rather than siti's TI, which would be measured across
+    // the decimation gaps.
+    var q = corpus_profile (12.12, 17.54, 9.77, 18.45);
+    q.spatial_info = 101.8;
+    SmartOptimizerLogic.classify_content (ref q);
+    assert (q.content_type != ContentType.SCREENCAST);
+
+    // Highest si among the remaining corpus (74.2) must not trip it either.
+    var r = corpus_profile (8.27, 13.78, 6.17, 11.64);
+    r.spatial_info = 74.2;
+    SmartOptimizerLogic.classify_content (ref r);
+    assert (r.content_type != ContentType.SCREENCAST);
+}
+
+void test_classify_falls_back_when_siti_missing () {
+    // siti unavailable (older ffmpeg, or a failed pass) leaves si at 0. The
+    // edge/motion rule must still fire so detection degrades rather than
+    // disappearing.
+    var p = corpus_profile (5.28, 14.45, 2.52, 0.85);
+    assert (p.spatial_info == 0.0);
+    SmartOptimizerLogic.classify_content (ref p);
+    assert (p.content_type == ContentType.SCREENCAST);
+
+    // And a source that only LOOKS like a screencast on the fallback signals
+    // must not be promoted once siti says otherwise: real si, low enough to
+    // fail the primary test, routes to the fallback being skipped entirely.
+    var q = corpus_profile (5.28, 14.45, 2.52, 0.85);
+    q.spatial_info = 30.0;    // measured, but nothing like screen content
+    SmartOptimizerLogic.classify_content (ref q);
+    assert (q.content_type != ContentType.SCREENCAST);
+}
+
 void test_classify_screencast_is_reachable () {
     // Screencast-testvid0.webm — the case the old gate could never reach
     // (it demanded edge > 25.0; nothing in the corpus exceeds 12.96).
@@ -1579,6 +1623,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/confidence/coverage", test_assess_confidence_coverage_penalty);
     Test.add_func ("/smart-optimizer-logic/policy/two-pass", test_decide_two_pass_policies);
     Test.add_func ("/smart-optimizer-logic/audio/measurement-floor", test_audio_measurement_floor);
+    Test.add_func ("/smart-optimizer-logic/content/screencast-siti", test_classify_screencast_prefers_siti_when_available);
+    Test.add_func ("/smart-optimizer-logic/content/siti-fallback", test_classify_falls_back_when_siti_missing);
     Test.add_func ("/smart-optimizer-logic/content/screencast-reachable", test_classify_screencast_is_reachable);
     Test.add_func ("/smart-optimizer-logic/content/screencast-not-anime", test_classify_screencast_not_labelled_anime);
     Test.add_func ("/smart-optimizer-logic/content/anime-reachable", test_classify_anime_is_reachable);

@@ -660,6 +660,42 @@ It does not track content variability at all. `adaptive_expansion_count`'s
 existing sampled-motion CV — computed from decoded pixels rather than container
 metadata — is the better measure despite being noisier, and should stay.
 
+### Postscript: `siti` (Phase 4c) is usable, but not where it was aimed
+
+Spatial information was planned as an input to detail-retention decisions (AQ,
+psy-rd strength per intent). There is no ground truth for that, so it would
+have been another invented threshold. It IS used for something measured: `si`
+separates screen content from everything else by a much wider margin than edge
+density, which does not separate it at all.
+
+```
+Screencast   si 115.4   motion  0.85
+next-highest si 101.8   motion 18.45   (heavy motion — live action)
+rest          si ≤ 74.2
+```
+
+**Cost correction.** The claim earlier in this document that the new signals
+"ride the existing pass for free" was right about the decode and wrong about
+the filter. Measured on the production chain:
+
+| chain | time |
+|---|---|
+| signalstats alone | 4.5 s |
+| signalstats + siti (every frame) | **45.6 s** |
+| signalstats + siti (after decimation) | **7.3 s** |
+
+`siti` does per-frame Sobel work and is expensive. Placing it *after* the
+existing frame decimation cuts it 6× for an **identical mean SI**, because SI
+is a per-frame measure and sampling it is unbiased.
+
+That is only true for SI. TI is frame-to-frame and would measure across the
+decimation gaps, so it is not used — `signalstats`' YDIF already provides
+temporal activity on every frame at no cost, and the screencast rule pairs
+`si` with that instead.
+
+Net effect on a real run: analysis went 33 s → 74 s when siti ran on every
+frame, and back to 36 s once decimated.
+
 ### The general principle, now confirmed twice
 
 > **Properties of an already-encoded source describe the encoder that made it at

@@ -278,6 +278,16 @@ public struct ContentProfile {
     public double      noise_stddev;
     public ContentType content_type;
     public double      type_confidence;
+    /**
+     * siti SI — spatial detail; 0 when unmeasured.
+     *
+     * Deliberately NOT accompanied by siti's TI. SI is a per-frame measure, so
+     * it can be sampled on decimated frames for the same mean at a sixth of
+     * the cost; TI is frame-to-frame and would measure across the decimation
+     * gaps instead. signalstats' YDIF already provides temporal activity on
+     * every frame for free, so it is used for that instead.
+     */
+    public double      spatial_info;
     public double      banding_risk;         // 0.0–1.0 composite score
     public double      low_luma_ratio;       // fraction of frames with high dark pixel count
     public double      dark_scene_ratio;     // fraction of frames where avg luma < 60
@@ -1198,6 +1208,17 @@ namespace SmartOptimizerLogic {
     public const double SCREENCAST_MAX_MOTION = 2.0;
     public const double SCREENCAST_MIN_EDGE   = 3.0;
 
+    // Preferred screencast test, used whenever `siti` produced a reading.
+    //   corpus: screencast si 115.4, motion 0.85
+    //           next-highest si is 101.8 (random-testvid3) but its motion is
+    //           18.45, the corpus maximum — synthetic screen content is the
+    //           only thing combining very high spatial detail with almost no
+    //           motion.
+    //           highest si among everything else: 74.2 (motion 11.64).
+    // The si margin (115.4 vs 74.2) is far wider than the edge margin, where
+    // the nearest confusable sits 0.05 from the motion threshold.
+    public const double SCREENCAST_MIN_SI = 80.0;
+
     // Live-action: sustained real-world motion.
     //   corpus: lowest live/film ydif is 6.37 (tvshow); highest anime is 4.55.
     public const double LIVE_ACTION_MIN_MOTION = 6.0;
@@ -1234,7 +1255,22 @@ namespace SmartOptimizerLogic {
      */
     public void classify_content (ref ContentProfile p) {
         // 1. Screencast — static frames with UI/text structure.
-        if (p.temporal_diff_mean < SCREENCAST_MAX_MOTION
+        //
+        // Prefer the siti test when a reading exists: `si` separates screen
+        // content from everything else by a much wider margin than edge
+        // density does, which does not separate it at all. Fall back to the
+        // edge/motion pair when siti is unavailable (older ffmpeg, or a failed
+        // analysis pass), so detection degrades rather than disappearing.
+        bool siti_available = (p.spatial_info > 0.0);
+        if (siti_available
+                && p.spatial_info >= SCREENCAST_MIN_SI
+                && p.temporal_diff_mean < SCREENCAST_MAX_MOTION) {
+            p.content_type = ContentType.SCREENCAST;
+            p.type_confidence = 0.9;
+            return;
+        }
+        if (!siti_available
+                && p.temporal_diff_mean < SCREENCAST_MAX_MOTION
                 && p.edge_mean > SCREENCAST_MIN_EDGE) {
             p.content_type = ContentType.SCREENCAST;
             // Confidence grows as motion approaches zero; a perfectly static
