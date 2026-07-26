@@ -371,6 +371,8 @@ public class SmartOptimizer : GLib.Object {
                     "Video has zero duration — ffprobe could not determine the length.\n"
                     + "The file may be corrupt, truncated, or in an unsupported container format.");
             }
+            info.duration = yield verify_probed_duration (
+                input_file, info.duration, cancellable);
 
             // ── 1b. Trim window, tier, container, audio plan ────────────
             var tw = SmartOptimizerLogic.resolve_trim_window (
@@ -733,6 +735,8 @@ public class SmartOptimizer : GLib.Object {
                 return make_error_rec (preferred_codec,
                     "Video has zero duration — ffprobe could not determine the length.");
             }
+            info.duration = yield verify_probed_duration (
+                input_file, info.duration, cancellable);
 
             // ── 2. Trim window, audio, container ────────────────────────
             var tw = SmartOptimizerLogic.resolve_trim_window (
@@ -1158,6 +1162,24 @@ public class SmartOptimizer : GLib.Object {
         yield ensure_intermediate (
             holder, input_file, positions, segment_duration, vf, pix_fmt,
             info, temp_run_dir, cancellable, true);
+        if (holder.path != null)
+            return;
+
+        // Almost always a lying container duration: every sample position sat
+        // past the last decodable frame. Measure what the file really holds
+        // and try once more against that.
+        double real = yield measure_real_duration (input_file, cancellable);
+        if (real > 0.0 && real < info.duration) {
+            warning ("Smart Optimizer: header claims %.1fs, only %.1fs decodable "
+                + "— resampling", info.duration, real);
+            double seg = double.min (segment_duration, real);
+            double[] retry = SmartOptimizerLogic.pick_sample_positions (seg > 0 ? real : 0.0, seg);
+            holder.build_failed = false;
+            yield ensure_intermediate (
+                holder, input_file, retry, seg, vf, pix_fmt,
+                info, temp_run_dir, cancellable, true);
+        }
+
         if (holder.path == null) {
             throw new IOError.FAILED (
                 "Could not build a lossless reference for quality measurement.\n"
@@ -1450,20 +1472,16 @@ public class SmartOptimizer : GLib.Object {
         }
 
         // ffmpeg exits 0 on "Output file is empty, nothing was encoded" (it
-        // does exactly that for odd-dimension sources under x264), so file
-        // existence alone is not proof the build worked.
-        int64 built_size = 0;
-        if (FileUtils.test (tmp, FileTest.EXISTS)) {
-            var probe = File.new_for_path (tmp);
-            try {
-                var pinfo = probe.query_info (
-                    FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
-                built_size = pinfo.get_size ();
-            } catch (Error e) {
-                built_size = 0;
-            }
-        }
-        if (built_size <= 0) {
+        // does exactly that for odd-dimension sources under x264, and for
+        // sample positions that all land past the last decodable frame), so
+        // neither the exit code nor the file's existence proves the build
+        // worked. Nor does its SIZE: a header-only Matroska file is ~5 KB, so
+        // a size check passes and the truncated file then gets used as a probe
+        // source or a VMAF reference. Decode a frame instead — that is the
+        // only thing that actually answers the question.
+        bool usable = FileUtils.test (tmp, FileTest.EXISTS)
+            && yield can_decode_a_frame (tmp, cancellable);
+        if (!usable) {
             cleanup_file (tmp);
             holder.build_failed = true;
             warning ("Smart Optimizer: intermediate build produced no data — %s",
@@ -1472,6 +1490,134 @@ public class SmartOptimizer : GLib.Object {
             return;
         }
         holder.path = tmp;
+    }
+
+    /**
+     * Correct a container duration that the file cannot back up.
+     *
+     * Headers lie: one corpus file advertises 323 s and holds 9.4 s of
+     * decodable video. Every duration-derived figure in the pipeline inherits
+     * that — sample positions land past the end, the size projection scales an
+     * 8 s probe by 40x instead of 1.2x, and the audio reservation over the
+     * phantom 313 s exceeds the entire source, which silently zeroes the size
+     * ceiling and disables it.
+     *
+     * The detection is O(1): seek near the claimed end and try to decode one
+     * frame. Only when that fails do we pay for a real measurement, and a file
+     * that fails is short by definition, so the decode is cheap.
+     *
+     * Returns the corrected duration, or the original when it holds up.
+     */
+    private async double verify_probed_duration (
+        string path, double claimed, Cancellable? cancellable
+    ) {
+        if (claimed <= 1.0)
+            return claimed;
+
+        // Seek near the claimed end and look at WHICH timestamp comes back.
+        //
+        // Two cheaper-looking checks do not work, both for the same reason
+        // this codebase keeps tripping over: seeking past the end and decoding
+        // exits 0 having produced nothing, and `-count_frames` over a
+        // read_interval past the end still reports 1 because the seek clamps
+        // to the last available packet. The clamp is the tell — ask for a
+        // timestamp near the end and see how far short the answer lands.
+        //
+        //   lying file:  seek 322.491s -> pts   9.386   (313s short)
+        //   honest file: seek  83.288s -> pts  80.113   (3.2s, keyframe spacing)
+        if (claimed <= TAIL_SEEK_TOLERANCE_SECONDS)
+            return claimed;                     // too short to discriminate
+
+        string ffprobe = AppSettings.get_default ().ffprobe_path;
+        double probe_at = double.max (0.0, claimed - 1.0);
+        string[] cmd = {
+            ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-read_intervals",
+            "%s%%+#1".printf (ConversionUtils.format_ffmpeg_double (probe_at, "%.3f")),
+            "-show_entries", "packet=pts_time", "-of", "csv=p=0", path
+        };
+        string tail_out;
+        try {
+            tail_out = yield run_subprocess_stdout (cmd, cancellable);
+        } catch (IOError.CANCELLED e) {
+            return claimed;
+        } catch (Error e) {
+            return claimed;                     // cannot tell — trust the header
+        }
+
+        double tail_pts = 0.0;
+        foreach (unowned string line in tail_out.split ("\n")) {
+            string t = line.strip ();
+            if (t.length == 0) continue;
+            if (try_parse_double (t, out tail_pts)) break;
+        }
+        // Landing within a GOP of the request means the tail really is there.
+        if (tail_pts <= 0.0 || (probe_at - tail_pts) <= TAIL_SEEK_TOLERANCE_SECONDS)
+            return claimed;
+
+        double real = yield measure_real_duration (path, cancellable);
+        if (real <= 0.0 || real >= claimed)
+            return claimed;
+        warning ("Smart Optimizer: container claims %.1fs but only %.1fs is "
+            + "decodable — using the measured duration", claimed, real);
+        return real;
+    }
+
+    /** True when at least one video frame decodes out of @path. */
+    private async bool can_decode_a_frame (string path, Cancellable? cancellable) {
+        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string[] cmd = {
+            ffmpeg, "-hide_banner", "-v", "error", "-nostdin",
+            "-i", path, "-frames:v", "1", "-f", "null", "-"
+        };
+        try {
+            yield run_subprocess_wait (cmd, cancellable);
+            return true;
+        } catch (IOError.CANCELLED e) {
+            return false;
+        } catch (Error e) {
+            return false;
+        }
+    }
+
+    /**
+     * Decode the video stream and report the timestamp actually reached.
+     *
+     * Container headers lie. One corpus file advertises 323 s and holds 9.4 s
+     * of decodable video, so every sample position past 9.4 s yields nothing
+     * and the reference comes out as a 5 KB stub. This is the authoritative
+     * answer, but it costs a full decode — call it only after a build has
+     * already failed, which by definition means the file is short or broken
+     * and the decode is cheap.
+     */
+    private async double measure_real_duration (string path, Cancellable? cancellable) {
+        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string[] cmd = {
+            ffmpeg, "-hide_banner", "-v", "error", "-stats", "-nostdin",
+            "-i", path, "-map", "0:v:0", "-f", "null", "-"
+        };
+        string err;
+        try {
+            err = yield run_subprocess_stderr (cmd, cancellable);
+        } catch (Error e) {
+            return 0.0;
+        }
+        double best = 0.0;
+        try {
+            var re = new Regex ("time=(\\d+):(\\d\\d):(\\d\\d(?:\\.\\d+)?)");
+            MatchInfo mi;
+            if (re.match (err, 0, out mi)) {
+                do {
+                    double h = double.parse (mi.fetch (1));
+                    double m = double.parse (mi.fetch (2));
+                    double sec = double.parse (mi.fetch (3));
+                    best = double.max (best, h * 3600.0 + m * 60.0 + sec);
+                } while (mi.next ());
+            }
+        } catch (RegexError e) {
+            return 0.0;
+        }
+        return best;
     }
 
     /**
@@ -3108,6 +3254,12 @@ public class SmartOptimizer : GLib.Object {
     // 1080p is wrong by libvmaf's own design. The correct remedy is a
     // content-aware target offset, which needs subjective comparison to size —
     // a measurement this corpus cannot provide.
+    // How far a seek may land short of the request before the container's
+    // duration is treated as a lie. Generous: long-GOP encodes place keyframes
+    // up to ~10s apart, and a seek resolves to the keyframe at or before the
+    // target, so a few seconds of undershoot is normal.
+    private const double TAIL_SEEK_TOLERANCE_SECONDS = 30.0;
+
     private const string VMAF_MODEL_4K_PATH  = "/usr/share/model/vmaf_4k_v0.6.1.json";
     private const int    VMAF_4K_MIN_WIDTH   = 2560;
 
