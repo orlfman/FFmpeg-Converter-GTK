@@ -1394,6 +1394,20 @@ public class TrimRunner : Object {
             GenericArray<string> primary_outputs,
             string out_dir,
             bool separate_export) {
+
+        // Trimming is the operation most likely to produce a technically
+        // successful encode containing nothing: a range that starts past the
+        // end of the real content yields no frames, and ffmpeg exits 0 having
+        // written only a container header. Verify every output before telling
+        // the user the export succeeded.
+        for (int i = 0; i < primary_outputs.length; i++) {
+            string problem;
+            if (!FfprobeUtils.output_file_is_usable (primary_outputs[i], out problem)) {
+                export_failed ("%s\n\n%s".printf (problem, primary_outputs[i]));
+                return;
+            }
+        }
+
         double[] fallback_durations = compute_fallback_durations (
             primary_outputs, separate_export);
         CollageRunSummary collages = generate_collages_for_outputs (

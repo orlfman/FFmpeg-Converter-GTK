@@ -37,10 +37,19 @@ Three genuine defects surfaced while building the tooling. None are caused by
 the Phase 1 refactor; all pre-date it. They share one root cause worth stating
 on its own:
 
-> **`ffmpeg` exits 0 while producing nothing.** "Output file is empty, nothing
-> was encoded" and "Terminating thread with return code -22" are both
-> accompanied by exit status 0. Any code that treats a zero exit as proof of
-> success will silently consume an empty file.
+> **`ffmpeg` exits 0 while producing nothing** — in one specific case. When a
+> filter chain yields no frames (a trim or concat covering a range with no
+> decodable content), ffmpeg prints "Output file is empty, nothing was encoded"
+> and **exits 0**, leaving a header-only container: 262 bytes for MP4, 581 for
+> Matroska. Any code treating a zero exit as proof of success consumes that
+> file happily.
+>
+> ⚠️ **Correction.** An earlier revision of this document claimed the
+> odd-dimension failure below also exits 0. It does not — x264 exits 187 and
+> x265 exits 183. That claim came from a shell pipeline where `&&` read the
+> exit status of `tail` rather than of ffmpeg. Encoder-open failures are
+> already caught by the exit code; the empty-output case is the one that slips
+> through, and it is the one worth guarding.
 
 Production checks exit status in several places where it needs to check output.
 
@@ -57,13 +66,15 @@ Measured, 2 seconds of that source, no scaling:
 
 | Encoder | Output | Frames | ffmpeg exit |
 |---|---|---|---|
-| libx264 | **0 bytes** | **0** | **0** |
-| libx265 | **0 bytes** | **0** | **0** |
+| libx264 | **0 bytes** | **0** | **187** |
+| libx265 | **0 bytes** | **0** | **183** |
 | libsvtav1 | 1244903 bytes | 78 | 0 |
 | libvpx-vp9 | 1141675 bytes | 78 | 0 |
 
-So converting an odd-dimension source to x264/x265 yields a 0-byte file and the
-app reports success.
+So converting an odd-dimension source to x264/x265 produces nothing — but it
+does so *loudly*, with a non-zero exit that callers already treat as failure.
+The user still cannot convert the file, which is the real defect; they are just
+not lied to about it.
 
 `filter-builder.vala:187-190` already rounds to even — but only inside the
 **scale** path, so it only helps when the user happens to be scaling. With no
@@ -142,13 +153,31 @@ probe manufactures damaged copies, which covers the calibration need, but a real
 over-compressed download (a re-encoded rip, a low-quality stream capture) would
 be worth adding.
 
-### 1.3 — Exit-status-only success checks
+### 1.3 — Exit-status-only success checks ✅ FIXED
 
-**Severity: medium.** The general form of 1.1 and 1.2.
+**Severity: medium.** The general form of 1.2.
 
-Anywhere production runs an encode and proceeds on `exit == 0`, it should also
-require non-zero output size, and for calibration probes a non-zero frame
-count. Worth an audit pass over the probe and intermediate paths.
+`ConversionRunner` declared success purely on `execute_ffmpeg(...) == 0` and
+never checked that the output existed, so an encode that produced nothing
+reported *"Conversion completed successfully!"* over an unplayable file.
+`TrimRunner` and `CombineRunner` had the same shape — and trimming is the
+likeliest operation to hit it, since a range starting past the end of the real
+content produces exactly the empty output described above.
+
+Fixed with `FfprobeUtils.output_file_is_usable`, applied at all three
+completion points. Size alone cannot decide it: a header-only file is small but
+not zero, and a legitimately tiny clip is also small. Asking ffprobe for a
+duration is what separates them — it fails outright on the stubs.
+
+Verified against real artifacts rather than in theory:
+
+| file | verdict |
+|---|---|
+| 581-byte Matroska stub (exit 0) | rejected |
+| 262-byte MP4 stub (exit 0) | rejected |
+| valid 1.28 MB encode | accepted |
+| zero-byte file | rejected |
+| missing file | rejected |
 
 ---
 

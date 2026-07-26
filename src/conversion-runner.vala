@@ -92,6 +92,18 @@ public class ConversionRunner {
                 process_runner,
                 ConversionPhase.FINALIZING
             );
+
+            // A zero exit status is not proof the encode produced anything.
+            // When a filter chain yields no frames ffmpeg still exits 0 and
+            // leaves a header-only file behind, and without this the user is
+            // told the conversion succeeded and handed an unplayable file.
+            string output_problem;
+            if (!FfprobeUtils.output_file_is_usable (safe_output, out output_problem)) {
+                if (!converter.is_cancelled (process_runner))
+                    converter.report_error_if_active (process_runner, output_problem);
+                return;
+            }
+
             succeeded = true;
 
             if (AppSettings.get_default ().generate_collage_thumbnail) {

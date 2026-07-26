@@ -639,6 +639,66 @@ namespace FfprobeUtils {
         return parse_primary_audio_stream_output (stdout_text);
     }
 
+    /**
+     * Verify that a file ffmpeg just wrote is actually usable.
+     *
+     * ffmpeg's exit status is not sufficient evidence that an encode produced
+     * anything. When a filter chain yields no frames — a trim starting past
+     * the end of the real content, a concat whose every segment falls outside
+     * the decodable range — ffmpeg reports:
+     *
+     *     "Output file is empty, nothing was encoded"
+     *
+     * and **exits 0**, leaving a header-only container behind (measured: 262
+     * bytes for MP4, 581 for Matroska). Callers that trust the exit code then
+     * tell the user their conversion succeeded and hand them an unplayable
+     * file.
+     *
+     * (Encoder-open failures — x264 refusing odd dimensions, say — DO exit
+     * non-zero, 187 and 183 respectively, so those are already caught. The
+     * empty-output case is the one that slips through.)
+     *
+     * Size alone cannot decide it either: a header-only file is small but not
+     * zero, and a legitimately tiny clip is also small. Asking ffprobe for a
+     * duration is what actually separates them — it fails outright on the
+     * stubs above.
+     *
+     * @reason is a short user-facing explanation when the file is unusable.
+     */
+    public bool output_file_is_usable (string path, out string reason) {
+        reason = "";
+
+        if (path.length == 0 || !FileUtils.test (path, FileTest.EXISTS)) {
+            reason = "FFmpeg reported success but no output file was created.";
+            return false;
+        }
+
+        int64 size = 0;
+        try {
+            var info = File.new_for_path (path).query_info (
+                FileAttribute.STANDARD_SIZE, FileQueryInfoFlags.NONE);
+            size = info.get_size ();
+        } catch (Error e) {
+            reason = "The output file could not be read: %s".printf (e.message);
+            return false;
+        }
+        if (size <= 0) {
+            reason = "FFmpeg reported success but the output file is empty.";
+            return false;
+        }
+
+        // The decisive check. A header-only container has a plausible size but
+        // no readable duration.
+        if (probe_duration (path) <= 0.0) {
+            reason = "FFmpeg reported success but the output contains no media "
+                   + "— it may have been asked to encode a range with no frames "
+                   + "in it.";
+            return false;
+        }
+
+        return true;
+    }
+
     public double probe_duration (string input_file) {
         string[] cmd = {
             AppSettings.get_default ().ffprobe_path,

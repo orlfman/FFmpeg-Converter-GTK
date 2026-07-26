@@ -171,6 +171,18 @@ public class CombineRunner : Object {
             return;
         }
 
+        // Exit zero does not prove anything was written. A concat whose inputs
+        // yield no frames still exits 0, leaving only a container header.
+        string output_problem;
+        if (!FfprobeUtils.output_file_is_usable (output_path, out output_problem)) {
+            if (runner.is_cancelled ()) {
+                report_cancelled ();
+            } else {
+                report_error (output_problem);
+            }
+            return;
+        }
+
         report_status (@"Combine completed!\n\nSaved to:\n$output_path",
             StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
         update_progress (100.0);
