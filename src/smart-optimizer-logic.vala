@@ -1223,19 +1223,38 @@ namespace SmartOptimizerLogic {
     //   corpus: lowest live/film ydif is 6.37 (tvshow); highest anime is 4.55.
     public const double LIVE_ACTION_MIN_MOTION = 6.0;
 
-    // Animation: held frames plus visible line work — present but not
-    // texture-rich edges.
-    //   corpus: anime ydif 3.13 / 4.55, edge 2.67 / 3.15
-    // ⚠️ WEAK SIGNAL.  The corpus shows animation is NOT reliably separable
-    // from slow, flat live-action using any measurement available here —
-    // edge, saturation level, saturation variance, motion, VREP and histogram
-    // entropy were all tested and all overlap.  This rule therefore has low
-    // recall by design and its confidence is capped (ANIME_MAX_CONFIDENCE) so
-    // downstream preset interpolation stays conservative.  Reliable animation
-    // handling needs an explicit user content override, not a better guess.
+    // Animation: held frames, visible line work, and colour that swings
+    // between shots.
+    //
+    // Calibrated against six verified animation sources spanning dark TV,
+    // bright TV, cinematic film and a fast-cut opening. Within the band this
+    // rule can actually reach (motion at or below LIVE_ACTION_MIN_MOTION):
+    //
+    //   anime      edge 1.36–2.67   satSD 3.03–8.59
+    //   live       edge 1.40–4.80   satSD 0.49–7.27
+    //
+    // Edge alone does not separate them — widening the edge floor to catch the
+    // darkest anime also admits a hazy aerial shot, a poolside phone video and
+    // a muted live-action film. Saturation VARIANCE does: animation cuts
+    // between strongly and differently coloured scenes, while the naturalistic
+    // footage that lands in this band holds a consistent overall saturation.
+    //
+    // Measured over the corpus, adding the satSD floor takes recall from 3/6
+    // to 4/6 while removing the one false positive, so it is strictly better
+    // on both axes. (`blur` also separates — animation has no optical
+    // defocus — but adds nothing once satSD is applied, so it is left out
+    // rather than carried as redundant decoration.)
+    //
+    // ⚠️ STILL INCOMPLETE. Two of six anime are missed, both high-motion: the
+    // live-action rule claims them before this one is reached, and nothing
+    // measurable here separates fast animation from fast live action. The
+    // confidence cap stays for that reason, and the user content override
+    // remains the reliable path.
     public const double ANIME_MAX_MOTION = 5.0;
-    public const double ANIME_MIN_EDGE   = 2.0;
+    public const double ANIME_MIN_EDGE   = 1.3;
     public const double ANIME_MAX_EDGE   = 4.5;
+    /** Colour must actually move between shots; see the note above. */
+    public const double ANIME_MIN_SAT_STDDEV = 2.5;
     public const double ANIME_MAX_CONFIDENCE = 0.5;
 
     /**
@@ -1294,7 +1313,8 @@ namespace SmartOptimizerLogic {
         //    Deliberately low confidence: see ANIME_* above.
         if (p.temporal_diff_mean < ANIME_MAX_MOTION
                 && p.edge_mean >= ANIME_MIN_EDGE
-                && p.edge_mean <= ANIME_MAX_EDGE) {
+                && p.edge_mean <= ANIME_MAX_EDGE
+                && p.saturation_stddev >= ANIME_MIN_SAT_STDDEV) {
             p.content_type = ContentType.ANIME;
             p.type_confidence = ANIME_MAX_CONFIDENCE;
             return;

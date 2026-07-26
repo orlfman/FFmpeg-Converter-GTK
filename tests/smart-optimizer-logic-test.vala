@@ -1243,11 +1243,33 @@ void test_classify_screencast_not_labelled_anime () {
 }
 
 void test_classify_anime_is_reachable () {
-    // Both real anime sources. Under the old thresholds ANIME was
-    // arithmetically unreachable — max achievable score equalled the
-    // threshold it had to exceed — so both landed in MIXED.
+    // Four verified animation sources spanning dark TV, bright TV and
+    // cinematic film. Under the original thresholds ANIME was arithmetically
+    // unreachable — the maximum achievable score equalled the threshold it had
+    // to exceed — so every one of these landed in MIXED.
+    //          edge   sat   satSD  ydif
     assert (classify_corpus (2.67, 13.74, 8.59, 4.55) == ContentType.ANIME);
-    assert (classify_corpus (3.15, 7.27, 3.03, 3.13) == ContentType.ANIME);
+    assert (classify_corpus (3.15,  7.27, 3.03, 3.13) == ContentType.ANIME);
+    assert (classify_corpus (2.60, 12.90, 7.51, 3.43) == ContentType.ANIME);
+    // Dark, low-contrast TV: edge 1.36 sits below the ORIGINAL 2.0 floor, so
+    // this one drove the floor down to 1.3.
+    assert (classify_corpus (1.36, 10.10, 4.90, 2.85) == ContentType.ANIME);
+}
+
+void test_classify_animation_rule_admits_no_false_positives () {
+    // Lowering the edge floor to reach dark animation also lets three
+    // live-action sources into the band. The saturation-variance floor is what
+    // keeps them out — animation cuts between strongly coloured scenes, these
+    // hold a consistent overall saturation.
+    //
+    // All three verified by eye, not inferred from filenames.
+
+    // Hazy aerial shot of a jet against sky — was a false positive before.
+    assert (classify_corpus (2.46, 9.21, 1.65, 3.65) != ContentType.ANIME);
+    // Poolside phone video.
+    assert (classify_corpus (1.62, 9.46, 0.49, 2.81) != ContentType.ANIME);
+    // Muted live-action film, slow dialogue scene.
+    assert (classify_corpus (1.40, 6.70, 1.38, 1.95) != ContentType.ANIME);
 }
 
 void test_classify_anime_confidence_is_capped () {
@@ -1272,7 +1294,7 @@ void test_classify_live_action_high_motion () {
     assert (classify_corpus (2.37, 33.23, 9.89, 13.83) == ContentType.LIVE_ACTION);
 }
 
-void test_classify_misses_high_motion_animation () {
+void test_classify_misses_high_motion_animation_both_cases () {
     // KNOWN LIMITATION, asserted so it cannot regress silently.
     //
     // random-testvid3.webm is a fast-cut anime opening — verified by eye, not
@@ -1285,15 +1307,19 @@ void test_classify_misses_high_motion_animation () {
     // (3.13, 4.55), so the animation rule was calibrated without ever seeing
     // this case.
     assert (classify_corpus (12.12, 17.54, 9.77, 18.45) == ContentType.LIVE_ACTION);
+    // A second case, found once more animation was added to the corpus:
+    // bright modern TV at ydif 8.73, also above the live-action threshold.
+    assert (classify_corpus (4.26, 20.30, 10.25, 8.73) == ContentType.LIVE_ACTION);
 
-    // Not fixed here on purpose. The one signal that would separate it is
-    // spatial information — si 101.8 against a maximum of 74.2 for every
-    // non-screencast file — but that is a rule fitted to a single sample, and
-    // inventing thresholds from n=1 is the failure mode this corpus exists to
-    // prevent. It needs more high-motion animation before it can be trusted.
+    // Not fixed on purpose. The spatial-information hypothesis that looked
+    // promising with one sample DIED once five more anime were measured: the
+    // opening reads si 101.8 but the other five span 22.3–46.9, straddling
+    // live action. It was never an animation signal, only a graphics-heavy
+    // one.
     //
-    // Until then the Content override is the answer, which is the same
-    // conclusion every other animation-detection attempt reached.
+    // Nothing measurable here separates fast animation from fast live action,
+    // so the Content override remains the answer — the same conclusion every
+    // other animation-detection attempt has reached.
 }
 
 void test_classify_mixed_is_the_honest_default () {
@@ -1653,7 +1679,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/content/anime-reachable", test_classify_anime_is_reachable);
     Test.add_func ("/smart-optimizer-logic/content/anime-confidence-capped", test_classify_anime_confidence_is_capped);
     Test.add_func ("/smart-optimizer-logic/content/live-action-motion", test_classify_live_action_high_motion);
-    Test.add_func ("/smart-optimizer-logic/content/high-motion-anime-limitation", test_classify_misses_high_motion_animation);
+    Test.add_func ("/smart-optimizer-logic/content/anime-no-false-positives", test_classify_animation_rule_admits_no_false_positives);
+    Test.add_func ("/smart-optimizer-logic/content/high-motion-anime-limitation", test_classify_misses_high_motion_animation_both_cases);
     Test.add_func ("/smart-optimizer-logic/content/mixed-default", test_classify_mixed_is_the_honest_default);
     Test.add_func ("/smart-optimizer-logic/content/not-degenerate", test_classify_no_longer_collapses_to_mixed);
     Test.add_func ("/smart-optimizer-logic/quality/intent-targets", test_quality_intent_targets_ascend);

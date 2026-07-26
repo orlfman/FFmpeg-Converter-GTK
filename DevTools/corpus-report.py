@@ -59,7 +59,9 @@ def num(row, key, default=0.0):
 # by eye, not inferred: random-testvid3 is a fast-cut anime opening that was
 # originally filed under the generic "random" prefix.
 CONTENT_CORRECTIONS = {
-    "random-testvid3.webm": "anime",
+    "random-testvid3.webm": "anime",       # fast-cut opening
+    "random-testvid0.webm": "live-action",  # aerial, jet against sky
+    "random-testvid1.webm": "live-action",  # poolside phone video
 }
 
 

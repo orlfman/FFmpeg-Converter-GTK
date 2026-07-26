@@ -523,11 +523,48 @@ explicitly (`content/high-motion-anime-limitation`) so it cannot change
 silently — an earlier version of that test asserted this file as *correctly*
 live-action, which was encoding the bug as expected behaviour.
 
-**Not fixed, deliberately.** The one signal that separates it is spatial
-information: si 101.8 against a maximum of 74.2 across every non-screencast
-file. But that is a rule fitted to a single sample, and inventing thresholds
-from n=1 is exactly the failure mode this corpus exists to prevent. It needs
-more high-motion animation before it can be trusted.
+**The spatial-information hypothesis died once more anime was measured.** With
+one sample, si 101.8 against a 74.2 ceiling looked like a clean animation
+signal. Three more anime sources put the other five at **22.3–46.9**, straddling
+live action. SI was never measuring animation, only graphics-heavy content —
+which is exactly why it was not implemented on n=1.
+
+### With six anime samples, the animation rule improves — but only in its band
+
+Three further animation sources (dark TV, bright TV, cinematic film) brought the
+corpus to six verified anime. Within the band the animation rule can actually
+reach (motion at or below the live-action threshold):
+
+```
+anime   edge 1.36–2.67   satSD 3.03–8.59
+live    edge 1.40–4.80   satSD 0.49–7.27
+```
+
+Edge alone cannot separate them: lowering the floor to 1.3 to catch the darkest
+anime also admits an aerial shot of a jet, a poolside phone video and a muted
+live-action film — all three verified by eye, and two of them previously
+sitting unexamined in the corpus as "misc".
+
+**Saturation variance separates them.** Animation cuts between strongly and
+differently coloured scenes; the naturalistic footage landing in this band holds
+a consistent overall saturation.
+
+| rule | anime found | false positives |
+|---|---|---|
+| original (edge 2.0–4.5) | 3/6 | 1 |
+| widened edge only (1.3–4.5) | 4/6 | 3 |
+| widened + `blur < 7.5` | 4/6 | 2 |
+| **widened + `satSD ≥ 2.5`** | **4/6** | **0** |
+| widened + satSD + blur | 4/6 | 0 |
+
+Strictly better than the original on both axes. `blur` also separates —
+animation has no optical defocus, which is a better physical story than the
+saturation one — but it adds nothing once satSD is applied, so it was left out
+rather than carried as redundant decoration.
+
+**Two of six are still missed, both high-motion** (ydif 8.73 and 18.45). The
+live-action rule claims them before the animation rule is reached, and nothing
+measurable here separates fast animation from fast live action.
 
 ### Animation detection remains weak, by design
 
