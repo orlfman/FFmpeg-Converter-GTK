@@ -239,6 +239,18 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     public signal void smart_optimizer_requested ();
 
     // ── Shared Smart Optimizer State ─────────────────────────────────────────
+    /**
+     * Last global auto-convert default this tab observed.
+     *
+     * AppSettings.settings_changed fires after ANY save and says nothing about
+     * which key moved, so the handler cannot tell "the user changed the
+     * auto-convert default" from "the user changed the output directory".
+     * Without this, saving an unrelated preference would silently reset every
+     * tab's auto-convert to the global value and discard per-tab choices.
+     */
+    private bool last_global_auto_convert = false;
+    /** Same guard as last_global_auto_convert, for the No Audio default. */
+    private bool last_global_strip_audio = false;
     public bool auto_convert_active { get; protected set; default = false; }
     public bool strip_audio_active  { get; protected set; default = false; }
     public bool match_source_size_active { get; protected set; default = false; }
@@ -648,21 +660,26 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         group.add (match_source_size_row);
 
         // Auto-convert toggle — per-tab, session-only.
-        // When the global override in Preferences is ON, this is forced active
-        // and locked insensitive. Disable the global override to control per-tab.
+        // The Preferences setting is the DEFAULT this starts from, not a lock:
+        // changing it moves every tab to the new value, and each tab can still
+        // be toggled afterwards. That matters because wanting auto-convert on
+        // for three codecs and off for a fourth is an ordinary thing to want,
+        // and the previous lock made it unreachable.
         var auto_convert_row = new Adw.SwitchRow ();
         auto_convert_row.set_title ("Auto-Convert");
         auto_convert_row.set_subtitle ("Start conversion automatically when optimization completes");
 
         bool global_on = AppSettings.get_default ().smart_optimizer_auto_convert;
         auto_convert_row.set_active (global_on);
-        auto_convert_row.set_sensitive (!global_on);
         auto_convert_active = global_on;
+        last_global_auto_convert = global_on;
 
         group.add (auto_convert_row);
 
         // No Audio toggle — per-tab, session-only.
         // Only visible when auto-convert is enabled on this tab.
+        // Same contract as Auto-Convert above: Preferences supplies the
+        // default, the tab keeps the final say.
         var strip_audio_row = new Adw.SwitchRow ();
         strip_audio_row.set_title ("No Audio");
         strip_audio_row.set_subtitle ("Strip audio from analysis and output");
@@ -670,8 +687,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
 
         bool audio_global = AppSettings.get_default ().smart_optimizer_strip_audio;
         strip_audio_row.set_active (audio_global && auto_convert_active);
-        strip_audio_row.set_sensitive (!audio_global);
         strip_audio_active = audio_global && auto_convert_active;
+        last_global_strip_audio = audio_global;
 
         // Wire auto-convert → strip_audio visibility after both rows exist
         var binding = new SmartOptimizerRowsBinding ();
@@ -705,25 +722,28 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         auto_convert_active = auto_convert_row.get_active ();
         strip_audio_row.set_visible (auto_convert_active);
         if (!auto_convert_active) {
+            // Nothing is being converted, so No Audio has nothing to act on.
             strip_audio_row.set_active (false);
         } else {
-            bool sa_locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-            if (sa_locked) {
-                strip_audio_row.set_active (true);
-                strip_audio_row.set_sensitive (false);
-            }
+            // Coming back into view after the line above zeroed it, so there
+            // is no per-tab choice left to preserve — restart from the default
+            // rather than from the forced-off state.
+            strip_audio_row.set_active (
+                AppSettings.get_default ().smart_optimizer_strip_audio);
         }
     }
 
     internal void handle_auto_convert_settings_changed (Adw.SwitchRow auto_convert_row) {
-        bool locked = AppSettings.get_default ().smart_optimizer_auto_convert;
-        if (locked) {
-            auto_convert_row.set_active (true);
-            auto_convert_row.set_sensitive (false);
-        } else if (!auto_convert_row.get_sensitive ()) {
-            auto_convert_row.set_sensitive (true);
-            auto_convert_row.set_active (false);
-        }
+        bool global_on = AppSettings.get_default ().smart_optimizer_auto_convert;
+        // Only act when the DEFAULT itself moved. Any other preference save
+        // also lands here, and adopting the global value on those would wipe
+        // out a per-tab choice the user made deliberately.
+        if (global_on == last_global_auto_convert)
+            return;
+        last_global_auto_convert = global_on;
+        // Adopt the new default so the preference visibly does something,
+        // while the row stays sensitive so this tab can disagree again.
+        auto_convert_row.set_active (global_on);
     }
 
     internal void handle_match_source_size_active_notify () {
@@ -786,16 +806,14 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     }
 
     internal void handle_strip_audio_settings_changed (Adw.SwitchRow strip_audio_row) {
-        bool locked = AppSettings.get_default ().smart_optimizer_strip_audio;
-        if (!strip_audio_row.get_visible ())
+        bool global_on = AppSettings.get_default ().smart_optimizer_strip_audio;
+        // Track the default even while hidden, so a change made with
+        // auto-convert off is not replayed as a "change" when it comes back.
+        bool moved = (global_on != last_global_strip_audio);
+        last_global_strip_audio = global_on;
+        if (!moved || !strip_audio_row.get_visible ())
             return;
-        if (locked) {
-            strip_audio_row.set_active (true);
-            strip_audio_row.set_sensitive (false);
-        } else if (!strip_audio_row.get_sensitive ()) {
-            strip_audio_row.set_sensitive (true);
-            strip_audio_row.set_active (false);
-        }
+        strip_audio_row.set_active (global_on);
     }
 
     /**

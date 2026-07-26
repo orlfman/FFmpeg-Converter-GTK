@@ -73,7 +73,10 @@ public class AppSettings : Object {
     private bool   _generate_collage_thumbnail = false;
     private bool   _verify_unknown_audio_copy_preflight = true;
     private int    _smart_optimizer_target_mb = 4;
-    private bool   _smart_optimizer_auto_convert = false;
+    // On by default: the optimizer exists to configure an encode, so running
+    // it is the expected next step rather than an opt-in extra. Turning this
+    // off in Preferences hands per-tab control back to the codec tabs.
+    private bool   _smart_optimizer_auto_convert = true;
     private bool   _smart_optimizer_strip_audio = false;
     private bool   _smart_optimizer_match_source_size = false;
 
@@ -491,7 +494,10 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
             read_int (kf, GROUP_SMART, "target_mb", 4));
-        bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", false);
+        // Fallback applies only when the key is absent — a fresh install or a
+        // config predating this setting. save() always writes the key, so an
+        // existing user who turned auto-convert off keeps it off.
+        bool smart_optimizer_auto_convert = read_bool (kf, GROUP_SMART, "auto_convert", true);
         bool smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
         bool smart_optimizer_match_source_size = read_bool (
             kf, GROUP_SMART, "match_source_size", false);
@@ -622,7 +628,7 @@ public class AppSettings : Object {
             _generate_collage_thumbnail = false;
             _verify_unknown_audio_copy_preflight = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
-            _smart_optimizer_auto_convert = false;
+            _smart_optimizer_auto_convert = true;
             _smart_optimizer_strip_audio = false;
             _smart_optimizer_match_source_size = false;
         } finally {

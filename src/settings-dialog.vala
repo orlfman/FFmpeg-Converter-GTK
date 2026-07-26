@@ -1357,15 +1357,15 @@ public class SettingsDialog : Adw.PreferencesDialog {
         auto_convert_switch = new Adw.SwitchRow ();
         auto_convert_switch.set_title ("Auto-Convert");
         auto_convert_switch.set_subtitle (
-            "Force auto-convert on for all codec tabs. " +
-            "Disable to control each tab independently.");
+            "Start conversion automatically when optimization completes. " +
+            "Sets every codec tab; each tab can still be changed.");
         behavior_group.add (auto_convert_switch);
 
         strip_audio_switch = new Adw.SwitchRow ();
         strip_audio_switch.set_title ("No Audio");
         strip_audio_switch.set_subtitle (
-            "Force audio stripping on all codec tabs. " +
-            "Disable to control each tab independently.");
+            "Strip audio from analysis and output. " +
+            "Sets every codec tab; each tab can still be changed.");
         behavior_group.add (strip_audio_switch);
 
         page.add (behavior_group);

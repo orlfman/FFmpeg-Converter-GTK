@@ -76,7 +76,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 
 ## 🧠 Smart Optimizer
 
-Tired of guessing your way to the perfect file size? Just press the **Smart Optimizer** button on the SVT-AV1, x265, x264 or VP9 tab, and the app handles everything else.
+Tired of guessing your way to the perfect file size? Tell it a size — or a quality level, if that's what you actually care about — then press the **Smart Optimizer** button on the SVT-AV1, x265, x264 or VP9 tab, and the app handles everything else.
 
 ### How it actually works
 It doesn’t rely on some magic lookup table. Instead, it runs **one to six (based off duration and content of the video) quick calibration encodes** on *your specific video* at different quality levels, then fits a real exponential curve to the results. It also figures out whether you’re dealing with live-action, anime, or a screencast, and picks the perfect preset + CRF or static bitrate combo to land right on your target size.
@@ -97,6 +97,25 @@ It doesn’t rely on some magic lookup table. Instead, it runs **one to six (bas
 It won’t just give up. It tells you exactly why and what to change: “trim to 42 seconds” or “scale down to "X."”
 
 You can set your default target size in **Preferences - Smart Optimizer**.
+
+### Don't care about size, just want it to look right?
+
+Set **Quality Target** on the codec tab to anything other than *Off*, and the whole thing runs backwards: you pin the quality, and the size becomes the prediction.
+
+- **Low** — acceptable (VMAF 88)
+- **Medium** — good (VMAF 92)
+- **High** — visually near-transparent (VMAF 95)
+- **Ultra** — archival (VMAF 97)
+
+Same idea as before — it runs test encodes on *your* video — except now it's measuring VMAF at a few CRFs, fitting the curve, and solving for the CRF that lands on your number. Then it does one more encode at that CRF and actually measures it, so the score you see is a measurement and not a guess. Both numbers show up in the Console tab: what it predicted, what it got, and the gap between them.
+
+Quality Target and Target Size are mutually exclusive — whichever you pin is the constraint, the other is the prediction. Leave it on *Off* and you're back to sizing.
+
+It also aims to never hand you a file bigger than your source, and the reason is worth a sentence. Re-encoding is copying: it can get very close to the original, but it can never come out better than it. Your source is the ceiling. So a file that ends up *bigger* than the source is the worst of both worlds — you paid extra bytes for something that still isn't quite as good as what you already had, and you'd have been better off just keeping the original.
+
+So when the optimizer sees that coming, it lowers the quality target until the file fits, and tells you it did. That's a target rather than a promise — the setting gets picked from short test encodes, so the full encode can still land a few percent over. It'll tell you when that happens too.
+
+Worth knowing: VMAF is a model of human vision, not human vision. It's solid on live-action, shakier on animation, and it badly over-rates screen recordings — a 4K screen capture scores 92.7 at CRF 34 with the text visibly mangled. On content where the number can't be trusted the optimizer caps CRF by rule instead of pretending the score means something.
 
 ### Just want to re-encode at the same size?
 Flip **Match Source Size** on, right under the target box. The target locks to your source file's own size, rounded to the nearest whole MB (a 9.54 MB file targets 10 MB, a 14.53 MB file targets 15 MB), and follows along whenever you pick a different file. Handy when you don't care about shrinking anything — you just want the optimizer to re-encode into a better codec at roughly the size you started with. On the Crop & Trim tab each segment gets its own target measured from that segment, so a 10-second cut out of a 2 GB movie doesn't inherit the full 2 GB. There's a global override in **Preferences - Smart Optimizer** if you want every codec tab to start this way.
