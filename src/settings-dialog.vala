@@ -385,10 +385,25 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
             switch (result.availability) {
                 case UpdateAvailability.UPDATE_AVAILABLE:
-                    update_row.set_subtitle (
-                        "Version %s is available — installed version: %s".printf (
-                            result.latest_version, result.current_version));
-                    update_release_url = result.release_url;
+                    // An AUR-installed copy must not be sent to the GitHub
+                    // tarball: installing over it would corrupt the package
+                    // (the same reason the Makefile refuses). Point at the
+                    // AUR page, where their helper can actually do the work.
+                    if (InstallDetection.detect () == InstallOrigin.AUR_PACKAGE) {
+                        update_row.set_subtitle (
+                            ("Version %s is available — installed version: %s. "
+                             + "This copy came from the AUR; update it with your "
+                             + "AUR helper.").printf (
+                                result.latest_version, result.current_version));
+                        update_release_url = ProjectUrls.AUR;
+                        update_release_button.set_label ("View on AUR");
+                    } else {
+                        update_row.set_subtitle (
+                            "Version %s is available — installed version: %s".printf (
+                                result.latest_version, result.current_version));
+                        update_release_url = result.release_url;
+                        update_release_button.set_label ("View Release");
+                    }
                     update_release_button.set_visible (true);
                     break;
                 case UpdateAvailability.NEWER_THAN_LATEST:

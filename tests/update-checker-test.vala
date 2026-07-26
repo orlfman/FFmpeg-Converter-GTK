@@ -94,8 +94,40 @@ private void test_invalid_response () {
     assert_true (failed);
 }
 
+void test_pacman_ownership_parsing () {
+    const string PKG = "ffmpeg-converter-gtk";
+
+    // The real shape of `pacman -Qo <path>` for an owned file.
+    assert_true (InstallDetection.owned_by_package (
+        "/usr/bin/ffmpeg-converter-gtk is owned by ffmpeg-converter-gtk 1.5.8-1\n",
+        PKG));
+
+    // Nothing to parse.
+    assert_true (!InstallDetection.owned_by_package ("", PKG));
+    assert_true (!InstallDetection.owned_by_package ("anything", ""));
+
+    // pacman's "no owner" wording must not read as ownership.
+    assert_true (!InstallDetection.owned_by_package (
+        "error: No package owns /usr/local/bin/ffmpeg-converter-gtk", PKG));
+
+    // A DIFFERENT package owning the binary is not our package. This is the
+    // case that matters: a distro repo build, or a fork packaged under
+    // another name, must still be sent to the GitHub release.
+    assert_true (!InstallDetection.owned_by_package (
+        "/usr/bin/ffmpeg-converter-gtk is owned by ffmpeg-converter-gtk-git 1.5.8.r2-1",
+        PKG));
+
+    // A path containing the package name must not pass on its own — only the
+    // token after "is owned by" counts.
+    assert_true (!InstallDetection.owned_by_package (
+        "/home/u/ffmpeg-converter-gtk/build/ffmpeg-converter-gtk is owned by other-pkg 1.0",
+        PKG));
+}
+
 int main (string[] args) {
     Test.init (ref args);
+    Test.add_func ("/update-checker/pacman-ownership-parsing",
+                   test_pacman_ownership_parsing);
     Test.add_func ("/update-checker/version-comparison",
                    test_version_comparison);
     Test.add_func ("/update-checker/update-available-response",

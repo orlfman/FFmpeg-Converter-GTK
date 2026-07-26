@@ -31,6 +31,96 @@ public class UpdateCheckResult : Object {
 }
 
 /**
+ * Where this copy of the app came from, so update advice can point somewhere
+ * the user can actually act on.
+ *
+ * Deliberately NOT "is this an Arch distro". Someone on Arch who built from
+ * source must still be sent to the GitHub release — telling them to update
+ * via the AUR would be wrong, and would step on the very install the
+ * Makefile's pacman guard exists to protect. The question is whether THIS
+ * binary belongs to the package, which is what `pacman -Qo` answers.
+ */
+public enum InstallOrigin {
+    UNKNOWN,
+    AUR_PACKAGE
+}
+
+public class InstallDetection : Object {
+    /**
+     * Arch package name. Kept here rather than in constants.vala so this
+     * module stays linkable on its own — constants.vala declares Gtk externs,
+     * and pulling GTK into the update-checker test just to read one string
+     * would not be a good trade.
+     */
+    public const string ARCH_PACKAGE_NAME = "ffmpeg-converter-gtk";
+
+    /**
+     * Does `pacman -Qo <path>` output say the file belongs to our package?
+     *
+     * Split out from the process call so the parsing is testable without a
+     * pacman database. Output looks like:
+     *   /usr/bin/ffmpeg-converter-gtk is owned by ffmpeg-converter-gtk 1.5.8-1
+     */
+    public static bool owned_by_package (string pacman_output, string package_name) {
+        if (pacman_output.length == 0 || package_name.length == 0)
+            return false;
+        // "is owned by <pkg> <version>" — match the token after the marker so
+        // a path that merely contains the package name cannot pass.
+        int marker = pacman_output.index_of ("is owned by ");
+        if (marker < 0)
+            return false;
+        string tail = pacman_output.substring (marker + "is owned by ".length).strip ();
+        string[] parts = tail.split (" ");
+        return parts.length > 0 && parts[0] == package_name;
+    }
+
+    private static bool cached = false;
+    private static InstallOrigin cached_origin = InstallOrigin.UNKNOWN;
+
+    /** Cached: the answer cannot change while the process is running. */
+    public static InstallOrigin detect () {
+        if (cached)
+            return cached_origin;
+        cached = true;
+        cached_origin = InstallOrigin.UNKNOWN;
+
+        if (Environment.find_program_in_path ("pacman") == null)
+            return cached_origin;
+
+        string exe_path;
+        try {
+            exe_path = FileUtils.read_link ("/proc/self/exe");
+        } catch (Error e) {
+            return cached_origin;
+        }
+        if (exe_path.length == 0)
+            return cached_origin;
+
+        try {
+            string stdout_buf;
+            int status;
+            Process.spawn_sync (
+                null,
+                { "pacman", "-Qo", exe_path },
+                null,
+                SpawnFlags.SEARCH_PATH | SpawnFlags.STDERR_TO_DEV_NULL,
+                null,
+                out stdout_buf,
+                null,
+                out status);
+            // A file pacman does not own is a non-zero exit, not an error.
+            if (status == 0
+                    && owned_by_package (stdout_buf, ARCH_PACKAGE_NAME)) {
+                cached_origin = InstallOrigin.AUR_PACKAGE;
+            }
+        } catch (SpawnError e) {
+            // pacman missing or unrunnable — stay UNKNOWN and use GitHub.
+        }
+        return cached_origin;
+    }
+}
+
+/**
  * Manual update checker backed by GitHub's latest-release API.
  *
  * Nothing runs on startup and nothing is downloaded. The Preferences dialog
