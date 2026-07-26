@@ -814,6 +814,14 @@ public class SmartOptimizer : GLib.Object {
                     SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES / (1024.0 * 1024.0 * 1024.0));
             }
 
+            // Replace the assumed audio budget with a measurement before
+            // anything reserves against it: the reservation feeds both the
+            // reported size and the size ceiling.
+            yield measure_quality_audio_budget (
+                input_file, resolved_container, ctx, plan, positions,
+                tw.sample_segment_duration, tw.encode_duration, tw.trim_start,
+                temp_run_dir, cancellable);
+
             // The reference is built lazily, on the first probe that actually
             // misses the cache. A fully-cached re-run needs no encoding at all,
             // so building it up front would be pure waste — and for 4K it is
@@ -884,7 +892,8 @@ public class SmartOptimizer : GLib.Object {
             // higher CRFs rather than fit a flat line.
             var m0 = SmartOptimizerLogic.solve_quality_crf (
                 measured_crfs, vmafs, target.target_vmaf, preferred_codec);
-            bool refined = false;
+            bool refined = false;          // extra probes after saturation
+            bool bracket_refined = false;  // extra probes to bracket the answer
             if (m0.degenerate && measured_crfs.length > 0) {
                 int highest = measured_crfs[measured_crfs.length - 1];
                 int crf_min, crf_max;
@@ -943,6 +952,68 @@ public class SmartOptimizer : GLib.Object {
                     "Could not measure a usable quality curve for this video.\n"
                     + "Too few probes produced a score — the source may be "
                     + "corrupt or too short to sample.");
+            }
+
+            // ── 7c. Refine an off-centre bracket ───────────────────────
+            // A solve landing outside the probed window is extrapolation, and
+            // confidence is docked for it. One more probe near the answer
+            // usually converts that into interpolation. Size Mode has done
+            // this since v5 (pick_adaptive_calibration_crfs); Quality Mode was
+            // only refining on saturation, so it accepted a low-confidence
+            // answer rather than spending a probe to earn a better one.
+            //
+            // Observed: an SVT-AV1 Medium run probed {26,32,38} and solved 41,
+            // reporting 58% confidence (0.75 extrapolation x 0.77 coverage)
+            // despite verifying to within 0.11 VMAF. The ladders for SVT-AV1
+            // and VP9 were derived by analogy from the measured x265 ones, so
+            // being off-centre is expected until they get a sweep of their own.
+            if (!m0.degenerate && measured_crfs.length > 0
+                    && SmartOptimizerLogic.should_refine_calibration_window (
+                        m0.predicted_crf, measured_crfs)) {
+                int crf_min_r, crf_max_r;
+                SmartOptimizerLogic.crf_range_for_codec (
+                    preferred_codec, out crf_min_r, out crf_max_r);
+                int[] extra_crfs = SmartOptimizerLogic.pick_adaptive_calibration_crfs (
+                    m0.predicted_crf, measured_crfs, crf_min_r, crf_max_r,
+                    measured_crfs.length + 1);      // one follow-up probe
+                try {
+                    foreach (int crf in extra_crfs) {
+                        double rc_size = 0.0, rc_vmaf = 0.0;
+                        if (qcache != null
+                                && qcache.lookup_with_vmaf (crf, out rc_size, out rc_vmaf)) {
+                            measured_crfs += crf;
+                            vmafs += rc_vmaf;
+                            sizes += rc_size;
+                            cached_points++;
+                            bracket_refined = true;
+                            continue;
+                        }
+                        yield ensure_quality_reference (
+                            intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, bit_depth.pix_fmt,
+                            info, temp_run_dir, cancellable);
+                        var rm = yield calibration_probe_with_vmaf (
+                            preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
+                            intermediate.path, tw.encode_duration, sample_duration,
+                            1.0, info.width, threads, temp_run_dir, cancellable);
+                        if (!rm.vmaf_measured)
+                            continue;
+                        measured_crfs += crf;
+                        vmafs += rm.vmaf;
+                        sizes += rm.size_kib;
+                        if (qcache != null)
+                            qcache.record_with_vmaf (crf, rm.size_kib, rm.vmaf);
+                        bracket_refined = true;
+                    }
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    warning ("Smart Optimizer: bracket refinement failed: %s", e.message);
+                }
+                if (bracket_refined) {
+                    m0 = SmartOptimizerLogic.solve_quality_crf (
+                        measured_crfs, vmafs, target.target_vmaf, preferred_codec);
+                }
             }
 
             if (all_saturated) {
@@ -1099,7 +1170,7 @@ public class SmartOptimizer : GLib.Object {
                 ceiling, final_crf, achieved_vmaf, estimated_total_kib,
                 confidence, coverage, positions.length, positions_trimmed,
                 crf_capped, refined, ceiling_kib, verification, all_saturated,
-                cached_points);
+                cached_points, bracket_refined);
 
             return OptimizationRecommendation () {
                 codec                 = preferred_codec,
@@ -1139,6 +1210,110 @@ public class SmartOptimizer : GLib.Object {
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
         }
+    }
+
+    // Above this duration, measuring the whole audio track costs enough that
+    // sampling is preferable. Opus runs far faster than realtime, so a
+    // half-hour track measures in seconds against a Quality Mode run already
+    // measured in minutes.
+    private const double QUALITY_AUDIO_FULL_MEASURE_MAX_SECONDS = 1800.0;
+
+    /**
+     * Replace Quality Mode's assumed audio budget with a measurement.
+     *
+     * The effort level supplies a NOMINAL bitrate (192 kbps at Medium), but
+     * what the encoder actually emits depends on the content: Opus VBR
+     * collapses quiet material to a fraction of its nominal rate. Measured on
+     * a real source whose audio averages −38.2 dB, a 192 kbps reservation
+     * produced 7.9 kbps of output — a 3.1 MiB over-estimate on a 10 MiB file,
+     * which accounted for that run's ENTIRE size prediction error (the video
+     * model was accurate to 0.9%).
+     *
+     * Over-reserving is not merely cosmetic: the reservation is subtracted
+     * from the size ceiling, so it applies phantom pressure that can clamp
+     * quality on a source where the margin is tight.
+     *
+     * Where affordable this measures the WHOLE track rather than sampling.
+     * Size Mode samples three windows and floors the result at a fraction of
+     * the budget, because a silent sample from an otherwise-loud track would
+     * under-reserve and blow a hard size target. That floor would have been
+     * wrong here — this track is quiet end to end, so the measurement was
+     * right and the floor would have inflated it sixfold. Measuring the whole
+     * track removes the sampling risk the floor exists to cover, so the floor
+     * is only applied when sampling is actually used.
+     */
+    private async void measure_quality_audio_budget (
+        string        input_file,
+        string        resolved_container,
+        OptimizationContext ctx,
+        SmartOptimizerLogic.AudioPlan plan,
+        double[]      positions,
+        double        sample_segment_duration,
+        double        encode_duration,
+        double        trim_start,
+        string?       temp_run_dir,
+        Cancellable?  cancellable
+    ) throws Error {
+        if (plan.use_stream_copy
+                || ctx.strip_audio
+                || ctx.audio_bitrate_kbps_override > 0
+                || plan.effective_track_count < 1
+                || plan.per_stream_kbps <= 0
+                || plan.probed_first_codec.length == 0) {
+            return;
+        }
+
+        bool full_track = (encode_duration > 0.0
+            && encode_duration <= QUALITY_AUDIO_FULL_MEASURE_MAX_SECONDS);
+        double[] measure_positions = full_track
+            ? new double[] { trim_start }
+            : positions;
+        double measure_duration = full_track
+            ? encode_duration
+            : sample_segment_duration;
+
+        int measured_kbps;
+        try {
+            cancellable_check (cancellable);
+            measured_kbps = yield measure_audio_bitrate (
+                input_file, resolved_container, measure_positions,
+                measure_duration, plan.per_stream_kbps, cancellable, temp_run_dir);
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            warning ("Smart Optimizer: audio measurement failed (%s) — keeping "
+                + "the %d kbps budget", e.message, plan.per_stream_kbps);
+            return;
+        }
+        if (measured_kbps <= 0)
+            return;
+
+        int raw_kbps = measured_kbps;
+        bool floored = false;
+        if (!full_track) {
+            measured_kbps = SmartOptimizerLogic.floor_measured_audio_kbps (
+                measured_kbps, plan.per_stream_kbps);
+            floored = (measured_kbps != raw_kbps);
+        }
+
+        // A measurement far above the nominal rate means the probe is wrong,
+        // not the assumption.
+        if (measured_kbps > plan.per_stream_kbps * 2) {
+            warning ("Smart Optimizer: measured audio %d kbps exceeds twice the "
+                + "%d kbps budget — ignoring", measured_kbps, plan.per_stream_kbps);
+            return;
+        }
+
+        warning ("Smart Optimizer: audio measured at %d kbps (%s), replacing the "
+            + "%d kbps budget", measured_kbps,
+            full_track ? "whole track" : "sampled", plan.per_stream_kbps);
+
+        plan.audio_measured    = true;
+        plan.measured_raw_kbps = raw_kbps;
+        plan.measured_kbps     = measured_kbps;
+        plan.measured_floored  = floored;
+        plan.per_stream_kbps   = measured_kbps;
+        plan.total_budget_kbps = measured_kbps * int.max (1, plan.effective_track_count);
     }
 
     /**
@@ -1215,7 +1390,8 @@ public class SmartOptimizer : GLib.Object {
         double                              ceiling_kib,
         SmartOptimizerLogic.VmafVerification verification,
         bool                                all_saturated,
-        int                                 cached_points
+        int                                 cached_points,
+        bool                                bracket_refined
     ) {
         var n = new StringBuilder ();
 
@@ -1248,7 +1424,11 @@ public class SmartOptimizer : GLib.Object {
                          SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD));
         }
         if (refined)
-            n.append ("  Bracket re-probed at higher CRFs after saturation\n");
+            n.append ("  Re-probed at higher CRFs after saturation\n");
+        if (bracket_refined) {
+            n.append ("  Re-probed near the answer — the first bracket did not "
+                + "contain it\n");
+        }
         if (cached_points > 0) {
             n.append ("  %d point(s) reused from a previous run\n".printf (
                 cached_points));
