@@ -672,6 +672,45 @@ void test_size_ceiling_is_inert_when_output_already_fits () {
     assert (o2.final_crf == 24);
 }
 
+void test_size_ceiling_records_budget_for_verification () {
+    double sa, sb, sc;
+    bool sdeg;
+    SmartOptimizerLogic.fit_calibration_curve (
+        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
+    double va, vb, vc;
+    bool vdeg;
+    SmartOptimizerLogic.fit_vmaf_curve (
+        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
+
+    // The CRF is clamped against the MODEL, then verification overwrites
+    // estimated_size_kib with a measurement. Detecting an overshoot after the
+    // fact needs the budget that was solved against, so the outcome must
+    // carry it — otherwise there is nothing left to compare the measurement
+    // to and the ceiling claim cannot be checked at all.
+    var clamped = SmartOptimizerLogic.apply_quality_size_ceiling (
+        16, 20000.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (clamped.clamped);
+    assert (clamped.ceiling_kib == 20000.0);
+    // By the model's own reckoning the chosen CRF fits. Any later overshoot is
+    // therefore model error, not the clamp failing to do its job.
+    assert (clamped.estimated_size_kib <= clamped.ceiling_kib);
+
+    var inert = SmartOptimizerLogic.apply_quality_size_ceiling (
+        24, 10000000.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (inert.ceiling_kib == 10000000.0);
+
+    // Unknown source size must stay 0, so the caller's `> 0.0` guard disables
+    // the check rather than flagging every encode as over budget.
+    var unknown = SmartOptimizerLogic.apply_quality_size_ceiling (
+        24, 0.0, sa, sb, sc, va, vb, vc, 8, 51);
+    assert (unknown.ceiling_kib == 0.0);
+
+    // Verification has not run in any of these, so nothing may be flagged yet.
+    assert (!clamped.verified_over_ceiling);
+    assert (!inert.verified_over_ceiling);
+    assert (!unknown.verified_over_ceiling);
+}
+
 void test_quality_calibration_ladders_widen_toward_ultra () {
     foreach (string codec in new string[] { "x265", "x264", "vp9", "svt-av1" }) {
         var low = SmartOptimizerLogic.pick_quality_calibration_crfs (
@@ -1154,6 +1193,156 @@ void test_plan_audio_strip_and_override () {
     assert (!overridden.use_stream_copy);
     assert (overridden.per_stream_kbps == 112);
     assert (overridden.total_budget_kbps == 112);
+}
+
+void test_fit_residual_is_informative () {
+    // A quadratic (qc != 0) has 3 coefficients: 3 points fit it exactly, so
+    // the residual is 0 by construction and carries no information.
+    assert (!SmartOptimizerLogic.fit_residual_is_informative (3, -0.0002));
+    assert (!SmartOptimizerLogic.fit_residual_is_informative (2, -0.0002));
+    assert (SmartOptimizerLogic.fit_residual_is_informative (4, -0.0002));
+    assert (SmartOptimizerLogic.fit_residual_is_informative (5, -0.0002));
+
+    // Degenerate to a line (qc == 0) and only 2 coefficients are spent.
+    assert (!SmartOptimizerLogic.fit_residual_is_informative (2, 0.0));
+    assert (SmartOptimizerLogic.fit_residual_is_informative (3, 0.0));
+
+    // The predicate must agree with the RMSE helpers it guards: wherever it
+    // reports "uninformative", the residual it would have printed is 0.
+    int[] crfs = { 24, 34, 44 };
+    double[] vmafs = { 99.74, 98.12, 90.43 };
+    double qa, qb, qc;
+    bool degenerate;
+    SmartOptimizerLogic.fit_vmaf_curve (crfs, vmafs, out qa, out qb, out qc, out degenerate);
+    double rmse = SmartOptimizerLogic.vmaf_fit_rmse (crfs, vmafs, qa, qb, qc);
+    assert (!SmartOptimizerLogic.fit_residual_is_informative (crfs.length, qc));
+    assert (rmse < 1e-6);
+}
+
+void test_audio_ladder_snapping () {
+    // Down-snapping never exceeds the input, so a snapped budget still fits.
+    assert (SmartOptimizerLogic.snap_audio_kbps_down (192) == 192);
+    assert (SmartOptimizerLogic.snap_audio_kbps_down (187) == 128);
+    assert (SmartOptimizerLogic.snap_audio_kbps_down (999) == 512);
+    // Below the lowest rung there is nothing cheaper to pick.
+    assert (SmartOptimizerLogic.snap_audio_kbps_down (32) == 64);
+    assert (SmartOptimizerLogic.snap_audio_kbps_down (0) == 0);
+
+    assert (SmartOptimizerLogic.snap_audio_kbps_up (96) == 128);
+    assert (SmartOptimizerLogic.snap_audio_kbps_up (192) == 192);
+    assert (SmartOptimizerLogic.snap_audio_kbps_up (999) == 512);
+    assert (SmartOptimizerLogic.snap_audio_kbps_up (0) == 0);
+
+    // Every rung must be selectable in the UI, or the applier cannot set it.
+    foreach (int rung in AudioCodecOptions.bitrate_values ()) {
+        assert (SmartOptimizerLogic.snap_audio_kbps_down (rung) == rung);
+        assert (SmartOptimizerLogic.snap_audio_kbps_up (rung) == rung);
+    }
+}
+
+void test_cap_audio_kbps_to_source () {
+    // A 96 kbps source does not justify the 320 kbps XLARGE rung: the first
+    // encoder already discarded what the extra bits would carry.
+    var lossy = new AudioSourceInfo[] { make_audio_source ("aac", 96, false) };
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (320, lossy) == 128);
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (192, lossy) == 128);
+    // Never raises a tier that is already below the source.
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (64, lossy) == 64);
+
+    // Lossless sits above every rung, so the cap never binds.
+    var lossless = new AudioSourceInfo[] { make_audio_source ("flac", 1411, false) };
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (320, lossless) == 320);
+
+    // A guessed source bitrate must not drive the cap.
+    var guessed = new AudioSourceInfo[] { make_audio_source ("aac", 128, true) };
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (320, guessed) == 320);
+
+    // Multi-track follows the loudest demand, not the first or the quietest.
+    var mixed = new AudioSourceInfo[] {
+        make_audio_source ("aac", 96, false),
+        make_audio_source ("ac3", 448, false)
+    };
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (320, mixed) == 320);
+
+    // No sources → nothing to cap against.
+    assert (SmartOptimizerLogic.cap_audio_kbps_to_source (256, {}) == 256);
+}
+
+void test_plan_audio_caps_reencode_at_source () {
+    // The reported case: 96 kbps AAC into WebM cannot be copied, so it is
+    // re-encoded — but at 128, not at the tier's 320.
+    var info = make_video_info ({ make_audio_source ("aac", 96, false) });
+    var ctx = OptimizationContext ();
+    var plan = SmartOptimizerLogic.plan_audio (info, ctx, SizeTier.XLARGE, "webm");
+
+    assert (!plan.use_stream_copy);
+    assert (plan.encode_target_kbps == 128);
+    assert (plan.per_stream_kbps == 128);
+    assert (plan.total_budget_kbps == 128);
+    // The cap is reported, not silent.
+    assert (plan.uncapped_tier_kbps == 320);
+    assert (plan.cap_source_kbps == 96);
+}
+
+void test_plan_audio_encode_target_is_always_selectable () {
+    // Whatever the plan hands the applier must be a rung the dropdown offers,
+    // in every branch — otherwise set_dropdown_by_label silently no-ops and
+    // the encode runs at a bitrate nobody chose.
+    SizeTier[] tiers = {
+        SizeTier.TINY, SizeTier.SMALL, SizeTier.MEDIUM,
+        SizeTier.LARGE, SizeTier.XLARGE
+    };
+
+    foreach (var tier in tiers) {
+        for (int variant = 0; variant < 4; variant++) {
+            SmartOptimizerVideoInfo info;
+            switch (variant) {
+                case 0:   // lossy source below every tier rung
+                    info = make_video_info ({ make_audio_source ("aac", 96, false) });
+                    break;
+                case 1:   // lossless — cap never binds
+                    info = make_video_info ({ make_audio_source ("flac", 1411, false) });
+                    break;
+                case 2:   // guessed bitrate — cap must not engage
+                    info = make_video_info ({ make_audio_source ("opus", 128, true) });
+                    break;
+                default:  // multi-track
+                    info = make_video_info ({
+                        make_audio_source ("aac", 128, false),
+                        make_audio_source ("ac3", 640, false)
+                    });
+                    break;
+            }
+
+            var plan = SmartOptimizerLogic.plan_audio (
+                info, OptimizationContext (), tier, "webm");
+            if (plan.encode_target_kbps == 0)
+                continue;   // stripped or stream-copied — no target to set
+            assert (SmartOptimizerLogic.snap_audio_kbps_down (
+                plan.encode_target_kbps) == plan.encode_target_kbps);
+        }
+    }
+
+    // An explicit override lands on a rung too, even at an odd value.
+    var info = make_video_info ({ make_audio_source ("aac", 256, false) });
+    var overridden = SmartOptimizerLogic.plan_audio (
+        info, OptimizationContext () { audio_bitrate_kbps_override = 112 },
+        SizeTier.MEDIUM, "mp4");
+    assert (overridden.encode_target_kbps == 64);
+    // The reserve keeps the caller's exact number; only the target snaps.
+    assert (overridden.per_stream_kbps == 112);
+}
+
+void test_plan_audio_stream_copy_has_no_encode_target () {
+    var info = make_video_info ({ make_audio_source ("opus", 64, false) });
+    var plan = SmartOptimizerLogic.plan_audio (
+        info, OptimizationContext (), SizeTier.TINY, "webm");
+    assert (plan.use_stream_copy);
+    assert (plan.encode_target_kbps == 0);
+
+    var stripped = SmartOptimizerLogic.plan_audio (
+        info, OptimizationContext () { strip_audio = true }, SizeTier.TINY, "webm");
+    assert (stripped.encode_target_kbps == 0);
 }
 
 void test_plan_audio_multitrack_gated_by_tier () {
@@ -1852,6 +2041,12 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/audio/stream-copy", test_plan_audio_stream_copy_when_within_budget);
     Test.add_func ("/smart-optimizer-logic/audio/reencode-over-budget", test_plan_audio_reencode_when_over_budget);
     Test.add_func ("/smart-optimizer-logic/audio/strip-and-override", test_plan_audio_strip_and_override);
+    Test.add_func ("/smart-optimizer-logic/fit-residual-informative", test_fit_residual_is_informative);
+    Test.add_func ("/smart-optimizer-logic/audio/ladder-snapping", test_audio_ladder_snapping);
+    Test.add_func ("/smart-optimizer-logic/audio/source-cap", test_cap_audio_kbps_to_source);
+    Test.add_func ("/smart-optimizer-logic/audio/reencode-capped-at-source", test_plan_audio_caps_reencode_at_source);
+    Test.add_func ("/smart-optimizer-logic/audio/encode-target-selectable", test_plan_audio_encode_target_is_always_selectable);
+    Test.add_func ("/smart-optimizer-logic/audio/stream-copy-no-target", test_plan_audio_stream_copy_has_no_encode_target);
     Test.add_func ("/smart-optimizer-logic/audio/multitrack-tier-gate", test_plan_audio_multitrack_gated_by_tier);
     Test.add_func ("/smart-optimizer-logic/budget/compute", test_compute_size_budget);
     Test.add_func ("/smart-optimizer-logic/budget/infeasibility-message", test_infeasibility_message_suggests_options);
@@ -1888,6 +2083,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-window", test_quality_ceiling_scales_to_trim_window);
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-clamps", test_size_ceiling_clamps_and_reports_achieved_quality);
     Test.add_func ("/smart-optimizer-logic/quality/ceiling-inert", test_size_ceiling_is_inert_when_output_already_fits);
+    Test.add_func ("/smart-optimizer-logic/quality/ceiling-records-budget", test_size_ceiling_records_budget_for_verification);
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);
     Test.add_func ("/smart-optimizer-logic/tuning/probe-matches-applier", test_encoder_tuning_is_one_decision_for_probe_and_applier);

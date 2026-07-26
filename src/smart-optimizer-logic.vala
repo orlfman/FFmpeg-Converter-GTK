@@ -128,7 +128,18 @@ public struct OptimizationRecommendation {
     public ContentType content_type;
     public double confidence;          // 0.0–1.0, how far we extrapolated
     public SizeTier size_tier;         // optimization strategy tier
-    public int recommended_audio_kbps; // per-stream audio bitrate the preset should use
+    public int recommended_audio_kbps; // per-stream audio bitrate reserved in the size estimate
+    /**
+     * Per-stream bitrate the applier must hand the encoder, as a rung of
+     * AudioCodecOptions.bitrate_values (0 = stripped or stream-copied).
+     *
+     * Separate from recommended_audio_kbps because that one is what the
+     * output is expected to weigh after VBR measurement, which is routinely a
+     * few kbps under the target and is not a selectable rung.  The applier
+     * must use THIS field: deriving the bitrate independently is what let the
+     * estimate and the encode disagree by 32% at Low intent.
+     */
+    public int audio_encode_kbps;
     public int total_audio_budget_kbps; // total audio bitrate reserved across all output tracks
     public int audio_track_count;      // number of output audio tracks represented by the budget
     public bool preserve_all_audio_tracks_effective; // tier-aware effective keep-all state
@@ -407,6 +418,21 @@ namespace SmartOptimizerLogic {
         public bool   probed_first_estimated;
         public int    actual_source_track_count;
         public int    effective_track_count;
+        /**
+         * What the encoder is told to target (-b:a), per stream.
+         *
+         * Distinct from per_stream_kbps, which is what the output is expected
+         * to WEIGH.  They start equal and diverge once measurement lands: a
+         * VBR encoder handed 192k routinely spends 187, and reserving 192 for
+         * it would overstate the file.  Reserving the measurement while
+         * encoding at the target is correct; conflating the two is not, and
+         * anything that hands a bitrate to ffmpeg must use this field.
+         *
+         * Always a rung of AudioCodecOptions.bitrate_values (or 0 when audio
+         * is stripped or stream-copied), because that is all the UI can
+         * express — see snap_audio_kbps_down.
+         */
+        public int    encode_target_kbps;
         public int    per_stream_kbps;
         public bool   per_stream_estimated;
         public int    total_budget_kbps;
@@ -415,6 +441,10 @@ namespace SmartOptimizerLogic {
         public int    measured_kbps;          // effective value after the silence floor
         public int    measured_raw_kbps;      // raw encoder measurement
         public bool   measured_floored;       // true when the silence floor kicked in
+        /** Tier budget before the source cap; 0 when the cap did not bind. */
+        public int    uncapped_tier_kbps;
+        /** Source bitrate the cap was taken from; 0 when it did not bind. */
+        public int    cap_source_kbps;
     }
 
     /** Suggestion to downscale when bits-per-pixel is too low for quality. */
@@ -666,6 +696,106 @@ namespace SmartOptimizerLogic {
         }
     }
 
+    /**
+     * Snap a bitrate down onto the UI's bitrate ladder.
+     *
+     * The optimizer's budget is arithmetic and lands anywhere; the audio
+     * bitrate dropdown only offers fixed rungs.  Anything the optimizer
+     * reserves in its size estimate has to be a value the applier can
+     * actually select, or the estimate describes an encode that never runs.
+     * Rounds DOWN so snapping can never push the encode over a budget that
+     * was computed to fit; below the lowest rung it returns that rung, since
+     * there is nothing cheaper to pick.
+     */
+    public int snap_audio_kbps_down (int kbps) {
+        int[] rungs = AudioCodecOptions.bitrate_values ();
+        if (rungs.length == 0 || kbps <= 0)
+            return 0;
+
+        int chosen = rungs[0];
+        foreach (int rung in rungs) {
+            if (rung <= kbps)
+                chosen = rung;
+        }
+        return chosen;
+    }
+
+    /** Snap a bitrate up onto the ladder, clamped to the highest rung. */
+    public int snap_audio_kbps_up (int kbps) {
+        int[] rungs = AudioCodecOptions.bitrate_values ();
+        if (rungs.length == 0 || kbps <= 0)
+            return 0;
+
+        foreach (int rung in rungs) {
+            if (rung >= kbps)
+                return rung;
+        }
+        return rungs[rungs.length - 1];
+    }
+
+    /**
+     * Cap a tier's re-encode budget at what the source audio actually carries.
+     *
+     * The tier ladder assumes the budget is the binding constraint, which is
+     * true of video and much weaker for audio: bits spent above the source
+     * rate go to reproducing the FIRST encoder's output more exactly, not to
+     * recovering anything it discarded.  Measured on a 96 kbps AAC track
+     * (25 s, stereo, 48 kHz), transcoded to Opus and differenced against the
+     * decoded source:
+     *
+     *     Opus 128k   residual -53.0 dBFS    395 KB
+     *     Opus 192k   residual -55.4 dBFS    592 KB
+     *     Opus 256k   residual -57.0 dBFS    793 KB
+     *     Opus 320k   residual -58.1 dBFS    991 KB
+     *
+     * So the returns are real but steeply diminishing — 2.5x the bytes for
+     * 5 dB of waveform convergence, on a signal the AAC stage had already
+     * lowpassed to about 14 kHz (energy above it sits 38 dB under full band).
+     * Waveform residual also flatters high bitrates: Opus discards phase and
+     * fine waveform detail deliberately, so this metric understates how close
+     * 128k already is perceptually.
+     *
+     * Against that, the cost is not marginal.  On the clip above the XLARGE
+     * rung spent 963 KiB on audio inside a 2461 KiB ceiling — 39% of the
+     * file — and the video solver gave up its VMAF 97 target to fit around
+     * it, landing at 96.  Trading a measured 5 dB of audio waveform accuracy
+     * for a visible quality target is the wrong side of that bargain.
+     *
+     * The cap is the lowest rung at or above the source rate, not the source
+     * rate itself: lossy-to-lossy transcoding needs some headroom to avoid
+     * compounding generational loss, and the ladder is what the applier can
+     * select anyway.  So a 96 kbps source caps at 128, and a 256 kbps source
+     * caps at 256.  Lossless and high-bitrate sources sit above every rung
+     * the tier would have chosen, so the cap simply never binds.
+     *
+     * Only ever lowers the budget — a source below the tier does not entitle
+     * it to more.  Skipped when the source bitrate was guessed rather than
+     * probed (ffprobe reported no bit_rate), since capping on a guess can
+     * silently degrade audio the guess was wrong about.
+     *
+     * With multiple tracks the cap follows the LOUDEST demand — the highest
+     * source bitrate in the set — because one budget is applied to every
+     * output track, and sizing it to the quietest would under-serve the rest.
+     */
+    public int cap_audio_kbps_to_source (int tier_kbps, AudioSourceInfo[] sources) {
+        if (tier_kbps <= 0 || sources.length == 0)
+            return tier_kbps;
+
+        int highest_source_kbps = 0;
+        foreach (unowned AudioSourceInfo source in sources) {
+            // One estimated stream poisons the whole set: the cap is applied
+            // per-stream, so a guess anywhere can under-serve a real track.
+            if (source.bitrate_estimated || source.bitrate_kbps <= 0)
+                return tier_kbps;
+            highest_source_kbps = int.max (highest_source_kbps, source.bitrate_kbps);
+        }
+
+        if (highest_source_kbps <= 0)
+            return tier_kbps;
+
+        return int.min (tier_kbps, snap_audio_kbps_up (highest_source_kbps));
+    }
+
     public int default_audio_bitrate_kbps_for_codec (string codec_name) {
         switch (codec_name.down ()) {
             case "opus":
@@ -791,6 +921,7 @@ namespace SmartOptimizerLogic {
             plan.per_stream_kbps       = 0;
             plan.per_stream_estimated  = false;
             plan.effective_track_count = 0;
+            plan.encode_target_kbps    = 0;
         } else if (ctx.audio_bitrate_kbps_override > 0) {
             // Overrides are per-stream FFmpeg rates; multiply by track count
             // when preserving multiple tracks.
@@ -798,6 +929,10 @@ namespace SmartOptimizerLogic {
             plan.per_stream_estimated  = false;
             plan.effective_track_count = int.max (plan.effective_track_count, 1);
             plan.total_budget_kbps     = ctx.audio_bitrate_kbps_override * plan.effective_track_count;
+            // An explicit override is the caller's number, not a budget to
+            // negotiate — but it still has to be selectable in the dropdown.
+            plan.encode_target_kbps    = snap_audio_kbps_down (
+                ctx.audio_bitrate_kbps_override);
         }
 
         // Determine the actual audio budget:
@@ -827,10 +962,24 @@ namespace SmartOptimizerLogic {
                 plan.total_budget_kbps    = plan.preserve_all_effective
                     ? probed_total_audio_kbps
                     : plan.probed_first_kbps;
+                // Copying re-uses the source bitstream; there is no target.
+                plan.encode_target_kbps   = 0;
             } else {
-                plan.per_stream_kbps      = plan.tier_audio_kbps;
+                // Re-encoding. The tier says what we can afford; the source
+                // says what is worth spending. Take the lower.
+                int budget_kbps = cap_audio_kbps_to_source (
+                    plan.tier_audio_kbps, plan.selected_sources);
+                if (budget_kbps != plan.tier_audio_kbps) {
+                    plan.uncapped_tier_kbps = plan.tier_audio_kbps;
+                    foreach (unowned AudioSourceInfo source in plan.selected_sources) {
+                        plan.cap_source_kbps = int.max (
+                            plan.cap_source_kbps, source.bitrate_kbps);
+                    }
+                }
+                plan.encode_target_kbps   = budget_kbps;
+                plan.per_stream_kbps      = budget_kbps;
                 plan.per_stream_estimated = false;
-                plan.total_budget_kbps    = plan.tier_audio_kbps * plan.effective_track_count;
+                plan.total_budget_kbps    = budget_kbps * plan.effective_track_count;
             }
         }
 
@@ -2235,6 +2384,28 @@ namespace SmartOptimizerLogic {
      * degrees-of-freedom-adjusted variance so the 4-point base fit
      * doesn't report artificially tiny residuals.
      */
+    /**
+     * Whether a fitted residual carries any information.
+     *
+     * A quadratic has three coefficients, so three points determine it
+     * exactly and every residual is zero — not because the curve agrees with
+     * the data, but because it had no freedom to disagree.  Both RMSE
+     * helpers below floor their degrees of freedom at 1 to avoid dividing by
+     * zero, which turns that structural zero into a printable "±0.00".
+     *
+     * Reporting it alongside runs that probed more points inverts the
+     * meaning: a 3-point fit shows ±0.00 while a 5-point fit of the same
+     * content shows ±0.17, so the less-constrained model looks like the
+     * better one.  Callers should ask this before printing a residual.
+     *
+     * Mirrors the model_params choice in fit_rmse_log and vmaf_fit_rmse —
+     * keep the three in step.
+     */
+    public bool fit_residual_is_informative (int point_count, double qc) {
+        int model_params = (qc == 0.0) ? 2 : 3;
+        return point_count > model_params;
+    }
+
     public double fit_rmse_log (
         int[]    cal_crfs,
         double[] cal_sizes,
@@ -3081,6 +3252,25 @@ namespace SmartOptimizerLogic {
         public double estimated_size_kib;
         public double achieved_vmaf;
         public double ceiling_kib;
+        /**
+         * Modelled size at final_crf, preserved before verification overwrites
+         * estimated_size_kib with a measurement.  Kept so the report can show
+         * how far the model was off rather than only its corrected answer.
+         */
+        public double modelled_size_kib;
+        /**
+         * The measured size at final_crf came in above ceiling_kib.
+         *
+         * The clamp walks CRF upward using MODELLED sizes, then verification
+         * replaces that estimate with a real measurement — but the CRF is not
+         * re-solved against it.  QUALITY_CEILING_SAFETY_MARGIN absorbs a few
+         * percent of model error; beyond that the clamp can report staying
+         * under a ceiling the encode then exceeds.  Re-solving would not fix
+         * this in general: the verification size is itself extrapolated from
+         * sampled segments, so a further error sits downstream of anything a
+         * re-clamp could see.  The honest move is to say so.
+         */
+        public bool   verified_over_ceiling;
     }
 
     /**

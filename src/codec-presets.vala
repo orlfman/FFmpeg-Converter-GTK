@@ -34,15 +34,40 @@ public class CodecPresets : Object {
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Configure audio for a Smart Optimizer recommendation based on the
-     * shared encoder effort level (see SmartOptimizerLogic.EncodeEffort).
+     * Audio bitrate rung to fall back on when a recommendation carries no
+     * audio_encode_kbps.  Mirrors SmartOptimizerLogic.tier_audio_kbps across
+     * the shared effort axis.
+     *
+     * This is a floor under malformed input, not a second opinion: the
+     * optimizer's own budget always wins when it is present.  Deriving the
+     * bitrate here USED to be the primary path, and because the optimizer
+     * plans audio at a tier floored to MEDIUM while this switch read the
+     * un-floored effort, a Low-intent encode was estimated at 192 kbps and
+     * encoded at 128 — a 17% size overshoot in the report, none of it the
+     * video model's fault.
+     */
+    private static int fallback_audio_kbps_for_effort (EncodeEffort effort) {
+        switch (effort) {
+            case EncodeEffort.MINIMAL: return 64;
+            case EncodeEffort.LOW:     return 128;
+            case EncodeEffort.MEDIUM:  return 192;
+            case EncodeEffort.HIGH:    return 256;
+            case EncodeEffort.MAXIMUM: return 320;
+            default:                   return 128;
+        }
+    }
+
+    /**
+     * Configure audio for a Smart Optimizer recommendation.
      *
      * Uses the native audio codec for the container: Opus for WebM,
      * AAC for MP4. This ensures maximum compatibility — Opus is the
      * standard WebM audio codec, and AAC is the standard MP4 audio codec.
      *
-     * Bitrate labels are applied directly so presets remain stable even when
-     * codec-specific bitrate menus differ in length or ordering.
+     * The bitrate comes from rec.audio_encode_kbps — the number the optimizer
+     * reserved against in its size estimate, already snapped to a rung this
+     * dropdown offers.  Nothing here may recompute it: the estimate and the
+     * encode have to be the same number or the prediction is fiction.
      */
     private static void configure_smart_audio (AudioSettings audio,
                                                 OptimizationRecommendation rec,
@@ -50,7 +75,7 @@ public class CodecPresets : Object {
         // When the optimizer determined source audio can be stream-copied,
         // try to set Copy.  If Copy is not available in the dropdown
         // (e.g. speed change or normalization is active), fall through
-        // to the effort-based re-encode below.
+        // to the re-encode below.
         if (rec.stream_copy_audio) {
             var model = audio.codec_combo.get_model () as StringList;
             if (model != null) {
@@ -61,28 +86,30 @@ public class CodecPresets : Object {
                     }
                 }
             }
-            // Copy not available — fall through to effort-based re-encode
+            // Copy not available (speed change, normalization) — re-encode.
+            // The plan carries no encoder target in the copy case, but it does
+            // carry the source's own bitrate, and matching that is the same
+            // decision cap_audio_kbps_to_source would have made.  Falling back
+            // to the effort ladder here would re-inflate a 96 kbps track to
+            // 320 through the one path that skips the cap.
+            if (rec.recommended_audio_kbps > 0) {
+                configure_audio (audio,
+                    (container == "webm") ? AudioCodecName.OPUS : AudioCodecName.AAC,
+                    AudioCodecOptions.bitrate_label (
+                        SmartOptimizerLogic.snap_audio_kbps_up (
+                            rec.recommended_audio_kbps)));
+                return;
+            }
         }
 
         bool is_webm = (container == "webm");
         string codec = is_webm ? AudioCodecName.OPUS : AudioCodecName.AAC;
-        switch (rec.effort) {
-            case EncodeEffort.MINIMAL:
-                configure_audio (audio, codec, "64 kbps");
-                break;
-            case EncodeEffort.LOW:
-                configure_audio (audio, codec, "128 kbps");
-                break;
-            case EncodeEffort.MEDIUM:
-                configure_audio (audio, codec, "192 kbps");
-                break;
-            case EncodeEffort.HIGH:
-                configure_audio (audio, codec, "256 kbps");
-                break;
-            case EncodeEffort.MAXIMUM:
-                configure_audio (audio, codec, "320 kbps");
-                break;
-        }
+
+        int kbps = (rec.audio_encode_kbps > 0)
+            ? rec.audio_encode_kbps
+            : fallback_audio_kbps_for_effort (rec.effort);
+
+        configure_audio (audio, codec, AudioCodecOptions.bitrate_label (kbps));
     }
 
     // ═════════════════════════════════════════════════════════════════════════

@@ -681,6 +681,7 @@ public class SmartOptimizer : GLib.Object {
                 confidence            = conf.confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
+                audio_encode_kbps     = plan.encode_target_kbps,
                 total_audio_budget_kbps = plan.total_budget_kbps,
                 audio_track_count     = plan.effective_track_count,
                 preserve_all_audio_tracks_effective = plan.preserve_all_effective,
@@ -1111,6 +1112,10 @@ public class SmartOptimizer : GLib.Object {
             var ceiling = SmartOptimizerLogic.apply_quality_size_ceiling (
                 capped_crf, size_degenerate ? 0.0 : video_ceiling_kib,
                 sa, sb, sc, m0.qa, m0.qb, m0.qc, crf_lo, crf_hi);
+            // Capture the modelled figure before verification overwrites it —
+            // the gap between the two is what tells the user whether the clamp
+            // was solved against a size that turned out to be real.
+            ceiling.modelled_size_kib = ceiling.estimated_size_kib;
 
             int final_crf = ceiling.final_crf;
             double achieved_vmaf = ceiling.achieved_vmaf;
@@ -1173,6 +1178,20 @@ public class SmartOptimizer : GLib.Object {
                     verification.measured_vmaf - verification.predicted_vmaf;
                 // Report what was measured, not what was modelled.
                 achieved_vmaf = verification.measured_vmaf;
+
+                // The clamp picked this CRF by testing the MODEL against the
+                // budget; the line above just replaced that model figure with
+                // a measurement. If the measurement is over budget, the clamp
+                // did not achieve what it is about to claim, and saying so
+                // beats printing "stayed under" over numbers that disagree.
+                if (ceiling.ceiling_kib > 0.0
+                        && ceiling.estimated_size_kib > ceiling.ceiling_kib) {
+                    ceiling.verified_over_ceiling = true;
+                    warning ("Smart Optimizer: verified size %.0f KiB at CRF %d "
+                        + "exceeds the %.0f KiB video budget (model said %.0f KiB)",
+                        ceiling.estimated_size_kib, final_crf,
+                        ceiling.ceiling_kib, ceiling.modelled_size_kib);
+                }
             }
 
             // ── 10. Confidence ─────────────────────────────────────────
@@ -1220,6 +1239,7 @@ public class SmartOptimizer : GLib.Object {
                 // Size Mode's reporting field; unused when quality is pinned.
                 size_tier             = nominal_tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
+                audio_encode_kbps     = plan.encode_target_kbps,
                 total_audio_budget_kbps = plan.total_budget_kbps,
                 audio_track_count     = plan.effective_track_count,
                 preserve_all_audio_tracks_effective = plan.preserve_all_effective,
@@ -1291,7 +1311,7 @@ public class SmartOptimizer : GLib.Object {
                 || ctx.strip_audio
                 || ctx.audio_bitrate_kbps_override > 0
                 || plan.effective_track_count < 1
-                || plan.per_stream_kbps <= 0
+                || plan.encode_target_kbps <= 0
                 || plan.probed_first_codec.length == 0) {
             return;
         }
@@ -1305,17 +1325,22 @@ public class SmartOptimizer : GLib.Object {
             ? encode_duration
             : sample_segment_duration;
 
+        // Measure at the rate the encode will use.  The measurement refines
+        // what the output will WEIGH; it must never move the encoder target,
+        // which has to stay on a rung the applier can select.
+        int target_kbps = plan.encode_target_kbps;
+
         int measured_kbps;
         try {
             cancellable_check (cancellable);
             measured_kbps = yield measure_audio_bitrate (
                 input_file, resolved_container, measure_positions,
-                measure_duration, plan.per_stream_kbps, cancellable, temp_run_dir);
+                measure_duration, target_kbps, cancellable, temp_run_dir);
         } catch (IOError.CANCELLED e) {
             throw e;
         } catch (Error e) {
             warning ("Smart Optimizer: audio measurement failed (%s) — keeping "
-                + "the %d kbps budget", e.message, plan.per_stream_kbps);
+                + "the %d kbps budget", e.message, target_kbps);
             return;
         }
         if (measured_kbps <= 0)
@@ -1325,20 +1350,20 @@ public class SmartOptimizer : GLib.Object {
         bool floored = false;
         if (!full_track) {
             measured_kbps = SmartOptimizerLogic.floor_measured_audio_kbps (
-                measured_kbps, plan.per_stream_kbps);
+                measured_kbps, target_kbps);
             floored = (measured_kbps != raw_kbps);
         }
 
         // A measurement far above the nominal rate means the probe is wrong,
         // not the assumption.
-        if (measured_kbps > plan.per_stream_kbps * 2) {
+        if (measured_kbps > target_kbps * 2) {
             warning ("Smart Optimizer: measured audio %d kbps exceeds twice the "
-                + "%d kbps budget — ignoring", measured_kbps, plan.per_stream_kbps);
+                + "%d kbps budget — ignoring", measured_kbps, target_kbps);
             return;
         }
 
         warning ("Smart Optimizer: audio measured at %d kbps (%s), replacing the "
-            + "%d kbps budget", measured_kbps,
+            + "%d kbps reserve", measured_kbps,
             full_track ? "whole track" : "sampled", plan.per_stream_kbps);
 
         plan.audio_measured    = true;
@@ -1466,7 +1491,14 @@ public class SmartOptimizer : GLib.Object {
             n.append ("  %d point(s) reused from a previous run\n".printf (
                 cached_points));
         }
-        n.append ("  Fit residual: ±%.2f VMAF\n".printf (model.fit_rmse));
+        if (SmartOptimizerLogic.fit_residual_is_informative (
+                model.cal_crfs.length, model.qc)) {
+            n.append ("  Fit residual: ±%.2f VMAF\n".printf (model.fit_rmse));
+        } else {
+            n.append (("  Fit residual: n/a — %d points define the curve "
+                + "exactly, so there is no residual to measure\n")
+                .printf (model.cal_crfs.length));
+        }
 
         n.append ("\n── Decision ──\n");
         n.append ("  Solved CRF %d for VMAF %.1f\n".printf (
@@ -1477,12 +1509,35 @@ public class SmartOptimizer : GLib.Object {
                 "VMAF is unreliable on this content, so a CRF ceiling applies"));
         }
         if (ceiling.clamped) {
-            n.append (("  Raised to CRF %d to stay under the %.0f MiB size ceiling "
-                 + "(%.0f%% of source)\n").printf (
+            // %.1f, not %.0f: this line explains why the requested quality was
+            // not delivered, and at %.0f a 2461 KiB ceiling printed as "2 MiB"
+            // directly above "Estimated size: 2.3 MiB" — the report appeared
+            // to contradict itself while the arithmetic underneath was right.
+            //
+            // "to stay under" is only claimable when the measurement agrees;
+            // otherwise this line asserts an outcome the estimate contradicts.
+            n.append ((ceiling.verified_over_ceiling
+                    ? "  Raised to CRF %d for the %.1f MiB size ceiling "
+                      + "(%.0f%% of source)\n"
+                    : "  Raised to CRF %d to stay under the %.1f MiB size ceiling "
+                      + "(%.0f%% of source)\n").printf (
                     ceiling.final_crf, ceiling_kib / 1024.0,
                     SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER * 100.0));
             n.append ("  → achieving VMAF %.1f rather than the %.1f requested\n"
                 .printf (achieved_vmaf, target.target_vmaf));
+        }
+        // Reported whether or not the clamp fired: an unclamped solve that
+        // verifies over budget is the same failure without the false claim.
+        if (ceiling.verified_over_ceiling && ceiling.ceiling_kib > 0.0) {
+            n.append (("  ⚠ Verified %.0f KiB of video against a %.0f KiB budget "
+                 + "(%+.1f%%) — the model predicted %.0f KiB\n").printf (
+                    ceiling.estimated_size_kib, ceiling.ceiling_kib,
+                    (ceiling.estimated_size_kib / ceiling.ceiling_kib - 1.0) * 100.0,
+                    ceiling.modelled_size_kib));
+            n.append (("    CRF is solved against the model, so the %.0f%%-of-source "
+                 + "ceiling is a target here, not a guarantee. The estimate below "
+                 + "reflects the measurement.\n").printf (
+                    SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER * 100.0));
         }
         // preset_label already reads "preset 6" / "cpu-used 2" / "slow"
         // depending on codec, so it must not be prefixed again.
@@ -1510,12 +1565,42 @@ public class SmartOptimizer : GLib.Object {
         n.append ("  Sampled %.0f%% of the encode window (%d × %.1fs segments%s)\n"
             .printf (coverage * 100.0, segment_count, tw.sample_segment_duration,
                      positions_trimmed ? ", reduced to fit the reference budget" : ""));
-        n.append ("  Audio: %d kbps/stream × %d\n".printf (
-            plan.per_stream_kbps, plan.effective_track_count));
+        if (plan.use_stream_copy) {
+            n.append ("  Audio: stream copy, %d kbps/stream × %d\n".printf (
+                plan.per_stream_kbps, plan.effective_track_count));
+        } else {
+            n.append ("  Audio: encode %d kbps/stream × %d".printf (
+                plan.encode_target_kbps, plan.effective_track_count));
+            if (plan.per_stream_kbps > 0
+                    && plan.per_stream_kbps != plan.encode_target_kbps) {
+                n.append (", reserving %d kbps".printf (plan.per_stream_kbps));
+            }
+            n.append ("\n");
+            append_audio_cap_note (n, plan);
+        }
         n.append ("  Single-pass CRF — two-pass targets a byte count, "
             + "which quality mode does not have.\n");
 
         return n.str;
+    }
+
+    /**
+     * Report the source-bitrate cap when it lowered the tier's audio budget.
+     *
+     * Worth a line because it is the one place the optimizer spends fewer
+     * bits than the tier allows, and a user comparing two intents will
+     * otherwise see the audio rate refuse to rise with no explanation.
+     */
+    private static void append_audio_cap_note (
+        StringBuilder n, SmartOptimizerLogic.AudioPlan plan
+    ) {
+        if (plan.uncapped_tier_kbps <= 0 || plan.cap_source_kbps <= 0)
+            return;
+
+        n.append (("  Capped from the %d kbps tier budget: source audio is "
+            + "%d kbps, so bits above that refine the previous encoder's "
+            + "output rather than recover anything.\n")
+            .printf (plan.uncapped_tier_kbps, plan.cap_source_kbps));
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1546,23 +1631,28 @@ public class SmartOptimizer : GLib.Object {
                 || ctx.strip_audio
                 || plan.effective_track_count != 1
                 || ctx.audio_bitrate_kbps_override > 0
-                || plan.per_stream_kbps <= 0
+                || plan.encode_target_kbps <= 0
                 || plan.probed_first_codec.length == 0) {
             return;
         }
         try {
             cancellable_check (cancellable);
+            // Measure at the rate the encode will actually use, not the tier
+            // rung it started from — the source cap may have lowered it, and
+            // measuring a rate we will not encode at re-introduces exactly
+            // the estimate/encode split this measurement exists to close.
+            int target_kbps = plan.encode_target_kbps;
             int measured_audio_kbps = yield measure_audio_bitrate (
                 input_file, resolved_container, positions,
-                sample_segment_duration, plan.tier_audio_kbps, cancellable, temp_run_dir);
+                sample_segment_duration, target_kbps, cancellable, temp_run_dir);
             if (measured_audio_kbps > 0) {
                 // Silence guard: VBR audio collapses near-silent sampled
                 // segments to a few kbps, but a full-length track rarely
                 // stays that low.  Floor the measurement at a fraction of
-                // the tier budget instead of under-reserving audio.
+                // the encode target instead of under-reserving audio.
                 int raw_measured_kbps = measured_audio_kbps;
                 measured_audio_kbps = SmartOptimizerLogic.floor_measured_audio_kbps (
-                    measured_audio_kbps, plan.tier_audio_kbps);
+                    measured_audio_kbps, target_kbps);
                 if (measured_audio_kbps != raw_measured_kbps) {
                     warning ("Smart Optimizer: measured audio %d kbps looks like sampled "
                         + "silence — floored to %d kbps",
@@ -1570,9 +1660,9 @@ public class SmartOptimizer : GLib.Object {
                 }
 
                 // Sanity check: measured bitrate should not exceed 2× the
-                // tier budget (encoder overhead, container framing).  If
+                // encode target (encoder overhead, container framing).  If
                 // it does, the measurement is suspect.
-                if (measured_audio_kbps <= plan.tier_audio_kbps * 2) {
+                if (measured_audio_kbps <= target_kbps * 2) {
                     double new_audio_kib = SmartOptimizerLogic.compute_reserved_audio_kib (
                         plan.selected_sources,
                         false,
@@ -1596,8 +1686,8 @@ public class SmartOptimizer : GLib.Object {
                     }
                 } else {
                     warning ("Smart Optimizer: measured audio %d kbps exceeds "
-                        + "2× tier budget %d kbps — ignoring measurement",
-                        measured_audio_kbps, plan.tier_audio_kbps);
+                        + "2× encode target %d kbps — ignoring measurement",
+                        measured_audio_kbps, target_kbps);
                 }
             }
         } catch (IOError.CANCELLED e) {
@@ -2211,14 +2301,17 @@ public class SmartOptimizer : GLib.Object {
 
         // --- Tier ---
         notes.append ("── Strategy: %s ──\n".printf (tier.to_label ()));
-        notes.append ("  Audio budget: %d kbps/stream".printf (plan.per_stream_kbps));
+        notes.append ("  Audio budget: %d kbps/stream".printf (
+            plan.use_stream_copy ? plan.per_stream_kbps : plan.encode_target_kbps));
         if (plan.effective_track_count > 1) {
             notes.append (" (%d tracks, %d kbps total)".printf (
                 plan.effective_track_count, plan.total_budget_kbps));
         }
         notes.append ("%s\n".printf (
             plan.use_stream_copy ? " (stream copy)" :
-            plan.audio_measured ? " (measured)" : ""));
+            plan.audio_measured
+                ? " (reserving %d kbps measured)".printf (plan.per_stream_kbps)
+                : ""));
 
         // --- Content ---
         notes.append ("\n── Content ──\n");
@@ -2290,13 +2383,15 @@ public class SmartOptimizer : GLib.Object {
                 }
             } else if (plan.audio_measured) {
                 if (plan.measured_floored) {
-                    notes.append ("  Audio: %d kbps (measured %d kbps — sampled segments look near-silent, floored; tier budget %d kbps) → %d KiB reserved\n"
-                        .printf (plan.measured_kbps, plan.measured_raw_kbps,
-                                 plan.tier_audio_kbps, (int) budget.audio_kib));
+                    notes.append ("  Audio: encode %d kbps, reserving %d kbps (measured %d kbps — sampled segments look near-silent, floored) → %d KiB\n"
+                        .printf (plan.encode_target_kbps, plan.measured_kbps,
+                                 plan.measured_raw_kbps, (int) budget.audio_kib));
                 } else {
-                    notes.append ("  Audio: %d kbps (measured, tier budget %d kbps) → %d KiB reserved\n"
-                        .printf (plan.measured_kbps, plan.tier_audio_kbps, (int) budget.audio_kib));
+                    notes.append ("  Audio: encode %d kbps, reserving %d kbps (measured) → %d KiB\n"
+                        .printf (plan.encode_target_kbps, plan.measured_kbps,
+                                 (int) budget.audio_kib));
                 }
+                append_audio_cap_note (notes, plan);
             } else {
                 notes.append ("  Audio: ~%d kbps/stream".printf (plan.per_stream_kbps));
                 if (plan.per_stream_estimated)
@@ -2307,6 +2402,7 @@ public class SmartOptimizer : GLib.Object {
                         plan.effective_track_count, plan.total_budget_kbps));
                 }
                 notes.append (" → %d KiB reserved\n".printf ((int) budget.audio_kib));
+                append_audio_cap_note (notes, plan);
             }
         }
 
@@ -2423,11 +2519,18 @@ public class SmartOptimizer : GLib.Object {
         }
         notes.append ("  Model: ln(size) = %.4f + %.4f·CRF + %.6f·CRF²\n"
             .printf (model.qa, model.qb, model.qc));
-        notes.append ("  Fit residual: ±%.1f%% RMSE%s\n"
-            .printf (conf.fit_rmse * 100.0,
-                     conf.fit_quality_factor < 1.0
-                         ? " (confidence ×%.2f)".printf (conf.fit_quality_factor)
-                         : ""));
+        if (SmartOptimizerLogic.fit_residual_is_informative (
+                model.cal_crfs.length, model.qc)) {
+            notes.append ("  Fit residual: ±%.1f%% RMSE%s\n"
+                .printf (conf.fit_rmse * 100.0,
+                         conf.fit_quality_factor < 1.0
+                             ? " (confidence ×%.2f)".printf (conf.fit_quality_factor)
+                             : ""));
+        } else {
+            notes.append (("  Fit residual: n/a — %d points define the curve "
+                + "exactly, so there is no residual to measure\n")
+                .printf (model.cal_crfs.length));
+        }
         if (Math.fabs (extrapolation_weight - 1.0) > 0.005) {
             notes.append ("  Complexity weight: ×%.2f (source bitrate, sampled regions vs full window)\n"
                 .printf (extrapolation_weight));
@@ -2553,7 +2656,20 @@ public class SmartOptimizer : GLib.Object {
             rec.audio_track_count == 0
                 ? "none"
                 : (rec.preserve_all_audio_tracks_effective ? "all preserved" : "first track only")));
-        sb.append ("Audio budget:   %d kbps/stream".printf (rec.recommended_audio_kbps));
+        if (rec.stream_copy_audio) {
+            sb.append ("Audio budget:   %d kbps/stream (copied)".printf (
+                rec.recommended_audio_kbps));
+        } else {
+            sb.append ("Audio budget:   %d kbps/stream".printf (rec.audio_encode_kbps));
+            // The reserve is what the VBR encoder is expected to actually
+            // spend.  Showing only one number is how a 192 kbps reserve and a
+            // 128 kbps encode went unnoticed.
+            if (rec.recommended_audio_kbps > 0
+                    && rec.recommended_audio_kbps != rec.audio_encode_kbps) {
+                sb.append (" (reserving %d kbps measured)".printf (
+                    rec.recommended_audio_kbps));
+            }
+        }
         if (rec.audio_track_count > 1) {
             sb.append (" (%d kbps total)".printf (rec.total_audio_budget_kbps));
         }

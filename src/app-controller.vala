@@ -736,7 +736,14 @@ public class AppController : Object {
         if (smart_opt_cancel != null) {
             smart_opt_cancel.cancel ();
         }
-        smart_opt_cancel = new Cancellable ();
+        // Hold this run's token locally. smart_opt_cancel is shared state that
+        // the NEXT invocation replaces, so reading it back after a yield would
+        // hand this run the successor's fresh, uncancelled token — the check
+        // would pass and a superseded run would keep going. The local
+        // reference also keeps the object alive after dispose() nulls the
+        // property, so an explicit cancel still registers here.
+        var my_cancel = new Cancellable ();
+        smart_opt_cancel = my_cancel;
         int my_generation = ++smart_opt_generation;
 
         // Look up the codec tab once — used for target size, audio probe,
@@ -772,8 +779,14 @@ public class AppController : Object {
         // Effective duration — if seek/time are set, the encode is shorter
         if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {
             double full_dur = yield FfprobeUtils.probe_duration_async (
-                input_file, smart_opt_cancel);
-            if (smart_opt_cancel.is_cancelled ()) {
+                input_file, my_cancel);
+            // Both halves are load-bearing after a resume: the local token
+            // catches an explicit cancel of THIS run, and the generation
+            // catches supersession by a newer one. Testing only the token
+            // would miss the case where a successor cancelled us and then
+            // installed its own; testing the shared property would read that
+            // successor's token and find it healthy.
+            if (my_cancel.is_cancelled () || my_generation != smart_opt_generation) {
                 if (my_generation == smart_opt_generation) {
                     status_area.stop_progress ();
                     smart_optimizer_running (false);
@@ -874,9 +887,19 @@ public class AppController : Object {
         try {
             var rec = quality_mode
                 ? yield smart_optimizer.optimize_for_quality (
-                    input_file, quality_intent, preferred_codec, ctx, smart_opt_cancel)
+                    input_file, quality_intent, preferred_codec, ctx, my_cancel)
                 : yield smart_optimizer.optimize_for_target_size (
-                    input_file, target_mb, preferred_codec, ctx, smart_opt_cancel);
+                    input_file, target_mb, preferred_codec, ctx, my_cancel);
+
+            // A superseded run must not act on its result. Everything below
+            // mutates shared state the live run now owns — it applies settings
+            // to the codec tab, takes over the status area, and can fire
+            // auto-convert, which would start an encode from a recommendation
+            // the user has already replaced. Being cancelled normally raises
+            // out of the yield above into the guarded catch; this covers
+            // supersession that lands between completion and resumption.
+            if (my_generation != smart_opt_generation)
+                return;
 
             status_area.stop_progress ();
 

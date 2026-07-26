@@ -73,12 +73,31 @@ namespace AudioCodecOptions {
         };
     }
 
-    public string[] bitrates () {
-        return {
-            "64 kbps", "128 kbps", "192 kbps", "256 kbps",
-            "320 kbps", "384 kbps", "448 kbps", "512 kbps"
-        };
+    /**
+     * The audio bitrates the UI can express, as numbers.
+     *
+     * The Smart Optimizer snaps its computed audio budget onto these rungs
+     * (see SmartOptimizerLogic.snap_audio_kbps_down), so the value it reserves
+     * in the size estimate is the value the encoder is actually given.  Keep
+     * this ascending — the snapping assumes it.
+     */
+    public int[] bitrate_values () {
+        return { 64, 128, 192, 256, 320, 384, 448, 512 };
     }
+
+    public string[] bitrates () {
+        int[] values = bitrate_values ();
+        string[] labels = new string[values.length];
+        for (int i = 0; i < values.length; i++)
+            labels[i] = bitrate_label (values[i]);
+        return labels;
+    }
+
+    /** The dropdown label for a bitrate rung. */
+    public string bitrate_label (int kbps) {
+        return "%d kbps".printf (kbps);
+    }
+
     public const int BITRATE_DEFAULT = 1;  // 128 kbps
 }
 
