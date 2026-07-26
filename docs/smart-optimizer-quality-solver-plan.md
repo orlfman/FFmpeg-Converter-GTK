@@ -240,10 +240,20 @@ list makes unexpressible.
 Size Mode presets, not here.
 
 **UI:** pinning quality disables the target-size controls and vice versa; the
-result card always shows both numbers with the pinned one marked. Keep the static
-tables as (a) an instant zero-analysis path and (b) the fallback when analysis
-fails or is cancelled — otherwise "Anime" on a 2-hour file now costs minutes
-where it used to be instant.
+result card always shows both numbers with the pinned one marked.
+
+✅ **The static preset tables are gone.** They were initially kept as an instant
+zero-analysis path, on the argument that Quality Mode costs minutes on a long
+file where a table was instant. That was overridden: having two controls with
+"Quality" in the name — a static `Quality Profile` dropdown directly above the
+new `Quality Target` — was actively misleading, and produced exactly the
+confusion you would predict (a user set the profile to Medium and got a 4 MB
+size-targeted run, because the profile has nothing to do with the optimizer).
+
+`apply_svt_av1`, `apply_x265`, `apply_x264` and `apply_vp9` are removed along
+with the dropdown, taking `codec-presets.vala` from 1152 lines to 610. Users
+wanting fixed settings configure the encoder directly, which is what the
+mission statement said from the start.
 
 ---
 

@@ -276,7 +276,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // axes are mutually exclusive — whichever the user pins becomes the
     // constraint and the other becomes the prediction.
     private const string[] QUALITY_INTENT_LABELS = {
-        "Off — target a size instead",
+        "Off — use Target Size below",
         "Low — acceptable (VMAF 88)",
         "Medium — good (VMAF 92)",
         "High — visually near-transparent (VMAF 95)",
@@ -540,7 +540,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         // Smart Optimizer — ActionRow with button suffix for content-aware analysis
         var smart_row = new Adw.ActionRow ();
         smart_row.set_title ("Smart Optimizer");
-        smart_row.set_subtitle ("Analyze the video and auto-configure CRF and speed for your target size");
+        smart_row.set_subtitle ("Measure this video and solve for the CRF that hits your target");
         smart_row.add_prefix (make_smart_icon ());
         var smart_btn = new Button.with_label ("Optimize");
         smart_btn.add_css_class ("suggested-action");
@@ -560,7 +560,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         quality_intent_row = new Adw.ComboRow ();
         quality_intent_row.set_title ("Quality Target");
         quality_intent_row.set_subtitle (
-            "Measure this video and solve for the CRF that hits the target");
+            "Pin a quality level and let size follow, or leave Off to pin a size instead");
         quality_intent_row.add_prefix (new Image.from_icon_name ("emblem-ok-symbolic"));
         quality_intent_row.set_model (new StringList (QUALITY_INTENT_LABELS));
         quality_intent_row.set_selected (0);

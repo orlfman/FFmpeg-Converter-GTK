@@ -5,7 +5,6 @@ using GLib;
 public class Vp9Tab : BaseCodecTab {
 
     // ── Preset ───────────────────────────────────────────────────────────────
-    public DropDown  quality_profile_combo    { get; private set; }
 
     // ── Encoding ─────────────────────────────────────────────────────────────
     public SpinButton speed_spin       { get; private set; }
@@ -90,20 +89,8 @@ public class Vp9Tab : BaseCodecTab {
 
     private void build_quality_profile_group () {
         var group = new Adw.PreferencesGroup ();
-        group.set_title ("Quality Profile");
-        group.set_description ("One-click configurations — settings can be adjusted individually after");
-
-        var row = new Adw.ActionRow ();
-        row.set_title ("Quality Profile");
-        row.set_subtitle ("Configures all settings below — you can still adjust individually");
-        quality_profile_combo = new DropDown (new StringList ({
-            "Custom", "Streaming", "Anime", "Low", "Medium", "High", "Very High",
-            "Imageboards"
-        }), null);
-        quality_profile_combo.set_valign (Align.CENTER);
-        quality_profile_combo.set_selected (0);
-        row.add_suffix (quality_profile_combo);
-        group.add (row);
+        group.set_title ("Smart Optimizer");
+        group.set_description ("Measure this video and configure the encoder for it — settings can still be adjusted individually after");
 
         // Smart Optimizer, Auto-Convert, and No Audio rows (shared via BaseCodecTab)
         add_smart_optimizer_rows (group);
@@ -506,7 +493,6 @@ public class Vp9Tab : BaseCodecTab {
         var reset_btn = new Button.with_label ("Reset to Defaults");
         reset_btn.add_css_class ("destructive-action");
         reset_btn.clicked.connect (() => {
-            quality_profile_combo.set_selected (0);   // Custom
             reset_defaults ();
         });
         reset_box.append (reset_btn);
@@ -519,13 +505,6 @@ public class Vp9Tab : BaseCodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void connect_signals () {
-        // Preset → apply preset configuration
-        quality_profile_combo.notify["selected"].connect (() => {
-            var item = quality_profile_combo.selected_item as StringObject;
-            if (item == null) return;
-            CodecPresets.apply_vp9 (this, item.string);
-        });
-
         // Rate control mode → show/hide rows
         rc_mode_combo.notify["selected"].connect (update_rc_visibility);
         update_rc_visibility ();
