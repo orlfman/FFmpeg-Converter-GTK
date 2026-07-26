@@ -71,6 +71,10 @@ public class AppSettings : Object {
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
     private bool   _generate_collage_thumbnail = false;
+    // Off by default: the XDG handler is whatever the user already chose for
+    // video, so overriding it silently would be presumptuous. ffplay is the
+    // opt-in for people who want the raw decode rather than their player's.
+    private bool   _play_with_ffplay = false;
     private bool   _verify_unknown_audio_copy_preflight = true;
     private int    _smart_optimizer_target_mb = 4;
     // On by default: the optimizer exists to configure an encode, so running
@@ -353,6 +357,27 @@ public class AppSettings : Object {
         }
     }
 
+    public bool play_with_ffplay {
+        get {
+            bool play_with_ffplay;
+            mutex.lock ();
+            try {
+                play_with_ffplay = _play_with_ffplay;
+            } finally {
+                mutex.unlock ();
+            }
+            return play_with_ffplay;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _play_with_ffplay = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public int smart_optimizer_target_mb {
         get {
             int target_mb;
@@ -492,6 +517,8 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "generate_collage_thumbnail", false);
         bool verify_unknown_audio_copy_preflight = read_bool (
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
+        bool play_with_ffplay = read_bool (
+            kf, GROUP_GENERAL, "play_with_ffplay", false);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
             read_int (kf, GROUP_SMART, "target_mb", 4));
         // Fallback applies only when the key is absent — a fresh install or a
@@ -513,6 +540,7 @@ public class AppSettings : Object {
             _output_custom_name = output_custom_name;
             _overwrite_enabled = overwrite_enabled;
             _generate_collage_thumbnail = generate_collage_thumbnail;
+            _play_with_ffplay = play_with_ffplay;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
@@ -549,6 +577,7 @@ public class AppSettings : Object {
         string output_custom_name;
         bool overwrite_enabled;
         bool generate_collage_thumbnail;
+        bool play_with_ffplay;
         bool verify_unknown_audio_copy_preflight;
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
@@ -566,6 +595,7 @@ public class AppSettings : Object {
             output_custom_name = _output_custom_name;
             overwrite_enabled = _overwrite_enabled;
             generate_collage_thumbnail = _generate_collage_thumbnail;
+            play_with_ffplay = _play_with_ffplay;
             verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
@@ -593,6 +623,7 @@ public class AppSettings : Object {
             "verify_unknown_audio_copy_preflight",
             verify_unknown_audio_copy_preflight
         );
+        kf.set_boolean (GROUP_GENERAL, "play_with_ffplay", play_with_ffplay);
         kf.set_integer (GROUP_SMART, "target_mb", smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
@@ -626,6 +657,7 @@ public class AppSettings : Object {
             _output_custom_name = "";
             _overwrite_enabled  = false;
             _generate_collage_thumbnail = false;
+            _play_with_ffplay = false;
             _verify_unknown_audio_copy_preflight = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = true;

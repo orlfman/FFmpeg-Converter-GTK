@@ -59,6 +59,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.EntryRow custom_name_entry;
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow generate_collage_thumbnail_switch;
+    private Adw.SwitchRow play_with_ffplay_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
@@ -272,6 +273,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
         );
         generated_outputs_group.add (generate_collage_thumbnail_switch);
         page.add (generated_outputs_group);
+
+        var playback_group = new Adw.PreferencesGroup ();
+        playback_group.set_title ("Playback");
+        playback_group.set_description (
+            "Which player opens a finished video from the menu."
+        );
+
+        play_with_ffplay_switch = new Adw.SwitchRow ();
+        play_with_ffplay_switch.set_title ("Play with ffplay");
+        play_with_ffplay_switch.set_subtitle (
+            "Off uses your desktop's default video player. On opens finished "
+            + "videos in ffplay instead, which decodes with the same FFmpeg "
+            + "build that produced them"
+        );
+        playback_group.add (play_with_ffplay_switch);
+        page.add (playback_group);
 
         var container_group = new Adw.PreferencesGroup ();
         container_group.set_title ("Default Container");
@@ -1418,6 +1435,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
         overwrite_switch.set_active (s.overwrite_enabled);
         generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
+        play_with_ffplay_switch.set_active (s.play_with_ffplay);
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
         );
@@ -1475,6 +1493,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.output_custom_name = custom_name_entry.get_text ().strip ();
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
+        s.play_with_ffplay = play_with_ffplay_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();
 

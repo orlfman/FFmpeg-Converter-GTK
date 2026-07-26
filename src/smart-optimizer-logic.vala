@@ -2890,47 +2890,18 @@ namespace SmartOptimizerLogic {
     // error, so three is genuinely enough — where the size solve needs 4-6.
     public const int VMAF_MIN_CALIBRATION_POINTS = 3;
 
-    // Quality Mode's runaway guard: never exceed this multiple of the source.
-    // A post-solve clamp, NOT a solve constraint — letting it participate in
-    // the solve would make it a competing objective fighting the quality axis.
-    //
-    // Set at 1.0: a quality re-encode that comes out LARGER than its source is
-    // almost never what was wanted. The source already encodes that content at
-    // some quality, so exceeding it means spending bits to preserve what the
-    // source's own encoder judged not worth keeping — including its artifacts.
-    // Unlike a perceptual threshold this needs no calibration; it is an
-    // economic statement, not a claim about how anything looks.
-    //
-    // Started at 2.0 on the assumption that only pathological cases would
-    // reach it. They are not the only ones: Ultra on a 1080p anime source
-    // solved CRF 14 and produced 1027 MiB from an 881 MiB input — 1.17x, well
-    // under 2.0, and pure waste (the same source scores 95.97 at CRF 18). The
-    // cause is the VMAF model under-scoring animation (see vmaf_model_path in
-    // smart-optimizer.vala), but the guard should not depend on diagnosing
-    // that.
-    //
-    // Known trade-off: transcoding to a LESS efficient codec (an AV1 source
-    // re-encoded to x264) legitimately needs more bits for equal quality, and
-    // will now be clamped. That degrades honestly rather than silently — the
-    // clamp raises CRF and reports the quality actually achieved, so the user
-    // is told the target was unreachable within the source's size rather than
-    // handed a surprise.
-    public const double QUALITY_MODE_MAX_SOURCE_MULTIPLIER = 1.0;
-
     /**
-     * Headroom shaved off the video ceiling to absorb model error.
+     * How far the solved CRF may clear its VMAF ceiling before the solver
+     * steps down to the next CRF to stay under it.
      *
-     * The clamp picks a CRF from the FITTED size curve, but the verification
-     * probe then replaces that estimate with a real measurement, and the real
-     * encode routinely lands a little above the model. Without headroom the
-     * finished file creeps past the ceiling — measured at 883.8 MiB against an
-     * 881.7 MiB source, a violation of the one thing this guard exists to
-     * prevent.
-     *
-     * Size Mode shaves the same 3% off its video bitrate for strict targets,
-     * for exactly this reason (decide_two_pass).
+     * Set at the size of the model's own uncertainty, not smaller: the fit
+     * residual runs ±0.15 VMAF and verification deltas measured +0.09, −0.01,
+     * +0.14 and +0.09 across four intents. Insisting on precision finer than
+     * that would be enforcing a distinction the model cannot resolve, while
+     * costing a whole CRF step — roughly a full VMAF point — to do it.
      */
-    public const double QUALITY_CEILING_SAFETY_MARGIN = 0.97;
+    public const double QUALITY_CEILING_TOLERANCE_VMAF = 0.25;
+
 
     /**
      * What the user asked for, as a perceptual target rather than a byte count.
@@ -3203,7 +3174,23 @@ namespace SmartOptimizerLogic {
         double raw = solve_crf_from_curve (
             m.qa, m.qb, m.qc, target_vmaf, cal_mid, crf_min, crf_max);
 
-        int solved = (int) Math.round (raw);
+        // The intent's VMAF is a ceiling, not a bullseye: Ultra means "up to
+        // 97", so landing at 97.3 spends bytes on quality the user declined.
+        // Rounding to nearest overshoots whenever the exact solve falls below
+        // the half-way point — 3 of 4 intents on one measured source
+        // (97->97.25, 95->95.13, 88->88.07).
+        //
+        // But CRF is integral, and a step is worth ~1 VMAF: solving 47.07 and
+        // taking ceil(47.07)=48 trades a 0.09 overshoot for a 1.18 undershoot,
+        // surrendering a full quality step to recover a fraction of a point.
+        // So take the NEAREST CRF unless it clears the ceiling by more than
+        // the model can even resolve, and only then step down to stay under.
+        int nearest = (int) Math.round (raw);
+        double nearest_vmaf = evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, nearest);
+        int solved = (nearest_vmaf <= target_vmaf + QUALITY_CEILING_TOLERANCE_VMAF)
+            ? nearest
+            : (int) Math.ceil (raw);   // quality falls as CRF rises
+
         m.crf_at_min = solved <= crf_min;
         m.crf_at_max = solved >= crf_max;
         m.predicted_crf = solved.clamp (crf_min, crf_max);
@@ -3222,117 +3209,6 @@ namespace SmartOptimizerLogic {
         return int.min (solved_crf, target.crf_cap);
     }
 
-    // ── Size ceiling ─────────────────────────────────────────────────────────
-
-    /**
-     * The Quality Mode output ceiling in KiB, scaled to a trimmed window.
-     *
-     * A trimmed segment carries only part of the source, so measuring the
-     * ceiling against the whole file would effectively remove it — the same
-     * reasoning as match_source_target_mb_for_window.
-     */
-    public double quality_ceiling_kib (
-        int64  file_size_bytes,
-        double window_duration,
-        double total_duration
-    ) {
-        if (file_size_bytes <= 0)
-            return 0.0;
-        double full = kib_from_bytes (file_size_bytes)
-            * QUALITY_MODE_MAX_SOURCE_MULTIPLIER;
-        if (window_duration <= 0.0 || total_duration <= 0.0)
-            return full;
-        return full * double.min (1.0, window_duration / total_duration);
-    }
-
-    /** Result of testing a solved CRF against the size ceiling. */
-    public class QualityCeilingOutcome {
-        public bool   clamped;
-        public int    final_crf;
-        public double estimated_size_kib;
-        public double achieved_vmaf;
-        public double ceiling_kib;
-        /**
-         * Modelled size at final_crf, preserved before verification overwrites
-         * estimated_size_kib with a measurement.  Kept so the report can show
-         * how far the model was off rather than only its corrected answer.
-         */
-        public double modelled_size_kib;
-        /**
-         * The measured size at final_crf came in above ceiling_kib.
-         *
-         * The clamp walks CRF upward using MODELLED sizes, then verification
-         * replaces that estimate with a real measurement — but the CRF is not
-         * re-solved against it.  QUALITY_CEILING_SAFETY_MARGIN absorbs a few
-         * percent of model error; beyond that the clamp can report staying
-         * under a ceiling the encode then exceeds.  Re-solving would not fix
-         * this in general: the verification size is itself extrapolated from
-         * sampled segments, so a further error sits downstream of anything a
-         * re-clamp could see.  The honest move is to say so.
-         */
-        public bool   verified_over_ceiling;
-    }
-
-    /**
-     * Post-solve size clamp.
-     *
-     * Solve for quality first; only if the predicted output exceeds the
-     * ceiling do we walk CRF upward until it fits, then report the quality
-     * actually achieved.  Deliberately NOT part of the solve: a ceiling that
-     * participates in the objective becomes a second target competing with the
-     * quality axis, which is the two-constraint problem two-pass exists to
-     * resolve in Size Mode.
-     *
-     * @size_qa/qb/qc is the log-space CRF↔size curve the same probes produced.
-     */
-    public QualityCeilingOutcome apply_quality_size_ceiling (
-        int    solved_crf,
-        double ceiling_kib,
-        double size_qa, double size_qb, double size_qc,
-        double vmaf_qa, double vmaf_qb, double vmaf_qc,
-        int    crf_min,
-        int    crf_max
-    ) {
-        var o = new QualityCeilingOutcome ();
-        o.ceiling_kib = ceiling_kib;
-        o.final_crf = solved_crf;
-
-        double size_kib = 0.0;
-        try_evaluate_model_size_kib (
-            size_qa, size_qb, size_qc, solved_crf, "quality ceiling", out size_kib);
-        o.estimated_size_kib = size_kib;
-        o.achieved_vmaf = evaluate_vmaf_at_crf (
-            vmaf_qa, vmaf_qb, vmaf_qc, solved_crf);
-
-        // Ceiling unknown or already satisfied.
-        if (ceiling_kib <= 0.0 || size_kib <= 0.0 || size_kib <= ceiling_kib)
-            return o;
-
-        for (int crf = solved_crf + 1; crf <= crf_max; crf++) {
-            double kib = 0.0;
-            if (!try_evaluate_model_size_kib (
-                    size_qa, size_qb, size_qc, crf, "quality ceiling", out kib))
-                break;
-            if (kib <= ceiling_kib) {
-                o.clamped = true;
-                o.final_crf = crf;
-                o.estimated_size_kib = kib;
-                o.achieved_vmaf = evaluate_vmaf_at_crf (
-                    vmaf_qa, vmaf_qb, vmaf_qc, crf);
-                return o;
-            }
-        }
-
-        // Nothing in range fits — report the least-bad option honestly.
-        o.clamped = true;
-        o.final_crf = crf_max;
-        try_evaluate_model_size_kib (
-            size_qa, size_qb, size_qc, crf_max, "quality ceiling",
-            out o.estimated_size_kib);
-        o.achieved_vmaf = evaluate_vmaf_at_crf (
-            vmaf_qa, vmaf_qb, vmaf_qc, crf_max);
-        return o;
-    }
 
     /**
      * Nominal SizeTier for a quality intent.

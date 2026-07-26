@@ -574,7 +574,15 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         quality_intent_row.set_subtitle (
             "Pin a quality level and let size follow, or leave Off to pin a size instead");
         quality_intent_row.add_prefix (new Image.from_icon_name ("emblem-ok-symbolic"));
-        quality_intent_row.set_model (new StringList (QUALITY_INTENT_LABELS));
+        // NOT `new StringList (ARRAY)`: gtk_string_list_new() wants a
+        // NULL-terminated array, but Vala emits a named const string[] as a
+        // bare fixed-size C array with no terminator. GTK then reads past the
+        // end into whatever the linker parked next in .rodata. This one ran
+        // straight into CONTENT_OVERRIDE_LABELS and showed 9 entries in a
+        // 5-entry menu. Inline literals are safe (Vala allocates length + 1);
+        // named constants are not. The helper appends by known length.
+        quality_intent_row.set_model (
+            CodecUtils.build_dropdown_string_list (QUALITY_INTENT_LABELS));
         quality_intent_row.set_selected (0);
         quality_intent_row.notify["selected"].connect (() => {
             sync_quality_mode_sensitivity ();
@@ -590,7 +598,10 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         content_override_row.set_subtitle (
             "Override detection — animation in particular cannot be detected reliably");
         content_override_row.add_prefix (new Image.from_icon_name ("view-list-symbolic"));
-        content_override_row.set_model (new StringList (CONTENT_OVERRIDE_LABELS));
+        // See the note on quality_intent_row above — same overrun, and this is
+        // the one that surfaced it.
+        content_override_row.set_model (
+            CodecUtils.build_dropdown_string_list (CONTENT_OVERRIDE_LABELS));
         content_override_row.set_selected (0);
         group.add (content_override_row);
 

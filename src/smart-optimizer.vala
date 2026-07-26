@@ -847,8 +847,8 @@ public class SmartOptimizer : GLib.Object {
             }
 
             // Replace the assumed audio budget with a measurement before
-            // anything reserves against it: the reservation feeds both the
-            // reported size and the size ceiling.
+            // anything reserves against it: the reservation is part of the
+            // reported size.
             yield measure_quality_audio_budget (
                 input_file, resolved_container, ctx, plan, positions,
                 tw.sample_segment_duration, tw.encode_duration, tw.trim_start,
@@ -1076,21 +1076,30 @@ public class SmartOptimizer : GLib.Object {
                     measured_crfs, sizes, out sa, out sb, out sc, out size_degenerate);
             }
 
-            // ── 9. Content CRF cap, then the size ceiling ───────────────
+            // ── 9. Content CRF cap ──────────────────────────────────────
+            // The intent's VMAF IS the ceiling. Once the encode measures the
+            // score that was asked for, further bytes buy quality the user
+            // explicitly said they did not want, so the solve itself is the
+            // stopping rule and nothing else needs to bound it.
+            //
+            // There used to be a second guard here capping output at 100% of
+            // the SOURCE's byte count. It was removed because a byte
+            // comparison only means "wasted bits" when the pipeline preserves
+            // resolution, frame rate, duration, bit depth and codec
+            // efficiency. Break any one and it clamps honest encodes: an
+            // upscale to 4K needs ~2.2x the bytes at identical CRF, frame
+            // interpolation doubles the frames, and re-encoding to a less
+            // efficient codec legitimately costs more for equal quality (a
+            // case the old comment already conceded as a "known trade-off").
+            // Every one of those degraded quality below the requested target
+            // for a reason that was never about quality.
             int capped_crf = SmartOptimizerLogic.apply_quality_crf_cap (
                 m0.predicted_crf, target);
             bool crf_capped = (capped_crf != m0.predicted_crf);
 
-            int crf_lo, crf_hi;
-            SmartOptimizerLogic.crf_range_for_codec (
-                preferred_codec, out crf_lo, out crf_hi);
-
-            // Reserve audio and container overhead BEFORE clamping. The size
-            // curve models video only, while the ceiling is derived from the
-            // source's TOTAL size — comparing one against the other lets the
-            // finished file exceed the ceiling by however much audio and
-            // muxing overhead it carries. Size Mode subtracts them from the
-            // budget for the same reason (compute_size_budget).
+            // Audio and container overhead still have to be reserved — not to
+            // bound anything now, but because the reported size is the whole
+            // file and the curve models video alone.
             double audio_kib = SmartOptimizerLogic.compute_reserved_audio_kib (
                 plan.selected_sources, plan.use_stream_copy, plan.per_stream_kbps,
                 plan.total_budget_kbps, tw.encode_duration);
@@ -1099,26 +1108,15 @@ public class SmartOptimizer : GLib.Object {
                 plan.selected_sources, plan.use_stream_copy,
                 plan.effective_track_count);
 
-            double ceiling_kib = SmartOptimizerLogic.quality_ceiling_kib (
-                info.file_size_bytes, tw.encode_duration, info.duration);
-            // Shave headroom as well: verification replaces the modelled size
-            // with a real measurement, and the real encode lands slightly
-            // above the model often enough to push the total past the ceiling.
-            double video_ceiling_kib = (ceiling_kib > 0.0)
-                ? double.max (0.0, (ceiling_kib - audio_kib - overhead_kib)
-                    * SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN)
-                : 0.0;
-
-            var ceiling = SmartOptimizerLogic.apply_quality_size_ceiling (
-                capped_crf, size_degenerate ? 0.0 : video_ceiling_kib,
-                sa, sb, sc, m0.qa, m0.qb, m0.qc, crf_lo, crf_hi);
-            // Capture the modelled figure before verification overwrites it —
-            // the gap between the two is what tells the user whether the clamp
-            // was solved against a size that turned out to be real.
-            ceiling.modelled_size_kib = ceiling.estimated_size_kib;
-
-            int final_crf = ceiling.final_crf;
-            double achieved_vmaf = ceiling.achieved_vmaf;
+            int final_crf = capped_crf;
+            double achieved_vmaf = SmartOptimizerLogic.evaluate_vmaf_at_crf (
+                m0.qa, m0.qb, m0.qc, final_crf);
+            double estimated_video_kib = 0.0;
+            if (!size_degenerate) {
+                SmartOptimizerLogic.try_evaluate_model_size_kib (
+                    sa, sb, sc, final_crf, "quality size estimate",
+                    out estimated_video_kib);
+            }
 
             // ── 9b. Verification ───────────────────────────────────────
             // Encode once at the CRF we are actually going to recommend and
@@ -1144,7 +1142,7 @@ public class SmartOptimizer : GLib.Object {
                 if (qcache.lookup_with_vmaf (final_crf, out vc_size, out vc_vmaf)) {
                     verification.done = true;
                     verification.measured_vmaf = vc_vmaf;
-                    ceiling.estimated_size_kib = vc_size;
+                    estimated_video_kib = vc_size;
                     cached_points++;
                 }
             }
@@ -1165,7 +1163,7 @@ public class SmartOptimizer : GLib.Object {
                             qcache.record_with_vmaf (final_crf, v.size_kib, v.vmaf);
                         // The measured size at the final CRF beats the modelled
                         // one — it is the encode we are recommending.
-                        ceiling.estimated_size_kib = v.size_kib;
+                        estimated_video_kib = v.size_kib;
                     }
                 } catch (IOError.CANCELLED e) {
                     throw e;
@@ -1178,20 +1176,6 @@ public class SmartOptimizer : GLib.Object {
                     verification.measured_vmaf - verification.predicted_vmaf;
                 // Report what was measured, not what was modelled.
                 achieved_vmaf = verification.measured_vmaf;
-
-                // The clamp picked this CRF by testing the MODEL against the
-                // budget; the line above just replaced that model figure with
-                // a measurement. If the measurement is over budget, the clamp
-                // did not achieve what it is about to claim, and saying so
-                // beats printing "stayed under" over numbers that disagree.
-                if (ceiling.ceiling_kib > 0.0
-                        && ceiling.estimated_size_kib > ceiling.ceiling_kib) {
-                    ceiling.verified_over_ceiling = true;
-                    warning ("Smart Optimizer: verified size %.0f KiB at CRF %d "
-                        + "exceeds the %.0f KiB video budget (model said %.0f KiB)",
-                        ceiling.estimated_size_kib, final_crf,
-                        ceiling.ceiling_kib, ceiling.modelled_size_kib);
-                }
             }
 
             // ── 10. Confidence ─────────────────────────────────────────
@@ -1208,7 +1192,7 @@ public class SmartOptimizer : GLib.Object {
             // ── 11. Estimated size ─────────────────────────────────────
             int estimated_total_kib = 0;
             SmartOptimizerLogic.try_cast_nonnegative_int (
-                ceiling.estimated_size_kib + audio_kib + overhead_kib,
+                estimated_video_kib + audio_kib + overhead_kib,
                 "quality estimated size", out estimated_total_kib);
 
             if (qcache != null)
@@ -1218,9 +1202,9 @@ public class SmartOptimizer : GLib.Object {
             string notes = build_quality_notes (
                 preferred_codec, intent, target, info, tw, plan, profile,
                 bit_depth, preset_label, m0, measured_crfs, vmafs, sizes,
-                ceiling, final_crf, achieved_vmaf, estimated_total_kib,
+                final_crf, achieved_vmaf, estimated_total_kib,
                 confidence, coverage, positions.length, positions_trimmed,
-                crf_capped, refined, ceiling_kib, verification, all_saturated,
+                crf_capped, refined, verification, all_saturated,
                 cached_points, bracket_refined);
 
             return OptimizationRecommendation () {
@@ -1282,9 +1266,9 @@ public class SmartOptimizer : GLib.Object {
      * which accounted for that run's ENTIRE size prediction error (the video
      * model was accurate to 0.9%).
      *
-     * Over-reserving is not merely cosmetic: the reservation is subtracted
-     * from the size ceiling, so it applies phantom pressure that can clamp
-     * quality on a source where the margin is tight.
+     * Over-reserving is purely a reporting error in Quality Mode now that
+     * nothing bounds the output by byte count — but it is still the largest
+     * single source of size-prediction error, so it is worth measuring.
      *
      * Where affordable this measures the WHOLE track rather than sampling.
      * Size Mode samples three windows and floors the result at a fraction of
@@ -1435,7 +1419,6 @@ public class SmartOptimizer : GLib.Object {
         int[]                               crfs,
         double[]                            vmafs,
         double[]                            sizes,
-        SmartOptimizerLogic.QualityCeilingOutcome ceiling,
         int                                 final_crf,
         double                              achieved_vmaf,
         int                                 estimated_total_kib,
@@ -1445,7 +1428,6 @@ public class SmartOptimizer : GLib.Object {
         bool                                positions_trimmed,
         bool                                crf_capped,
         bool                                refined,
-        double                              ceiling_kib,
         SmartOptimizerLogic.VmafVerification verification,
         bool                                all_saturated,
         int                                 cached_points,
@@ -1507,37 +1489,6 @@ public class SmartOptimizer : GLib.Object {
             n.append ("  Capped to CRF %d — %s\n".printf (
                 SmartOptimizerLogic.apply_quality_crf_cap (model.predicted_crf, target),
                 "VMAF is unreliable on this content, so a CRF ceiling applies"));
-        }
-        if (ceiling.clamped) {
-            // %.1f, not %.0f: this line explains why the requested quality was
-            // not delivered, and at %.0f a 2461 KiB ceiling printed as "2 MiB"
-            // directly above "Estimated size: 2.3 MiB" — the report appeared
-            // to contradict itself while the arithmetic underneath was right.
-            //
-            // "to stay under" is only claimable when the measurement agrees;
-            // otherwise this line asserts an outcome the estimate contradicts.
-            n.append ((ceiling.verified_over_ceiling
-                    ? "  Raised to CRF %d for the %.1f MiB size ceiling "
-                      + "(%.0f%% of source)\n"
-                    : "  Raised to CRF %d to stay under the %.1f MiB size ceiling "
-                      + "(%.0f%% of source)\n").printf (
-                    ceiling.final_crf, ceiling_kib / 1024.0,
-                    SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER * 100.0));
-            n.append ("  → achieving VMAF %.1f rather than the %.1f requested\n"
-                .printf (achieved_vmaf, target.target_vmaf));
-        }
-        // Reported whether or not the clamp fired: an unclamped solve that
-        // verifies over budget is the same failure without the false claim.
-        if (ceiling.verified_over_ceiling && ceiling.ceiling_kib > 0.0) {
-            n.append (("  ⚠ Verified %.0f KiB of video against a %.0f KiB budget "
-                 + "(%+.1f%%) — the model predicted %.0f KiB\n").printf (
-                    ceiling.estimated_size_kib, ceiling.ceiling_kib,
-                    (ceiling.estimated_size_kib / ceiling.ceiling_kib - 1.0) * 100.0,
-                    ceiling.modelled_size_kib));
-            n.append (("    CRF is solved against the model, so the %.0f%%-of-source "
-                 + "ceiling is a target here, not a guarantee. The estimate below "
-                 + "reflects the measurement.\n").printf (
-                    SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER * 100.0));
         }
         // preset_label already reads "preset 6" / "cpu-used 2" / "slow"
         // depending on codec, so it must not be prefixed again.

@@ -122,11 +122,60 @@ public class HamburgerMenu {
 
     private static void open_with_default_player (string path) {
         if (path.length == 0) return;
+
+        if (AppSettings.get_default ().play_with_ffplay
+                && launch_in_ffplay (path)) {
+            return;
+        }
+
         try {
             var file = File.new_for_path (path);
             AppInfo.launch_default_for_uri (file.get_uri (), null);
         } catch (Error e) {
             warning ("Failed to open video: %s", e.message);
+        }
+    }
+
+    /**
+     * Play @path in ffplay. Returns false if it could not be started, so the
+     * caller can fall back to the desktop handler rather than leaving the user
+     * with a menu item that silently does nothing — ffplay is a separate
+     * package from ffmpeg on several distros and may simply be absent.
+     *
+     * Spawned detached: ffplay owns its own window and must outlive the
+     * calling context, and its exit is not something to report on.
+     */
+    private static bool launch_in_ffplay (string path) {
+        string ffplay = AppSettings.get_default ().ffplay_path;
+        if (ffplay.length == 0) return false;
+
+        // A bare name has to be resolvable, or spawn fails later and noisily.
+        if (!ffplay.contains ("/")
+                && Environment.find_program_in_path (ffplay) == null) {
+            warning ("ffplay playback requested but '%s' is not on PATH — "
+                + "falling back to the default player", ffplay);
+            return false;
+        }
+
+        try {
+            Pid pid;
+            Process.spawn_async (
+                null,
+                { ffplay, "-autoexit", path },
+                null,
+                SpawnFlags.SEARCH_PATH | SpawnFlags.STDOUT_TO_DEV_NULL
+                    | SpawnFlags.STDERR_TO_DEV_NULL | SpawnFlags.DO_NOT_REAP_CHILD,
+                null,
+                out pid);
+            // DO_NOT_REAP_CHILD without a watch would leave a zombie.
+            ChildWatch.add (pid, (child_pid, status) => {
+                Process.close_pid (child_pid);
+            });
+            return true;
+        } catch (SpawnError e) {
+            warning ("Failed to launch ffplay (%s) — falling back to the "
+                + "default player", e.message);
+            return false;
         }
     }
 

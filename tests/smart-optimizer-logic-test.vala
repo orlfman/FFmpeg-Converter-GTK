@@ -534,6 +534,46 @@ void test_solve_reproduces_measured_crf_for_target () {
     assert (m2.predicted_crf >= 28 && m2.predicted_crf <= 30);
 }
 
+void test_solve_treats_the_intent_as_a_ceiling () {
+    // The intent's VMAF is a ceiling, not a bullseye — Ultra means "up to 97".
+    // Across the four shipped intents the solve must never clear its ceiling
+    // by more than the model can resolve.
+    double[] targets = { 88.0, 92.0, 95.0, 97.0 };
+    foreach (double t in targets) {
+        foreach (unowned string codec in new string[] { "x265", "svt-av1" }) {
+            var m = SmartOptimizerLogic.solve_quality_crf (
+                ANIME_CRFS, ANIME_VMAFS, t, codec);
+            if (m.degenerate || m.crf_at_min || m.crf_at_max)
+                continue;   // clamped: the ceiling was out of reach either way
+            assert (m.predicted_vmaf
+                <= t + SmartOptimizerLogic.QUALITY_CEILING_TOLERANCE_VMAF);
+        }
+    }
+
+    // Both branches of the tolerance rule must actually be reachable, or the
+    // step-down is dead code. Sweep fine-grained targets across the measured
+    // range and require that each branch is exercised: some solves keep the
+    // nearest CRF (overshoot inside tolerance), others step down to stay under.
+    bool saw_nearest_kept = false;
+    bool saw_stepped_down = false;
+    for (double t = 80.0; t <= 95.0; t += 0.1) {
+        var m = SmartOptimizerLogic.solve_quality_crf (
+            ANIME_CRFS, ANIME_VMAFS, t, "x265");
+        if (m.degenerate || m.crf_at_min || m.crf_at_max)
+            continue;
+        // Never above the ceiling by more than the tolerance, whichever
+        // branch ran.
+        assert (m.predicted_vmaf
+            <= t + SmartOptimizerLogic.QUALITY_CEILING_TOLERANCE_VMAF);
+        if (m.predicted_vmaf > t)
+            saw_nearest_kept = true;    // kept a small overshoot
+        else
+            saw_stepped_down = true;    // landed under the ceiling
+    }
+    assert (saw_nearest_kept);
+    assert (saw_stepped_down);
+}
+
 void test_solve_separates_content_at_high_intent () {
     // The core justification for solving instead of tabulating: at Ultra the
     // measured spread across content classes was 11.2 CRF. Anime tolerates a
@@ -600,116 +640,9 @@ void test_non_screencast_target_is_unmodified () {
     assert (SmartOptimizerLogic.apply_quality_crf_cap (12, t) == 12);
 }
 
-void test_quality_ceiling_scales_to_trim_window () {
-    int64 src = (int64) (1000.0 * 1024.0);          // 1000 KiB source
-    double full = SmartOptimizerLogic.quality_ceiling_kib (src, 0, 0);
-    // A quality re-encode must not come out larger than its source.
-    assert (close_to (full, 1000.0, 1e-6));
 
-    // Half the file trimmed away → half the ceiling, so a short clip cannot
-    // spend the whole file's allowance.
-    double half = SmartOptimizerLogic.quality_ceiling_kib (src, 50.0, 100.0);
-    assert (close_to (half, 500.0, 1e-6));
 
-    // The multiplier is the only thing that sets this, so the relationship
-    // holds if it is retuned later.
-    assert (close_to (full,
-        1000.0 * SmartOptimizerLogic.QUALITY_MODE_MAX_SOURCE_MULTIPLIER, 1e-6));
 
-    // Headroom must be real but small — enough to absorb model error without
-    // materially lowering the quality the user asked for.
-    assert (SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN < 1.0);
-    assert (SmartOptimizerLogic.QUALITY_CEILING_SAFETY_MARGIN >= 0.95);
-
-    assert (SmartOptimizerLogic.quality_ceiling_kib (0, 10.0, 100.0) == 0.0);
-}
-
-void test_size_ceiling_clamps_and_reports_achieved_quality () {
-    // Fit both curves from the same measured anime probes.
-    double sa, sb, sc;
-    bool sdeg;
-    SmartOptimizerLogic.fit_calibration_curve (
-        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
-    double va, vb, vc;
-    bool vdeg;
-    SmartOptimizerLogic.fit_vmaf_curve (
-        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
-
-    // Ultra on this source solves near CRF 16, which the measured curve puts
-    // at ~135 MB. A 20 MB ceiling must force the CRF up.
-    var o = SmartOptimizerLogic.apply_quality_size_ceiling (
-        16, 20000.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (o.clamped);
-    assert (o.final_crf > 16);
-    assert (o.estimated_size_kib <= 20000.0);
-    // And it must report the quality actually achieved, not the one requested.
-    assert (o.achieved_vmaf < 95.0);
-    assert (o.achieved_vmaf > 0.0);
-}
-
-void test_size_ceiling_is_inert_when_output_already_fits () {
-    double sa, sb, sc;
-    bool sdeg;
-    SmartOptimizerLogic.fit_calibration_curve (
-        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
-    double va, vb, vc;
-    bool vdeg;
-    SmartOptimizerLogic.fit_vmaf_curve (
-        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
-
-    // Generous ceiling → the solved CRF must pass through untouched, byte for
-    // byte. This is what makes the multiplier safe to retune later.
-    var o = SmartOptimizerLogic.apply_quality_size_ceiling (
-        24, 10000000.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (!o.clamped);
-    assert (o.final_crf == 24);
-
-    // Unknown source size (ceiling 0) must also be inert, not treated as zero
-    // allowance.
-    var o2 = SmartOptimizerLogic.apply_quality_size_ceiling (
-        24, 0.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (!o2.clamped);
-    assert (o2.final_crf == 24);
-}
-
-void test_size_ceiling_records_budget_for_verification () {
-    double sa, sb, sc;
-    bool sdeg;
-    SmartOptimizerLogic.fit_calibration_curve (
-        ANIME_CRFS, ANIME_SIZES, out sa, out sb, out sc, out sdeg);
-    double va, vb, vc;
-    bool vdeg;
-    SmartOptimizerLogic.fit_vmaf_curve (
-        ANIME_CRFS, ANIME_VMAFS, out va, out vb, out vc, out vdeg);
-
-    // The CRF is clamped against the MODEL, then verification overwrites
-    // estimated_size_kib with a measurement. Detecting an overshoot after the
-    // fact needs the budget that was solved against, so the outcome must
-    // carry it — otherwise there is nothing left to compare the measurement
-    // to and the ceiling claim cannot be checked at all.
-    var clamped = SmartOptimizerLogic.apply_quality_size_ceiling (
-        16, 20000.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (clamped.clamped);
-    assert (clamped.ceiling_kib == 20000.0);
-    // By the model's own reckoning the chosen CRF fits. Any later overshoot is
-    // therefore model error, not the clamp failing to do its job.
-    assert (clamped.estimated_size_kib <= clamped.ceiling_kib);
-
-    var inert = SmartOptimizerLogic.apply_quality_size_ceiling (
-        24, 10000000.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (inert.ceiling_kib == 10000000.0);
-
-    // Unknown source size must stay 0, so the caller's `> 0.0` guard disables
-    // the check rather than flagging every encode as over budget.
-    var unknown = SmartOptimizerLogic.apply_quality_size_ceiling (
-        24, 0.0, sa, sb, sc, va, vb, vc, 8, 51);
-    assert (unknown.ceiling_kib == 0.0);
-
-    // Verification has not run in any of these, so nothing may be flagged yet.
-    assert (!clamped.verified_over_ceiling);
-    assert (!inert.verified_over_ceiling);
-    assert (!unknown.verified_over_ceiling);
-}
 
 void test_quality_calibration_ladders_widen_toward_ultra () {
     foreach (string codec in new string[] { "x265", "x264", "vp9", "svt-av1" }) {
@@ -2076,14 +2009,11 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/evaluation-clamped", test_vmaf_evaluation_is_clamped_to_metric_range);
     Test.add_func ("/smart-optimizer-logic/quality/reject-saturated", test_saturated_points_are_rejected);
     Test.add_func ("/smart-optimizer-logic/quality/solve-measured-crf", test_solve_reproduces_measured_crf_for_target);
+    Test.add_func ("/smart-optimizer-logic/quality/intent-is-a-ceiling", test_solve_treats_the_intent_as_a_ceiling);
     Test.add_func ("/smart-optimizer-logic/quality/content-separation", test_solve_separates_content_at_high_intent);
     Test.add_func ("/smart-optimizer-logic/quality/all-saturated-degenerate", test_solve_refuses_to_fit_when_all_points_saturate);
     Test.add_func ("/smart-optimizer-logic/quality/screencast-cap", test_screencast_target_caps_crf_and_keeps_vmaf_as_floor);
     Test.add_func ("/smart-optimizer-logic/quality/target-unmodified", test_non_screencast_target_is_unmodified);
-    Test.add_func ("/smart-optimizer-logic/quality/ceiling-window", test_quality_ceiling_scales_to_trim_window);
-    Test.add_func ("/smart-optimizer-logic/quality/ceiling-clamps", test_size_ceiling_clamps_and_reports_achieved_quality);
-    Test.add_func ("/smart-optimizer-logic/quality/ceiling-inert", test_size_ceiling_is_inert_when_output_already_fits);
-    Test.add_func ("/smart-optimizer-logic/quality/ceiling-records-budget", test_size_ceiling_records_budget_for_verification);
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);
     Test.add_func ("/smart-optimizer-logic/tuning/probe-matches-applier", test_encoder_tuning_is_one_decision_for_probe_and_applier);
