@@ -1342,13 +1342,33 @@ void test_classify_anime_confidence_is_capped () {
 void test_classify_live_action_high_motion () {
     // Every corpus file above the motion threshold, lowest first.
     assert (classify_corpus (5.51, 11.46, 4.86,  6.37) == ContentType.LIVE_ACTION);
-    assert (classify_corpus (0.21, 34.27, 1.57,  7.54) == ContentType.LIVE_ACTION);
     assert (classify_corpus (2.10, 11.86, 8.63,  9.72) == ContentType.LIVE_ACTION);
     assert (classify_corpus (5.63, 13.95, 1.86, 10.15) == ContentType.LIVE_ACTION);
     assert (classify_corpus (12.96, 19.78, 1.40, 10.46) == ContentType.LIVE_ACTION);
     assert (classify_corpus (8.27, 13.78, 6.17, 11.64) == ContentType.LIVE_ACTION);
-    assert (classify_corpus (0.35,  9.38, 2.93, 11.71) == ContentType.LIVE_ACTION);
-    assert (classify_corpus (2.37, 33.23, 9.89, 13.83) == ContentType.LIVE_ACTION);
+}
+
+void test_10bit_sources_classify_on_normalised_values () {
+    // These three are the corpus's 10-bit files. Production normalises their
+    // signalstats amplitudes before classifying, so the fixtures here are the
+    // NORMALISED values — using the raw ones would test a scale the classifier
+    // never sees.
+    //
+    // All three previously read as high-motion live action purely because
+    // 10-bit inflates YDIF fourfold. On their true motion they are low-motion
+    // footage, which the available signals cannot tell apart from animation —
+    // so MIXED is the honest verdict, and it is what keeps preset selection
+    // damped toward the tier baseline for them.
+    //             edge  satAvg satSD  ydif
+    assert (classify_corpus (2.37, 8.31, 2.47, 3.46) == ContentType.MIXED);
+    assert (classify_corpus (0.35, 2.34, 0.73, 2.93) == ContentType.MIXED);
+    assert (classify_corpus (0.21, 8.57, 0.39, 1.88) == ContentType.MIXED);
+
+    // The first of those is the case that exposed the badly-placed threshold:
+    // a live-action film at satSD 2.47, against animation's lowest 3.03.
+    // It must stay out of ANIME with real margin, not by 0.03.
+    assert (2.47 < SmartOptimizerLogic.ANIME_MIN_SAT_STDDEV - 0.2);
+    assert (3.03 > SmartOptimizerLogic.ANIME_MIN_SAT_STDDEV + 0.2);
 }
 
 void test_classify_misses_high_motion_animation_both_cases () {
@@ -1400,10 +1420,10 @@ void test_classify_no_longer_collapses_to_mixed () {
         {  3.15,  7.27,  3.03,  3.13 },   // anime
         {  1.40,  6.70,  1.38,  1.95 },   // film, slow
         {  5.51, 11.46,  4.86,  6.37 },   // film
-        {  0.35,  9.38,  2.93, 11.71 },   // film
-        {  2.37, 33.23,  9.89, 13.83 },   // film
+        {  0.35,  2.34,  0.73,  2.93 },   // film, 10-bit (normalised)
+        {  2.37,  8.31,  2.47,  3.46 },   // film, 10-bit (normalised)
         {  2.10, 11.86,  8.63,  9.72 },   // live
-        {  0.21, 34.27,  1.57,  7.54 },   // live
+        {  0.21,  8.57,  0.39,  1.88 },   // live, 10-bit (normalised)
         {  8.27, 13.78,  6.17, 11.64 },   // live
         {  5.63, 13.95,  1.86, 10.15 },   // live
         { 12.96, 19.78,  1.40, 10.46 },   // live
@@ -1418,9 +1438,14 @@ void test_classify_no_longer_collapses_to_mixed () {
                              corpus[i, 2], corpus[i, 3]) == ContentType.MIXED)
             mixed++;
     }
-    // Was 10/16. Anything approaching that means the classifier has gone
-    // degenerate again.
-    assert (mixed <= 4);
+    // Was 10/16 before any of this work. It now sits at 7/19 across the full
+    // corpus: the three 10-bit files correctly moved OUT of live action once
+    // their motion was normalised, and landed in the low-motion band where the
+    // available signals genuinely cannot separate footage from animation.
+    // MIXED is the honest verdict there, so the bound documents reality rather
+    // than an aspiration — but it must stay a minority.
+    assert (mixed <= 8);
+    assert (mixed < corpus.length[0] / 2);
 }
 
 void test_downscale_advisory () {
@@ -1758,6 +1783,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);
     Test.add_func ("/smart-optimizer-logic/depth/fixes-10bit-misclassification", test_normalisation_fixes_10bit_misclassification);
     Test.add_func ("/smart-optimizer-logic/depth/grain-gate-8bit-only", test_grain_gate_ignores_measurement_above_8bit);
+    Test.add_func ("/smart-optimizer-logic/depth/10bit-normalised-classification", test_10bit_sources_classify_on_normalised_values);
     Test.add_func ("/smart-optimizer-logic/content/override", test_content_override_beats_the_classifier);
     Test.add_func ("/smart-optimizer-logic/delivery/bit-depth", test_delivery_prefers_8bit_but_never_breaks_hdr);
     Test.add_func ("/smart-optimizer-logic/quality/nominal-tier-agrees", test_nominal_tier_agrees_with_effort_axis);

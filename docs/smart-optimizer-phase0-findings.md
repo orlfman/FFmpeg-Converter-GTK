@@ -20,6 +20,7 @@ This document records what the corpus actually says.
 | Phase 4a: gate on `blockdetect`/`blurdetect` | **Not possible.** No pixel-domain signal detects degradation without a reference. Consider dropping the guard |
 | Phase 4d (noise character) demoted to last | **Un-demote** — TOUT cannot separate grain from compression noise, so the existing grain gate is untrustworthy without it |
 | Phase 4b (temporal complexity) "cheapest win, do first" | **Not implementable** — keyframe density and bitrate variance measure the source encoder's GOP and rate control, not content (Part 7) |
+| Phase 4d (noise character) | **Not implementable** — the candidate signal was measuring bit depth (Part 8) |
 | Content override axis is a nice-to-have | **Essential** — the classifier cannot detect anime or screencast at all (Part 4) |
 
 ### Highest-priority outcome
@@ -778,6 +779,74 @@ held to the same standard before implementation: measure first, wire in second.
 Signals derived from **decoded pixels** (`signalstats`, `edgedetect`, `siti`)
 remain sound. Signals derived from **container/bitstream metadata** (packet
 sizes, keyframe flags, source bitrate) are suspect by default.
+
+---
+
+## Part 8 — signalstats is measured in the source's native bit depth ⚠️
+
+**Severity: high, and it invalidated part of this document's own analysis.**
+
+`signalstats` reports in the source's native range, so a 10-bit source yields
+~4× the values of identical content at 8-bit. Every threshold in
+`classify_content`, the grain gate and the banding metrics compares those
+figures **across** sources.
+
+Measured on one 10-bit film, native versus the same content converted to 8-bit:
+
+| metric | native | at 8-bit | ratio |
+|---|---|---|---|
+| YDIF | 13.83 | 3.46 | 4.00× |
+| YLOW | 147.9 | 37.0 | 4.00× |
+| SATAVG stddev | 9.89 | 2.47 | 4.02× |
+| **TOUT** | **0.00194** | **0.00018** | **10.8×** |
+| edgedetect YAVG | 3.199 | 3.206 | 1.00× |
+
+`edgedetect` normalises its own output and is unaffected. Everything else is not.
+
+### What it broke
+
+`YDIF` is `temporal_diff_mean`, which gates every branch of the classifier. The
+two 10-bit films in this corpus measured 13.83 and 11.71 and were filed as
+high-motion live action. **Their true motion is 3.46 and 2.93** — both inside
+the animation rule's band. Several conclusions earlier in this document were
+drawn from those inflated figures.
+
+### The fix, and why not the obvious one
+
+Amplitudes are divided by `2^(depth−8)` in the parser. The one-line alternative
+— `format=yuv420p` before measuring — rescales correctly but **quantises away
+the sub-LSB variation fine film grain lives in**: note TOUT moving 10.8× where
+amplitudes move exactly 4×. That difference is grain destroyed, not rescaled,
+and it would have made a film with grain visible at 3× magnification read as
+clean.
+
+### TOUT cannot be fixed at all
+
+Its depth response is not linear and neither figure converts into the other.
+`GRAIN_SYNTH_LOW/HIGH` are therefore **8-bit only**, and `grain_warranted` now
+ignores the measurement above 8-bit and defers to the content category rather
+than acting on a number known to be wrong.
+
+Restricted to the 8-bit corpus, where TOUT *is* comparable, the earlier finding
+survives intact: the maximum reading (0.00279) belongs to grain-free cel
+animation, and **nothing reaches `GRAIN_SYNTH_HIGH` (0.0040)**.
+
+### Threshold consequence
+
+Recentring the animation rule's saturation floor. Within the band that rule
+reaches, the highest non-animation satSD is now 2.47 (a live-action film,
+previously mis-scaled to 9.89) and the lowest animation satSD is 3.03. The
+shipped 2.50 cleared the film by **0.03** — luck, not calibration. It is now
+2.75, the midpoint, 0.28 from each side.
+
+### How it was found
+
+Testing a Phase 4d candidate. Denoise-residual amplitude looked like a clean
+separator — a 3.4× gap, correctly ranking grain-free animation last despite that
+file holding the corpus-maximum TOUT, which was the stated test. The top three
+files turned out to be exactly the three 10-bit files in the corpus. Normalised,
+the visibly grainy film sits **10th of 19**. Phase 4d is dead; the bug it
+exposed was worth more than the signal.
 
 ---
 

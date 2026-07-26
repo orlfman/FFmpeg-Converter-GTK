@@ -1259,6 +1259,14 @@ namespace SmartOptimizerLogic {
     // defocus — but adds nothing once satSD is applied, so it is left out
     // rather than carried as redundant decoration.)
     //
+    // The floor is the MIDPOINT of the measured gap, not a round number:
+    // within the band this rule reaches, the highest non-animation satSD is
+    // 2.47 (a live-action film) and the lowest animation satSD is 3.03. 2.75
+    // sits 0.28 from each. The first version of this used 2.50, which cleared
+    // the film by 0.03 — that was luck rather than calibration, and it only
+    // became visible once the bit-depth normalisation put that 10-bit film on
+    // the right scale.
+    //
     // ⚠️ STILL INCOMPLETE. Two of six anime are missed, both high-motion: the
     // live-action rule claims them before this one is reached, and nothing
     // measurable here separates fast animation from fast live action. The
@@ -1268,7 +1276,7 @@ namespace SmartOptimizerLogic {
     public const double ANIME_MIN_EDGE   = 1.3;
     public const double ANIME_MAX_EDGE   = 4.5;
     /** Colour must actually move between shots; see the note above. */
-    public const double ANIME_MIN_SAT_STDDEV = 2.5;
+    public const double ANIME_MIN_SAT_STDDEV = 2.75;
     public const double ANIME_MAX_CONFIDENCE = 0.5;
 
     /**
