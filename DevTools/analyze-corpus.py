@@ -298,6 +298,9 @@ def parse_metadata(stderr):
 
 
 def run_filter_pass(ref, vf):
+    # Measured at native depth; amplitude metrics are normalised afterwards by
+    # collect_signals. Converting to 8-bit here would rescale correctly but
+    # quantise away the sub-LSB variation fine film grain lives in.
     cmd = ["ffmpeg", "-hide_banner", "-v", "info", "-i", str(ref),
            "-vf", vf, "-an", "-sn", "-f", "null", "-"]
     rc, _, err = run(cmd, timeout=3600)

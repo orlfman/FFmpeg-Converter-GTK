@@ -158,6 +158,12 @@ public struct OptimizationRecommendation {
 
     /** Delivery constraint is active — favour cheap decode and compatibility. */
     public bool   fast_decode;
+    /**
+     * Source bit depth, needed downstream because TOUT (grain_score) is
+     * measured at the source's native depth and is not comparable across
+     * depths. See grain_warranted.
+     */
+    public int    source_bit_depth;
 }
 
 /**
@@ -346,6 +352,14 @@ namespace SmartOptimizerLogic {
     // genuinely grainy film source using the "Grain/noise (TOUT)" value printed
     // in the Smart Optimizer log: set LOW just above your clean maximum and
     // HIGH at/below the grainy reading.
+    // ⚠️ 8-BIT ONLY. TOUT is a threshold-derived fraction measured at the
+    // source's native depth, and it does NOT rescale linearly with depth: the
+    // same 10-bit film reads 0.00194 native and 0.00018 once converted to
+    // 8-bit, a 10.8x spread where amplitudes move by exactly 4x. Neither
+    // figure can be corrected into the other, so these thresholds are only
+    // meaningful for 8-bit sources and a 10-bit source will read as far
+    // grainier than it is. grain_warranted() therefore ignores the
+    // measurement entirely above 8-bit and defers to the content category.
     public const double GRAIN_SYNTH_LOW  = 0.0015;
     public const double GRAIN_SYNTH_HIGH = 0.0040;
 
@@ -1408,9 +1422,17 @@ namespace SmartOptimizerLogic {
      * This is only the grain-signal decision; callers apply their own tier
      * gate (e.g. SVT-AV1 at MEDIUM+, x265 at LARGE+).
      */
-    public bool grain_warranted (double grain_score, ContentType content_type) {
+    public bool grain_warranted (double grain_score, ContentType content_type,
+                                 int source_bit_depth = 8) {
         bool category_says_grain = (content_type == ContentType.LIVE_ACTION
             || content_type == ContentType.MIXED);
+
+        // Above 8-bit the measurement is on a scale these thresholds were never
+        // calibrated for, and it cannot be converted onto one. Trusting it
+        // would call every 10-bit source grainy. Defer to the category instead
+        // of acting on a number known to be wrong.
+        if (source_bit_depth > 8)
+            return category_says_grain;
 
         if (grain_score <= 0.0)                 // no measurement → category heuristic
             return category_says_grain;
@@ -1419,6 +1441,31 @@ namespace SmartOptimizerLogic {
         if (grain_score <= GRAIN_SYNTH_LOW)     // clearly clean
             return false;
         return category_says_grain;             // ambiguous → category heuristic
+    }
+
+    /**
+     * Rescale a signalstats amplitude to its 8-bit equivalent.
+     *
+     * signalstats reports in the source's native range, so a 10-bit source
+     * yields ~4x the values of identical content at 8-bit. Every threshold in
+     * the classifier, the grain gate and the banding metrics compares these
+     * figures ACROSS sources, so without this a 10-bit input reads as four
+     * times the motion it actually has — which is exactly what happened: two
+     * corpus films measured YDIF 13.83 and 11.71 and were classified as
+     * high-motion live action, when their true motion is 3.46 and 2.93.
+     *
+     * Applies to amplitude-like metrics only: YDIF, YLOW, SATAVG and the
+     * spread derived from it. NOT to:
+     *   - edgedetect's YAVG, which normalises its own output (measured
+     *     identical at both depths), and
+     *   - TOUT, which is a threshold-derived fraction whose depth response is
+     *     10.8x rather than 4x — it does not rescale linearly, and is left
+     *     native. See GRAIN_SYNTH_LOW/HIGH for what that means for grain.
+     */
+    public double normalise_amplitude_for_depth (double value, int source_bit_depth) {
+        if (source_bit_depth <= 8)
+            return value;
+        return value / Math.pow (2.0, (double) (source_bit_depth - 8));
     }
 
     public void compute_stats (double[] values, out double mean, out double stddev) {

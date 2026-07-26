@@ -930,7 +930,8 @@ public class CodecPresets : Object {
                 set_dropdown_by_label (tab.tune_combo, "animation");
             } else if (effort >= EncodeEffort.HIGH
                        && SmartOptimizerLogic.grain_warranted (
-                           rec.grain_score, rec.content_type)) {
+                           rec.grain_score, rec.content_type,
+                           rec.source_bit_depth)) {
                 // At generous budgets, preserve natural film grain rather
                 // than smearing it — but only when grain is actually measured
                 // (SmartOptimizerLogic.grain_warranted), not just from category.
@@ -1070,7 +1071,8 @@ public class CodecPresets : Object {
             // sources included even if the category was uncertain). See
             // SmartOptimizerLogic.grain_warranted.
             bool use_grain = (effort >= EncodeEffort.MEDIUM)
-                && SmartOptimizerLogic.grain_warranted (rec.grain_score, rec.content_type);
+                && SmartOptimizerLogic.grain_warranted (
+                    rec.grain_score, rec.content_type, rec.source_bit_depth);
 
             switch (effort) {
                 case EncodeEffort.MINIMAL:

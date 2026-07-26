@@ -673,7 +673,8 @@ public class SmartOptimizer : GLib.Object {
                 pinned_axis           = PinnedAxis.SIZE,
                 estimated_vmaf        = 0.0,
                 vmaf_measured         = false,
-                fast_decode           = ctx.optimize_for_delivery
+                fast_decode           = ctx.optimize_for_delivery,
+                source_bit_depth      = info.source_bit_depth
             };
         } finally {
             if (intermediate.path != null)
@@ -1110,7 +1111,8 @@ public class SmartOptimizer : GLib.Object {
                 pinned_axis           = PinnedAxis.QUALITY,
                 estimated_vmaf        = achieved_vmaf,
                 vmaf_measured         = true,
-                fast_decode           = ctx.optimize_for_delivery
+                fast_decode           = ctx.optimize_for_delivery,
+                source_bit_depth      = info.source_bit_depth
             };
         } finally {
             if (intermediate.path != null)
@@ -2475,6 +2477,25 @@ public class SmartOptimizer : GLib.Object {
         double[] all_si = {};
         parse_metadata_field (sig_output, "lavfi.siti.si", ref all_si);
 
+        // Put the amplitude metrics on one scale before any statistic is
+        // computed from them. signalstats reports in the source's native
+        // range, so without this every threshold downstream sees a 10-bit
+        // source as four times whatever it actually is. TOUT is deliberately
+        // excluded — it does not rescale linearly; see
+        // SmartOptimizerLogic.normalise_amplitude_for_depth.
+        for (int i = 0; i < all_satavg.length; i++)
+            all_satavg[i] = SmartOptimizerLogic.normalise_amplitude_for_depth (
+                all_satavg[i], info.source_bit_depth);
+        for (int i = 0; i < all_ydif.length; i++)
+            all_ydif[i] = SmartOptimizerLogic.normalise_amplitude_for_depth (
+                all_ydif[i], info.source_bit_depth);
+        for (int i = 0; i < all_ylow.length; i++)
+            all_ylow[i] = SmartOptimizerLogic.normalise_amplitude_for_depth (
+                all_ylow[i], info.source_bit_depth);
+        for (int i = 0; i < all_yavg.length; i++)
+            all_yavg[i] = SmartOptimizerLogic.normalise_amplitude_for_depth (
+                all_yavg[i], info.source_bit_depth);
+
         // ── Edge detection ──────────────────────────────────────────────
         string[] edge_cmd = build_concat_analysis_cmd (
             path, positions, segment_duration,
@@ -3247,6 +3268,24 @@ public class SmartOptimizer : GLib.Object {
 
         add_segment_inputs (cmd, path, positions, seg_dur);
 
+        // Measured at the source's NATIVE bit depth, deliberately.
+        //
+        // signalstats reports in the native range, so a 10-bit source yields
+        // ~4x the values of the same content at 8-bit. Every threshold in the
+        // classifier, the grain gate and the banding metrics compares these
+        // across sources, so that scale difference has to be removed — but it
+        // is removed in the parser (normalise_amplitude_for_depth), NOT with a
+        // format filter here.
+        //
+        // Converting to 8-bit before measuring does not merely rescale: it
+        // quantises away the sub-LSB variation that fine film grain lives in.
+        // Measured on a 10-bit film with grain visible at 3x magnification:
+        //
+        //     YDIF  13.83 native -> 3.46 forced-8-bit   (4.00x — pure scale)
+        //     TOUT   0.00194     -> 0.00018             (10.8x — grain LOST)
+        //
+        // Dividing afterwards reproduces the conversion's answer for motion
+        // and saturation while leaving the grain measurement intact.
         cmd.add ("-filter_complex");
         cmd.add (concat_filter_spec (positions.length, video_filter_chain)
             + ";[v]%s".printf (filter));
@@ -3938,7 +3977,8 @@ public class SmartOptimizer : GLib.Object {
             pinned_axis            = PinnedAxis.SIZE,
             estimated_vmaf         = 0.0,
             vmaf_measured          = false,
-            fast_decode            = false
+            fast_decode            = false,
+            source_bit_depth       = 8
         };
     }
 }

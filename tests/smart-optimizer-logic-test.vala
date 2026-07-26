@@ -736,6 +736,63 @@ void test_verification_delta_drives_confidence () {
     assert (unreliable < agreed);
 }
 
+void test_amplitude_normalisation_by_bit_depth () {
+    // signalstats reports in the source's NATIVE range. Measured on one 10-bit
+    // film: YDIF 13.83 native against 3.46 for the same content converted to
+    // 8-bit — exactly 4x, i.e. 2^(10-8).
+    assert (close_to (
+        SmartOptimizerLogic.normalise_amplitude_for_depth (13.83, 10), 3.4575, 1e-6));
+    assert (close_to (
+        SmartOptimizerLogic.normalise_amplitude_for_depth (9.89, 10), 2.4725, 1e-6));
+    assert (close_to (
+        SmartOptimizerLogic.normalise_amplitude_for_depth (100.0, 12), 6.25, 1e-6));
+
+    // 8-bit is the reference scale and must pass through untouched, so no
+    // existing behaviour shifts for the overwhelming majority of sources.
+    assert (SmartOptimizerLogic.normalise_amplitude_for_depth (13.83, 8) == 13.83);
+    assert (SmartOptimizerLogic.normalise_amplitude_for_depth (13.83, 0) == 13.83);
+}
+
+void test_normalisation_fixes_10bit_misclassification () {
+    // The bug this closes: two 10-bit corpus films measured YDIF 13.83 and
+    // 11.71 and were classified as high-motion live action. Their true motion
+    // is 3.46 and 2.93 — both well inside the animation rule's band.
+    //
+    // Raw (wrong) values: claimed by the live-action rule.
+    assert (classify_corpus (2.37, 33.23, 9.89, 13.83) == ContentType.LIVE_ACTION);
+
+    // Normalised (correct) values: no longer live action...
+    double ydif = SmartOptimizerLogic.normalise_amplitude_for_depth (13.83, 10);
+    double sat  = SmartOptimizerLogic.normalise_amplitude_for_depth (33.23, 10);
+    double ssd  = SmartOptimizerLogic.normalise_amplitude_for_depth (9.89, 10);
+    assert (classify_corpus (2.37, sat, ssd, ydif) != ContentType.LIVE_ACTION);
+    // ...and, critically, still not misfiled as animation: this is a
+    // live-action film, and the saturation-variance floor is what keeps it out
+    // once its true motion puts it inside the animation band.
+    assert (classify_corpus (2.37, sat, ssd, ydif) != ContentType.ANIME);
+}
+
+void test_grain_gate_ignores_measurement_above_8bit () {
+    // TOUT does not rescale linearly with depth — the same 10-bit film reads
+    // 0.00194 native and 0.00018 at 8-bit, a 10.8x spread where amplitudes
+    // move by exactly 4x. Neither figure converts into the other, so above
+    // 8-bit the measurement is unusable and the category must decide.
+
+    // A score far above GRAIN_SYNTH_HIGH would normally force grain on.
+    assert (SmartOptimizerLogic.grain_warranted (
+        0.0500, ContentType.ANIME, 8) == true);
+    // At 10-bit that same score is ignored, and ANIME says no grain.
+    assert (SmartOptimizerLogic.grain_warranted (
+        0.0500, ContentType.ANIME, 10) == false);
+    // Live action at 10-bit falls back to the category, which says yes.
+    assert (SmartOptimizerLogic.grain_warranted (
+        0.0001, ContentType.LIVE_ACTION, 10) == true);
+
+    // 8-bit behaviour is unchanged, including the default parameter.
+    assert (SmartOptimizerLogic.grain_warranted (0.0001, ContentType.LIVE_ACTION, 8)
+            == SmartOptimizerLogic.grain_warranted (0.0001, ContentType.LIVE_ACTION));
+}
+
 void test_content_override_beats_the_classifier () {
     // Measured anime readings that the classifier lands on ANIME anyway.
     var p = ContentProfile () {
@@ -1698,6 +1755,9 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
     Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
+    Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);
+    Test.add_func ("/smart-optimizer-logic/depth/fixes-10bit-misclassification", test_normalisation_fixes_10bit_misclassification);
+    Test.add_func ("/smart-optimizer-logic/depth/grain-gate-8bit-only", test_grain_gate_ignores_measurement_above_8bit);
     Test.add_func ("/smart-optimizer-logic/content/override", test_content_override_beats_the_classifier);
     Test.add_func ("/smart-optimizer-logic/delivery/bit-depth", test_delivery_prefers_8bit_but_never_breaks_hdr);
     Test.add_func ("/smart-optimizer-logic/quality/nominal-tier-agrees", test_nominal_tier_agrees_with_effort_axis);
