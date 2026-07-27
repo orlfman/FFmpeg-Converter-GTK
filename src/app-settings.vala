@@ -25,6 +25,8 @@ using GLib;
     //                                            4-4-4 PNG collage sidecar)
     //    play_with_ffplay = false                (default: false → use desktop
     //                                            player for Playback menu actions)
+    //    recently_opened_enabled = true          (default: true → remember and
+    //                                            show up to 20 input files)
     //    container_default_mode = default        (default|mkv|codec_specific)
     //                                           (default: keep current tab defaults when
     //                                            resetting codec tabs; mkv: prefer MKV;
@@ -77,6 +79,8 @@ public class AppSettings : Object {
     // video, so overriding it silently would be presumptuous. ffplay is the
     // opt-in for people who want the raw decode rather than their player's.
     private bool   _play_with_ffplay = false;
+    private bool   _recently_opened_enabled = true;
+    private string[] _recent_input_files = {};
     private bool   _verify_unknown_audio_copy_preflight = true;
     private int    _smart_optimizer_target_mb = 4;
     // On by default: the optimizer exists to configure an encode, so running
@@ -94,6 +98,8 @@ public class AppSettings : Object {
     private const string GROUP_OUTPUT  = "output";
     private const string GROUP_GENERAL = "general";
     private const string GROUP_SMART   = "smart_optimizer";
+    private const string GROUP_RECENT  = "recent_files";
+    public const int MAX_RECENT_INPUT_FILES = 20;
 
     // ── Signal: emitted after settings are saved ──────────────────────────────
     public signal void settings_changed ();
@@ -380,6 +386,152 @@ public class AppSettings : Object {
         }
     }
 
+    public bool recently_opened_enabled {
+        get {
+            bool enabled;
+            mutex.lock ();
+            try {
+                enabled = _recently_opened_enabled;
+            } finally {
+                mutex.unlock ();
+            }
+            return enabled;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _recently_opened_enabled = value;
+                // Disabling history is also a privacy action: forget paths
+                // already collected so the next save removes them from
+                // settings.ini instead of merely hiding them from the menu.
+                if (!value)
+                    _recent_input_files = {};
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
+    public string[] recent_input_files {
+        owned get {
+            string[] files;
+            mutex.lock ();
+            try {
+                files = new string[_recent_input_files.length];
+                for (int i = 0; i < _recent_input_files.length; i++)
+                    files[i] = _recent_input_files[i];
+            } finally {
+                mutex.unlock ();
+            }
+            return files;
+        }
+    }
+
+    /**
+     * Return a newest-first, de-duplicated and bounded recent-file list.
+     * Missing files are discarded when `require_existing` is true.
+     */
+    internal static string[] sanitize_recent_input_files (
+        string[] paths,
+        bool require_existing = true
+    ) {
+        string[] clean = {};
+
+        foreach (unowned string path in paths) {
+            if (path.length == 0)
+                continue;
+
+            string canonical = Filename.canonicalize (
+                path, Environment.get_current_dir ());
+            if (require_existing
+                    && !FileUtils.test (canonical, FileTest.IS_REGULAR)) {
+                continue;
+            }
+
+            bool duplicate = false;
+            foreach (unowned string existing in clean) {
+                if (existing == canonical) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+
+            clean += canonical;
+            if (clean.length >= MAX_RECENT_INPUT_FILES)
+                break;
+        }
+
+        return clean;
+    }
+
+    /** Record an existing input file and move it to the front of the list. */
+    public void record_recent_input_file (string path) {
+        if (path.length == 0 || !recently_opened_enabled)
+            return;
+
+        string canonical = Filename.canonicalize (
+            path, Environment.get_current_dir ());
+        if (!FileUtils.test (canonical, FileTest.IS_REGULAR))
+            return;
+
+        bool changed = false;
+        mutex.lock ();
+        try {
+            string[] candidates = { canonical };
+            foreach (unowned string existing in _recent_input_files)
+                candidates += existing;
+            string[] updated = sanitize_recent_input_files (candidates);
+            if (!string_arrays_equal (updated, _recent_input_files)) {
+                _recent_input_files = updated;
+                changed = true;
+            }
+        } finally {
+            mutex.unlock ();
+        }
+
+        if (changed)
+            save_internal (true);
+    }
+
+    /** Remove missing files from history and persist the cleaned list. */
+    public bool prune_recent_input_files () {
+        bool changed = false;
+        mutex.lock ();
+        try {
+            string[] updated = sanitize_recent_input_files (_recent_input_files);
+            if (!string_arrays_equal (updated, _recent_input_files)) {
+                _recent_input_files = updated;
+                changed = true;
+            }
+        } finally {
+            mutex.unlock ();
+        }
+
+        // Pruning is maintenance, not a preference change. Avoid recursively
+        // rebuilding an open hamburger menu through settings_changed.
+        if (changed)
+            save_internal (false);
+        return changed;
+    }
+
+    public void clear_recent_input_files () {
+        bool changed = false;
+        mutex.lock ();
+        try {
+            if (_recent_input_files.length > 0) {
+                _recent_input_files = {};
+                changed = true;
+            }
+        } finally {
+            mutex.unlock ();
+        }
+
+        if (changed)
+            save_internal (true);
+    }
+
     public int smart_optimizer_target_mb {
         get {
             int target_mb;
@@ -521,6 +673,12 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
         bool play_with_ffplay = read_bool (
             kf, GROUP_GENERAL, "play_with_ffplay", false);
+        bool recently_opened_enabled = read_bool (
+            kf, GROUP_GENERAL, "recently_opened_enabled", true);
+        string[] raw_recent_input_files = read_string_list (
+            kf, GROUP_RECENT, "input_files");
+        string[] recent_input_files = sanitize_recent_input_files (
+            raw_recent_input_files);
         int smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (
             read_int (kf, GROUP_SMART, "target_mb", 4));
         // Fallback applies only when the key is absent — a fresh install or a
@@ -543,6 +701,8 @@ public class AppSettings : Object {
             _overwrite_enabled = overwrite_enabled;
             _generate_collage_thumbnail = generate_collage_thumbnail;
             _play_with_ffplay = play_with_ffplay;
+            _recently_opened_enabled = recently_opened_enabled;
+            _recent_input_files = recent_input_files;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
@@ -554,7 +714,9 @@ public class AppSettings : Object {
 
         return ffmpeg_path != raw_ffmpeg_path
             || ffprobe_path != raw_ffprobe_path
-            || ffplay_path != raw_ffplay_path;
+            || ffplay_path != raw_ffplay_path
+            || !string_arrays_equal (
+                recent_input_files, raw_recent_input_files);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -580,6 +742,8 @@ public class AppSettings : Object {
         bool overwrite_enabled;
         bool generate_collage_thumbnail;
         bool play_with_ffplay;
+        bool recently_opened_enabled;
+        string[] recent_input_files;
         bool verify_unknown_audio_copy_preflight;
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
@@ -598,6 +762,10 @@ public class AppSettings : Object {
             overwrite_enabled = _overwrite_enabled;
             generate_collage_thumbnail = _generate_collage_thumbnail;
             play_with_ffplay = _play_with_ffplay;
+            recently_opened_enabled = _recently_opened_enabled;
+            recent_input_files = new string[_recent_input_files.length];
+            for (int i = 0; i < _recent_input_files.length; i++)
+                recent_input_files[i] = _recent_input_files[i];
             verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
@@ -626,6 +794,13 @@ public class AppSettings : Object {
             verify_unknown_audio_copy_preflight
         );
         kf.set_boolean (GROUP_GENERAL, "play_with_ffplay", play_with_ffplay);
+        kf.set_boolean (
+            GROUP_GENERAL,
+            "recently_opened_enabled",
+            recently_opened_enabled
+        );
+        if (recent_input_files.length > 0)
+            kf.set_string_list (GROUP_RECENT, "input_files", recent_input_files);
         kf.set_integer (GROUP_SMART, "target_mb", smart_optimizer_target_mb);
         kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
@@ -660,6 +835,7 @@ public class AppSettings : Object {
             _overwrite_enabled  = false;
             _generate_collage_thumbnail = false;
             _play_with_ffplay = false;
+            _recently_opened_enabled = true;
             _verify_unknown_audio_copy_preflight = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = true;
@@ -738,5 +914,24 @@ public class AppSettings : Object {
         } catch (KeyFileError e) {
             return fallback;
         }
+    }
+
+    private static string[] read_string_list (KeyFile kf, string group,
+                                              string key) {
+        try {
+            return kf.get_string_list (group, key);
+        } catch (KeyFileError e) {
+            return {};
+        }
+    }
+
+    private static bool string_arrays_equal (string[] a, string[] b) {
+        if (a.length != b.length)
+            return false;
+        for (int i = 0; i < a.length; i++) {
+            if (a[i] != b[i])
+                return false;
+        }
+        return true;
     }
 }

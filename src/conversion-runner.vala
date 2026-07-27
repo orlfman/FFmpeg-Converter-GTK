@@ -104,6 +104,8 @@ public class ConversionRunner {
                 return;
             }
 
+            report_smart_size_result (safe_output);
+
             succeeded = true;
 
             if (AppSettings.get_default ().generate_collage_thumbnail) {
@@ -164,6 +166,70 @@ public class ConversionRunner {
                 succeeded,
                 succeeded ? output_result : null
             );
+        }
+    }
+
+    internal static string format_smart_size_comparison (int target_size_kib,
+                                                         int planned_size_kib,
+                                                         double planning_uncertainty,
+                                                         int64 actual_bytes) {
+        if (target_size_kib <= 0 || actual_bytes < 0)
+            return "";
+
+        double actual_kib = (double) actual_bytes / 1024.0;
+        double requested_difference_kib = actual_kib - target_size_kib;
+        double requested_difference_percent =
+            requested_difference_kib / target_size_kib * 100.0;
+        var report = new StringBuilder ();
+        report.append ("[Smart Optimizer] ── Final size ──\n");
+        report.append ("[Smart Optimizer]   Requested:  %d KiB\n".printf (
+            target_size_kib));
+        if (planned_size_kib > 0) {
+            report.append ("[Smart Optimizer]   Planned:    %d KiB (approximately ±%.0f%%)\n"
+                .printf (planned_size_kib,
+                    planning_uncertainty.clamp (0.0, 0.50) * 100.0));
+        }
+        report.append ("[Smart Optimizer]   Actual:     %.0f KiB\n".printf (
+            actual_kib));
+        report.append ("[Smart Optimizer]   Requested difference: %+.0f KiB (%+.1f%%)"
+            .printf (requested_difference_kib,
+                requested_difference_percent));
+
+        if (planned_size_kib > 0) {
+            double planned_difference_kib = actual_kib - planned_size_kib;
+            double planned_difference_percent =
+                planned_difference_kib / planned_size_kib * 100.0;
+            bool within_plan = Math.fabs (planned_difference_percent)
+                <= planning_uncertainty.clamp (0.0, 0.50) * 100.0;
+            report.append ("\n[Smart Optimizer]   Planned difference:   %+.0f KiB (%+.1f%%; %s ±%.0f%% uncertainty)"
+                .printf (planned_difference_kib,
+                    planned_difference_percent,
+                    within_plan ? "within" : "outside",
+                    planning_uncertainty.clamp (0.0, 0.50) * 100.0));
+        }
+        return report.str;
+    }
+
+    private void report_smart_size_result (string output_path) {
+        if (config.smart_requested_size_kib <= 0)
+            return;
+
+        try {
+            var info = File.new_for_path (output_path).query_info (
+                FileAttribute.STANDARD_SIZE,
+                FileQueryInfoFlags.NONE
+            );
+            string report = format_smart_size_comparison (
+                config.smart_requested_size_kib,
+                config.smart_planned_size_kib,
+                config.smart_planning_uncertainty,
+                info.get_size ());
+            foreach (unowned string line in report.split ("\n")) {
+                converter.log_console_if_active (process_runner, line);
+            }
+        } catch (Error e) {
+            warning ("Could not report Smart Optimizer final size for %s: %s",
+                output_path, e.message);
         }
     }
 

@@ -1211,7 +1211,7 @@ void test_temporal_tuning_is_signal_driven_and_codec_capped () {
         cuts_per_minute = 15.0
     };
     var x264 = SmartOptimizerLogic.decide_temporal_tuning (
-        "x264", EncodeEffort.MAXIMUM, variable, 30.0, false, false);
+        "x264", EncodeEffort.MAXIMUM, variable, 30.0, false);
     assert (x264.keyint_frames == 60);  // two seconds at 30 fps
     assert (x264.lookahead_frames >= 100);
     assert (x264.lookahead_frames % 5 == 0);
@@ -1225,45 +1225,63 @@ void test_temporal_tuning_is_signal_driven_and_codec_capped () {
         cuts_per_minute = 0.0
     };
     var x265 = SmartOptimizerLogic.decide_temporal_tuning (
-        "x265", EncodeEffort.MAXIMUM, quiet, 30.0, false, false);
+        "x265", EncodeEffort.MAXIMUM, quiet, 30.0, false);
     assert (x265.keyint_frames == 240); // eight seconds at 30 fps
     assert (x265.lookahead_frames == 20);
 
     var vp9 = SmartOptimizerLogic.decide_temporal_tuning (
-        "vp9", EncodeEffort.MAXIMUM, variable, 30.0, false, false);
+        "vp9", EncodeEffort.MAXIMUM, variable, 30.0, false);
     assert (vp9.lookahead_frames <= 25);
 
-    var svt_two_pass = SmartOptimizerLogic.decide_temporal_tuning (
-        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false, true);
-    assert (svt_two_pass.lookahead_frames <= 42);
-    assert (svt_two_pass.reason.contains ("capped at 42"));
+    var svt = SmartOptimizerLogic.decide_temporal_tuning (
+        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false);
+    assert (svt.lookahead_frames > 42);
+    assert (!svt.reason.contains ("two-pass"));
 
-    // Size Mode uses the compatible setting for both calibration and the
-    // eventual recommendation, whether its late policy selects one or two passes.
+    // A motion-only signal must not claim that scene changes contributed.
+    // This mirrors the 0.73 motion-CV / 0 cuts-per-minute field report.
+    var motion_only = ContentProfile () {
+        content_type = ContentType.MIXED,
+        temporal_diff_mean = 8.0,
+        temporal_diff_stddev = 5.84,
+        temporal_samples = 100,
+        static_frame_ratio = 0.0,
+        cuts_per_minute = 0.0
+    };
+    var motion_only_tuning = SmartOptimizerLogic.decide_temporal_tuning (
+        "svt-av1", EncodeEffort.MAXIMUM, motion_only, 24.0, false);
+    assert (motion_only_tuning.keyint_frames == 96);
+    assert (motion_only_tuning.reason == "variable motion");
+
+    // Size Mode keeps the signal-selected setting during calibration. If its
+    // late policy chooses two-pass, SVT itself may apply its compatibility quirk.
     var svt_calibration = SmartOptimizerLogic.decide_temporal_tuning (
-        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false, true);
+        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false);
     assert (SmartOptimizerLogic.temporal_tuning_key (svt_calibration)
-        == SmartOptimizerLogic.temporal_tuning_key (svt_two_pass));
+        == SmartOptimizerLogic.temporal_tuning_key (svt));
 
     var delivery = SmartOptimizerLogic.decide_temporal_tuning (
-        "x264", EncodeEffort.MAXIMUM, quiet, 24.0, true, false);
+        "x264", EncodeEffort.MAXIMUM, quiet, 24.0, true);
     assert (delivery.keyint_frames == 48);
     assert (delivery.lookahead_frames <= 40);
+    var svt_delivery = SmartOptimizerLogic.decide_temporal_tuning (
+        "svt-av1", EncodeEffort.MAXIMUM, variable, 24.0, true);
+    assert (svt_delivery.lookahead_frames <= 32);
 
     // The optimizer must follow the same positive custom FPS accepted by the
     // conversion filter, including values outside the old 5..500 range.
     var one_fps = SmartOptimizerLogic.decide_temporal_tuning (
-        "x265", EncodeEffort.MAXIMUM, quiet, 1.0, false, false);
+        "x265", EncodeEffort.MAXIMUM, quiet, 1.0, false);
     assert (one_fps.keyint_frames == 8);
     assert (close_to (one_fps.keyint_seconds, 8.0, 1e-9));
 
     var high_fps = SmartOptimizerLogic.decide_temporal_tuning (
-        "x265", EncodeEffort.MAXIMUM, quiet, 1000.0, false, false);
+        "x265", EncodeEffort.MAXIMUM, quiet, 1000.0, false);
     assert (high_fps.keyint_frames == 1920);
     assert (close_to (high_fps.keyint_seconds, 1.92, 1e-9));
 
     var extreme_fps = SmartOptimizerLogic.decide_temporal_tuning (
-        "x265", EncodeEffort.MAXIMUM, quiet, double.MAX, false, false);
+        "x265", EncodeEffort.MAXIMUM, quiet, double.MAX, false);
     assert (extreme_fps.keyint_frames == 1920);
 }
 
@@ -2194,6 +2212,17 @@ void test_decide_two_pass_policies () {
     assert (tiny.recommend_two_pass);
     assert (tiny.strict_targeting);
     assert (tiny.target_video_kbps == 970);
+
+    // Final-size uncertainty is derived from the bitrate/audio/container
+    // plan and has no CRF-calibration confidence input.
+    var final_size = SmartOptimizerLogic.assess_final_size (
+        "svt-av1", 3072.0, 283, 71.73, 437.0, 73.0, false, true);
+    assert (final_size.expected_size_kib >= 2987);
+    assert (final_size.expected_size_kib <= 2989);
+    assert (final_size.expected_error_fraction > 0.06);
+    assert (final_size.expected_error_fraction < 0.07);
+    assert (final_size.basis.contains ("video ±6%"));
+    assert (final_size.basis.contains ("audio ±3%"));
 
     // XLARGE, confident, estimate on target → CRF mode allowed
     var xl = SmartOptimizerLogic.decide_two_pass (

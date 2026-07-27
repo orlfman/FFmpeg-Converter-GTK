@@ -513,16 +513,13 @@ public class SmartOptimizer : GLib.Object {
                 info.source_bit_depth, ctx.optimize_for_delivery);
             active_tuning = encoder_tuning;
             double temporal_fps = ctx.output_fps > 0.0 ? ctx.output_fps : info.fps;
-            // Size Mode may choose two-pass only after calibration. Keep SVT's
-            // probes, cache key, verification, and final encode on the same
-            // <=42-frame lookahead so that late choice cannot change the
-            // encoder whose size curve we measured.
-            bool svt_two_pass_compatible = (preferred_codec == "svt-av1");
+            // Let the temporal signal select SVT-AV1 lookahead without
+            // pre-emptively constraining a recommendation that may remain
+            // single-pass. SVT may reduce it internally for two-pass mode.
             var temporal_tuning = SmartOptimizerLogic.decide_temporal_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_size_tier (tier),
-                profile, temporal_fps, ctx.optimize_for_delivery,
-                svt_two_pass_compatible);
+                profile, temporal_fps, ctx.optimize_for_delivery);
             active_temporal_tuning = temporal_tuning;
 
             // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
@@ -686,6 +683,11 @@ public class SmartOptimizer : GLib.Object {
                 conf.confidence, model.crf_at_max, tw.trim_active,
                 conf.source_total_kbps, tw.encode_duration,
                 info.file_size_bytes, conf.sample_coverage, profile);
+            var final_size = SmartOptimizerLogic.assess_final_size (
+                preferred_codec, budget.target_total_kib,
+                policy.target_video_kbps, tw.encode_duration,
+                budget.audio_kib, budget.container_overhead_kib,
+                plan.use_stream_copy, plan.audio_measured);
             var final_temporal_tuning = temporal_tuning;
 
             // ── 11b. Downscale advisory ─────────────────────────────────
@@ -729,6 +731,16 @@ public class SmartOptimizer : GLib.Object {
                 cuts_per_minute       = profile.cuts_per_minute,
                 temporal_reason       = final_temporal_tuning.reason,
                 confidence            = conf.confidence,
+                expected_size_error_fraction = policy.recommend_two_pass
+                    ? final_size.expected_error_fraction : 0.0,
+                expected_final_size_kib = policy.recommend_two_pass
+                    ? final_size.expected_size_kib : estimated_total_kib,
+                final_size_basis = policy.recommend_two_pass
+                    ? final_size.basis : "CRF calibration model",
+                calibration_fit_rmse = conf.fit_rmse,
+                calibration_fit_informative =
+                    SmartOptimizerLogic.fit_residual_is_informative (
+                        model.cal_crfs.length, model.qc),
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
                 audio_encode_kbps     = plan.encode_target_kbps,
@@ -888,7 +900,7 @@ public class SmartOptimizer : GLib.Object {
             var temporal_tuning = SmartOptimizerLogic.decide_temporal_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_quality_intent (intent),
-                profile, temporal_fps, ctx.optimize_for_delivery, false);
+                profile, temporal_fps, ctx.optimize_for_delivery);
             active_temporal_tuning = temporal_tuning;
             var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
 
@@ -1443,6 +1455,13 @@ public class SmartOptimizer : GLib.Object {
                 cuts_per_minute       = profile.cuts_per_minute,
                 temporal_reason       = temporal_tuning.reason,
                 confidence            = confidence,
+                expected_size_error_fraction = 0.0,
+                expected_final_size_kib = estimated_total_kib,
+                final_size_basis = "quality-pinned size prediction",
+                // Size-calibration fields are not used in quality mode; its
+                // VMAF residual is already reported in the quality notes.
+                calibration_fit_rmse = 0.0,
+                calibration_fit_informative = false,
                 // Size Mode's reporting field; unused when quality is pinned.
                 size_tier             = nominal_tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
@@ -1765,7 +1784,8 @@ public class SmartOptimizer : GLib.Object {
         n.append ("  Estimated size: %.1f MiB\n".printf (estimated_total_kib / 1024.0));
         n.append ("  %s VMAF: %.1f\n".printf (
             verification.done ? "Measured" : "Estimated", achieved_vmaf));
-        n.append ("  Confidence: %.0f%%\n".printf (confidence * 100.0));
+        n.append ("  Quality-model confidence: %.0f%%\n".printf (
+            confidence * 100.0));
         n.append ("  Sampled %.0f%% of the encode window (%d × %.1fs segments%s)\n"
             .printf (coverage * 100.0, segment_count, tw.sample_segment_duration,
                      positions_trimmed ? ", reduced to fit the reference budget" : ""));
@@ -2671,6 +2691,9 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  This mode targets the requested size more directly.\n");
             notes.append ("  Final size can still land above or below target depending on codec, audio, and container behavior.\n");
             notes.append ("  Quality is determined by available bitrate, not CRF.\n");
+            if (codec == "svt-av1") {
+                notes.append ("  SVT-AV1 two-pass quirk: the encoder may reduce the requested lookahead to a compatible value.\n");
+            }
         } else {
             notes.append ("\n── Two-pass: skipped ──\n");
             if (policy.within_target_band) {
@@ -2833,8 +2856,10 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("Two-pass:       %s\n".printf (rec.two_pass ? "enabled" : "disabled"));
         if (rec.two_pass) {
             sb.append ("  Bitrate cap:  %d kbps\n".printf (rec.target_bitrate_kbps));
+            sb.append ("Requested size: %d KiB\n".printf (rec.target_size_kib));
             sb.append ("Est. size:      ~%d KiB (via two-pass @ %d kbps)\n"
-                .printf (rec.target_size_kib, rec.target_bitrate_kbps));
+                .printf (rec.expected_final_size_kib,
+                    rec.target_bitrate_kbps));
             if (rec.estimated_size_kib < rec.target_size_kib) {
                 sb.append ("CRF ceiling:    %d KiB (CRF %d — max quality undershoots target)\n"
                     .printf (rec.estimated_size_kib, rec.crf));
@@ -2850,7 +2875,27 @@ public class SmartOptimizer : GLib.Object {
         }
         sb.append ("Pinned axis:    %s\n".printf (rec.pinned_axis.to_label ()));
         sb.append ("Content:        %s\n".printf (rec.content_type.to_label ()));
-        sb.append ("Confidence:     %s\n".printf ("%.0f%%".printf (rec.confidence * 100)));
+        if (rec.pinned_axis == PinnedAxis.SIZE) {
+            sb.append ("Calibration confidence: %.0f%% (CRF size model".printf (
+                rec.confidence * 100.0));
+            if (rec.calibration_fit_informative) {
+                sb.append ("; residual ±%.1f%%".printf (
+                    rec.calibration_fit_rmse * 100.0));
+            }
+            sb.append (")\n");
+            if (rec.two_pass) {
+                sb.append ("Planning uncertainty: approximately ±%.0f%% (bitrate/audio/container estimate)\n"
+                    .printf (rec.expected_size_error_fraction * 100.0));
+                sb.append ("Expected final size: ~%d KiB (approximately ±%.0f%%)\n"
+                    .printf (rec.expected_final_size_kib,
+                        rec.expected_size_error_fraction * 100.0));
+                sb.append ("Final-size basis: %s; may vary above or below target\n"
+                    .printf (rec.final_size_basis));
+            }
+        } else {
+            sb.append ("Quality-model confidence: %s\n".printf (
+                "%.0f%%".printf (rec.confidence * 100)));
+        }
         sb.append ("Effort:         %s\n".printf (rec.effort.to_label ()));
         if (rec.pinned_axis == PinnedAxis.SIZE) {
             sb.append ("Size tier:      %s\n".printf (rec.size_tier.to_label ()));
@@ -4923,6 +4968,11 @@ public class SmartOptimizer : GLib.Object {
             cuts_per_minute        = 0.0,
             temporal_reason        = "",
             confidence             = 0.0,
+            expected_size_error_fraction = 0.0,
+            expected_final_size_kib = 0,
+            final_size_basis       = "",
+            calibration_fit_rmse  = 0.0,
+            calibration_fit_informative = false,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,
             total_audio_budget_kbps = 0,

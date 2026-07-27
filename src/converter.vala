@@ -31,6 +31,13 @@ public class ConversionConfig : Object {
     public string time_timestamp { get; set; default = "00:00:00"; }
     public double output_duration_seconds { get; set; default = 0.0; }
 
+    // Set only when this conversion follows a successful size-pinned Smart
+    // Optimizer recommendation. The runner uses it for an actual-vs-requested
+    // report after the output has passed ffprobe validation.
+    public int smart_requested_size_kib { get; set; default = 0; }
+    public int smart_planned_size_kib { get; set; default = 0; }
+    public double smart_planning_uncertainty { get; set; default = 0.0; }
+
     // ── Frame-based progress ───────────────────────────────────────────────
     //    Effective output fps resolved at snapshot time from the General tab's
     //    frame rate setting.  0.0 means "use probed input fps".
@@ -82,6 +89,10 @@ public class Converter : Object {
     private string _last_output_file = "";
     private string? _passlog_base = null;
     private string? _passlog_run_dir = null;
+    private string pending_smart_size_codec = "";
+    private int pending_smart_target_size_kib = 0;
+    private int pending_smart_planned_size_kib = 0;
+    private double pending_smart_planning_uncertainty = 0.0;
     private SvtAv1CrfTwoPassCapability svt_crf_two_pass_capability =
         new SvtAv1CrfTwoPassCapability ();
 
@@ -150,6 +161,58 @@ public class Converter : Object {
 
     public SvtAv1CrfTwoPassCapability get_svt_crf_two_pass_capability () {
         return svt_crf_two_pass_capability.copy ();
+    }
+
+    /** Stage a one-shot final-size report for the next conversion. */
+    public void stage_smart_size_report (string codec,
+                                         int target_size_kib,
+                                         int planned_size_kib,
+                                         double planning_uncertainty) {
+        state_mutex.lock ();
+        try {
+            if (target_size_kib > 0 && codec.length > 0) {
+                pending_smart_size_codec = codec.down ();
+                pending_smart_target_size_kib = target_size_kib;
+                pending_smart_planned_size_kib = int.max (
+                    0, planned_size_kib);
+                pending_smart_planning_uncertainty = planning_uncertainty.clamp (
+                    0.0, 0.50);
+            } else {
+                pending_smart_size_codec = "";
+                pending_smart_target_size_kib = 0;
+                pending_smart_planned_size_kib = 0;
+                pending_smart_planning_uncertainty = 0.0;
+            }
+        } finally {
+            state_mutex.unlock ();
+        }
+    }
+
+    private void consume_smart_size_report (string codec,
+                                            out int target,
+                                            out int planned,
+                                            out double uncertainty) {
+        target = 0;
+        planned = 0;
+        uncertainty = 0.0;
+        state_mutex.lock ();
+        try {
+            if (pending_smart_target_size_kib > 0
+                    && pending_smart_size_codec == codec.down ()) {
+                target = pending_smart_target_size_kib;
+                planned = pending_smart_planned_size_kib;
+                uncertainty = pending_smart_planning_uncertainty;
+            }
+            // Any conversion consumes the one-shot association. If the user
+            // changed codec after optimization, do not let the old target
+            // attach itself to an unrelated later conversion.
+            pending_smart_size_codec = "";
+            pending_smart_target_size_kib = 0;
+            pending_smart_planned_size_kib = 0;
+            pending_smart_planning_uncertainty = 0.0;
+        } finally {
+            state_mutex.unlock ();
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -380,6 +443,17 @@ public class Converter : Object {
             : null;
         GeneralSettingsSnapshot general_settings = general_tab.snapshot_settings (pixel_format);
         config.profile = CodecUtils.snapshot_encode_profile (builder, codec_tab, general_settings);
+        int smart_requested_size_kib;
+        int smart_planned_size_kib;
+        double smart_planning_uncertainty;
+        consume_smart_size_report (
+            config.profile.codec_name,
+            out smart_requested_size_kib,
+            out smart_planned_size_kib,
+            out smart_planning_uncertainty);
+        config.smart_requested_size_kib = smart_requested_size_kib;
+        config.smart_planned_size_kib = smart_planned_size_kib;
+        config.smart_planning_uncertainty = smart_planning_uncertainty;
         SvtAv1CrfTwoPassCapability svt_capability = get_svt_crf_two_pass_capability ();
         config.svt_crf_two_pass_status = svt_capability.status;
         config.svt_crf_two_pass_reason = svt_capability.reason;

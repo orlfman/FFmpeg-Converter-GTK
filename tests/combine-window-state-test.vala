@@ -4432,26 +4432,63 @@ private void test_smart_optimizer_report_includes_native_sharpness_decision () {
         pinned_axis = PinnedAxis.QUALITY,
         keyint_frames = 120,
         keyint_seconds = 5.0,
-        lookahead_frames = 42,
+        lookahead_frames = 61,
         motion_variability = 0.57,
         cuts_per_minute = 4.5,
         static_frame_ratio = 0.18,
-        temporal_reason = "variable motion; SVT-AV1 two-pass lookahead capped at 42"
+        temporal_reason = "variable motion"
     };
 
     string enabled = SmartOptimizer.format_recommendation (rec);
+    assert_contains (enabled, "Quality-model confidence: 87%",
+        "quality report identifies confidence as belonging to its model");
     assert_contains (enabled, "Sharpness:      level 2 (detail score 63%)",
         "SVT-AV1 report states the applied sharpness level and signal");
     assert_contains (enabled,
         "Keyframes:      ≤ 120 frames (5.0s maximum; scene cuts enabled)",
         "report states the signal-selected maximum GOP");
-    assert_contains (enabled, "Lookahead:      42 frames",
+    assert_contains (enabled, "Lookahead:      61 frames",
         "report states the applied lookahead");
     assert_contains (enabled,
         "Temporal signal: motion CV 0.57, cuts 4.5/min, static frames 18%",
         "report exposes the temporal signals behind the decision");
 
+    rec.pinned_axis = PinnedAxis.SIZE;
+    rec.two_pass = true;
+    rec.target_size_kib = 3072;
+    rec.target_bitrate_kbps = 283;
+    rec.confidence = 1.0;
+    rec.expected_size_error_fraction = 0.066;
+    rec.expected_final_size_kib = 2988;
+    rec.final_size_basis = "video ±6%, audio ±3%, container reserve ±50%";
+    rec.calibration_fit_rmse = 0.017;
+    rec.calibration_fit_informative = true;
+    rec.notes = "SVT-AV1 two-pass quirk: the encoder may reduce the requested lookahead to a compatible value.";
+    string size_target = SmartOptimizer.format_recommendation (rec);
+    assert_contains (size_target,
+        "Calibration confidence: 100% (CRF size model; residual ±1.7%)",
+        "size report distinguishes CRF calibration confidence");
+    assert_contains (size_target,
+        "Planning uncertainty: approximately ±7% (bitrate/audio/container estimate)",
+        "size report describes modeled final-size error as planning uncertainty");
+    assert_contains (size_target, "Requested size: 3072 KiB",
+        "two-pass header identifies the requested size as a target");
+    assert_contains (size_target,
+        "Est. size:      ~2988 KiB (via two-pass @ 283 kbps)",
+        "two-pass header uses the independently budgeted estimate");
+    assert_contains (size_target,
+        "Expected final size: ~2988 KiB (approximately ±7%)",
+        "size report gives the final-size planning range");
+    assert_contains (size_target,
+        "Final-size basis: video ±6%, audio ±3%, container reserve ±50%; may vary above or below target",
+        "size report explains both uncertainty directions and inputs");
+    assert_contains (size_target,
+        "SVT-AV1 two-pass quirk: the encoder may reduce the requested lookahead to a compatible value.",
+        "size report documents SVT's automatic two-pass lookahead adjustment");
+
     rec.codec = "vp9";
+    rec.pinned_axis = PinnedAxis.QUALITY;
+    rec.two_pass = false;
     rec.detail_score = 0.12;
     rec.native_sharpness = 0;
     string disabled = SmartOptimizer.format_recommendation (rec);
@@ -4463,6 +4500,25 @@ private void test_smart_optimizer_report_includes_native_sharpness_decision () {
     string deferred_codec = SmartOptimizer.format_recommendation (rec);
     assert_false (deferred_codec.contains ("Sharpness:"),
         "x264/x265 do not claim a native sharpness decision");
+}
+
+private void test_conversion_report_compares_smart_target_with_actual_bytes () {
+    string report = ConversionRunner.format_smart_size_comparison (
+        3072, 2989, 0.07, 2922516);
+    assert_contains (report, "Requested:  3072 KiB",
+        "completion report preserves the optimizer's exact requested size");
+    assert_contains (report, "Planned:    2989 KiB (approximately ±7%)",
+        "completion report preserves the independently planned size");
+    assert_contains (report, "Actual:     2854 KiB",
+        "completion report derives actual KiB from filesystem bytes");
+    assert_contains (report, "Requested difference: -218 KiB (-7.1%)",
+        "completion report compares actual size with the requested maximum");
+    assert_contains (report,
+        "Planned difference:   -135 KiB (-4.5%; within ±7% uncertainty)",
+        "completion report evaluates the planning model against its uncertainty");
+    assert_true (ConversionRunner.format_smart_size_comparison (
+        0, 0, 0.0, 2922516) == "",
+        "ordinary conversions do not receive a Smart Optimizer size report");
 }
 
 private void test_smart_optimizer_direct_args_include_temporal_tuning () {
@@ -5081,6 +5137,63 @@ private void test_both_logo_detect_buttons_reset_together () {
         "reset leaves logo removal inactive");
 }
 
+private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
+    string temp_dir = "";
+    string[] files = {};
+
+    try {
+        temp_dir = DirUtils.make_tmp ("recent-input-history-XXXXXX");
+        for (int i = 0; i < 22; i++) {
+            string path = Path.build_filename (
+                temp_dir, "video-%02d.mkv".printf (i));
+            FileUtils.set_contents (path, "test");
+            files += path;
+        }
+
+        string[] candidates = { files[0], files[1], files[0] };
+        for (int i = 2; i < files.length; i++)
+            candidates += files[i];
+
+        string[] clean = AppSettings.sanitize_recent_input_files (candidates);
+        assert_true (clean.length == AppSettings.MAX_RECENT_INPUT_FILES,
+            "recent history retains at most 20 files");
+        assert_string_equal (clean[0], files[0],
+            "recent history preserves newest-first order");
+        assert_string_equal (clean[1], files[1],
+            "duplicate entries do not displace the next unique file");
+        assert_string_equal (clean[19], files[19],
+            "the 20-item boundary is deterministic");
+
+        FileUtils.remove (files[5]);
+        string[] pruned = AppSettings.sanitize_recent_input_files (clean);
+        assert_true (pruned.length == 19,
+            "a deleted recent input is removed during refresh");
+        foreach (unowned string path in pruned) {
+            assert_true (path != files[5],
+                "deleted input does not remain in the recent menu model");
+        }
+    } catch (Error e) {
+        error ("Recent input history test setup failed: %s", e.message);
+    } finally {
+        foreach (unowned string path in files)
+            FileUtils.remove (path);
+        if (temp_dir.length > 0)
+            DirUtils.remove (temp_dir);
+    }
+}
+
+private void test_recent_input_menu_item_exposes_full_path_tooltip () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    string path = "/videos/archive/shared-name.mkv";
+    var button = HamburgerMenu.create_recent_input_button (path);
+    assert_string_equal (button.get_label (), "shared-name.mkv",
+        "recent item keeps a compact basename label");
+    assert_string_equal (button.get_tooltip_text () ?? "", path,
+        "recent item tooltip exposes its complete path");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -5090,6 +5203,10 @@ void main (string[] args) {
         test_combine_preview_hides_popout_button);
     Test.add_func ("/combine/file-pickers/combine-lock-clears-and-disables-input",
         test_file_pickers_combine_lock_clears_and_disables_input);
+    Test.add_func ("/app-settings/recent-inputs/bounded-deduplicated-pruned",
+        test_recent_input_history_is_bounded_deduplicated_and_pruned);
+    Test.add_func ("/hamburger/recent-inputs/full-path-tooltip",
+        test_recent_input_menu_item_exposes_full_path_tooltip);
     Test.add_func ("/combine/information/clears-stale-input-when-removed",
         test_information_tab_clears_stale_input_when_input_removed);
     Test.add_func ("/combine/information/output-hides-input-and-shows-summary",
@@ -5364,6 +5481,8 @@ void main (string[] args) {
         test_vmaf_probe_reports_binary_errors_separately);
     Test.add_func ("/combine/smart-optimizer/report-native-sharpness",
         test_smart_optimizer_report_includes_native_sharpness_decision);
+    Test.add_func ("/combine/smart-optimizer/final-size-comparison",
+        test_conversion_report_compares_smart_target_with_actual_bytes);
     Test.add_func ("/combine/smart-optimizer/direct-args-temporal-tuning",
         test_smart_optimizer_direct_args_include_temporal_tuning);
     Test.add_func ("/combine/smart-optimizer/apply-temporal-tuning",

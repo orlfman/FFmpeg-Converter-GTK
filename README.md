@@ -125,11 +125,37 @@ Just pick the mode and go.
 
 ---
 
-### Dependency
+### Dependencies
+
+Package names differ between distributions, but a source build needs:
+
+- **Build tools:** GNU Make, Meson, Ninja, Vala, `pkg-config`, and a C compiler.
+- **Development libraries:** GLib/GObject/GIO, GTK4, libadwaita, Cairo, Pango,
+  JSON-GLib, and libsoup 3.
+- **Runtime:** FFmpeg (including FFprobe), GStreamer, the GStreamer playback
+  core, and plugins supporting Matroska/WebM, MP4, Opus, Vorbis, AAC, H.264,
+  H.265/HEVC, VP9, and AV1. The hicolor icon theme is also required for the
+  installed application icon.
+- **Optional:** FFmpeg's `libvmaf` filter enables Smart Optimizer Quality
+  Target mode. FFplay enables the optional ffplay playback preference; the app
+  falls back to the system player when it is unavailable.
+
+The Makefile checks these capabilities before building and reports the missing
+tool, library, or GStreamer feature rather than assuming distribution-specific
+package names.
+
+### Dependencies (Arch Linux)
+
+Install everything needed to build and run the application from source:
 
 ```bash
-meson, ninja, valac, pkg-config, GTK4, libadwaita, json-glib, libsoup 3, FFmpeg, FFprobe, and GStreamer
+sudo pacman -S --needed base-devel meson ninja vala pkgconf gtk4 libadwaita \
+  json-glib libsoup3 cairo pango ffmpeg gstreamer gst-plugins-base \
+  gst-plugins-good gst-plugins-bad gst-libav hicolor-icon-theme
 ```
+
+On Arch, FFmpeg supplies FFmpeg, FFprobe, FFplay, and the `libvmaf`-enabled
+filter used by Quality Target mode.
 
 ### Install (Arch Linux / AUR)
 
@@ -141,7 +167,7 @@ yay -S ffmpeg-converter-gtk
 
 ### Install (from source)
 
-Download the latest source release from [Releases](https://github.com/orlfman/FFmpeg-Converter-GTK/releases), extract it, then:
+Download the latest source release from [Releases](https://github.com/orlfman/FFmpeg-Converter-GTK/releases), extract it, then use the included Makefile:
 
 ```bash
 cd FFmpeg-Converter-GTK-<version>
@@ -150,6 +176,9 @@ sudo make install
 ```
 
 ### Development Build & Install
+
+A Git clone also includes the interactive `DevTools/build.sh` helper, which is
+not included in release archives.
 
 ```bash
 git clone https://github.com/orlfman/FFmpeg-Converter-GTK.git

@@ -60,6 +60,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow generate_collage_thumbnail_switch;
     private Adw.SwitchRow play_with_ffplay_switch;
+    private Adw.SwitchRow recently_opened_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
@@ -288,6 +289,20 @@ public class SettingsDialog : Adw.PreferencesDialog {
         );
         playback_group.add (play_with_ffplay_switch);
         page.add (playback_group);
+
+        var history_group = new Adw.PreferencesGroup ();
+        history_group.set_title ("Recent Files");
+        history_group.set_description (
+            "Control whether input-file history is stored and shown in the hamburger menu."
+        );
+
+        recently_opened_switch = new Adw.SwitchRow ();
+        recently_opened_switch.set_title ("Remember Recently Opened Files");
+        recently_opened_switch.set_subtitle (
+            "Keep up to 20 input files for quick reopening. Turning this off clears stored history and hides the menu."
+        );
+        history_group.add (recently_opened_switch);
+        page.add (history_group);
 
         var container_group = new Adw.PreferencesGroup ();
         container_group.set_title ("Default Container");
@@ -1433,6 +1448,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_switch.set_active (s.overwrite_enabled);
         generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
         play_with_ffplay_switch.set_active (s.play_with_ffplay);
+        recently_opened_switch.set_active (s.recently_opened_enabled);
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
         );
@@ -1491,6 +1507,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
         s.play_with_ffplay = play_with_ffplay_switch.get_active ();
+        s.recently_opened_enabled = recently_opened_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();
 

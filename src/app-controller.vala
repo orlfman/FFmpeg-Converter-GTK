@@ -725,6 +725,10 @@ public class AppController : Object {
      * and output audio bitrate. All are gathered from the GeneralTab state.
      */
     private async void run_smart_optimizer (string codec) {
+        // A new analysis supersedes any not-yet-consumed report staged by an
+        // older recommendation, including when this run cannot start.
+        converter.stage_smart_size_report ("", 0, 0, 0.0);
+
         string input_file = file_pickers.input_entry.get_text ();
         if (input_file.length == 0) {
             status_area.set_status ("Smart Optimizer: select an input file first.",
@@ -972,6 +976,17 @@ public class AppController : Object {
                     smart_tab.get_audio_settings_ref ().set_audio_enabled (false);
                 }
             }
+
+            // Carry the exact solved target—not a re-read of the spin button—
+            // into the next matching conversion. This preserves trim-scaled
+            // Match Source targets and lets the runner report actual bytes.
+            converter.stage_smart_size_report (
+                rec.codec,
+                rec.pinned_axis == PinnedAxis.SIZE ? rec.target_size_kib : 0,
+                rec.pinned_axis == PinnedAxis.SIZE && rec.two_pass
+                    ? rec.expected_final_size_kib : 0,
+                rec.pinned_axis == PinnedAxis.SIZE && rec.two_pass
+                    ? rec.expected_size_error_fraction : 0.0);
 
             // Strip metadata for tiny targets — every byte counts
             if (rec.strip_metadata) {

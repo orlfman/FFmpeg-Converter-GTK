@@ -126,7 +126,17 @@ public struct OptimizationRecommendation {
     public string notes;
     public bool is_impossible;
     public ContentType content_type;
-    public double confidence;          // 0.0–1.0, how far we extrapolated
+    /** Confidence in the sampled CRF model, not a two-pass size guarantee. */
+    public double confidence;
+    /** Expected variation as a fraction of the independently budgeted size. */
+    public double expected_size_error_fraction;
+    /** Independently budgeted two-pass size, before the final encoder run. */
+    public int expected_final_size_kib;
+    /** Human-readable inputs behind the independent final-size estimate. */
+    public string final_size_basis;
+    /** Log-space residual of the CRF size calibration model. */
+    public double calibration_fit_rmse;
+    public bool calibration_fit_informative;
     public SizeTier size_tier;         // optimization strategy tier
     public int recommended_audio_kbps; // per-stream audio bitrate reserved in the size estimate
     /**
@@ -542,6 +552,23 @@ namespace SmartOptimizerLogic {
         public double comparison_source_size_mb;
         public double reduction_confidence = 1.0;
         public bool   is_impossible;
+    }
+
+    /**
+     * Independent uncertainty budget for a completed two-pass file.
+     *
+     * Unlike ConfidenceAssessment this deliberately does not consume the CRF
+     * curve, extrapolation distance, or fit residual: two-pass selects a
+     * bitrate, so its remaining uncertainty comes from the encoder's rate
+     * control, audio budgeting, and muxer overhead.
+     */
+    public class FinalSizeAssessment {
+        public double expected_error_fraction;
+        public int    expected_size_kib;
+        public double video_error_fraction;
+        public double audio_error_fraction;
+        public double container_error_fraction;
+        public string basis = "";
     }
 
     // ── Unit conversions ─────────────────────────────────────────────────────
@@ -2068,8 +2095,7 @@ namespace SmartOptimizerLogic {
         EncodeEffort   effort,
         ContentProfile profile,
         double         output_fps,
-        bool           optimize_for_delivery,
-        bool           svt_two_pass_compatible
+        bool           optimize_for_delivery
     ) {
         double fps = (output_fps.is_finite () && output_fps > 0.0)
             ? output_fps : 30.0;
@@ -2086,11 +2112,21 @@ namespace SmartOptimizerLogic {
         } else if (signals_available
                 && (profile.cuts_per_minute >= 12.0 || motion_cv >= 1.0)) {
             keyint_seconds = 2.0;
-            reason = "frequent cuts or highly variable motion";
+            if (profile.cuts_per_minute >= 12.0 && motion_cv >= 1.0)
+                reason = "frequent cuts and highly variable motion";
+            else if (profile.cuts_per_minute >= 12.0)
+                reason = "frequent scene changes";
+            else
+                reason = "highly variable motion";
         } else if (signals_available
                 && (profile.cuts_per_minute >= 6.0 || motion_cv >= 0.60)) {
             keyint_seconds = 4.0;
-            reason = "variable motion or regular scene changes";
+            if (profile.cuts_per_minute >= 6.0 && motion_cv >= 0.60)
+                reason = "variable motion and regular scene changes";
+            else if (profile.cuts_per_minute >= 6.0)
+                reason = "regular scene changes";
+            else
+                reason = "variable motion";
         } else if (signals_available
                 && (profile.content_type == ContentType.SCREENCAST
                     || (profile.temporal_diff_mean <= 2.0
@@ -2127,11 +2163,6 @@ namespace SmartOptimizerLogic {
 
         int cap = temporal_lookahead_cap (codec, effort);
         int floor = (codec == "vp9") ? 8 : ((codec == "svt-av1") ? 24 : 20);
-        if (codec == "svt-av1" && svt_two_pass_compatible) {
-            cap = int.min (cap, 42);
-            floor = int.min (floor, cap);
-            reason += "; SVT-AV1 lookahead capped at 42 for two-pass compatibility";
-        }
         if (optimize_for_delivery) {
             int delivery_cap = (codec == "vp9") ? 12
                 : ((codec == "svt-av1") ? 32 : 40);
@@ -3075,6 +3106,74 @@ namespace SmartOptimizerLogic {
     }
 
     // ── Two-pass policy ──────────────────────────────────────────────────────
+
+    private double two_pass_video_rate_error (string codec) {
+        // Planning tolerances for how closely each encoder's two-pass VBR
+        // consumes its requested average bitrate. These describe rate-control
+        // behavior, not CRF calibration quality. SVT-AV1 receives the widest
+        // allowance because it commonly undershoots constrained material;
+        // x264's mature ABR controller receives the narrowest.
+        switch (codec.down ()) {
+            case "x264":    return 0.03;
+            case "x265":    return 0.04;
+            case "vp9":     return 0.05;
+            case "svt-av1": return 0.06;
+            default:        return 0.08;
+        }
+    }
+
+    /** Build a final-size estimate independently of the sampled CRF curve. */
+    public FinalSizeAssessment assess_final_size (
+        string codec,
+        double target_size_kib,
+        int    target_video_kbps,
+        double encode_duration,
+        double audio_kib,
+        double container_overhead_kib,
+        bool   stream_copy_audio,
+        bool   audio_measured
+    ) {
+        var result = new FinalSizeAssessment ();
+
+        double safe_target = double.max (0.0, target_size_kib);
+        double safe_audio = double.max (0.0, audio_kib);
+        double safe_container = double.max (0.0, container_overhead_kib);
+        bool duration_known = encode_duration.is_finite () && encode_duration > 0.0;
+        double video_kib = duration_known
+            ? kib_from_kbps_for_duration (
+                double.max (0.0, target_video_kbps), encode_duration)
+            : double.max (0.0, safe_target - safe_audio - safe_container);
+
+        double video_error = two_pass_video_rate_error (codec);
+        if (!duration_known)
+            video_error = double.min (0.20, video_error + 0.04);
+        double audio_error = safe_audio <= 0.0 ? 0.0
+            : (stream_copy_audio ? 0.01 : (audio_measured ? 0.03 : 0.10));
+        // The reserve is deliberately conservative; observed mux overhead can
+        // use substantially less of it, so budget half of the reserved amount
+        // as uncertainty rather than pretending the reserve is exact.
+        double container_error = safe_container > 0.0 ? 0.50 : 0.0;
+
+        double expected_kib = video_kib + safe_audio + safe_container;
+        if (!expected_kib.is_finite () || expected_kib <= 0.0)
+            expected_kib = safe_target;
+        double error_kib = video_kib * video_error
+            + safe_audio * audio_error
+            + safe_container * container_error;
+        double error_fraction = expected_kib > 0.0
+            ? (error_kib / expected_kib).clamp (0.0, 0.50) : 0.50;
+
+        result.expected_size_kib = (int) Math.round (expected_kib);
+        result.expected_error_fraction = error_fraction;
+        result.video_error_fraction = video_error;
+        result.audio_error_fraction = audio_error;
+        result.container_error_fraction = container_error;
+        result.basis = "video ±%.0f%%, audio ±%.0f%%, container reserve ±%.0f%%%s"
+            .printf (video_error * 100.0, audio_error * 100.0,
+                container_error * 100.0,
+                duration_known ? "" : ", duration estimated");
+        return result;
+    }
 
     /**
      * Tier-aware two-pass recommendation: strict tiers always use two-pass

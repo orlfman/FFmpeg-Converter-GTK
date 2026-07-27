@@ -25,6 +25,22 @@ check_pkg_config_dependency() {
     fi
 }
 
+check_gstreamer_element() {
+    local label="$1"
+    shift
+
+    local element
+    for element in "$@"; do
+        if gst-inspect-1.0 "$element" &> /dev/null; then
+            return
+        fi
+    done
+
+    echo "❌ Error: GStreamer is missing $label support."
+    echo "   Install the appropriate base/good/bad/libav plugin package and try again."
+    exit 1
+}
+
 echo "=== FFmpeg Converter GTK - Clean Fresh Build & Install ==="
 echo "Detected project directory: $PROJECT_DIR"
 echo
@@ -35,14 +51,38 @@ check_dependency meson
 check_dependency ninja
 check_dependency valac
 check_dependency pkg-config
+check_dependency cc
+check_pkg_config_dependency glib-2.0 GLib
+check_pkg_config_dependency gobject-2.0 GObject
+check_pkg_config_dependency gio-2.0 GIO
 check_pkg_config_dependency gtk4 GTK4
+check_pkg_config_dependency cairo Cairo
+check_pkg_config_dependency pango Pango
 check_pkg_config_dependency libadwaita-1 libadwaita
 check_pkg_config_dependency json-glib-1.0 json-glib
 check_pkg_config_dependency libsoup-3.0 "libsoup 3"
 check_dependency ffmpeg
 check_dependency ffprobe
 check_dependency gst-inspect-1.0
+check_gstreamer_element "playback" playbin playbin3
+check_gstreamer_element "Matroska/WebM container" matroskademux
+check_gstreamer_element "MP4/QuickTime container" qtdemux
+check_gstreamer_element "Opus audio" opusdec
+check_gstreamer_element "Vorbis audio" vorbisdec
+check_gstreamer_element "AAC audio" avdec_aac faad
+check_gstreamer_element "H.264 video" avdec_h264 openh264dec
+check_gstreamer_element "H.265/HEVC video" avdec_h265 libde265dec
+check_gstreamer_element "VP9 video" vp9dec avdec_vp9
+check_gstreamer_element "AV1 video" av1dec dav1ddec avdec_av1
 echo "✅ All dependencies found"
+
+if ! ffmpeg -hide_banner -filters 2>/dev/null \
+        | awk '$2 == "libvmaf" { found=1 } END { exit !found }'; then
+    echo "⚠️  Optional: this FFmpeg build has no libvmaf filter; Quality Target mode will be unavailable."
+fi
+if ! command -v ffplay &> /dev/null; then
+    echo "⚠️  Optional: ffplay was not found; the ffplay playback preference will use its fallback."
+fi
 echo
 
 # --- Optional test run prompt ---
