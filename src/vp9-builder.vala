@@ -12,6 +12,8 @@ public class Vp9BuilderSnapshot : Object {
     public int cbr_bitrate_kbps = 1000;
     public string tune_content = "Default";
     public string aq_mode = "Disabled";
+    public bool sharpness_enabled = false;
+    public int sharpness = 1;
     public bool lookahead_enabled = false;
     public int lag_in_frames = 25;
     public bool altref_enabled = false;
@@ -55,6 +57,8 @@ public class Vp9Builder : Object, ICodecBuilder {
         snapshot.cbr_bitrate_kbps = (int) tab.cbr_bitrate_spin.get_value ();
         snapshot.tune_content = CodecUtils.get_dropdown_text (tab.tune_content_combo);
         snapshot.aq_mode = CodecUtils.get_dropdown_text (tab.aq_mode_combo);
+        snapshot.sharpness_enabled = tab.sharpness_expander.enable_expansion;
+        snapshot.sharpness = (int) tab.sharpness_spin.get_value ();
         snapshot.lookahead_enabled = tab.lookahead_expander.enable_expansion;
         snapshot.lag_in_frames = (int) tab.lag_in_frames_spin.get_value ();
         snapshot.altref_enabled = tab.altref_expander.enable_expansion;
@@ -165,6 +169,12 @@ public class Vp9Builder : Object, ICodecBuilder {
                 args += "-aq-mode";
                 args += aq_val.to_string ();
             }
+        }
+
+        // Native VP9 loop-filter sharpness (0–7)
+        if (snapshot.sharpness_enabled) {
+            args += "-sharpness";
+            args += snapshot.sharpness.to_string ();
         }
 
         // ── Lookahead (lag-in-frames) ──────────────────────────────────────

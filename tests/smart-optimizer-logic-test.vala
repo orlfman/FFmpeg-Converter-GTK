@@ -1070,50 +1070,113 @@ void test_encoder_tuning_is_one_decision_for_probe_and_applier () {
 
     // Animation gets the animation tune on x264/x265 — the 34% case.
     var anime = SmartOptimizerLogic.decide_encoder_tuning (
-        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 8, false);
+        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 0.0, 8, false);
     assert (anime.tune == "animation");
 
     // Screen content gets stillimage on x264.
     var screen = SmartOptimizerLogic.decide_encoder_tuning (
-        "x264", EncodeEffort.MEDIUM, ContentType.SCREENCAST, 0.0005, 8, false);
+        "x264", EncodeEffort.MEDIUM, ContentType.SCREENCAST, 0.0005, 0.0, 8, false);
     assert (screen.tune == "stillimage");
 
     // Delivery displaces the content tune, because only one is possible.
     var fast = SmartOptimizerLogic.decide_encoder_tuning (
-        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 8, true);
+        "x264", EncodeEffort.MEDIUM, ContentType.ANIME, 0.0005, 0.0, 8, true);
     assert (fast.tune == "fastdecode");
 
     // x265 carries psy-rd, which scales with effort.
     var x265_low = SmartOptimizerLogic.decide_encoder_tuning (
-        "x265", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0005, 8, false);
+        "x265", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0005, 0.0, 8, false);
     var x265_max = SmartOptimizerLogic.decide_encoder_tuning (
-        "x265", EncodeEffort.MAXIMUM, ContentType.LIVE_ACTION, 0.0005, 8, false);
+        "x265", EncodeEffort.MAXIMUM, ContentType.LIVE_ACTION, 0.0005, 0.0, 8, false);
     assert (x265_max.psy_rd > x265_low.psy_rd);
 
     // Grainy live action at high effort gets the grain tune on x265.
     var grainy = SmartOptimizerLogic.decide_encoder_tuning (
-        "x265", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 8, false);
+        "x265", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 0.0, 8, false);
     assert (grainy.tune == "grain");
 
     // SVT-AV1 exposes fast-decode separately, so it COMPOSES with grain
     // rather than displacing it — unlike x264/x265 where a tune is exclusive.
     var av1 = SmartOptimizerLogic.decide_encoder_tuning (
-        "svt-av1", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 8, true);
+        "svt-av1", EncodeEffort.HIGH, ContentType.LIVE_ACTION, 0.0060, 0.8, 8, true);
     assert (av1.film_grain);
     assert (av1.film_grain_strength > 0);
     assert (av1.fast_decode_level == 1);
 
     // Grain is gated on effort: below Medium it stays off however grainy.
     var av1_low = SmartOptimizerLogic.decide_encoder_tuning (
-        "svt-av1", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0060, 8, false);
+        "svt-av1", EncodeEffort.LOW, ContentType.LIVE_ACTION, 0.0060, 0.0, 8, false);
     assert (!av1_low.film_grain);
 
     // And it respects the 8-bit-only limit on the grain measurement: a 10-bit
     // source's TOUT is not comparable, so the category decides — and animation
     // has no grain.
     var av1_10bit = SmartOptimizerLogic.decide_encoder_tuning (
-        "svt-av1", EncodeEffort.HIGH, ContentType.ANIME, 0.0060, 10, false);
+        "svt-av1", EncodeEffort.HIGH, ContentType.ANIME, 0.0060, 0.0, 10, false);
     assert (!av1_10bit.film_grain);
+}
+
+void test_detail_signal_combines_structure_softness_and_noise () {
+    // Corpus-like crisp screen content: very high SI, clear edges, low blur.
+    var crisp = ContentProfile () {
+        spatial_info = 115.4,
+        edge_mean = 5.28,
+        blur_mean = 4.23,
+        noise_mean = 0.00093
+    };
+    // Corpus-like soft live action: little spatial/edge energy and high blur.
+    var soft = ContentProfile () {
+        spatial_info = 11.1,
+        edge_mean = 0.21,
+        blur_mean = 10.15,
+        noise_mean = 0.00013
+    };
+    double crisp_score = SmartOptimizerLogic.detail_preservation_score (crisp, 8);
+    double soft_score = SmartOptimizerLogic.detail_preservation_score (soft, 8);
+    assert (crisp_score >= 0.75);
+    assert (soft_score < 0.25);
+    assert (crisp_score > soft_score);
+
+    // TOUT is not depth-comparable. It may temper an 8-bit signal, but must
+    // not suppress a 10-bit source merely because its native-scale value is
+    // numerically larger.
+    crisp.noise_mean = 0.0025;
+    double noisy_8bit = SmartOptimizerLogic.detail_preservation_score (crisp, 8);
+    double same_10bit = SmartOptimizerLogic.detail_preservation_score (crisp, 10);
+    assert (same_10bit > noisy_8bit);
+}
+
+void test_native_sharpness_is_detail_driven_and_effort_capped () {
+    // Strong detail enables sharpening even below High; effort controls only
+    // the maximum strength permitted at each rung.
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.MINIMAL, 0.80) == 0);
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.LOW, 0.80) == 1);
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.MEDIUM, 0.80) == 1);
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.HIGH, 0.80) == 2);
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.MAXIMUM, 0.80) == 3);
+
+    // A soft source remains unsharpened at every effort.
+    assert (SmartOptimizerLogic.native_sharpness_for_detail (
+        EncodeEffort.MAXIMUM, 0.10) == 0);
+
+    // VP9 and SVT-AV1 consume the same native decision; x264/x265 are deferred.
+    var vp9 = SmartOptimizerLogic.decide_encoder_tuning (
+        "vp9", EncodeEffort.HIGH, ContentType.SCREENCAST,
+        0.0005, 0.80, 8, false);
+    var av1 = SmartOptimizerLogic.decide_encoder_tuning (
+        "svt-av1", EncodeEffort.HIGH, ContentType.SCREENCAST,
+        0.0005, 0.80, 8, false);
+    var x264 = SmartOptimizerLogic.decide_encoder_tuning (
+        "x264", EncodeEffort.HIGH, ContentType.SCREENCAST,
+        0.0005, 0.80, 8, false);
+    assert (vp9.native_sharpness == 2);
+    assert (av1.native_sharpness == vp9.native_sharpness);
+    assert (x264.native_sharpness == 0);
 }
 
 void test_sum_profile_range_partial_buckets () {
@@ -2149,6 +2212,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);
     Test.add_func ("/smart-optimizer-logic/tuning/probe-matches-applier", test_encoder_tuning_is_one_decision_for_probe_and_applier);
+    Test.add_func ("/smart-optimizer-logic/tuning/detail-signal", test_detail_signal_combines_structure_softness_and_noise);
+    Test.add_func ("/smart-optimizer-logic/tuning/native-sharpness", test_native_sharpness_is_detail_driven_and_effort_capped);
     Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
     Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
     Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);

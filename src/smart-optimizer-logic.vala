@@ -149,6 +149,7 @@ public struct OptimizationRecommendation {
     public string resolved_container;  // effective container after tier policy (e.g. "webm", "mp4", "mkv")
     public int target_size_kib;        // user-requested target size in KiB
     public double grain_score;         // measured TOUT (temporal-outlier fraction) — grain/noise proxy
+    public double detail_score;        // 0.0–1.0 native-sharpness demand
 
     // ── Mode-agnostic decision axis ──────────────────────────────────────────
     // Every downstream apply_smart_* switches on `effort`, never on size_tier,
@@ -287,6 +288,8 @@ public struct SmartOptimizerVideoInfo {
 public struct ContentProfile {
     public double      edge_mean;
     public double      edge_stddev;
+    public double      blur_mean;       // softness input; never an artifact/degradation gate
+    public double      blur_stddev;
     public double      saturation_mean;
     public double      saturation_stddev;
     public double      temporal_diff_mean;   // YDIF average across frames
@@ -1928,13 +1931,69 @@ namespace SmartOptimizerLogic {
         public double psy_rd;
         /** SVT-AV1 fast-decode level; 0 = disabled. */
         public int    fast_decode_level;
+        /** VP9/SVT-AV1 native sharpness; 0 = disabled. */
+        public int    native_sharpness;
     }
 
     /** Stable identity for a tuning, for use in the calibration cache key. */
     public string encoder_tuning_key (EncoderTuning t) {
-        return "%s|%d|%d|%.2f|%d".printf (
+        return "%s|%d|%d|%.2f|%d|%d".printf (
             t.tune, t.film_grain ? 1 : 0, t.film_grain_strength,
-            t.psy_rd, t.fast_decode_level);
+            t.psy_rd, t.fast_decode_level, t.native_sharpness);
+    }
+
+    /**
+     * Estimate how much the source benefits from native edge preservation.
+     *
+     * The anchors are the measured 19-file Phase-0 corpus ranges. Spatial
+     * information is the primary signal, edge density confirms real structure,
+     * and blur is only a small softness term: absolute blur cannot distinguish
+     * optical defocus from compression damage, so it must never act as a gate.
+     * TOUT reduces sharpening on noisy 8-bit sources; above 8-bit that metric
+     * is not comparable and is deliberately ignored.
+     */
+    public double detail_preservation_score (
+        ContentProfile profile,
+        int            source_bit_depth
+    ) {
+        double spatial = ((profile.spatial_info - 15.0) / 85.0).clamp (0.0, 1.0);
+        double edges = ((profile.edge_mean - 1.0) / 9.0).clamp (0.0, 1.0);
+        double clarity = (profile.blur_mean > 0.0)
+            ? ((10.0 - profile.blur_mean) / 6.0).clamp (0.0, 1.0)
+            : 0.0;
+        double noise_penalty = 0.0;
+        if (source_bit_depth > 0 && source_bit_depth <= 8) {
+            noise_penalty = ((profile.noise_mean - 0.0005) / 0.0020)
+                .clamp (0.0, 1.0);
+        }
+        return (0.50 * spatial + 0.30 * edges + 0.20 * clarity
+            - 0.15 * noise_penalty).clamp (0.0, 1.0);
+    }
+
+    /**
+     * Turn measured detail demand into a conservative native sharpness.
+     * Effort is a maximum-strength cap, not the on/off decision: Low and
+     * Medium may preserve detail, while High/Maximum permit stronger levels
+     * only when the source signal calls for them.
+     */
+    public int native_sharpness_for_detail (
+        EncodeEffort effort,
+        double       detail_score
+    ) {
+        int requested = 0;
+        if (detail_score >= 0.75)       requested = 3;
+        else if (detail_score >= 0.55) requested = 2;
+        else if (detail_score >= 0.25) requested = 1;
+
+        int cap = 0;
+        switch (effort) {
+            case EncodeEffort.LOW:
+            case EncodeEffort.MEDIUM:  cap = 1; break;
+            case EncodeEffort.HIGH:    cap = 2; break;
+            case EncodeEffort.MAXIMUM: cap = 3; break;
+            default:                   cap = 0; break;
+        }
+        return int.min (requested, cap);
     }
 
     /** x265 psy-rd by effort, mirroring apply_smart_x265. */
@@ -1964,20 +2023,21 @@ namespace SmartOptimizerLogic {
      * Decide the encoder tuning for a recommendation.
      *
      * Every input is known before calibration runs — content classification,
-     * grain measurement and effort are all settled by then — so the probe can
-     * use the real settings rather than a stripped-down approximation.
+     * grain/detail measurements and effort are all settled by then — so the
+     * probe can use the real settings rather than a stripped-down approximation.
      */
     public EncoderTuning decide_encoder_tuning (
         string       codec,
         EncodeEffort effort,
         ContentType  content_type,
         double       grain_score,
+        double       detail_score,
         int          source_bit_depth,
         bool         fast_decode
     ) {
         var t = EncoderTuning () {
             tune = "", film_grain = false, film_grain_strength = 0,
-            psy_rd = 0.0, fast_decode_level = 0
+            psy_rd = 0.0, fast_decode_level = 0, native_sharpness = 0
         };
         bool grain = grain_warranted (grain_score, content_type, source_bit_depth);
 
@@ -1992,10 +2052,13 @@ namespace SmartOptimizerLogic {
             else if (content_type == ContentType.ANIME) t.tune = "animation";
             else if (effort >= EncodeEffort.HIGH && grain) t.tune = "grain";
             t.psy_rd = psy_rd_for_effort (effort);
+        } else if (codec == "vp9") {
+            t.native_sharpness = native_sharpness_for_detail (effort, detail_score);
         } else if (codec == "svt-av1") {
             // AV1 exposes fast-decode separately from tuning, so unlike
             // x264/x265 it composes rather than displacing anything.
             t.fast_decode_level = fast_decode ? 1 : 0;
+            t.native_sharpness = native_sharpness_for_detail (effort, detail_score);
             if (effort >= EncodeEffort.MEDIUM && grain) {
                 t.film_grain = true;
                 t.film_grain_strength = film_grain_strength_for_effort (effort);

@@ -466,6 +466,8 @@ public class SmartOptimizer : GLib.Object {
             // convenience for animation.
             SmartOptimizerLogic.apply_content_override (
                 ref profile, ctx.content_override);
+            double detail_score = SmartOptimizerLogic.detail_preservation_score (
+                profile, info.source_bit_depth);
 
             // ── 4b. Bit depth & content-aware, tier-scaled preset ───────
             // Decided before expansion so the speed-probe below encodes at the
@@ -483,7 +485,7 @@ public class SmartOptimizer : GLib.Object {
             active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_size_tier (tier),
-                profile.content_type, profile.noise_mean,
+                profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
 
             // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
@@ -678,6 +680,7 @@ public class SmartOptimizer : GLib.Object {
                 is_impossible         = policy.is_impossible,
                 content_type          = profile.content_type,
                 grain_score           = profile.noise_mean,
+                detail_score          = detail_score,
                 confidence            = conf.confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
@@ -812,6 +815,8 @@ public class SmartOptimizer : GLib.Object {
             // convenience for animation.
             SmartOptimizerLogic.apply_content_override (
                 ref profile, ctx.content_override);
+            double detail_score = SmartOptimizerLogic.detail_preservation_score (
+                profile, info.source_bit_depth);
 
             // ── 5. Bit depth, preset, effective target ──────────────────
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
@@ -825,7 +830,7 @@ public class SmartOptimizer : GLib.Object {
             active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_quality_intent (intent),
-                profile.content_type, profile.noise_mean,
+                profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
             var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
 
@@ -1369,6 +1374,7 @@ public class SmartOptimizer : GLib.Object {
                 is_impossible         = false,
                 content_type          = profile.content_type,
                 grain_score           = profile.noise_mean,
+                detail_score          = detail_score,
                 confidence            = confidence,
                 // Size Mode's reporting field; unused when quality is pinned.
                 size_tier             = nominal_tier,
@@ -3084,7 +3090,7 @@ public class SmartOptimizer : GLib.Object {
             // mean SI, since SI is a per-frame measure. Only SI is taken;
             // siti's TI would be meaningless across the decimation gaps, and
             // signalstats' YDIF already covers temporal activity for free.
-            "signalstats=stat=tout+vrep+brng,%s,siti,metadata=print".printf (decimate),
+            "signalstats=stat=tout+vrep+brng,%s,blurdetect,siti,metadata=print".printf (decimate),
             video_filter_chain
         );
         string sig_output = yield run_subprocess_stderr (sig_cmd, cancellable);
@@ -3097,6 +3103,8 @@ public class SmartOptimizer : GLib.Object {
             ref all_ylow, ref all_yavg, ref all_tout);
         double[] all_si = {};
         parse_metadata_field (sig_output, "lavfi.siti.si", ref all_si);
+        double[] all_blur = {};
+        parse_metadata_field (sig_output, "lavfi.blur", ref all_blur);
 
         // Put the amplitude metrics on one scale before any statistic is
         // computed from them. signalstats reports in the source's native
@@ -3131,6 +3139,8 @@ public class SmartOptimizer : GLib.Object {
         var profile = ContentProfile ();
         SmartOptimizerLogic.compute_stats (
             all_edge,   out profile.edge_mean,          out profile.edge_stddev);
+        SmartOptimizerLogic.compute_stats (
+            all_blur,   out profile.blur_mean,          out profile.blur_stddev);
         SmartOptimizerLogic.compute_stats (
             all_satavg, out profile.saturation_mean,    out profile.saturation_stddev);
         SmartOptimizerLogic.compute_stats (
@@ -4052,6 +4062,10 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");      cmd.add (crf.to_string ());
             cmd.add ("-b:v");      cmd.add ("0");
             cmd.add ("-row-mt");   cmd.add ("1");
+            if (tuning != null && tuning.native_sharpness > 0) {
+                cmd.add ("-sharpness");
+                cmd.add (tuning.native_sharpness.to_string ());
+            }
         } else if (codec == "svt-av1") {
             cmd.add ("-c:v");      cmd.add ("libsvtav1");
             cmd.add ("-preset");   cmd.add (preset_idx >= 0
@@ -4066,6 +4080,8 @@ public class SmartOptimizer : GLib.Object {
                 }
                 if (tuning.fast_decode_level > 0)
                     p.add ("fast-decode=%d".printf (tuning.fast_decode_level));
+                if (tuning.native_sharpness > 0)
+                    p.add ("sharpness=%d".printf (tuning.native_sharpness));
                 if (p.length > 0) {
                     var joined = new StringBuilder ();
                     for (int i = 0; i < p.length; i++) {
@@ -4695,6 +4711,7 @@ public class SmartOptimizer : GLib.Object {
             notes                  = "❌ " + message,
             is_impossible          = true,
             content_type           = ContentType.LIVE_ACTION,
+            detail_score           = 0.0,
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,

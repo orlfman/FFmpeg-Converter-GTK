@@ -28,6 +28,8 @@ public class Vp9Tab : BaseCodecTab {
     // ── Quality & Tuning ─────────────────────────────────────────────────────
     public DropDown   tune_content_combo { get; private set; }
     public DropDown   aq_mode_combo      { get; private set; }
+    public Adw.ExpanderRow sharpness_expander { get; private set; }
+    public SpinButton sharpness_spin     { get; private set; }
 
     // ── Lookahead ────────────────────────────────────────────────────────────
     public Adw.ExpanderRow lookahead_expander { get; private set; }
@@ -280,6 +282,23 @@ public class Vp9Tab : BaseCodecTab {
         aq_mode_combo.set_selected (0);
         aq_row.add_suffix (aq_mode_combo);
         group.add (aq_row);
+
+        // Native loop-filter sharpness
+        sharpness_expander = new Adw.ExpanderRow ();
+        sharpness_expander.set_title ("VP9 Sharpness");
+        sharpness_expander.set_subtitle (
+            "Preserves fine edges by reducing loop filtering — higher values may reveal ringing or noise");
+        sharpness_expander.set_show_enable_switch (true);
+        sharpness_expander.set_enable_expansion (false);
+
+        var sharpness_row = new Adw.ActionRow ();
+        sharpness_row.set_title ("Level");
+        sharpness_spin = new SpinButton.with_range (0, 7, 1);
+        sharpness_spin.set_value (1);
+        sharpness_spin.set_valign (Align.CENTER);
+        sharpness_row.add_suffix (sharpness_spin);
+        sharpness_expander.add_row (sharpness_row);
+        group.add (sharpness_expander);
 
         // Lookahead (lag-in-frames)
         lookahead_expander = new Adw.ExpanderRow ();
@@ -693,6 +712,8 @@ public class Vp9Tab : BaseCodecTab {
         // Quality & Tuning
         tune_content_combo.set_selected (0);
         aq_mode_combo.set_selected (0);
+        sharpness_expander.set_enable_expansion (false);
+        sharpness_spin.set_value (1);
         lookahead_expander.set_enable_expansion (false);
         lag_in_frames_spin.set_value (25);
 

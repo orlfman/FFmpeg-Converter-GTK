@@ -156,7 +156,7 @@ public class CodecPresets : Object {
             // SmartOptimizerLogic.decide_encoder_tuning.
             var tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 "x264", rec.effort, rec.content_type, rec.grain_score,
-                rec.source_bit_depth, rec.fast_decode);
+                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
             if (tuning.tune.length > 0)
                 set_dropdown_by_label (tab.tune_combo, tuning.tune);
             else
@@ -312,6 +312,16 @@ public class CodecPresets : Object {
                 tab.tune_content_combo.set_selected (0);
             }
 
+            // Native edge preservation is selected by measured source detail;
+            // effort only caps its strength. Calibration uses this same value.
+            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                "vp9", rec.effort, rec.content_type, rec.grain_score,
+                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
+            tab.sharpness_expander.set_enable_expansion (
+                tuning.native_sharpness > 0);
+            if (tuning.native_sharpness > 0)
+                tab.sharpness_spin.set_value (tuning.native_sharpness);
+
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
@@ -403,7 +413,7 @@ public class CodecPresets : Object {
             // Same decision the calibration probe encoded with.
             var tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 "x265", rec.effort, rec.content_type, rec.grain_score,
-                rec.source_bit_depth, rec.fast_decode);
+                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
             // decide_encoder_tuning already folds in the delivery override,
             // the animation case, and preserving film grain at generous
             // budgets when grain was actually measured.
@@ -530,7 +540,7 @@ public class CodecPresets : Object {
             // Same decision the calibration probe encoded with.
             var tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 "svt-av1", rec.effort, rec.content_type, rec.grain_score,
-                rec.source_bit_depth, rec.fast_decode);
+                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
             set_dropdown_by_label (tab.fast_decode_combo,
                 tuning.fast_decode_level > 0
                     ? "Level %d".printf (tuning.fast_decode_level)
@@ -549,12 +559,15 @@ public class CodecPresets : Object {
             // sources included even if the category was uncertain). See
             // SmartOptimizerLogic.grain_warranted.
             bool use_grain = tuning.film_grain;
+            bool use_sharpness = tuning.native_sharpness > 0;
+            tab.sharpness_expander.set_enable_expansion (use_sharpness);
+            if (use_sharpness)
+                tab.sharpness_spin.set_value (tuning.native_sharpness);
 
             switch (effort) {
                 case EncodeEffort.MINIMAL:
                     tab.grain_expander.set_enable_expansion (false);
                     tab.qm_expander.set_enable_expansion (false);
-                    tab.sharpness_expander.set_enable_expansion (false);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (60);
                     break;
@@ -566,7 +579,6 @@ public class CodecPresets : Object {
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (false);
-                    tab.sharpness_expander.set_enable_expansion (false);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (80);
                     break;
@@ -580,7 +592,6 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (12);
-                    tab.sharpness_expander.set_enable_expansion (false);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (100);
                     break;
@@ -594,8 +605,6 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (13);
-                    tab.sharpness_expander.set_enable_expansion (true);
-                    tab.sharpness_spin.set_value (2);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (120);
                     break;
@@ -609,8 +618,6 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (15);
-                    tab.sharpness_expander.set_enable_expansion (true);
-                    tab.sharpness_spin.set_value (3);
                     tab.lookahead_expander.set_enable_expansion (true);
                     tab.lookahead_spin.set_value (120);
                     break;
