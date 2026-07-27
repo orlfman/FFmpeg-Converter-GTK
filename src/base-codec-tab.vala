@@ -289,10 +289,10 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     // constraint and the other becomes the prediction.
     private const string[] QUALITY_INTENT_LABELS = {
         "Off — use Target Size below",
-        "Low — acceptable (VMAF 88)",
-        "Medium — good (VMAF 92)",
-        "High — visually near-transparent (VMAF 95)",
-        "Ultra — archival (VMAF 97)"
+        "Low — acceptable (maximum VMAF 88)",
+        "Medium — good (maximum VMAF 92)",
+        "High — visually near-transparent (maximum VMAF 95)",
+        "Ultra — archival (maximum VMAF 97)"
     };
     private int last_synced_target_mb;
     private ContainerDefaultMode last_synced_container_default_mode =
@@ -552,7 +552,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         // Smart Optimizer — ActionRow with button suffix for content-aware analysis
         var smart_row = new Adw.ActionRow ();
         smart_row.set_title ("Smart Optimizer");
-        smart_row.set_subtitle ("Measure this video and solve for the CRF that hits your target");
+        smart_row.set_subtitle (
+            "Measure this video and solve for the closest CRF within your chosen ceiling");
         smart_row.add_prefix (make_smart_icon ());
         var smart_btn = new Button.with_label ("Optimize");
         smart_btn.add_css_class ("suggested-action");
@@ -564,15 +565,15 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         smart_row.set_activatable_widget (smart_btn);
         group.add (smart_row);
 
-        // Quality Target — the second solver. Selecting anything other than
+        // Quality Ceiling — the second solver. Selecting anything other than
         // "Off" pins a perceptual score and lets size float, which is the
         // mirror image of the size target below. The two are mutually
         // exclusive: whichever the user pins is the constraint, the other is
         // reported as the prediction.
         quality_intent_row = new Adw.ComboRow ();
-        quality_intent_row.set_title ("Quality Target");
+        quality_intent_row.set_title ("Quality Ceiling");
         quality_intent_row.set_subtitle (
-            "Pin a quality level and let size follow, or leave Off to pin a size instead");
+            "Choose the maximum quality tier and let size follow, or use Target Size below");
         quality_intent_row.add_prefix (new Image.from_icon_name ("emblem-ok-symbolic"));
         // NOT `new StringList (ARRAY)`: gtk_string_list_new() wants a
         // NULL-terminated array, but Vala emits a named const string[] as a

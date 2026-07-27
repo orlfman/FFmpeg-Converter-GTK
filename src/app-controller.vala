@@ -849,7 +849,7 @@ public class AppController : Object {
             : SmartOptimizerLogic.QualityIntent.MEDIUM;
 
         status_area.set_status (quality_mode
-            ? "Smart Optimizer: measuring quality for %s %s…".printf (
+            ? "Smart Optimizer: measuring the %s quality ceiling for %s…".printf (
                 quality_intent.to_label (), codec.up ())
             : "Smart Optimizer: analyzing video for %d MB %s target…".printf (
                 target_mb, codec.up ()),

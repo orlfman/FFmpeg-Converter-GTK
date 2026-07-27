@@ -536,8 +536,8 @@ void test_solve_reproduces_measured_crf_for_target () {
 
 void test_solve_treats_the_intent_as_a_ceiling () {
     // The intent's VMAF is a ceiling, not a bullseye — Ultra means "up to 97".
-    // Across the four shipped intents the solve must never clear its ceiling
-    // by more than the model can resolve.
+    // Across the four shipped intents the starting solve itself must never
+    // clear the ceiling. Actual verification remains authoritative.
     double[] targets = { 88.0, 92.0, 95.0, 97.0 };
     foreach (double t in targets) {
         foreach (unowned string codec in new string[] { "x265", "svt-av1" }) {
@@ -545,33 +545,24 @@ void test_solve_treats_the_intent_as_a_ceiling () {
                 ANIME_CRFS, ANIME_VMAFS, t, codec);
             if (m.degenerate || m.crf_at_min || m.crf_at_max)
                 continue;   // clamped: the ceiling was out of reach either way
-            assert (m.predicted_vmaf
-                <= t + SmartOptimizerLogic.QUALITY_CEILING_TOLERANCE_VMAF);
+            assert (m.predicted_vmaf <= t);
+
+            // It is also the closest integer on the quality side: one lower
+            // CRF would be above the ceiling according to the fitted curve.
+            assert (SmartOptimizerLogic.evaluate_vmaf_at_crf (
+                m.qa, m.qb, m.qc, m.predicted_crf - 1) > t);
         }
     }
 
-    // Both branches of the tolerance rule must actually be reachable, or the
-    // step-down is dead code. Sweep fine-grained targets across the measured
-    // range and require that each branch is exercised: some solves keep the
-    // nearest CRF (overshoot inside tolerance), others step down to stay under.
-    bool saw_nearest_kept = false;
-    bool saw_stepped_down = false;
+    // Fine-grained targets must obey the same exact contract; there is no
+    // hidden +0.25 allowance around tier boundaries.
     for (double t = 80.0; t <= 95.0; t += 0.1) {
         var m = SmartOptimizerLogic.solve_quality_crf (
             ANIME_CRFS, ANIME_VMAFS, t, "x265");
         if (m.degenerate || m.crf_at_min || m.crf_at_max)
             continue;
-        // Never above the ceiling by more than the tolerance, whichever
-        // branch ran.
-        assert (m.predicted_vmaf
-            <= t + SmartOptimizerLogic.QUALITY_CEILING_TOLERANCE_VMAF);
-        if (m.predicted_vmaf > t)
-            saw_nearest_kept = true;    // kept a small overshoot
-        else
-            saw_stepped_down = true;    // landed under the ceiling
+        assert (m.predicted_vmaf <= t);
     }
-    assert (saw_nearest_kept);
-    assert (saw_stepped_down);
 }
 
 void test_solve_separates_content_at_high_intent () {
@@ -608,12 +599,55 @@ void test_solve_refuses_to_fit_when_all_points_saturate () {
     assert (m.saturated_points_dropped == 4);
 }
 
-void test_screencast_target_caps_crf_and_keeps_vmaf_as_floor () {
+void test_quality_policy_covers_every_tier_and_content_combination () {
+    ContentType[] content_types = {
+        ContentType.LIVE_ACTION, ContentType.ANIME,
+        ContentType.MIXED, ContentType.SCREENCAST
+    };
+    SmartOptimizerLogic.QualityIntent[] intents = {
+        SmartOptimizerLogic.QualityIntent.LOW,
+        SmartOptimizerLogic.QualityIntent.MEDIUM,
+        SmartOptimizerLogic.QualityIntent.HIGH,
+        SmartOptimizerLogic.QualityIntent.ULTRA
+    };
+
+    foreach (ContentType content_type in content_types) {
+        foreach (SmartOptimizerLogic.QualityIntent intent in intents) {
+            var p = ContentProfile () { content_type = content_type };
+            var t = SmartOptimizerLogic.resolve_quality_target (intent, p);
+            bool text_exception = content_type == ContentType.SCREENCAST
+                && (intent == SmartOptimizerLogic.QualityIntent.HIGH
+                    || intent == SmartOptimizerLogic.QualityIntent.ULTRA);
+
+            assert (t.target_vmaf == intent.target_vmaf ());
+            assert (t.vmaf_reliable
+                == (content_type != ContentType.SCREENCAST));
+            assert (t.enforce_vmaf_ceiling == !text_exception);
+            assert ((t.crf_cap > 0) == text_exception);
+
+            var decision = SmartOptimizerLogic.decide_quality_ceiling (
+                t, t.target_vmaf + 0.001, 30, 51);
+            assert (decision == (text_exception
+                ? SmartOptimizerLogic.QualityCeilingDecision.TEXT_PROTECTION_EXCEPTION
+                : SmartOptimizerLogic.QualityCeilingDecision.RAISE_CRF));
+        }
+    }
+}
+
+void test_screencast_text_protection_only_applies_to_high_and_ultra () {
     var p = ContentProfile () { content_type = ContentType.SCREENCAST };
-    var t = SmartOptimizerLogic.resolve_quality_target (
+    var low = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.LOW, p);
+    var medium = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.MEDIUM, p);
+    var high = SmartOptimizerLogic.resolve_quality_target (
         SmartOptimizerLogic.QualityIntent.HIGH, p);
-    assert (!t.vmaf_reliable);
-    assert (t.crf_cap == 22);
+    var ultra = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.ULTRA, p);
+    assert (low.enforce_vmaf_ceiling && low.crf_cap == 0);
+    assert (medium.enforce_vmaf_ceiling && medium.crf_cap == 0);
+    assert (!high.enforce_vmaf_ceiling && high.crf_cap == 22);
+    assert (!ultra.enforce_vmaf_ceiling && ultra.crf_cap == 18);
 
     // The measured screencast curve reaches VMAF 95 only past CRF 30 — a
     // score that would pass the High intent while the text is mangled.
@@ -622,12 +656,84 @@ void test_screencast_target_caps_crf_and_keeps_vmaf_as_floor () {
     assert (m.predicted_crf > 28);
 
     // The cap must pull it back.
-    int capped = SmartOptimizerLogic.apply_quality_crf_cap (m.predicted_crf, t);
+    int capped = SmartOptimizerLogic.apply_quality_crf_cap (m.predicted_crf, high);
     assert (capped == 22);
 
-    // VMAF stays a FLOOR: when the solve already asks for better quality than
-    // the cap, the solve wins.
-    assert (SmartOptimizerLogic.apply_quality_crf_cap (18, t) == 18);
+    // When the solve already asks for better quality than the text cap, the
+    // solve wins. Low/Medium never receive a cap.
+    assert (SmartOptimizerLogic.apply_quality_crf_cap (18, high) == 18);
+    assert (SmartOptimizerLogic.apply_quality_crf_cap (34, medium) == 34);
+}
+
+void test_measured_ceiling_decisions_handle_overshoot_and_codec_limit () {
+    var p = ContentProfile () { content_type = ContentType.LIVE_ACTION };
+    var t = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.MEDIUM, p);
+
+    assert (SmartOptimizerLogic.decide_quality_ceiling (t, 92.0, 27, 51)
+        == SmartOptimizerLogic.QualityCeilingDecision.ACCEPT);
+    // Even a tiny measured overshoot is corrected; the former +0.25 allowance
+    // does not survive final verification.
+    assert (SmartOptimizerLogic.decide_quality_ceiling (t, 92.001, 27, 51)
+        == SmartOptimizerLogic.QualityCeilingDecision.RAISE_CRF);
+    assert (SmartOptimizerLogic.decide_quality_ceiling (t, 92.001, 51, 51)
+        == SmartOptimizerLogic.QualityCeilingDecision.CODEC_LIMIT);
+
+    foreach (string codec in new string[] { "x264", "x265", "vp9", "svt-av1" }) {
+        int crf_min, crf_max;
+        SmartOptimizerLogic.crf_range_for_codec (codec, out crf_min, out crf_max);
+        assert (SmartOptimizerLogic.decide_quality_ceiling (
+            t, 93.0, crf_max, crf_max)
+            == SmartOptimizerLogic.QualityCeilingDecision.CODEC_LIMIT);
+    }
+}
+
+void test_measured_overshoots_repeat_until_the_ceiling_is_met () {
+    var p = ContentProfile () { content_type = ContentType.LIVE_ACTION };
+    var t = SmartOptimizerLogic.resolve_quality_target (
+        SmartOptimizerLogic.QualityIntent.MEDIUM, p);
+    double[] measured = { 92.30, 92.01, 91.80 };
+    int crf = 27;
+    int corrections = 0;
+
+    foreach (double vmaf in measured) {
+        var decision = SmartOptimizerLogic.decide_quality_ceiling (
+            t, vmaf, crf, 51);
+        if (decision == SmartOptimizerLogic.QualityCeilingDecision.RAISE_CRF) {
+            crf++;
+            corrections++;
+            continue;
+        }
+        assert (decision == SmartOptimizerLogic.QualityCeilingDecision.ACCEPT);
+        break;
+    }
+    assert (crf == 29);
+    assert (corrections == 2);
+}
+
+void test_saturation_search_continues_beyond_two_probes_to_codec_limit () {
+    int current = 25;
+    int[] probes = {};
+    while (true) {
+        int next = SmartOptimizerLogic.next_saturation_search_crf (current, 51);
+        if (next < 0)
+            break;
+        probes += next;
+        current = next;
+    }
+    assert (probes.length == 5);
+    assert (probes[0] == 31 && probes[1] == 37);
+    assert (probes[4] == 51);
+
+    // Once a below-ceiling probe is found, midpoint probes narrow the bracket
+    // until the two measured CRFs are adjacent.
+    int above = 37;
+    int below = 49;
+    assert (SmartOptimizerLogic.next_quality_bracket_crf (above, below) == 43);
+    above = 43;
+    assert (SmartOptimizerLogic.next_quality_bracket_crf (above, below) == 46);
+    below = 44;
+    assert (SmartOptimizerLogic.next_quality_bracket_crf (above, below) == -1);
 }
 
 void test_non_screencast_target_is_unmodified () {
@@ -635,6 +741,7 @@ void test_non_screencast_target_is_unmodified () {
     var t = SmartOptimizerLogic.resolve_quality_target (
         SmartOptimizerLogic.QualityIntent.ULTRA, p);
     assert (t.vmaf_reliable);
+    assert (t.enforce_vmaf_ceiling);
     assert (t.crf_cap == 0);
     assert (t.target_vmaf == 97.0);
     assert (SmartOptimizerLogic.apply_quality_crf_cap (12, t) == 12);
@@ -1069,6 +1176,26 @@ void test_append_calibration_sample_sorted () {
     assert (crfs.length == 3);
     assert (crfs[0] == 16 && crfs[1] == 21 && crfs[2] == 26);
     assert (close_to (sizes[1], 70.0, 1e-9));
+}
+
+void test_append_quality_sample_keeps_saturation_bracket_aligned () {
+    int[] crfs = { 18, 24, 36 };
+    double[] vmafs = { 99.9, 99.7, 94.0 };
+    double[] sizes = { 120.0, 90.0, 45.0 };
+
+    // Saturation recovery probes coarsely and then inserts midpoints. All axes
+    // must remain aligned when a midpoint is inserted out of order.
+    SmartOptimizerLogic.append_quality_calibration_sample (
+        ref crfs, ref vmafs, ref sizes, 30, 97.0, 65.0);
+    assert (crfs.length == 4);
+    assert (crfs[2] == 30);
+    assert (vmafs[2] == 97.0);
+    assert (sizes[2] == 65.0);
+
+    // Reusing a cached CRF must not duplicate or desynchronise the bracket.
+    SmartOptimizerLogic.append_quality_calibration_sample (
+        ref crfs, ref vmafs, ref sizes, 30, 96.5, 64.0);
+    assert (crfs.length == 4);
 }
 
 void test_adaptive_calibration_selection () {
@@ -1969,6 +2096,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/positions/coverage", test_pick_sample_positions_coverage);
     Test.add_func ("/smart-optimizer-logic/calibration/crf-tables", test_pick_calibration_crfs_shape);
     Test.add_func ("/smart-optimizer-logic/calibration/append-sorted", test_append_calibration_sample_sorted);
+    Test.add_func ("/smart-optimizer-logic/quality/saturation-bracket-aligned", test_append_quality_sample_keeps_saturation_bracket_aligned);
     Test.add_func ("/smart-optimizer-logic/calibration/adaptive-selection", test_adaptive_calibration_selection);
     Test.add_func ("/smart-optimizer-logic/container/resolve", test_resolve_effective_container);
     Test.add_func ("/smart-optimizer-logic/audio/stream-copy", test_plan_audio_stream_copy_when_within_budget);
@@ -2012,7 +2140,11 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/intent-is-a-ceiling", test_solve_treats_the_intent_as_a_ceiling);
     Test.add_func ("/smart-optimizer-logic/quality/content-separation", test_solve_separates_content_at_high_intent);
     Test.add_func ("/smart-optimizer-logic/quality/all-saturated-degenerate", test_solve_refuses_to_fit_when_all_points_saturate);
-    Test.add_func ("/smart-optimizer-logic/quality/screencast-cap", test_screencast_target_caps_crf_and_keeps_vmaf_as_floor);
+    Test.add_func ("/smart-optimizer-logic/quality/tier-content-policy", test_quality_policy_covers_every_tier_and_content_combination);
+    Test.add_func ("/smart-optimizer-logic/quality/screencast-cap", test_screencast_text_protection_only_applies_to_high_and_ultra);
+    Test.add_func ("/smart-optimizer-logic/quality/verified-ceiling-decisions", test_measured_ceiling_decisions_handle_overshoot_and_codec_limit);
+    Test.add_func ("/smart-optimizer-logic/quality/verified-ceiling-repeats", test_measured_overshoots_repeat_until_the_ceiling_is_met);
+    Test.add_func ("/smart-optimizer-logic/quality/saturation-search-to-codec-limit", test_saturation_search_continues_beyond_two_probes_to_codec_limit);
     Test.add_func ("/smart-optimizer-logic/quality/target-unmodified", test_non_screencast_target_is_unmodified);
     Test.add_func ("/smart-optimizer-logic/quality/calibration-ladders", test_quality_calibration_ladders_widen_toward_ultra);
     Test.add_func ("/smart-optimizer-logic/quality/svtav1-ladders-measured", test_svtav1_ladders_bracket_the_measured_answers);

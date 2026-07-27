@@ -23,6 +23,8 @@ using GLib;
     //    overwrite_enabled = false               (default: false → prompt before overwriting)
     //    generate_collage_thumbnail = false      (default: false → no automatic
     //                                            4-4-4 PNG collage sidecar)
+    //    play_with_ffplay = false                (default: false → use desktop
+    //                                            player for Playback menu actions)
     //    container_default_mode = default        (default|mkv|codec_specific)
     //                                           (default: keep current tab defaults when
     //                                            resetting codec tabs; mkv: prefer MKV;

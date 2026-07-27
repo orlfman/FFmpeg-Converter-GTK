@@ -123,8 +123,19 @@ public class HamburgerMenu {
     private static void open_with_default_player (string path) {
         if (path.length == 0) return;
 
-        if (AppSettings.get_default ().play_with_ffplay
-                && launch_in_ffplay (path)) {
+        var settings = AppSettings.get_default ();
+        string ffplay = settings.ffplay_path;
+        string? resolved = ffplay.contains ("/")
+            ? ffplay : Environment.find_program_in_path (ffplay);
+        var route = PlaybackLauncherLogic.resolve_route (
+            settings.play_with_ffplay, ffplay, resolved);
+        if (settings.play_with_ffplay && route
+                == PlaybackLauncherLogic.Route.DESKTOP_DEFAULT) {
+            warning ("ffplay playback requested but '%s' is not on PATH — "
+                + "falling back to the default player", ffplay);
+        }
+        if (route == PlaybackLauncherLogic.Route.FFPLAY
+                && launch_in_ffplay (path, ffplay)) {
             return;
         }
 
@@ -145,23 +156,12 @@ public class HamburgerMenu {
      * Spawned detached: ffplay owns its own window and must outlive the
      * calling context, and its exit is not something to report on.
      */
-    private static bool launch_in_ffplay (string path) {
-        string ffplay = AppSettings.get_default ().ffplay_path;
-        if (ffplay.length == 0) return false;
-
-        // A bare name has to be resolvable, or spawn fails later and noisily.
-        if (!ffplay.contains ("/")
-                && Environment.find_program_in_path (ffplay) == null) {
-            warning ("ffplay playback requested but '%s' is not on PATH — "
-                + "falling back to the default player", ffplay);
-            return false;
-        }
-
+    private static bool launch_in_ffplay (string path, string ffplay) {
         try {
             Pid pid;
             Process.spawn_async (
                 null,
-                { ffplay, "-autoexit", path },
+                PlaybackLauncherLogic.build_ffplay_argv (ffplay, path),
                 null,
                 SpawnFlags.SEARCH_PATH | SpawnFlags.STDOUT_TO_DEV_NULL
                     | SpawnFlags.STDERR_TO_DEV_NULL | SpawnFlags.DO_NOT_REAP_CHILD,

@@ -63,6 +63,7 @@ sources = files(
   'src/information-tab.vala',
   'src/about-dialog.vala',
   'src/update-checker.vala',
+  'src/playback-launcher-logic.vala',
   'src/hamburger-menu.vala',
   'src/video-player.vala',
   'src/crop-overlay.vala',
@@ -100,6 +101,23 @@ executable('ffmpeg-converter-gtk',
   install : true,
   install_dir : get_option('bindir')
 )
+
+if fs.exists('tests/playback-launcher-logic-test.vala')
+  playback_launcher_logic_test = executable(
+    'playback-launcher-logic-test',
+    files(
+      'src/playback-launcher-logic.vala',
+      'tests/playback-launcher-logic-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+    ],
+    build_by_default : false,
+  )
+
+  test('playback-launcher-logic', playback_launcher_logic_test)
+endif
 
 if fs.exists('tests/update-checker-test.vala')
   update_checker_test = executable(
@@ -380,6 +398,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/information-tab.vala',
       'src/about-dialog.vala',
       'src/update-checker.vala',
+      'src/playback-launcher-logic.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',
@@ -458,6 +477,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/information-tab.vala',
       'src/about-dialog.vala',
       'src/update-checker.vala',
+      'src/playback-launcher-logic.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',
@@ -538,6 +558,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/information-tab.vala',
       'src/about-dialog.vala',
       'src/update-checker.vala',
+      'src/playback-launcher-logic.vala',
       'src/hamburger-menu.vala',
       'src/video-player.vala',
       'src/crop-overlay.vala',

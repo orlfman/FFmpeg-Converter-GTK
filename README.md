@@ -100,23 +100,21 @@ You can set your default target size in **Preferences - Smart Optimizer**.
 
 ### Don't care about size, just want it to look right?
 
-Set **Quality Target** on the codec tab to anything other than *Off*, and the whole thing runs backwards: you pin the quality, and the size becomes the prediction.
+Set **Quality Ceiling** on the codec tab to anything other than *Off*, and the whole thing runs backwards: you choose the quality tier, and size becomes the prediction.
 
-- **Low** — acceptable (VMAF 88)
-- **Medium** — good (VMAF 92)
-- **High** — visually near-transparent (VMAF 95)
-- **Ultra** — archival (VMAF 97)
+- **Low** — acceptable, maximum VMAF 88
+- **Medium** — good, maximum VMAF 92
+- **High** — visually near-transparent, maximum VMAF 95
+- **Ultra** — archival, maximum VMAF 97
 
-Same idea as before — it runs test encodes on *your* video — except now it's measuring VMAF at a few CRFs, fitting the curve, and solving for the CRF that lands on your number. Then it does one more encode at that CRF and actually measures it, so the score you see is a measurement and not a guess. Both numbers show up in the Console tab: what it predicted, what it got, and the gap between them.
+The number is a ceiling, not a bullseye or a minimum. The fitted curve chooses a starting CRF, then the optimizer measures that candidate. If the measured VMAF is above the selected ceiling, it raises CRF and measures again until the result is at or below the ceiling. Undershooting is allowed when an integral CRF step or the source itself cannot land exactly on the number; the optimizer keeps the closest result it can verify without crossing it.
 
-Quality Target and Target Size are mutually exclusive — whichever you pin is the constraint, the other is the prediction. Leave it on *Off* and you're back to sizing.
+Quality Ceiling and Target Size are mutually exclusive — whichever you select is the constraint, and the other value is reported as a prediction. Leave Quality Ceiling on *Off* to optimize for size.
 
-It also aims to never hand you a file bigger than your source, and the reason is worth a sentence. Re-encoding is copying: it can get very close to the original, but it can never come out better than it. Your source is the ceiling. So a file that ends up *bigger* than the source is the worst of both worlds — you paid extra bytes for something that still isn't quite as good as what you already had, and you'd have been better off just keeping the original. You cannot go higher than a VMAF score of 100, and achieving a goal of 100 is incredibly hard as that's virtually lossless, and these codecs are not lossless codecs. To make it more difficult, the curve goes flat before you even start to reach 100. Trying to push to lossless quality, when you know ultimately, you cannot, isn't worth it. Achieving a VMAF score of 97 is the most practical goal for “Ultra” quality. So trying to push the filesize above source level on absolute quality alone (this doesn’t take into account things like filters, codec, and other metrics that do make sense to increase size over source, which is allowed), doesn’t make a lot of sense. 
-
-So when the optimizer sees that coming, it lowers the quality target until the file fits, and tells you it did. That's a target rather than a promise — the setting gets picked from short test encodes, so the full encode can still land a few percent over. It'll tell you when that happens too.
+Quality Mode has no source-byte ceiling. An upscale, frame-rate increase, bit-depth change, or less efficient output codec can legitimately require a file larger than the input. The selected VMAF tier is the quality constraint; size is allowed to follow it.
 
 
-Worth knowing: VMAF is a model of human vision, not human vision. It's solid on live-action, shakier on animation, and it badly over-rates screen recordings — a 4K screen capture scores 92.7 at CRF 34 with the text visibly mangled. On content where the number can't be trusted the optimizer caps CRF by rule instead of pretending the score means something.
+Worth knowing: VMAF is a model of human vision, not human vision. It is solid on live-action, shakier on animation, and badly over-rates screen recordings — a 4K screen capture scored 92.7 at CRF 34 with visibly damaged text in the test corpus. Low and Medium still enforce their 88/92 ceilings; reduced text clarity is part of choosing those tiers. High and Ultra are the explicit exception: they cap screencast CRF at 22/18 to protect text and report when that makes the measured score exceed the numeric ceiling. If even a codec's maximum CRF cannot get under a hard ceiling, the optimizer reports that the ceiling was unreachable.
 
 ### Just want to re-encode at the same size?
 Flip **Match Source Size** on, right under the target box. The target locks to your source file's own size, rounded to the nearest whole MB (a 9.54 MB file targets 10 MB, a 14.53 MB file targets 15 MB), and follows along whenever you pick a different file. Handy when you don't care about shrinking anything — you just want the optimizer to re-encode into a better codec at roughly the size you started with. On the Crop & Trim tab each segment gets its own target measured from that segment, so a 10-second cut out of a 2 GB movie doesn't inherit the full 2 GB. There's a global override in **Preferences - Smart Optimizer** if you want every codec tab to start this way.

@@ -11,6 +11,12 @@ This document records what the corpus actually says.
 **Status: complete.** 16 files, 16 signal rows (with matched degraded pairs),
 80 CRF/VMAF sweep points, 16 matched compressibility pairs.
 
+> **Current policy note:** the measurements below are preserved as research,
+> but the shipped tier values are ceilings, not targets to hit. Low/Medium
+> screencasts enforce VMAF 88/92; High/Ultra screencasts retain CRF 22/18 text
+> protection and report any 95/97 exception. Quality Mode has no source-byte
+> ceiling.
+
 ### Summary of what changed in the plan
 
 | Plan said | Data says |
@@ -713,10 +719,11 @@ Low and Medium are unreachable: **even CRF 34 scores VMAF 92.69**, above the
 Medium target. And "Ultra" resolves to CRF 27, which on text and UI would look
 poor to any user.
 
-This is direct confirmation of the plan's Phase 5 concern. VMAF is trained on
-natural video and massively over-rewards synthetic screen content. Screencast
-must use rule-based CRF with VMAF as a floor only — the intent→VMAF scale is
-meaningless there.
+This confirms the plan's Phase 5 concern: VMAF massively over-rewards synthetic
+screen content. The current policy deliberately makes the tier trade-off
+explicit instead of applying one fallback to every tier: Low/Medium enforce
+88/92 even if that risks text, while High/Ultra use CRF 22/18 text protection
+and may report a numeric-ceiling exception.
 
 ---
 
@@ -929,7 +936,9 @@ CRF 25 → VMAF 92.70   ( 197 MiB projected)
 
 The solver is working correctly — the verification delta is 0.10 — but the
 **output is larger than the 881 MiB source**, for no visible gain over CRF 18.
-The 2× size ceiling does not fire because 1027 < 1762.
+The then-proposed 2× size ceiling did not fire because 1027 < 1762. That byte
+ceiling was later removed; transformations and codec changes can legitimately
+make an equal-quality output larger than its source.
 
 ### This corrects an earlier conclusion in this document
 

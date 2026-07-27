@@ -2265,6 +2265,53 @@ namespace SmartOptimizerLogic {
         cal_sizes = new_sizes;
     }
 
+    /** Insert one quality sample while keeping CRF, VMAF, and size aligned. */
+    public void append_quality_calibration_sample (
+        ref int[]    cal_crfs,
+        ref double[] cal_vmafs,
+        ref double[] cal_sizes,
+        int          crf,
+        double       vmaf,
+        double       size_kib
+    ) {
+        if (calibration_contains_crf (cal_crfs, crf))
+            return;
+
+        int old_len = cal_crfs.length;
+        int[] new_crfs = new int[old_len + 1];
+        double[] new_vmafs = new double[old_len + 1];
+        double[] new_sizes = new double[old_len + 1];
+
+        for (int i = 0; i < old_len; i++) {
+            new_crfs[i] = cal_crfs[i];
+            new_vmafs[i] = cal_vmafs[i];
+            new_sizes[i] = cal_sizes[i];
+        }
+        new_crfs[old_len] = crf;
+        new_vmafs[old_len] = vmaf;
+        new_sizes[old_len] = size_kib;
+
+        for (int i = 1; i < new_crfs.length; i++) {
+            int cur_crf = new_crfs[i];
+            double cur_vmaf = new_vmafs[i];
+            double cur_size = new_sizes[i];
+            int j = i - 1;
+            while (j >= 0 && new_crfs[j] > cur_crf) {
+                new_crfs[j + 1] = new_crfs[j];
+                new_vmafs[j + 1] = new_vmafs[j];
+                new_sizes[j + 1] = new_sizes[j];
+                j--;
+            }
+            new_crfs[j + 1] = cur_crf;
+            new_vmafs[j + 1] = cur_vmaf;
+            new_sizes[j + 1] = cur_size;
+        }
+
+        cal_crfs = new_crfs;
+        cal_vmafs = new_vmafs;
+        cal_sizes = new_sizes;
+    }
+
     public bool should_refine_calibration_window (int predicted_crf, int[] cal_crfs) {
         int cal_first = cal_crfs[0];
         int cal_last  = cal_crfs[cal_crfs.length - 1];
@@ -2891,19 +2938,6 @@ namespace SmartOptimizerLogic {
     public const int VMAF_MIN_CALIBRATION_POINTS = 3;
 
     /**
-     * How far the solved CRF may clear its VMAF ceiling before the solver
-     * steps down to the next CRF to stay under it.
-     *
-     * Set at the size of the model's own uncertainty, not smaller: the fit
-     * residual runs ±0.15 VMAF and verification deltas measured +0.09, −0.01,
-     * +0.14 and +0.09 across four intents. Insisting on precision finer than
-     * that would be enforcing a distinction the model cannot resolve, while
-     * costing a whole CRF step — roughly a full VMAF point — to do it.
-     */
-    public const double QUALITY_CEILING_TOLERANCE_VMAF = 0.25;
-
-
-    /**
      * What the user asked for, as a perceptual target rather than a byte count.
      *
      * The VMAF values are Phase 0 defaults: 88/92/95/97 spans "acceptable" to
@@ -2963,28 +2997,31 @@ namespace SmartOptimizerLogic {
         public double target_vmaf;
         /** False when VMAF cannot be trusted to rank this content. */
         public bool   vmaf_reliable;
-        /** CRF ceiling applied when VMAF is unreliable; 0 = no cap. */
+        /** True when measured VMAF must not exceed target_vmaf. */
+        public bool   enforce_vmaf_ceiling;
+        /** CRF ceiling used by the High/Ultra screen-text exception; 0 = none. */
         public int    crf_cap;
         public string reason;
     }
 
-    // Screencast CRF caps.  Phase 0 measured a 3837x2160 screen capture at
+    // Screencast CRF caps. Phase 0 measured a 3837x2160 screen capture at
     // VMAF 92.69 at CRF 34 and 97.23 at CRF 28 — scores that would satisfy the
     // Medium and High intents while the text is visibly mangled.  VMAF
-    // massively over-rewards synthetic screen content, so the intent->VMAF
-    // scale is meaningless here and a rule-based ceiling takes over, with VMAF
-    // retained only as a floor.
+    // massively over-rewards synthetic screen content. High and Ultra preserve
+    // the rule-based text-legibility guard. Low and Medium deliberately accept
+    // the text-quality trade-off and enforce their numeric VMAF ceilings like
+    // every other content type.
     //
     // PROVISIONAL: these are defensible values for text legibility, not
     // perceptually validated ones.  Settling them needs subjective comparison,
     // which Phase 0 could not provide.
     public int screencast_crf_cap (QualityIntent intent) {
         switch (intent) {
-            case QualityIntent.LOW:    return 30;
-            case QualityIntent.MEDIUM: return 26;
+            case QualityIntent.LOW:    return 0;
+            case QualityIntent.MEDIUM: return 0;
             case QualityIntent.HIGH:   return 22;
             case QualityIntent.ULTRA:  return 18;
-            default:                   return 26;
+            default:                   return 0;
         }
     }
 
@@ -2995,14 +3032,27 @@ namespace SmartOptimizerLogic {
         double nominal = intent.target_vmaf ();
 
         if (profile.content_type == ContentType.SCREENCAST) {
+            int cap = screencast_crf_cap (intent);
+            if (cap <= 0) {
+                return QualityTarget () {
+                    target_vmaf         = nominal,
+                    vmaf_reliable       = false,
+                    enforce_vmaf_ceiling = true,
+                    crf_cap             = 0,
+                    reason              = ("VMAF over-rates screen content, but "
+                        + "%s deliberately keeps VMAF %.0f as a hard ceiling; "
+                        + "reduced text clarity is part of this tier's trade-off")
+                        .printf (intent.to_label (), nominal)
+                };
+            }
             return QualityTarget () {
-                target_vmaf   = nominal,
-                vmaf_reliable = false,
-                crf_cap       = screencast_crf_cap (intent),
-                reason        = ("VMAF over-rewards screen content "
-                    + "(measured 92.7 at CRF 34); capping CRF at %d and using "
-                    + "VMAF %.0f only as a floor").printf (
-                        screencast_crf_cap (intent), nominal)
+                target_vmaf          = nominal,
+                vmaf_reliable        = false,
+                enforce_vmaf_ceiling = false,
+                crf_cap              = cap,
+                reason               = ("VMAF over-rates screen content; %s may "
+                    + "exceed VMAF %.0f to protect text, with CRF capped at %d")
+                    .printf (intent.to_label (), nominal, cap)
             };
         }
 
@@ -3012,11 +3062,55 @@ namespace SmartOptimizerLogic {
         // sweep — so no adjustment is applied rather than inventing one.
         // Revisit with perceptual data.
         return QualityTarget () {
-            target_vmaf   = nominal,
-            vmaf_reliable = true,
-            crf_cap       = 0,
-            reason        = "VMAF %.0f target".printf (nominal)
+            target_vmaf          = nominal,
+            vmaf_reliable        = true,
+            enforce_vmaf_ceiling = true,
+            crf_cap              = 0,
+            reason               = "VMAF %.0f hard ceiling".printf (nominal)
         };
+    }
+
+    /** The action required after measuring one candidate encode. */
+    public enum QualityCeilingDecision {
+        ACCEPT,
+        RAISE_CRF,
+        CODEC_LIMIT,
+        TEXT_PROTECTION_EXCEPTION
+    }
+
+    /**
+     * Decide what verification must do with an actual VMAF measurement.
+     * There is intentionally no allowance: a score above the selected tier's
+     * number is over its ceiling. The only exception is the explicit
+     * High/Ultra screencast text-protection policy.
+     */
+    public QualityCeilingDecision decide_quality_ceiling (
+        QualityTarget target,
+        double        measured_vmaf,
+        int           crf,
+        int           codec_max_crf
+    ) {
+        if (measured_vmaf <= target.target_vmaf)
+            return QualityCeilingDecision.ACCEPT;
+        if (!target.enforce_vmaf_ceiling)
+            return QualityCeilingDecision.TEXT_PROTECTION_EXCEPTION;
+        if (crf >= codec_max_crf)
+            return QualityCeilingDecision.CODEC_LIMIT;
+        return QualityCeilingDecision.RAISE_CRF;
+    }
+
+    /** Next coarse CRF for saturation recovery, or -1 at the codec limit. */
+    public int next_saturation_search_crf (int current_crf, int codec_max_crf) {
+        if (current_crf >= codec_max_crf)
+            return -1;
+        return int.min (current_crf + 6, codec_max_crf);
+    }
+
+    /** Midpoint for narrowing a measured over/under bracket, or -1 if adjacent. */
+    public int next_quality_bracket_crf (int above_crf, int below_crf) {
+        if (below_crf - above_crf <= 1)
+            return -1;
+        return above_crf + (below_crf - above_crf) / 2;
     }
 
     /**
@@ -3175,21 +3269,19 @@ namespace SmartOptimizerLogic {
             m.qa, m.qb, m.qc, target_vmaf, cal_mid, crf_min, crf_max);
 
         // The intent's VMAF is a ceiling, not a bullseye: Ultra means "up to
-        // 97", so landing at 97.3 spends bytes on quality the user declined.
-        // Rounding to nearest overshoots whenever the exact solve falls below
-        // the half-way point — 3 of 4 intents on one measured source
-        // (97->97.25, 95->95.13, 88->88.07).
-        //
-        // But CRF is integral, and a step is worth ~1 VMAF: solving 47.07 and
-        // taking ceil(47.07)=48 trades a 0.09 overshoot for a 1.18 undershoot,
-        // surrendering a full quality step to recover a fraction of a point.
-        // So take the NEAREST CRF unless it clears the ceiling by more than
-        // the model can even resolve, and only then step down to stay under.
+        // 97". CRF is integral, so select the best-quality integer whose MODEL
+        // prediction is not above the ceiling. Verification below is still
+        // authoritative and raises CRF again if the measured result overshoots.
         int nearest = (int) Math.round (raw);
-        double nearest_vmaf = evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, nearest);
-        int solved = (nearest_vmaf <= target_vmaf + QUALITY_CEILING_TOLERANCE_VMAF)
-            ? nearest
-            : (int) Math.ceil (raw);   // quality falls as CRF rises
+        int solved = nearest.clamp (crf_min, crf_max);
+        while (solved < crf_max
+                && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved) > target_vmaf) {
+            solved++;
+        }
+        while (solved > crf_min
+                && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved - 1) <= target_vmaf) {
+            solved--;
+        }
 
         m.crf_at_min = solved <= crf_min;
         m.crf_at_max = solved >= crf_max;
@@ -3198,13 +3290,9 @@ namespace SmartOptimizerLogic {
         return m;
     }
 
-    /**
-     * Apply a content-driven CRF cap (currently screencast only).
-     * VMAF stays a floor: whichever CRF gives the better picture wins, and a
-     * lower CRF is always the better picture.
-     */
+    /** Apply the High/Ultra screencast text-protection CRF cap, when present. */
     public int apply_quality_crf_cap (int solved_crf, QualityTarget target) {
-        if (target.vmaf_reliable || target.crf_cap <= 0)
+        if (target.crf_cap <= 0)
             return solved_crf;
         return int.min (solved_crf, target.crf_cap);
     }
@@ -3319,11 +3407,18 @@ namespace SmartOptimizerLogic {
      */
     public class VmafVerification {
         public bool   done;
+        public int    initial_crf;
         public int    verified_crf;
         public double predicted_vmaf;
         public double measured_vmaf;
         /** measured − predicted; negative means the solve was optimistic. */
         public double delta;
+        /** Number of one-step CRF increases made after measured overshoots. */
+        public int    ceiling_corrections;
+        /** True when the codec's maximum CRF still measures above the ceiling. */
+        public bool   ceiling_unreachable;
+        /** True when High/Ultra preserved screen text above the numeric ceiling. */
+        public bool   text_protection_exception;
     }
 
     // Verification deltas beyond this many VMAF points mean the curve did not

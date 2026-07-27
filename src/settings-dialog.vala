@@ -277,15 +277,14 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var playback_group = new Adw.PreferencesGroup ();
         playback_group.set_title ("Playback");
         playback_group.set_description (
-            "Which player opens a finished video from the menu."
+            "Choose how Playback menu actions open input and output videos."
         );
 
         play_with_ffplay_switch = new Adw.SwitchRow ();
         play_with_ffplay_switch.set_title ("Play with ffplay");
         play_with_ffplay_switch.set_subtitle (
-            "Off uses your desktop's default video player. On opens finished "
-            + "videos in ffplay instead, which decodes with the same FFmpeg "
-            + "build that produced them"
+            "Off uses your desktop's default video player. On uses the "
+            + "separately configured ffplay executable for input and output"
         );
         playback_group.add (play_with_ffplay_switch);
         page.add (playback_group);
@@ -402,15 +401,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
             switch (result.availability) {
                 case UpdateAvailability.UPDATE_AVAILABLE:
-                    // An AUR-installed copy must not be sent to the GitHub
-                    // tarball: installing over it would corrupt the package
-                    // (the same reason the Makefile refuses). Point at the
-                    // AUR page, where their helper can actually do the work.
-                    if (InstallDetection.detect () == InstallOrigin.AUR_PACKAGE) {
+                    // os-release identifies Arch-family systems; point those
+                    // users at the AUR and everyone else at the GitHub release.
+                    if (InstallDetection.detect () == InstallOrigin.ARCH_BASED_SYSTEM) {
                         update_row.set_subtitle (
                             ("Version %s is available — installed version: %s. "
-                             + "This copy came from the AUR; update it with your "
-                             + "AUR helper.").printf (
+                             + "This is an Arch-based system; update it with "
+                             + "your AUR helper.").printf (
                                 result.latest_version, result.current_version));
                         update_release_url = ProjectUrls.AUR;
                         update_release_button.set_label ("View on AUR");
@@ -584,7 +581,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         ffplay_entry  = new Entry ();
         ffplay_status = new Label ("");
         build_binary_row (ffplay_group, "ffplay Path",
-                          "Media player — reserved for future playback features",
+                          "Media player used by Playback menu actions when enabled",
                           ffplay_entry, ffplay_status, "ffplay", false, ffplay_validation);
         page.add (ffplay_group);
 

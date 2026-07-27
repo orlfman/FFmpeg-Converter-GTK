@@ -920,67 +920,190 @@ public class SmartOptimizer : GLib.Object {
             }
 
             // ── 7b. Recover from an over-saturated bracket ──────────────
-            // Every probe landing above VMAF 99.5 means the ladder sat too far
-            // into visually-lossless territory to carry any gradient. Probe
-            // higher CRFs rather than fit a flat line.
+            // A fitted answer is only a starting point. If saturation leaves
+            // too little gradient to fit (including an all-saturated ladder),
+            // search upward until an actual encode crosses the selected
+            // ceiling, then narrow that bracket to adjacent integral CRFs.
+            // Stop only at the codec limit. High/Ultra screencasts are the
+            // explicit exception: their rule-based cap protects text.
             var m0 = SmartOptimizerLogic.solve_quality_crf (
                 measured_crfs, vmafs, target.target_vmaf, preferred_codec);
             bool refined = false;          // extra probes after saturation
             bool bracket_refined = false;  // extra probes to bracket the answer
-            if (m0.degenerate && measured_crfs.length > 0) {
-                int highest = measured_crfs[measured_crfs.length - 1];
+            bool saturation_direct_solution = false;
+            bool saturation_codec_limit = false;
+
+            if (m0.degenerate && m0.saturated_points_dropped > 0
+                    && target.enforce_vmaf_ceiling) {
                 int crf_min, crf_max;
                 SmartOptimizerLogic.crf_range_for_codec (
                     preferred_codec, out crf_min, out crf_max);
-                int[] extra = {
-                    int.min (highest + 6, crf_max),
-                    int.min (highest + 12, crf_max)
-                };
+                int above_crf = -1;
+                int below_crf = -1;
+                for (int i = 0; i < measured_crfs.length; i++) {
+                    if (vmafs[i] > target.target_vmaf) {
+                        above_crf = measured_crfs[i];
+                    } else if (above_crf >= 0) {
+                        below_crf = measured_crfs[i];
+                        break;
+                    }
+                }
+                int next_crf = (below_crf >= 0) ? -1
+                    : SmartOptimizerLogic.next_saturation_search_crf (
+                        above_crf, crf_max);
                 try {
-                    foreach (int crf in extra) {
-                        if (SmartOptimizerLogic.calibration_contains_crf (measured_crfs, crf))
-                            continue;
-                        yield ensure_quality_reference (
-                            intermediate, input_file, positions,
-                            tw.sample_segment_duration, vf, bit_depth.pix_fmt,
-                            info, temp_run_dir, cancellable);
-                        var m = yield calibration_probe_with_vmaf (
-                            preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
-                            intermediate.path, tw.encode_duration, sample_duration,
-                            1.0, info.width, threads, temp_run_dir, cancellable);
-                        if (!m.vmaf_measured)
-                            continue;
-                        measured_crfs += crf;
-                        vmafs += m.vmaf;
-                        sizes += m.size_kib;
-                        if (qcache != null)
-                            qcache.record_with_vmaf (crf, m.size_kib, m.vmaf);
+                    while (below_crf < 0 && above_crf < crf_max) {
+                        var m = yield quality_measurement_at_crf (
+                            next_crf, qcache, intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, info, preferred_codec,
+                            preset_idx, bit_depth.pix_fmt, tw.encode_duration,
+                            sample_duration, threads, temp_run_dir, cancellable);
+                        if (!m.vmaf_measured) {
+                            return make_error_rec (preferred_codec,
+                                "Could not verify the quality ceiling at CRF %d.\n"
+                                .printf (next_crf)
+                                + "Auto-convert was not started because the "
+                                + "selected quality ceiling could not be guaranteed.");
+                        }
+                        SmartOptimizerLogic.append_quality_calibration_sample (
+                            ref measured_crfs, ref vmafs, ref sizes,
+                            next_crf, m.vmaf, m.size_kib);
+                        if (m.from_cache)
+                            cached_points++;
                         refined = true;
+                        if (m.vmaf <= target.target_vmaf) {
+                            below_crf = next_crf;
+                            break;
+                        }
+                        above_crf = next_crf;
+                        if (next_crf >= crf_max)
+                            break;
+                        next_crf = SmartOptimizerLogic.next_saturation_search_crf (
+                            next_crf, crf_max);
+                    }
+
+                    // Coarse probing found the crossing. Narrow it so the
+                    // chosen integer is the closest one at or below the ceiling.
+                    int midpoint = SmartOptimizerLogic.next_quality_bracket_crf (
+                        above_crf, below_crf);
+                    while (midpoint >= 0) {
+                        var m = yield quality_measurement_at_crf (
+                            midpoint, qcache, intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, info, preferred_codec,
+                            preset_idx, bit_depth.pix_fmt, tw.encode_duration,
+                            sample_duration, threads, temp_run_dir, cancellable);
+                        if (!m.vmaf_measured) {
+                            return make_error_rec (preferred_codec,
+                                "Could not verify the quality ceiling at CRF %d.\n"
+                                .printf (midpoint)
+                                + "Auto-convert was not started because the "
+                                + "selected quality ceiling could not be guaranteed.");
+                        }
+                        SmartOptimizerLogic.append_quality_calibration_sample (
+                            ref measured_crfs, ref vmafs, ref sizes,
+                            midpoint, m.vmaf, m.size_kib);
+                        if (m.from_cache)
+                            cached_points++;
+                        if (m.vmaf <= target.target_vmaf)
+                            below_crf = midpoint;
+                        else
+                            above_crf = midpoint;
+                        midpoint = SmartOptimizerLogic.next_quality_bracket_crf (
+                            above_crf, below_crf);
+                    }
+                } catch (IOError.CANCELLED e) {
+                    throw e;
+                } catch (Error e) {
+                    return make_error_rec (preferred_codec,
+                        "Quality ceiling search failed: %s\n".printf (e.message)
+                        + "Auto-convert was not started because the selected "
+                        + "quality ceiling could not be guaranteed.");
+                }
+
+                int direct_crf = (below_crf > 0) ? below_crf : crf_max;
+                saturation_codec_limit = (below_crf <= 0);
+                saturation_direct_solution = true;
+
+                // Preserve a real fitted model when enough gradient was found,
+                // but make the measured bracket answer authoritative.
+                m0 = SmartOptimizerLogic.solve_quality_crf (
+                    measured_crfs, vmafs, target.target_vmaf, preferred_codec);
+                if (m0.degenerate) {
+                    m0.degenerate = false;
+                    m0.cal_crfs = measured_crfs;
+                    m0.cal_vmafs = vmafs;
+                    m0.qa = vmafs[vmafs.length - 1];
+                    m0.qb = 0.0;
+                    m0.qc = 0.0;
+                }
+                m0.predicted_crf = direct_crf;
+                for (int i = 0; i < measured_crfs.length; i++) {
+                    if (measured_crfs[i] == direct_crf) {
+                        m0.predicted_vmaf = vmafs[i];
+                        break;
+                    }
+                }
+                m0.crf_at_max = (direct_crf >= crf_max);
+            } else if (m0.degenerate && !target.enforce_vmaf_ceiling
+                    && target.crf_cap > 0 && measured_crfs.length > 0) {
+                // High/Ultra screen content does not need a VMAF gradient to
+                // choose its answer: the explicit CRF cap is authoritative and
+                // the final candidate is still measured for honest reporting.
+                m0.degenerate = false;
+                m0.cal_crfs = measured_crfs;
+                m0.cal_vmafs = vmafs;
+                m0.qa = vmafs[vmafs.length - 1];
+                m0.qb = 0.0;
+                m0.qc = 0.0;
+                m0.predicted_crf = measured_crfs[measured_crfs.length - 1];
+                m0.predicted_vmaf = m0.qa;
+                saturation_direct_solution = true;
+            } else if (m0.degenerate && target.enforce_vmaf_ceiling
+                    && measured_crfs.length > 0) {
+                // A partially saturated ladder can leave only one or two usable
+                // points. Keep extending it until the curve is fit-capable or
+                // the codec has nowhere left to go.
+                int crf_min, crf_max;
+                SmartOptimizerLogic.crf_range_for_codec (
+                    preferred_codec, out crf_min, out crf_max);
+                int next_crf = SmartOptimizerLogic.next_saturation_search_crf (
+                    measured_crfs[measured_crfs.length - 1], crf_max);
+                try {
+                    while (m0.degenerate && next_crf >= 0
+                            && !SmartOptimizerLogic.calibration_contains_crf (
+                                measured_crfs, next_crf)) {
+                        var m = yield quality_measurement_at_crf (
+                            next_crf, qcache, intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, info, preferred_codec,
+                            preset_idx, bit_depth.pix_fmt, tw.encode_duration,
+                            sample_duration, threads, temp_run_dir, cancellable);
+                        if (m.vmaf_measured) {
+                            SmartOptimizerLogic.append_quality_calibration_sample (
+                                ref measured_crfs, ref vmafs, ref sizes,
+                                next_crf, m.vmaf, m.size_kib);
+                            if (m.from_cache)
+                                cached_points++;
+                            refined = true;
+                            m0 = SmartOptimizerLogic.solve_quality_crf (
+                                measured_crfs, vmafs, target.target_vmaf,
+                                preferred_codec);
+                        }
+                        if (next_crf >= crf_max)
+                            break;
+                        next_crf = SmartOptimizerLogic.next_saturation_search_crf (
+                            next_crf, crf_max);
                     }
                 } catch (IOError.CANCELLED e) {
                     throw e;
                 } catch (Error e) {
                     warning ("Smart Optimizer: saturation refinement failed: %s", e.message);
                 }
-                if (refined) {
-                    m0 = SmartOptimizerLogic.solve_quality_crf (
-                        measured_crfs, vmafs, target.target_vmaf, preferred_codec);
-                }
             }
 
-            // Every probe saturating is NOT a failure — it means the target
-            // was already cleared everywhere we looked. The right answer is
-            // the highest CRF probed: the cheapest encode that still exceeds
-            // the target. Erroring out here would throw away a usable result.
-            //
-            // Screen content reaches this routinely. Phase 0 measured a
-            // screencast at VMAF 92.7 even at x265 CRF 34, and SVT-AV1 stays
-            // above 99.5 past CRF 46 — which is exactly why that content type
-            // gets a rule-based CRF cap with VMAF as a floor that never binds.
             bool all_saturated = (measured_crfs.length > 0
                 && m0.saturated_points_dropped == measured_crfs.length);
 
-            if (m0.degenerate && !all_saturated) {
+            if (m0.degenerate && !all_saturated && !saturation_direct_solution) {
                 return make_error_rec (preferred_codec,
                     "Could not measure a usable quality curve for this video.\n"
                     + "Too few probes produced a score — the source may be "
@@ -1000,7 +1123,8 @@ public class SmartOptimizer : GLib.Object {
             // despite verifying to within 0.11 VMAF. The ladders for SVT-AV1
             // and VP9 were derived by analogy from the measured x265 ones, so
             // being off-centre is expected until they get a sweep of their own.
-            if (!m0.degenerate && measured_crfs.length > 0
+            if (!m0.degenerate && !saturation_direct_solution
+                    && measured_crfs.length > 0
                     && SmartOptimizerLogic.should_refine_calibration_window (
                         m0.predicted_crf, measured_crfs)) {
                 int crf_min_r, crf_max_r;
@@ -1049,11 +1173,11 @@ public class SmartOptimizer : GLib.Object {
                 }
             }
 
-            if (all_saturated) {
+            if (all_saturated && !saturation_direct_solution) {
                 // Model the response as flat at the measured value: within the
-                // probed range that is precisely what saturation means. The
-                // verification probe below re-measures at the final CRF, so a
-                // flat model that turns out to be wrong self-corrects.
+                // probed range that is precisely what saturation means. This
+                // branch is the High/Ultra screen-text exception; strict
+                // ceilings took the measured search path above.
                 m0.degenerate = false;
                 m0.cal_crfs = measured_crfs;
                 m0.cal_vmafs = vmafs;
@@ -1118,65 +1242,91 @@ public class SmartOptimizer : GLib.Object {
                     out estimated_video_kib);
             }
 
-            // ── 9b. Verification ───────────────────────────────────────
-            // Encode once at the CRF we are actually going to recommend and
-            // score it. This is the quality solver's only real accuracy
-            // check: with a 3-point ladder the quadratic interpolates its own
-            // samples exactly, so the fit residual proves nothing. Reuses a
-            // measured point when the answer happens to land on one.
+            // ── 9b. Verification and ceiling correction ────────────────
+            // The model chooses only a starting CRF. Measure the actual answer;
+            // whenever it is above a hard ceiling, raise CRF one step and
+            // measure again. Auto-convert cannot begin until this loop accepts
+            // the result or proves that the codec's maximum CRF cannot reach it.
             var verification = new SmartOptimizerLogic.VmafVerification ();
-            verification.verified_crf = final_crf;
-            verification.predicted_vmaf = achieved_vmaf;
-            for (int i = 0; i < measured_crfs.length; i++) {
-                if (measured_crfs[i] == final_crf) {
-                    verification.done = true;
-                    verification.measured_vmaf = vmafs[i];
+            verification.initial_crf = final_crf;
+            int verify_crf_min, verify_crf_max;
+            SmartOptimizerLogic.crf_range_for_codec (
+                preferred_codec, out verify_crf_min, out verify_crf_max);
+
+            while (true) {
+                verification.done = false;
+                verification.verified_crf = final_crf;
+                verification.predicted_vmaf =
+                    SmartOptimizerLogic.evaluate_vmaf_at_crf (
+                        m0.qa, m0.qb, m0.qc, final_crf);
+
+                for (int i = 0; i < measured_crfs.length; i++) {
+                    if (measured_crfs[i] == final_crf) {
+                        verification.done = true;
+                        verification.measured_vmaf = vmafs[i];
+                        estimated_video_kib = sizes[i];
+                        break;
+                    }
+                }
+
+                if (!verification.done) {
+                    try {
+                        var v = yield quality_measurement_at_crf (
+                            final_crf, qcache, intermediate, input_file, positions,
+                            tw.sample_segment_duration, vf, info, preferred_codec,
+                            preset_idx, bit_depth.pix_fmt, tw.encode_duration,
+                            sample_duration, threads, temp_run_dir, cancellable);
+                        if (v.vmaf_measured) {
+                            verification.done = true;
+                            verification.measured_vmaf = v.vmaf;
+                            estimated_video_kib = v.size_kib;
+                            if (v.from_cache)
+                                cached_points++;
+                        }
+                    } catch (IOError.CANCELLED e) {
+                        throw e;
+                    } catch (Error e) {
+                        warning ("Smart Optimizer: quality verification failed: %s",
+                            e.message);
+                    }
+                }
+
+                if (!verification.done) {
+                    if (target.enforce_vmaf_ceiling) {
+                        return make_error_rec (preferred_codec,
+                            "Could not verify VMAF at CRF %d.\n".printf (final_crf)
+                            + "Auto-convert was not started because the selected "
+                            + "quality ceiling could not be guaranteed.");
+                    }
                     break;
                 }
-            }
-            if (!verification.done && qcache != null) {
-                // A previous run very likely verified this same CRF — the
-                // solve is deterministic for a given key, so the answer lands
-                // in the same place. Reuse it rather than re-encoding.
-                double vc_size = 0.0, vc_vmaf = 0.0;
-                if (qcache.lookup_with_vmaf (final_crf, out vc_size, out vc_vmaf)) {
-                    verification.done = true;
-                    verification.measured_vmaf = vc_vmaf;
-                    estimated_video_kib = vc_size;
-                    cached_points++;
-                }
-            }
-            if (!verification.done) {
-                try {
-                    yield ensure_quality_reference (
-                        intermediate, input_file, positions,
-                        tw.sample_segment_duration, vf, bit_depth.pix_fmt,
-                        info, temp_run_dir, cancellable);
-                    var v = yield calibration_probe_with_vmaf (
-                        preferred_codec, final_crf, preset_idx, bit_depth.pix_fmt,
-                        intermediate.path, tw.encode_duration, sample_duration,
-                        1.0, info.width, threads, temp_run_dir, cancellable);
-                    if (v.vmaf_measured) {
-                        verification.done = true;
-                        verification.measured_vmaf = v.vmaf;
-                        if (qcache != null)
-                            qcache.record_with_vmaf (final_crf, v.size_kib, v.vmaf);
-                        // The measured size at the final CRF beats the modelled
-                        // one — it is the encode we are recommending.
-                        estimated_video_kib = v.size_kib;
-                    }
-                } catch (IOError.CANCELLED e) {
-                    throw e;
-                } catch (Error e) {
-                    warning ("Smart Optimizer: quality verification failed: %s", e.message);
-                }
-            }
-            if (verification.done) {
+
                 verification.delta =
                     verification.measured_vmaf - verification.predicted_vmaf;
-                // Report what was measured, not what was modelled.
                 achieved_vmaf = verification.measured_vmaf;
+
+                var ceiling_decision = SmartOptimizerLogic.decide_quality_ceiling (
+                    target, verification.measured_vmaf, final_crf, verify_crf_max);
+                if (ceiling_decision
+                        == SmartOptimizerLogic.QualityCeilingDecision.RAISE_CRF) {
+                    final_crf++;
+                    verification.ceiling_corrections++;
+                    continue;
+                }
+                if (ceiling_decision
+                        == SmartOptimizerLogic.QualityCeilingDecision.CODEC_LIMIT) {
+                    verification.ceiling_unreachable = true;
+                } else if (ceiling_decision == SmartOptimizerLogic
+                        .QualityCeilingDecision.TEXT_PROTECTION_EXCEPTION) {
+                    verification.text_protection_exception = true;
+                }
+                break;
             }
+
+            // The saturation search can know this before final verification;
+            // retain the fact even if the maximum-CRF sample was reused.
+            if (saturation_codec_limit)
+                verification.ceiling_unreachable = true;
 
             // ── 10. Confidence ─────────────────────────────────────────
             double coverage = (tw.encode_duration > 0.0)
@@ -1184,8 +1334,8 @@ public class SmartOptimizer : GLib.Object {
             double confidence = SmartOptimizerLogic.assess_quality_confidence (
                 m0, coverage, target.vmaf_reliable, verification);
             if (all_saturated) {
-                // A flat model carries no gradient; the answer is a floor, not
-                // a solve. Say so through the confidence figure.
+                // A saturated model carries no gradient, regardless of whether
+                // the result came from a codec limit or the text exception.
                 confidence *= 0.6;
             }
 
@@ -1435,10 +1585,10 @@ public class SmartOptimizer : GLib.Object {
     ) {
         var n = new StringBuilder ();
 
-        n.append ("── Intent: %s (VMAF %.0f) ──\n".printf (
+        n.append ("── Intent: %s (VMAF ceiling %.0f) ──\n".printf (
             intent.to_label (), target.target_vmaf));
         n.append ("  %s\n".printf (target.reason));
-        n.append ("  Quality pinned; size is the prediction.\n");
+        n.append ("  Quality ceiling pinned; size is the prediction.\n");
 
         n.append ("\n── Content ──\n");
         n.append ("  %s".printf (profile.content_type.to_label ()));
@@ -1456,8 +1606,13 @@ public class SmartOptimizer : GLib.Object {
             n.append (("  ⚠ Every probe cleared VMAF %.1f — the metric cannot "
                  + "separate these encodes.\n").printf (
                     SmartOptimizerLogic.VMAF_SATURATION_THRESHOLD));
-            n.append ("  Recommending the highest CRF probed: the cheapest "
-                + "encode that still exceeds the target.\n");
+            if (target.enforce_vmaf_ceiling) {
+                n.append ("  Probed through the codec limit while looking for "
+                    + "an encode at or below the ceiling.\n");
+            } else {
+                n.append ("  The High/Ultra screen-text exception uses its "
+                    + "text-protection CRF instead of chasing this score.\n");
+            }
         } else if (model.saturated_points_dropped > 0) {
             n.append ("  %d point(s) discarded above VMAF %.1f — no gradient there\n"
                 .printf (model.saturated_points_dropped,
@@ -1483,12 +1638,12 @@ public class SmartOptimizer : GLib.Object {
         }
 
         n.append ("\n── Decision ──\n");
-        n.append ("  Solved CRF %d for VMAF %.1f\n".printf (
+        n.append ("  Fitted starting CRF %d for VMAF ceiling %.1f\n".printf (
             model.predicted_crf, target.target_vmaf));
         if (crf_capped) {
-            n.append ("  Capped to CRF %d — %s\n".printf (
+            n.append ("  Text protection capped CRF at %d — %s\n".printf (
                 SmartOptimizerLogic.apply_quality_crf_cap (model.predicted_crf, target),
-                "VMAF is unreliable on this content, so a CRF ceiling applies"));
+                "High/Ultra screencasts may exceed the numeric VMAF ceiling"));
         }
         // preset_label already reads "preset 6" / "cpu-used 2" / "slow"
         // depending on codec, so it must not be prefixed again.
@@ -1502,6 +1657,29 @@ public class SmartOptimizer : GLib.Object {
                 .printf (verification.verified_crf, verification.measured_vmaf));
             n.append ("(predicted %.2f, %+.2f)\n".printf (
                 verification.predicted_vmaf, verification.delta));
+            if (verification.ceiling_corrections > 0) {
+                n.append (("  Raised CRF %d step(s), from %d to %d, until the "
+                    + "measured result was at or below the ceiling.\n").printf (
+                        verification.ceiling_corrections,
+                        verification.initial_crf, verification.verified_crf));
+            }
+            if (verification.text_protection_exception) {
+                n.append (("  ⚠ Measured VMAF %.2f exceeds the %.0f ceiling "
+                    + "to protect screen-text legibility at this tier.\n").printf (
+                        verification.measured_vmaf, target.target_vmaf));
+            }
+            if (verification.ceiling_unreachable) {
+                n.append (("  ⚠ Codec maximum CRF %d still measured VMAF %.2f; "
+                    + "the %.0f ceiling is unreachable for this source.\n").printf (
+                        verification.verified_crf, verification.measured_vmaf,
+                        target.target_vmaf));
+            } else if (target.enforce_vmaf_ceiling && model.crf_at_min
+                    && verification.measured_vmaf < target.target_vmaf) {
+                n.append (("  Codec minimum CRF still measured VMAF %.2f; this "
+                    + "is the closest result the source and codec can produce "
+                    + "below the %.0f ceiling.\n").printf (
+                        verification.measured_vmaf, target.target_vmaf));
+            }
             if (Math.fabs (verification.delta)
                     > SmartOptimizerLogic.VMAF_VERIFY_TOLERANCE) {
                 n.append ("  ⚠ The curve did not generalise to its own answer — "
@@ -1511,7 +1689,8 @@ public class SmartOptimizer : GLib.Object {
 
         n.append ("\n── Prediction ──\n");
         n.append ("  Estimated size: %.1f MiB\n".printf (estimated_total_kib / 1024.0));
-        n.append ("  Estimated VMAF: %.1f\n".printf (achieved_vmaf));
+        n.append ("  %s VMAF: %.1f\n".printf (
+            verification.done ? "Measured" : "Estimated", achieved_vmaf));
         n.append ("  Confidence: %.0f%%\n".printf (confidence * 100.0));
         n.append ("  Sampled %.0f%% of the encode window (%d × %.1fs segments%s)\n"
             .printf (coverage * 100.0, segment_count, tw.sample_segment_duration,
@@ -3548,6 +3727,7 @@ public class SmartOptimizer : GLib.Object {
         public double size_kib;
         public double vmaf;
         public bool   vmaf_measured;
+        public bool   from_cache;
     }
 
     /**
@@ -3641,6 +3821,52 @@ public class SmartOptimizer : GLib.Object {
             return 0.0;
         }
         return score;
+    }
+
+    /**
+     * Return one quality measurement, preferring this run's persistent cache.
+     * A miss builds the shared reference lazily, encodes the requested CRF,
+     * measures it, and records both axes for later correction steps.
+     */
+    private async ProbeMeasurement quality_measurement_at_crf (
+        int                     crf,
+        SmartOptimizerCache?    qcache,
+        IntermediateHolder      intermediate,
+        string                  input_file,
+        double[]                positions,
+        double                  segment_duration,
+        string                  vf,
+        SmartOptimizerVideoInfo info,
+        string                  codec,
+        int                     preset_idx,
+        string                  pix_fmt,
+        double                  full_duration,
+        double                  sample_duration,
+        int                     encoder_threads,
+        string?                 temp_run_dir,
+        Cancellable?            cancellable
+    ) throws Error {
+        double cached_size = 0.0, cached_vmaf = 0.0;
+        if (qcache != null
+                && qcache.lookup_with_vmaf (crf, out cached_size, out cached_vmaf)) {
+            return new ProbeMeasurement () {
+                size_kib = cached_size,
+                vmaf = cached_vmaf,
+                vmaf_measured = true,
+                from_cache = true
+            };
+        }
+
+        yield ensure_quality_reference (
+            intermediate, input_file, positions, segment_duration, vf, pix_fmt,
+            info, temp_run_dir, cancellable);
+        var measured = yield calibration_probe_with_vmaf (
+            codec, crf, preset_idx, pix_fmt, intermediate.path,
+            full_duration, sample_duration, 1.0, info.width,
+            encoder_threads, temp_run_dir, cancellable);
+        if (measured.vmaf_measured && qcache != null)
+            qcache.record_with_vmaf (crf, measured.size_kib, measured.vmaf);
+        return measured;
     }
 
     /**

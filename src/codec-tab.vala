@@ -29,7 +29,7 @@ public interface ISmartCodecTab : Object {
     public abstract bool get_strip_audio_active ();
     public abstract int get_target_mb ();
     /**
-     * True when the user pinned a quality target instead of a size target.
+     * True when the user selected a quality ceiling instead of a size target.
      * The two are mutually exclusive: one axis is the constraint, the other
      * is the prediction.
      */

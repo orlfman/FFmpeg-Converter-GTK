@@ -9,7 +9,9 @@
 > raw VMAF**, not logit; the Phase 4a degradation guard is **not implementable
 > as specified** and is recommended for removal; the Content axis turned out to
 > be **load-bearing**, not a convenience, because the classifier cannot detect
-> animation at all.
+> animation at all. The shipped tier values are **measured VMAF ceilings**, and
+> the proposed source-byte ceiling was removed because transformations and codec
+> changes can legitimately make an equal-quality output larger than its source.
 
 ## Mission Statement
 
@@ -18,8 +20,8 @@ specific video, solve for the CRF that lands there.** Size reduction, arbitrary
 targets, inflation, and match-source are all the same operation with a different
 number in `target_mb`.
 
-The goal now is the second half of that idea: **pin a quality, let size float,
-solve for the CRF that achieves it on this specific source.**
+The goal now is the second half of that idea: **choose a quality ceiling, let
+size float, and solve for the closest CRF at or below it on this source.**
 
 Not a rule table that says "High = CRF 20." A measurement that says *this grainy
 4K master needs CRF 18 to reach VMAF 95, and that clean anime reaches it at CRF
@@ -131,8 +133,11 @@ far better behaved than size-vs-CRF — less curvature, less content dependence 
 so **3 base points plus verification should suffice** where size needs 4–6.
 Confirm against the Phase 0 sweep.
 
-**The solve.** `solve_crf_from_curve` against a target VMAF instead of a target
-size. Reuse extrapolation-distance and RMSE-based confidence unchanged.
+**The solve.** `solve_crf_from_curve` against a VMAF ceiling instead of a target
+size. The fit supplies a starting CRF. Measure that candidate, then raise CRF
+one step and re-measure for as long as actual VMAF exceeds the ceiling. There is
+no positive VMAF allowance. Reuse extrapolation-distance and RMSE-based
+confidence unchanged.
 
 **Cost control** (in priority order): reuse existing probe encodes rather than
 adding passes; `n_threads` on libvmaf; skip VMAF on probes far from the predicted
@@ -170,44 +175,15 @@ That is the next thing to attack if quality-mode latency matters.
 **No two-pass in Quality Mode.** Two-pass exists to hit a byte count.
 CRF-with-a-measured-target is the entire point.
 
-**Safety ceiling: 2× source size.** A pathological-case net, not a routine
-constraint — the solver isn't blindly picking CRF 5, so this should rarely fire.
-Design accordingly:
+**No source-size ceiling.** Quality Mode constrains measured VMAF and lets size
+float. Source bytes are not a valid quality boundary when the operation changes
+resolution, frame rate, bit depth, codec efficiency, or filtering. Match Source
+Size remains available as an explicit Size Mode request.
 
-- It is a **post-solve clamp, not a second objective.** Solve for VMAF; if the
-  estimated size exceeds the ceiling, raise CRF until it fits and report the
-  quality actually achieved: *"couldn't reach VMAF 97 within 2× source; landed at
-  94."* Never let the ceiling participate in the solve, or it becomes a competing
-  target that fights the quality axis.
-- **Use the windowed source size.** `match_source_target_mb_for_window` already
-  solves this for Match Source Size — scale by duration fraction, or a 30-second
-  trim of a 1 GB file gets a 2 GB ceiling that can never fire.
-- **Composes with the 4a degradation guard, in order.** Degradation lowers the
-  effective target *before* the solve; the ceiling clamps whatever is left
-  *after*. Both fire on the same input (degraded source + high intent), so the
-  notes must attribute the outcome to one cause, not blame both.
-
-Realistic trigger cases for testing: heavily-compressed source at Ultra, and
-codec downgrades (AV1 source → x264 at Ultra, where x264 needs far more bits for
-the same VMAF).
-
-**The multiplier is tunable and 2.0 is a placeholder.** Keep it as a named
-constant (`QUALITY_MODE_MAX_SOURCE_MULTIPLIER`) in `smart-optimizer-logic.vala`
-next to `GRAIN_SYNTH_LOW/HIGH` and `BPP_COMFORT_MULTIPLIER`, with the clamp
-itself as a pure function covered by `smart-optimizer-logic-test.vala`. Because
-it is a post-solve clamp, changing it cannot perturb any run that was already
-landing under the ceiling — every result below the line stays byte-identical.
-**Phase 0 sets the final value:** the corpus sweep already records
-`(crf, size, vmaf)` per file, which shows directly how far Ultra pushes size
-relative to source on real material. Pick a multiplier above the legitimate cases
-and below the pathological ones.
-
-Start with a single global number. Per-intent or per-degradation multipliers are
-plausible later, but adding them before data shows they're needed is exactly the
-magic-number proliferation Phase 0 exists to prevent. Likewise, leave it
-hardcoded rather than exposing a Preferences knob until Phase 6 shows users
-actually hit it — promoting a constant to an `AppSettings` value later is
-mechanical, but every preference added is permanent.
+**Saturation recovery.** If every ladder point is at or above VMAF 99.5, keep
+probing higher CRFs until the numeric ceiling is bracketed, narrow the bracket to
+adjacent integral CRFs, or reach the codec maximum. Report the codec-limit case
+instead of silently recommending a known ceiling violation.
 
 ---
 
@@ -246,7 +222,7 @@ result card always shows both numbers with the pinned one marked.
 zero-analysis path, on the argument that Quality Mode costs minutes on a long
 file where a table was instant. That was overridden: having two controls with
 "Quality" in the name — a static `Quality Profile` dropdown directly above the
-new `Quality Target` — was actively misleading, and produced exactly the
+new `Quality Ceiling` — was actively misleading, and produced exactly the
 confusion you would predict (a user set the profile to Medium and got a 4 MB
 size-targeted run, because the profile has nothing to do with the optimizer).
 
@@ -306,8 +282,10 @@ on exactly the content this app is used for.
 
 - **Anime:** VMAF under-penalizes flat animation — expect a positive offset on
   the target. Size from Phase 0 data.
-- **Screencast:** VMAF is close to meaningless on text and UI. Fall back to
-  rule-based CRF with VMAF as a sanity *floor* only, and say so in the notes.
+- **Screencast:** VMAF is close to meaningless on text and UI. Low/Medium still
+  enforce 88/92 as hard ceilings; text loss is an accepted tier trade-off.
+  High/Ultra retain rule-based CRF 22/18 text protection, may exceed 95/97, and
+  must identify that exception explicitly in the notes.
 - **≥1080p:** evaluate `vmaf_4k_v0.6.1`; decide on NEG variants (they resist
   sharpening/enhancement gaming, generally the right choice for encoder
   decisions).
@@ -322,8 +300,8 @@ on exactly the content this app is used for.
 
 ## Phase 6 — Validation
 
-- Corpus from Phase 0, now used as a regression suite: does each intent hit its
-  VMAF target within tolerance across all content classes?
+- Corpus from Phase 0, now used as a regression suite: does each intent stay at
+  or below its measured VMAF ceiling across all content classes?
 - **Cross-mode sanity:** solve for size, then verify the reported VMAF matches an
   independent measurement of the real output. Same in reverse. The two solvers
   must agree about the same video.
@@ -355,5 +333,6 @@ versus "same size, VMAF 88, you lost something."
 
 ## Resolved Decisions
 
-- **Quality Mode size ceiling: 2× source** (windowed for trims), as a post-solve
-  clamp that reports the quality actually achieved. See Phase 2.
+- **Quality Mode has no source-byte ceiling.** Low/Medium/High/Ultra mean maximum
+  measured VMAF 88/92/95/97. Only High/Ultra screencasts may exceed that number,
+  specifically to preserve screen-text legibility.
