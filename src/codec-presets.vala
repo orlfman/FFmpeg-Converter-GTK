@@ -312,15 +312,12 @@ public class CodecPresets : Object {
                 tab.tune_content_combo.set_selected (0);
             }
 
-            // Native edge preservation is selected by measured source detail;
-            // effort only caps its strength. Calibration uses this same value.
-            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
-                "vp9", rec.effort, rec.content_type, rec.grain_score,
-                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
+            // The recommendation records the exact value used by calibration,
+            // so application and reporting cannot drift from the measurement.
             tab.sharpness_expander.set_enable_expansion (
-                tuning.native_sharpness > 0);
-            if (tuning.native_sharpness > 0)
-                tab.sharpness_spin.set_value (tuning.native_sharpness);
+                rec.native_sharpness > 0);
+            if (rec.native_sharpness > 0)
+                tab.sharpness_spin.set_value (rec.native_sharpness);
 
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.row_mt_switch.set_active (true);
@@ -559,10 +556,10 @@ public class CodecPresets : Object {
             // sources included even if the category was uncertain). See
             // SmartOptimizerLogic.grain_warranted.
             bool use_grain = tuning.film_grain;
-            bool use_sharpness = tuning.native_sharpness > 0;
+            bool use_sharpness = rec.native_sharpness > 0;
             tab.sharpness_expander.set_enable_expansion (use_sharpness);
             if (use_sharpness)
-                tab.sharpness_spin.set_value (tuning.native_sharpness);
+                tab.sharpness_spin.set_value (rec.native_sharpness);
 
             switch (effort) {
                 case EncodeEffort.MINIMAL:

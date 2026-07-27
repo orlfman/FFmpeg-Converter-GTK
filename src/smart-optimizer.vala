@@ -283,6 +283,28 @@ public class SmartOptimizer : GLib.Object {
      * which is the pre-existing behaviour.
      */
     private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
+    private FfmpegRuntimeCapabilities? runtime_capabilities;
+
+    public SmartOptimizer (
+        FfmpegRuntimeCapabilities? runtime_capabilities = null
+    ) {
+        this.runtime_capabilities = runtime_capabilities;
+    }
+
+    /** Fail before any video probing or temporary-file work when VMAF is absent. */
+    private async void require_vmaf (Cancellable? cancellable) throws Error {
+        var probe_cancel = cancellable ?? new Cancellable ();
+        VmafCapability capability = (runtime_capabilities != null)
+            ? yield runtime_capabilities.get_vmaf_capability (
+                AppSettings.get_default ().ffmpeg_path, probe_cancel)
+            : yield FfmpegRuntimeCapabilities.probe_vmaf (
+                AppSettings.get_default ().ffmpeg_path, probe_cancel);
+
+        if (capability.status != VmafCapabilityStatus.SUPPORTED) {
+            throw new IOError.NOT_SUPPORTED (
+                capability.reason ?? "Quality Target requires FFmpeg with libvmaf support.");
+        }
+    }
 
     // Calibration parallelism: encodes within a batch are independent.
     // One concurrent job per this many logical cores, capped below — a
@@ -482,11 +504,12 @@ public class SmartOptimizer : GLib.Object {
             // Probe with the settings that will actually be applied. Content
             // type, grain and effort are all settled by this point, so there
             // is no ordering obstacle — the probe simply used to ignore them.
-            active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
+            var encoder_tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_size_tier (tier),
                 profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
+            active_tuning = encoder_tuning;
 
             // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
             // One short probe encode at the real preset/res/bit-depth measures
@@ -569,7 +592,7 @@ public class SmartOptimizer : GLib.Object {
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, extrapolation_weight,
-                SmartOptimizerLogic.encoder_tuning_key (active_tuning));
+                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning));
 
             // ── 6/7. Calibration, fit, solve, adaptive refinement ───────
             SmartOptimizerLogic.CalibrationModel model;
@@ -681,6 +704,7 @@ public class SmartOptimizer : GLib.Object {
                 content_type          = profile.content_type,
                 grain_score           = profile.noise_mean,
                 detail_score          = detail_score,
+                native_sharpness      = encoder_tuning.native_sharpness,
                 confidence            = conf.confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
@@ -744,6 +768,8 @@ public class SmartOptimizer : GLib.Object {
         OptimizationContext               ctx             = OptimizationContext (),
         Cancellable?                      cancellable     = null
     ) throws Error {
+        yield require_vmaf (cancellable);
+
         string? temp_run_dir = ConversionUtils.create_managed_temp_run_dir (
             "smart-optimizer", "quality");
         var intermediate = new IntermediateHolder ();
@@ -827,11 +853,12 @@ public class SmartOptimizer : GLib.Object {
                 profile, nominal_tier, preferred_codec);
 
             // Same reasoning as Size Mode: probe what will be applied.
-            active_tuning = SmartOptimizerLogic.decide_encoder_tuning (
+            var encoder_tuning = SmartOptimizerLogic.decide_encoder_tuning (
                 preferred_codec,
                 SmartOptimizerLogic.effort_from_quality_intent (intent),
                 profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
+            active_tuning = encoder_tuning;
             var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
 
             // ── 6. Constrain samples to the VMAF reference budget ───────
@@ -881,7 +908,7 @@ public class SmartOptimizer : GLib.Object {
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, 1.0,
-                SmartOptimizerLogic.encoder_tuning_key (active_tuning));
+                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning));
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
                 preferred_codec, intent);
@@ -1375,6 +1402,7 @@ public class SmartOptimizer : GLib.Object {
                 content_type          = profile.content_type,
                 grain_score           = profile.noise_mean,
                 detail_score          = detail_score,
+                native_sharpness      = encoder_tuning.native_sharpness,
                 confidence            = confidence,
                 // Size Mode's reporting field; unused when quality is pinned.
                 size_tier             = nominal_tier,
@@ -2812,6 +2840,22 @@ public class SmartOptimizer : GLib.Object {
         sb.append ("\n");
         if (rec.recommended_pix_fmt != null && rec.recommended_pix_fmt.length > 0)
             sb.append ("Pixel format:   %s\n".printf (rec.recommended_pix_fmt));
+        string normalized_codec = rec.codec.down ();
+        if (!rec.is_impossible
+                && (normalized_codec == "vp9" || normalized_codec == "svt-av1")) {
+            double detail_percent = rec.detail_score.clamp (0.0, 1.0) * 100.0;
+            if (rec.native_sharpness > 0) {
+                sb.append ("Sharpness:      level %d (detail score %.0f%%)\n".printf (
+                    rec.native_sharpness, detail_percent));
+            } else if (rec.effort == EncodeEffort.MINIMAL
+                    && rec.detail_score >= 0.25) {
+                sb.append ("Sharpness:      disabled (detail score %.0f%%; Minimal effort cap)\n"
+                    .printf (detail_percent));
+            } else {
+                sb.append ("Sharpness:      disabled (detail score %.0f%% — below threshold)\n"
+                    .printf (detail_percent));
+            }
+        }
         if (rec.strip_metadata)
             sb.append ("Metadata:       stripped (tiny target)\n");
         sb.append ("\n");
@@ -4712,6 +4756,7 @@ public class SmartOptimizer : GLib.Object {
             is_impossible          = true,
             content_type           = ContentType.LIVE_ACTION,
             detail_score           = 0.0,
+            native_sharpness       = 0,
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,

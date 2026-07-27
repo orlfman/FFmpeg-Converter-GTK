@@ -8,6 +8,26 @@ public enum SvtAv1CrfTwoPassCapabilityStatus {
     ERROR
 }
 
+public enum VmafCapabilityStatus {
+    SUPPORTED,
+    UNSUPPORTED,
+    ERROR
+}
+
+public class VmafCapability : Object {
+    public VmafCapabilityStatus status {
+        get; set; default = VmafCapabilityStatus.ERROR;
+    }
+    public string? reason { get; set; default = null; }
+
+    public VmafCapability copy () {
+        var duplicate = new VmafCapability ();
+        duplicate.status = status;
+        duplicate.reason = reason;
+        return duplicate;
+    }
+}
+
 public class SvtAv1CrfTwoPassCapability : Object {
     public SvtAv1CrfTwoPassCapabilityStatus status {
         get; set; default = SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN;
@@ -23,10 +43,12 @@ public class SvtAv1CrfTwoPassCapability : Object {
 }
 
 public class FfmpegRuntimeCapabilities : Object {
-    private const uint SVT_CRF_TWO_PASS_PROBE_TIMEOUT_MS = 15000;
+    private const uint CAPABILITY_PROBE_TIMEOUT_MS = 15000;
 
     private HashTable<string, SvtAv1CrfTwoPassCapability> svt_crf_two_pass_cache =
         new HashTable<string, SvtAv1CrfTwoPassCapability> (str_hash, str_equal);
+    private HashTable<string, VmafCapability> vmaf_cache =
+        new HashTable<string, VmafCapability> (str_hash, str_equal);
     private SvtAv1CrfTwoPassCapability current_svt_crf_two_pass =
         new SvtAv1CrfTwoPassCapability ();
 
@@ -60,6 +82,83 @@ public class FfmpegRuntimeCapabilities : Object {
                                         SvtAv1CrfTwoPassCapability capability) {
         string cache_key = build_binary_cache_key (binary_path);
         svt_crf_two_pass_cache.insert (cache_key, capability.copy ());
+    }
+
+    /**
+     * Return the cached VMAF result for this exact FFmpeg binary, or probe it.
+     * The cache key includes path, size and modification time, so replacing a
+     * configured binary naturally invalidates the result.
+     */
+    public async VmafCapability get_vmaf_capability (
+        string       binary_path,
+        Cancellable cancellable
+    ) throws Error {
+        string cache_key = build_binary_cache_key (binary_path);
+        VmafCapability? cached = vmaf_cache.lookup (cache_key);
+        if (cached != null)
+            return cached.copy ();
+
+        VmafCapability capability = yield probe_vmaf (binary_path, cancellable);
+        // A launch failure can be transient (permissions, resource pressure,
+        // etc.), so only cache authoritative filter-table results.
+        if (capability.status != VmafCapabilityStatus.ERROR)
+            vmaf_cache.insert (cache_key, capability.copy ());
+        return capability;
+    }
+
+    /** Exact filter-name check: `vmafmotion` must not satisfy the guard. */
+    public static bool filter_listing_has_libvmaf (string listing) {
+        foreach (unowned string line in listing.split ("\n")) {
+            string clean = line.strip ();
+            if (clean.length == 0)
+                continue;
+
+            string[] fields = clean.replace ("\t", " ").split (" ");
+            foreach (unowned string field in fields) {
+                if (field == "libvmaf")
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Ask the configured FFmpeg binary whether it exposes the libvmaf filter.
+     * Installing a VMAF library alone is insufficient when FFmpeg was built
+     * without it, which is why the executable's filter table is authoritative.
+     */
+    public static async VmafCapability probe_vmaf (
+        string       binary_path,
+        Cancellable cancellable
+    ) throws Error {
+        try {
+            string output = yield run_subprocess_capture ({
+                binary_path, "-hide_banner", "-filters"
+            }, cancellable);
+
+            var capability = new VmafCapability ();
+            if (filter_listing_has_libvmaf (output)) {
+                capability.status = VmafCapabilityStatus.SUPPORTED;
+                capability.reason =
+                    "Quality Target: supported by this FFmpeg build (libvmaf filter found).";
+            } else {
+                capability.status = VmafCapabilityStatus.UNSUPPORTED;
+                capability.reason =
+                    "Quality Target requires an FFmpeg build with the libvmaf filter. "
+                    + "Target Size remains available.";
+            }
+            return capability;
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            var capability = new VmafCapability ();
+            capability.status = VmafCapabilityStatus.ERROR;
+            capability.reason =
+                "Quality Target could not verify libvmaf in the configured FFmpeg "
+                + "binary (%s). Target Size remains available."
+                    .printf (describe_probe_error (e.message));
+            return capability;
+        }
     }
 
     public static string build_binary_cache_key (string binary_path) {
@@ -186,7 +285,7 @@ public class FfmpegRuntimeCapabilities : Object {
         uint timeout_id = 0;
         var local_cancel = new Cancellable ();
         ulong parent_id = cancellable.connect (() => { local_cancel.cancel (); });
-        timeout_id = Timeout.add (SVT_CRF_TWO_PASS_PROBE_TIMEOUT_MS, () => {
+        timeout_id = Timeout.add (CAPABILITY_PROBE_TIMEOUT_MS, () => {
             timed_out = true;
             local_cancel.cancel ();
             timeout_id = 0;
@@ -204,7 +303,7 @@ public class FfmpegRuntimeCapabilities : Object {
             }
             cancellable.disconnect (parent_id);
             if (timed_out) {
-                throw new IOError.TIMED_OUT ("SVT-AV1 CRF/QP two-pass probe timed out");
+                throw new IOError.TIMED_OUT ("FFmpeg capability probe timed out");
             }
             throw e;
         }
@@ -217,7 +316,7 @@ public class FfmpegRuntimeCapabilities : Object {
         if (!proc.get_successful ()) {
             string combined_output = build_combined_output (stderr_buf, stdout_buf);
             if (combined_output.length == 0) {
-                combined_output = "SVT-AV1 CRF/QP two-pass probe exited with status %d"
+                combined_output = "FFmpeg capability probe exited with status %d"
                     .printf (proc.get_exit_status ());
             }
             throw new IOError.FAILED (combined_output);

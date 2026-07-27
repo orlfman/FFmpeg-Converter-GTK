@@ -101,8 +101,8 @@ public class AppController : Object {
         this.status_area    = status_area;
         this.view_stack     = view_stack;
 
-        smart_optimizer = new SmartOptimizer ();
         ffmpeg_runtime_capabilities = new FfmpegRuntimeCapabilities ();
+        smart_optimizer = new SmartOptimizer (ffmpeg_runtime_capabilities);
         ffmpeg_runtime_capabilities.svt_crf_two_pass_changed.connect (
             apply_svt_crf_two_pass_capability);
 
@@ -847,6 +847,48 @@ public class AppController : Object {
         var quality_intent = (smart_tab != null)
             ? smart_tab.get_quality_intent ()
             : SmartOptimizerLogic.QualityIntent.MEDIUM;
+
+        // Quality Target cannot function without the configured FFmpeg's
+        // libvmaf filter. Check before probing the video; Target Size does not
+        // use VMAF and deliberately bypasses this guard.
+        if (quality_mode) {
+            VmafCapability vmaf_capability;
+            try {
+                vmaf_capability = yield ffmpeg_runtime_capabilities.get_vmaf_capability (
+                    AppSettings.get_default ().ffmpeg_path, my_cancel);
+            } catch (IOError.CANCELLED e) {
+                if (my_generation == smart_opt_generation) {
+                    status_area.stop_progress ();
+                    smart_optimizer_running (false);
+                    status_area.set_status ("Smart Optimizer cancelled.",
+                        StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                }
+                return;
+            } catch (Error e) {
+                if (my_generation != smart_opt_generation)
+                    return;
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                status_area.set_status (
+                    "Quality Target could not check FFmpeg for libvmaf: %s".printf (e.message),
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                return;
+            }
+
+            if (my_generation != smart_opt_generation)
+                return;
+            if (vmaf_capability.status != VmafCapabilityStatus.SUPPORTED) {
+                string reason = vmaf_capability.reason
+                    ?? "Quality Target requires FFmpeg with the libvmaf filter. "
+                        + "Target Size remains available.";
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                status_area.set_status (reason,
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                console_tab.add_line ("[Smart Optimizer] " + reason);
+                return;
+            }
+        }
 
         status_area.set_status (quality_mode
             ? "Smart Optimizer: measuring the %s quality ceiling for %s…".printf (

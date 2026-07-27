@@ -150,6 +150,8 @@ public struct OptimizationRecommendation {
     public int target_size_kib;        // user-requested target size in KiB
     public double grain_score;         // measured TOUT (temporal-outlier fraction) — grain/noise proxy
     public double detail_score;        // 0.0–1.0 native-sharpness demand
+    /** Exact VP9/SVT-AV1 native sharpness used by calibration; 0 = disabled. */
+    public int native_sharpness;
 
     // ── Mode-agnostic decision axis ──────────────────────────────────────────
     // Every downstream apply_smart_* switches on `effort`, never on size_tier,

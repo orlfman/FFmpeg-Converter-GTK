@@ -402,6 +402,60 @@ private SvtAv1CrfTwoPassCapability run_svt_crf_two_pass_probe_for_test (string b
     return capability;
 }
 
+private string make_fake_vmaf_probe_ffmpeg (string dir,
+                                             string filename,
+                                             bool supports_vmaf,
+                                             bool exits_successfully = true) {
+    string path = Path.build_filename (dir, filename);
+    string listing = supports_vmaf
+        ? " .. libvmaf           VV->V      Calculate VMAF\n"
+          + " .. vmafmotion        V->V       Calculate VMAF Motion\n"
+        : " .. vmafmotion        V->V       Calculate VMAF Motion\n";
+    string script = "#!/bin/sh\n"
+        + (exits_successfully
+            ? "printf '%s' '" + listing + "'\nexit 0\n"
+            : "echo 'configured ffmpeg failed' >&2\nexit 1\n");
+
+    try {
+        FileUtils.set_contents (path, script);
+    } catch (FileError e) {
+        Test.fail_printf ("failed to write fake VMAF probe script '%s': %s",
+            path, e.message);
+    }
+
+    if (Posix.chmod (path, 0755) != 0)
+        Test.fail_printf ("failed to chmod fake VMAF probe script '%s'", path);
+    return path;
+}
+
+private VmafCapability run_vmaf_probe_for_test (string binary_path,
+                                                 string context) {
+    var loop = new MainLoop (null, false);
+    var cancellable = new Cancellable ();
+    VmafCapability? capability = null;
+    Error? async_error = null;
+
+    FfmpegRuntimeCapabilities.probe_vmaf.begin (
+        binary_path,
+        cancellable,
+        (obj, res) => {
+            try {
+                capability = FfmpegRuntimeCapabilities.probe_vmaf.end (res);
+            } catch (Error e) {
+                async_error = e;
+            }
+            loop.quit ();
+        }
+    );
+    loop.run ();
+
+    if (async_error != null)
+        Test.fail_printf ("%s probe failed: %s", context, async_error.message);
+    if (capability == null)
+        Test.fail_printf ("%s probe returned no result", context);
+    return capability;
+}
+
 private void assert_filter_complex_executes_with_media_inputs (string[] input_paths,
                                                                string filter_complex,
                                                                bool map_video,
@@ -4302,6 +4356,100 @@ private void test_svt_av1_crf_two_pass_probe_prefers_error_over_info () {
     }
 }
 
+private void test_vmaf_filter_parser_requires_exact_libvmaf_name () {
+    assert_false (
+        FfmpegRuntimeCapabilities.filter_listing_has_libvmaf (
+            " .. vmafmotion        V->V       Calculate VMAF Motion\n"),
+        "vmafmotion alone must not satisfy the Quality Target guard");
+    assert_true (
+        FfmpegRuntimeCapabilities.filter_listing_has_libvmaf (
+            " ..\tlibvmaf\tVV->V\tCalculate VMAF\n"),
+        "exact libvmaf filter is accepted with tab-separated fields");
+}
+
+private void test_vmaf_probe_reports_supported_and_unsupported () {
+    string? dir = null;
+    try {
+        dir = DirUtils.make_tmp ("vmaf-probe-XXXXXX");
+        string supported_ffmpeg = make_fake_vmaf_probe_ffmpeg (
+            dir, "ffmpeg-with-vmaf", true);
+        string unsupported_ffmpeg = make_fake_vmaf_probe_ffmpeg (
+            dir, "ffmpeg-without-vmaf", false);
+
+        VmafCapability supported = run_vmaf_probe_for_test (
+            supported_ffmpeg, "supported VMAF");
+        VmafCapability unsupported = run_vmaf_probe_for_test (
+            unsupported_ffmpeg, "unsupported VMAF");
+
+        assert_true (supported.status == VmafCapabilityStatus.SUPPORTED,
+            "libvmaf filter reports supported");
+        assert_true (unsupported.status == VmafCapabilityStatus.UNSUPPORTED,
+            "missing libvmaf filter reports unsupported");
+        assert_contains (unsupported.reason ?? "", "Target Size remains available",
+            "unsupported message preserves the size solver");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create VMAF probe temp dir: %s", e.message);
+    } finally {
+        if (dir != null)
+            cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_vmaf_probe_reports_binary_errors_separately () {
+    string? dir = null;
+    try {
+        dir = DirUtils.make_tmp ("vmaf-probe-error-XXXXXX");
+        string broken_ffmpeg = make_fake_vmaf_probe_ffmpeg (
+            dir, "broken-ffmpeg", false, false);
+        VmafCapability capability = run_vmaf_probe_for_test (
+            broken_ffmpeg, "VMAF binary error");
+
+        assert_true (capability.status == VmafCapabilityStatus.ERROR,
+            "failed FFmpeg invocation is an error, not an unsupported build");
+        assert_contains (capability.reason ?? "", "configured ffmpeg failed",
+            "binary error keeps the useful diagnostic");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create VMAF error temp dir: %s", e.message);
+    } finally {
+        if (dir != null)
+            cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_smart_optimizer_report_includes_native_sharpness_decision () {
+    var rec = OptimizationRecommendation () {
+        codec = "svt-av1",
+        crf = 21,
+        preset = "preset 7",
+        estimated_size_kib = 16212,
+        notes = "",
+        content_type = ContentType.MIXED,
+        confidence = 0.87,
+        recommended_pix_fmt = "yuv420p",
+        detail_score = 0.63,
+        native_sharpness = 2,
+        effort = EncodeEffort.MAXIMUM,
+        pinned_axis = PinnedAxis.QUALITY
+    };
+
+    string enabled = SmartOptimizer.format_recommendation (rec);
+    assert_contains (enabled, "Sharpness:      level 2 (detail score 63%)",
+        "SVT-AV1 report states the applied sharpness level and signal");
+
+    rec.codec = "vp9";
+    rec.detail_score = 0.12;
+    rec.native_sharpness = 0;
+    string disabled = SmartOptimizer.format_recommendation (rec);
+    assert_contains (disabled,
+        "Sharpness:      disabled (detail score 12% — below threshold)",
+        "VP9 report explains a disabled sharpness decision");
+
+    rec.codec = "x265";
+    string deferred_codec = SmartOptimizer.format_recommendation (rec);
+    assert_false (deferred_codec.contains ("Sharpness:"),
+        "x264/x265 do not claim a native sharpness decision");
+}
+
 private void test_svt_av1_crf_two_pass_capability_updates_visibility () {
     if (!ensure_gtk_widget_tests_available ()) return;
 
@@ -5048,6 +5196,14 @@ void main (string[] args) {
         test_svt_av1_crf_two_pass_probe_reports_unsupported);
     Test.add_func ("/combine/svt-av1/crf-two-pass-probe-prefers-error-over-info",
         test_svt_av1_crf_two_pass_probe_prefers_error_over_info);
+    Test.add_func ("/combine/vmaf/filter-parser-exact-name",
+        test_vmaf_filter_parser_requires_exact_libvmaf_name);
+    Test.add_func ("/combine/vmaf/probe-supported-and-unsupported",
+        test_vmaf_probe_reports_supported_and_unsupported);
+    Test.add_func ("/combine/vmaf/probe-binary-error",
+        test_vmaf_probe_reports_binary_errors_separately);
+    Test.add_func ("/combine/smart-optimizer/report-native-sharpness",
+        test_smart_optimizer_report_includes_native_sharpness_decision);
     Test.add_func ("/combine/svt-av1/crf-two-pass-ui-reacts-to-capability",
         test_svt_av1_crf_two_pass_capability_updates_visibility);
     Test.add_func ("/combine/svt-av1/crf-two-pass-backstop-fails-fast",
