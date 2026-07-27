@@ -857,6 +857,15 @@ public class TrimTab : Box, ICodecTab {
                 ctx.video_filter_chain = shared_video_filter_chain;
                 ctx.tone_mapping_active = shared_video_filter_chain.contains ("tonemap=");
             }
+            if (general_settings_snapshot != null) {
+                double parsed_output_fps = 0.0;
+                if (CodecUtils.try_resolve_output_fps_from_snapshot (
+                        general_settings_snapshot, out parsed_output_fps)) {
+                    ctx.output_fps = parsed_output_fps;
+                }
+                ctx.video_speed_multiplier =
+                    FilterBuilder.get_video_speed_multiplier (general_settings_snapshot);
+            }
             if (selected_codec_tab != null
                 && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
                 ctx.strip_audio = true;

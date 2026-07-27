@@ -124,6 +124,38 @@ public class EncodeProfileSnapshot : Object {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace CodecUtils {
+    /**
+     * Resolve the General tab's configured output frame rate.
+     * Returns false for "Original" so callers can use the probed source rate.
+     * This deliberately accepts every positive finite value that FFmpeg's fps
+     * filter accepts instead of imposing a second, optimizer-only range.
+     */
+    public bool try_resolve_output_fps (string selected_text,
+                                        string custom_text,
+                                        out double fps) {
+        fps = 0.0;
+        if (selected_text == FrameRateLabel.ORIGINAL)
+            return false;
+
+        string value = (selected_text == FrameRateLabel.CUSTOM)
+            ? custom_text : selected_text;
+        double parsed = 0.0;
+        if (!double.try_parse (value, out parsed)
+                || !parsed.is_finite () || parsed <= 0.0)
+            return false;
+
+        fps = parsed;
+        return true;
+    }
+
+    public bool try_resolve_output_fps_from_snapshot (
+        GeneralSettingsSnapshot snapshot,
+        out double fps
+    ) {
+        return try_resolve_output_fps (
+            snapshot.frame_rate_text, snapshot.custom_frame_rate_text, out fps);
+    }
+
     public StringList build_dropdown_string_list (string[] options) {
         var model = new StringList (null);
         foreach (unowned string option in options) {
@@ -398,26 +430,20 @@ namespace CodecUtils {
 
         // ── fps-based: check General tab first, then probe ───────────────
         double fps = 0.0;
-
-        string fr_text = snapshot.frame_rate_text;
-        if (fr_text == FrameRateLabel.CUSTOM) {
-            string custom_fr = snapshot.custom_frame_rate_text;
-            if (custom_fr.length > 0)
-                fps = double.parse (custom_fr);
-        } else if (fr_text != FrameRateLabel.ORIGINAL) {
-            fps = double.parse (fr_text);
-        }
+        try_resolve_output_fps (
+            snapshot.frame_rate_text, snapshot.custom_frame_rate_text, out fps);
 
         // If still unknown, probe the input file
-        if (fps < 5.0)
+        if (fps <= 0.0)
             fps = FfprobeUtils.probe_input_fps (input_file);
 
         // Sanity — fall back to a safe default
-        if (fps < 5.0 || fps > 500.0)
+        if (!fps.is_finite () || fps <= 0.0)
             return { "-g", "240" };
 
-        int gop = (int) Math.round (seconds * fps);
-        if (gop < 10) gop = 240;
+        double requested_gop = Math.round (seconds * fps);
+        int gop = (requested_gop > (double) int.MAX)
+            ? int.MAX : int.max (1, (int) requested_gop);
 
         return { "-g", gop.to_string () };
     }
@@ -559,6 +585,11 @@ namespace CodecUtils {
                     break;
             }
 
+            if (rec.lookahead_frames > 0) {
+                args += "-x264-params";
+                args += "rc-lookahead=%d".printf (rec.lookahead_frames);
+            }
+
         } else if (rec.codec == "vp9") {
             args += "-c:v";
             args += "libvpx-vp9";
@@ -598,6 +629,14 @@ namespace CodecUtils {
                 args += "-tune-content";
                 args += "screen";
             }
+            if (rec.lookahead_frames > 0) {
+                args += "-lag-in-frames";
+                args += rec.lookahead_frames.to_string ();
+            }
+            if (rec.native_sharpness > 0) {
+                args += "-sharpness";
+                args += rec.native_sharpness.to_string ();
+            }
 
         } else if (rec.codec == "x265") {
             args += "-c:v";
@@ -626,6 +665,10 @@ namespace CodecUtils {
             if (rec.content_type == ContentType.ANIME) {
                 args += "-tune";
                 args += "animation";
+            }
+            if (rec.lookahead_frames > 0) {
+                args += "-x265-params";
+                args += "rc-lookahead=%d".printf (rec.lookahead_frames);
             }
 
         } else if (rec.codec == "svt-av1") {
@@ -658,6 +701,21 @@ namespace CodecUtils {
 
             args += "-preset";
             args += preset_str;
+
+            string[] svt_params = {};
+            if (rec.lookahead_frames > 0)
+                svt_params += "lookahead=%d".printf (rec.lookahead_frames);
+            if (rec.native_sharpness > 0)
+                svt_params += "sharpness=%d".printf (rec.native_sharpness);
+            if (svt_params.length > 0) {
+                args += "-svtav1-params";
+                args += string.joinv (":", svt_params);
+            }
+        }
+
+        if (rec.keyint_frames > 0) {
+            args += "-g";
+            args += rec.keyint_frames.to_string ();
         }
 
         // Emit -pix_fmt for non-SVT-AV1 codecs when recommended and not

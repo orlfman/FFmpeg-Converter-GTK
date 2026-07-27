@@ -283,6 +283,7 @@ public class SmartOptimizer : GLib.Object {
      * which is the pre-existing behaviour.
      */
     private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
+    private SmartOptimizerLogic.TemporalTuning? active_temporal_tuning = null;
     private FfmpegRuntimeCapabilities? runtime_capabilities;
 
     public SmartOptimizer (
@@ -473,7 +474,8 @@ public class SmartOptimizer : GLib.Object {
             try {
                 cancellable_check (cancellable);
                 profile = yield analyze_content (
-                    input_file, positions, tw.sample_segment_duration, info, vf, cancellable);
+                    input_file, positions, tw.sample_segment_duration, info, vf,
+                    ctx.output_fps, ctx.video_speed_multiplier, cancellable);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -510,6 +512,18 @@ public class SmartOptimizer : GLib.Object {
                 profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
             active_tuning = encoder_tuning;
+            double temporal_fps = ctx.output_fps > 0.0 ? ctx.output_fps : info.fps;
+            // Size Mode may choose two-pass only after calibration. Keep SVT's
+            // probes, cache key, verification, and final encode on the same
+            // <=42-frame lookahead so that late choice cannot change the
+            // encoder whose size curve we measured.
+            bool svt_two_pass_compatible = (preferred_codec == "svt-av1");
+            var temporal_tuning = SmartOptimizerLogic.decide_temporal_tuning (
+                preferred_codec,
+                SmartOptimizerLogic.effort_from_size_tier (tier),
+                profile, temporal_fps, ctx.optimize_for_delivery,
+                svt_two_pass_compatible);
+            active_temporal_tuning = temporal_tuning;
 
             // ── 4c. Live probe: time-budgeted expansion + RAM-safe jobs ──
             // One short probe encode at the real preset/res/bit-depth measures
@@ -592,7 +606,8 @@ public class SmartOptimizer : GLib.Object {
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, extrapolation_weight,
-                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning));
+                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning)
+                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning));
 
             // ── 6/7. Calibration, fit, solve, adaptive refinement ───────
             SmartOptimizerLogic.CalibrationModel model;
@@ -671,6 +686,7 @@ public class SmartOptimizer : GLib.Object {
                 conf.confidence, model.crf_at_max, tw.trim_active,
                 conf.source_total_kbps, tw.encode_duration,
                 info.file_size_bytes, conf.sample_coverage, profile);
+            var final_temporal_tuning = temporal_tuning;
 
             // ── 11b. Downscale advisory ─────────────────────────────────
             // Purely informational: when bits-per-pixel is low for the
@@ -705,6 +721,13 @@ public class SmartOptimizer : GLib.Object {
                 grain_score           = profile.noise_mean,
                 detail_score          = detail_score,
                 native_sharpness      = encoder_tuning.native_sharpness,
+                keyint_frames         = final_temporal_tuning.keyint_frames,
+                keyint_seconds        = final_temporal_tuning.keyint_seconds,
+                lookahead_frames      = final_temporal_tuning.lookahead_frames,
+                motion_variability    = final_temporal_tuning.motion_variability,
+                static_frame_ratio    = profile.static_frame_ratio,
+                cuts_per_minute       = profile.cuts_per_minute,
+                temporal_reason       = final_temporal_tuning.reason,
                 confidence            = conf.confidence,
                 size_tier             = tier,
                 recommended_audio_kbps = plan.per_stream_kbps,
@@ -731,6 +754,7 @@ public class SmartOptimizer : GLib.Object {
             };
         } finally {
             active_tuning = null;
+            active_temporal_tuning = null;
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
@@ -826,7 +850,8 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 profile = yield analyze_content (
                     input_file, positions, tw.sample_segment_duration,
-                    info, vf, cancellable);
+                    info, vf, ctx.output_fps,
+                    ctx.video_speed_multiplier, cancellable);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -859,6 +884,12 @@ public class SmartOptimizer : GLib.Object {
                 profile.content_type, profile.noise_mean, detail_score,
                 info.source_bit_depth, ctx.optimize_for_delivery);
             active_tuning = encoder_tuning;
+            double temporal_fps = ctx.output_fps > 0.0 ? ctx.output_fps : info.fps;
+            var temporal_tuning = SmartOptimizerLogic.decide_temporal_tuning (
+                preferred_codec,
+                SmartOptimizerLogic.effort_from_quality_intent (intent),
+                profile, temporal_fps, ctx.optimize_for_delivery, false);
+            active_temporal_tuning = temporal_tuning;
             var target = SmartOptimizerLogic.resolve_quality_target (intent, profile);
 
             // ── 6. Constrain samples to the VMAF reference budget ───────
@@ -908,7 +939,8 @@ public class SmartOptimizer : GLib.Object {
                 input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, 1.0,
-                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning));
+                SmartOptimizerLogic.encoder_tuning_key (encoder_tuning)
+                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning));
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
                 preferred_codec, intent);
@@ -1403,6 +1435,13 @@ public class SmartOptimizer : GLib.Object {
                 grain_score           = profile.noise_mean,
                 detail_score          = detail_score,
                 native_sharpness      = encoder_tuning.native_sharpness,
+                keyint_frames         = temporal_tuning.keyint_frames,
+                keyint_seconds        = temporal_tuning.keyint_seconds,
+                lookahead_frames      = temporal_tuning.lookahead_frames,
+                motion_variability    = temporal_tuning.motion_variability,
+                static_frame_ratio    = profile.static_frame_ratio,
+                cuts_per_minute       = profile.cuts_per_minute,
+                temporal_reason       = temporal_tuning.reason,
                 confidence            = confidence,
                 // Size Mode's reporting field; unused when quality is pinned.
                 size_tier             = nominal_tier,
@@ -1427,6 +1466,7 @@ public class SmartOptimizer : GLib.Object {
             };
         } finally {
             active_tuning = null;
+            active_temporal_tuning = null;
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
@@ -2856,6 +2896,15 @@ public class SmartOptimizer : GLib.Object {
                     .printf (detail_percent));
             }
         }
+        if (!rec.is_impossible && rec.keyint_frames > 0) {
+            sb.append ("Keyframes:      ≤ %d frames (%.1fs maximum; scene cuts enabled)\n"
+                .printf (rec.keyint_frames, rec.keyint_seconds));
+            sb.append ("Lookahead:      %d frames\n".printf (rec.lookahead_frames));
+            sb.append ("Temporal basis: %s\n".printf (rec.temporal_reason));
+            sb.append ("Temporal signal: motion CV %.2f, cuts %.1f/min, static frames %.0f%%\n"
+                .printf (rec.motion_variability, rec.cuts_per_minute,
+                    rec.static_frame_ratio.clamp (0.0, 1.0) * 100.0));
+        }
         if (rec.strip_metadata)
             sb.append ("Metadata:       stripped (tiny target)\n");
         sb.append ("\n");
@@ -3103,8 +3152,9 @@ public class SmartOptimizer : GLib.Object {
 
     /**
      * Run signalstats + edgedetect over sample segments and classify content.
-     * Uses two ffmpeg calls total (one for signal stats, one for edge stats),
-     * each processing all segments via multi-input concat.
+     * Uses two ffmpeg calls total (one for signal stats, one for edge stats).
+     * Temporal filters run as independent branches so their frame-to-frame
+     * state cannot see artificial transitions between sampled source regions.
      */
     private async ContentProfile analyze_content (
         string        path,
@@ -3112,16 +3162,44 @@ public class SmartOptimizer : GLib.Object {
         double        segment_duration,
         SmartOptimizerVideoInfo info,
         string        video_filter_chain = "",
+        double        output_fps = 0.0,
+        double        video_speed_multiplier = 1.0,
         Cancellable?  cancellable = null
     ) throws Error {
+        double speed = (video_speed_multiplier.is_finite ()
+                && video_speed_multiplier > 0.0)
+            ? video_speed_multiplier : 1.0;
+        string analysis_video_filter_chain = video_filter_chain;
+        if (Math.fabs (speed - 1.0) > 1e-9) {
+            // setpts changes timestamps, while FFmpeg's output sync later
+            // drops/duplicates frames to retain the configured output rate.
+            // Put that final cadence in the analysis graph explicitly so YDIF,
+            // static-frame ratio, and cuts describe frames the encoder sees.
+            double cadence = (output_fps.is_finite () && output_fps > 0.0)
+                ? output_fps : info.fps;
+            if (!cadence.is_finite () || cadence <= 0.0)
+                cadence = 30.0;
+            string final_fps = "fps=%s".printf (
+                ConversionUtils.format_ffmpeg_double (cadence, "%.6f"));
+            analysis_video_filter_chain =
+                (analysis_video_filter_chain.length > 0)
+                ? analysis_video_filter_chain + "," + final_fps
+                : final_fps;
+        }
+
         // ── Signal stats (color + motion via YDIF) ──────────────────────
         // signalstats attaches per-frame metadata; metadata=print surfaces it
         // on stderr (as lavfi.signalstats.KEY=value lines). `select` decimates
         // the *printed* frames AFTER signalstats — the stats themselves are
         // still computed frame-to-frame, so YDIF/TOUT stay accurate; we just
         // sample fewer of them (see ANALYSIS_PRINT_STRIDE for why).
-        string decimate = "select=not(mod(n\\,%d))".printf (ANALYSIS_PRINT_STRIDE);
-        string[] sig_cmd = build_concat_analysis_cmd (
+        // Offset by one stride so branch frame 0 is never printed: YDIF has no
+        // preceding frame there and signalstats reports an initialization zero,
+        // which would otherwise inflate the measured static-frame ratio once
+        // every sampled region owns an independent branch.
+        string decimate = "select=not(mod(n+1\\,%d))".printf (
+            ANALYSIS_PRINT_STRIDE);
+        string[] sig_cmd = build_independent_analysis_cmd (
             path, positions, segment_duration,
             // siti shares this decode rather than needing a pass of its own —
             // unlike edgedetect below, which rewrites the frame into an edge
@@ -3134,8 +3212,16 @@ public class SmartOptimizer : GLib.Object {
             // mean SI, since SI is a per-frame measure. Only SI is taken;
             // siti's TI would be meaningless across the decimation gaps, and
             // signalstats' YDIF already covers temporal activity for free.
-            "signalstats=stat=tout+vrep+brng,%s,blurdetect,siti,metadata=print".printf (decimate),
-            video_filter_chain
+            // scdet runs before decimation and prints only actual cut
+            // timestamps. Delete that key afterwards so the final metadata
+            // printer cannot emit a duplicate when a cut lands on a sampled
+            // frame. Every sample has independent signalstats/scdet state, so
+            // sample boundaries never become YDIF spikes or scene cuts.
+            ("signalstats=stat=tout+brng,scdet=t=10,"
+             + "metadata=mode=print:key=lavfi.scd.time,"
+             + "metadata=mode=delete:key=lavfi.scd.time,%s,"
+             + "blurdetect,siti,metadata=print").printf (decimate),
+            analysis_video_filter_chain
         );
         string sig_output = yield run_subprocess_stderr (sig_cmd, cancellable);
         double[] all_satavg = {};
@@ -3149,6 +3235,8 @@ public class SmartOptimizer : GLib.Object {
         parse_metadata_field (sig_output, "lavfi.siti.si", ref all_si);
         double[] all_blur = {};
         parse_metadata_field (sig_output, "lavfi.blur", ref all_blur);
+        double[] cut_times = {};
+        parse_metadata_field (sig_output, "lavfi.scd.time", ref cut_times);
 
         // Put the amplitude metrics on one scale before any statistic is
         // computed from them. signalstats reports in the source's native
@@ -3173,7 +3261,7 @@ public class SmartOptimizer : GLib.Object {
         string[] edge_cmd = build_concat_analysis_cmd (
             path, positions, segment_duration,
             "edgedetect=low=0.08:high=0.25,signalstats,%s,metadata=print".printf (decimate),
-            video_filter_chain
+            analysis_video_filter_chain
         );
         string edge_output = yield run_subprocess_stderr (edge_cmd, cancellable);
         double[] all_edge = {};
@@ -3189,6 +3277,12 @@ public class SmartOptimizer : GLib.Object {
             all_satavg, out profile.saturation_mean,    out profile.saturation_stddev);
         SmartOptimizerLogic.compute_stats (
             all_ydif,   out profile.temporal_diff_mean, out profile.temporal_diff_stddev);
+        profile.temporal_samples = all_ydif.length;
+        profile.static_frame_ratio =
+            SmartOptimizerLogic.static_frame_ratio_from_ydif (all_ydif);
+        profile.cuts_per_minute = SmartOptimizerLogic.scene_cuts_per_minute (
+            cut_times, positions.length, segment_duration,
+            video_speed_multiplier);
         SmartOptimizerLogic.compute_stats (
             all_tout,   out profile.noise_mean,         out profile.noise_stddev);
 
@@ -4047,6 +4141,42 @@ public class SmartOptimizer : GLib.Object {
         return StringArrayUtils.copy_generic_array (cmd);
     }
 
+    /**
+     * Build one FFmpeg process with a separate analysis filter chain for every
+     * sampled input. Unlike concat, this resets signalstats/scdet state at each
+     * source region, so an edit introduced by sampling cannot be mistaken for
+     * source motion or a source scene cut.
+     */
+    private string[] build_independent_analysis_cmd (
+        string   path,
+        double[] positions,
+        double   seg_dur,
+        string   filter,
+        string   video_filter_chain = ""
+    ) {
+        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        var cmd = new GenericArray<string> ();
+        cmd.add (ffmpeg);
+        cmd.add ("-v");
+        cmd.add ("info");
+
+        add_segment_inputs (cmd, path, positions, seg_dur);
+
+        cmd.add ("-filter_complex");
+        cmd.add (SmartOptimizerLogic.independent_analysis_filter_spec (
+            positions.length, video_filter_chain, filter));
+        for (int i = 0; i < positions.length; i++) {
+            cmd.add ("-map");
+            cmd.add ("[analysis%d]".printf (i));
+        }
+        cmd.add ("-an");
+        cmd.add ("-f");
+        cmd.add ("null");
+        cmd.add ("-");
+
+        return StringArrayUtils.copy_generic_array (cmd);
+    }
+
     /** Append the per-segment seek inputs shared by all sampling commands. */
     private void add_segment_inputs (
         GenericArray<string> cmd,
@@ -4097,8 +4227,14 @@ public class SmartOptimizer : GLib.Object {
         string codec,
         int    crf,
         int    preset_idx,
-        SmartOptimizerLogic.EncoderTuning? tuning = null
+        SmartOptimizerLogic.EncoderTuning? tuning = null,
+        SmartOptimizerLogic.TemporalTuning? temporal = null
     ) {
+        if (temporal != null && temporal.keyint_frames > 0) {
+            cmd.add ("-g");
+            cmd.add (temporal.keyint_frames.to_string ());
+        }
+
         if (codec == "vp9") {
             cmd.add ("-c:v");      cmd.add ("libvpx-vp9");
             cmd.add ("-cpu-used"); cmd.add (preset_idx >= 0
@@ -4106,6 +4242,10 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");      cmd.add (crf.to_string ());
             cmd.add ("-b:v");      cmd.add ("0");
             cmd.add ("-row-mt");   cmd.add ("1");
+            if (temporal != null && temporal.lookahead_frames > 0) {
+                cmd.add ("-lag-in-frames");
+                cmd.add (temporal.lookahead_frames.to_string ());
+            }
             if (tuning != null && tuning.native_sharpness > 0) {
                 cmd.add ("-sharpness");
                 cmd.add (tuning.native_sharpness.to_string ());
@@ -4116,8 +4256,8 @@ public class SmartOptimizer : GLib.Object {
                 ? SVT_AV1_PRESETS[preset_idx].to_string ()
                 : SVT_AV1_PRESETS[0].to_string ());
             cmd.add ("-crf");      cmd.add (crf.to_string ());
+            var p = new GenericArray<string> ();
             if (tuning != null) {
-                var p = new GenericArray<string> ();
                 if (tuning.film_grain) {
                     p.add ("film-grain=%d".printf (tuning.film_grain_strength));
                     p.add ("film-grain-denoise=1");
@@ -4126,29 +4266,41 @@ public class SmartOptimizer : GLib.Object {
                     p.add ("fast-decode=%d".printf (tuning.fast_decode_level));
                 if (tuning.native_sharpness > 0)
                     p.add ("sharpness=%d".printf (tuning.native_sharpness));
-                if (p.length > 0) {
-                    var joined = new StringBuilder ();
-                    for (int i = 0; i < p.length; i++) {
-                        if (i > 0) joined.append (":");
-                        joined.append (p[i]);
-                    }
-                    cmd.add ("-svtav1-params"); cmd.add (joined.str);
+            }
+            if (temporal != null && temporal.lookahead_frames > 0)
+                p.add ("lookahead=%d".printf (temporal.lookahead_frames));
+            if (p.length > 0) {
+                var joined = new StringBuilder ();
+                for (int i = 0; i < p.length; i++) {
+                    if (i > 0) joined.append (":");
+                    joined.append (p[i]);
                 }
+                cmd.add ("-svtav1-params"); cmd.add (joined.str);
             }
         } else if (codec == "x265") {
             cmd.add ("-c:v");    cmd.add ("libx265");
             cmd.add ("-preset"); cmd.add (preset_idx >= 0
                 ? X265_PRESETS[preset_idx] : "ultrafast");
             cmd.add ("-crf");    cmd.add (crf.to_string ());
+            var p = new GenericArray<string> ();
             if (tuning != null) {
                 if (tuning.tune.length > 0) {
                     cmd.add ("-tune"); cmd.add (tuning.tune);
                 }
-                if (tuning.psy_rd > 0.0) {
-                    cmd.add ("-x265-params");
-                    cmd.add ("psy-rd=%s".printf (
+                if (tuning.psy_rd > 0.0)
+                    p.add ("psy-rd=%s".printf (
                         ConversionUtils.format_ffmpeg_double (tuning.psy_rd, "%.2f")));
+            }
+            if (temporal != null && temporal.lookahead_frames > 0)
+                p.add ("rc-lookahead=%d".printf (temporal.lookahead_frames));
+            if (p.length > 0) {
+                var joined = new StringBuilder ();
+                for (int i = 0; i < p.length; i++) {
+                    if (i > 0) joined.append (":");
+                    joined.append (p[i]);
                 }
+                cmd.add ("-x265-params");
+                cmd.add (joined.str);
             }
         } else {
             cmd.add ("-c:v");    cmd.add ("libx264");
@@ -4157,6 +4309,10 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");    cmd.add (crf.to_string ());
             if (tuning != null && tuning.tune.length > 0) {
                 cmd.add ("-tune"); cmd.add (tuning.tune);
+            }
+            if (temporal != null && temporal.lookahead_frames > 0) {
+                cmd.add ("-x264-params");
+                cmd.add ("rc-lookahead=%d".printf (temporal.lookahead_frames));
             }
         }
     }
@@ -4246,7 +4402,8 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-i"); cmd.add (intermediate_path);
         cmd.add ("-an");
 
-        append_video_codec_args (cmd, codec, crf, preset_idx, active_tuning);
+        append_video_codec_args (cmd, codec, crf, preset_idx,
+            active_tuning, active_temporal_tuning);
 
         if (pix_fmt.length > 0) {
             cmd.add ("-pix_fmt"); cmd.add (pix_fmt);
@@ -4297,7 +4454,8 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");             // no audio for calibration
 
-        append_video_codec_args (cmd, codec, crf, preset_idx, active_tuning);
+        append_video_codec_args (cmd, codec, crf, preset_idx,
+            active_tuning, active_temporal_tuning);
 
         if (pix_fmt.length > 0) {
             cmd.add ("-pix_fmt"); cmd.add (pix_fmt);
@@ -4757,6 +4915,13 @@ public class SmartOptimizer : GLib.Object {
             content_type           = ContentType.LIVE_ACTION,
             detail_score           = 0.0,
             native_sharpness       = 0,
+            keyint_frames          = 0,
+            keyint_seconds         = 0.0,
+            lookahead_frames       = 0,
+            motion_variability     = 0.0,
+            static_frame_ratio     = 0.0,
+            cuts_per_minute        = 0.0,
+            temporal_reason        = "",
             confidence             = 0.0,
             size_tier              = SizeTier.TINY,
             recommended_audio_kbps = 64,

@@ -769,9 +769,18 @@ public class AppController : Object {
         PixelFormatSettingsSnapshot? pixel_format = (codec_tab != null)
             ? codec_tab.snapshot_pixel_format_settings ()
             : null;
-        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain (
-            general_tab, false, codec, pixel_format);
+        GeneralSettingsSnapshot general_snapshot =
+            general_tab.snapshot_settings (pixel_format);
+        ctx.video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (
+            general_snapshot, false, codec);
         ctx.tone_mapping_active = ctx.video_filter_chain.contains ("tonemap=");
+        double parsed_output_fps = 0.0;
+        if (CodecUtils.try_resolve_output_fps_from_snapshot (
+                general_snapshot, out parsed_output_fps)) {
+            ctx.output_fps = parsed_output_fps;
+        }
+        ctx.video_speed_multiplier =
+            FilterBuilder.get_video_speed_multiplier (general_snapshot);
         if (codec_tab != null) {
             ctx.output_container = codec_tab.get_container ();
         }

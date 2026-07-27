@@ -1179,6 +1179,94 @@ void test_native_sharpness_is_detail_driven_and_effort_capped () {
     assert (x264.native_sharpness == 0);
 }
 
+void test_temporal_signals_keep_samples_independent () {
+    double[] ydif = { 0.0, 0.01, 0.04, 0.20 };
+    assert (close_to (
+        SmartOptimizerLogic.static_frame_ratio_from_ydif (ydif), 0.75, 1e-9));
+
+    // Timestamps are local to independent sample branches. Equal values in
+    // different branches remain distinct source cuts; no concat join exists.
+    double[] cut_times = { 2.0, 4.0, 2.0 };
+    double cuts_per_minute = SmartOptimizerLogic.scene_cuts_per_minute (
+        cut_times, 3, 8.0, 1.0);
+    assert (close_to (cuts_per_minute, 7.5, 1e-9));
+    assert (close_to (SmartOptimizerLogic.scene_cuts_per_minute (
+        cut_times, 3, 8.0, 2.0), 15.0, 1e-9));
+
+    string graph = SmartOptimizerLogic.independent_analysis_filter_spec (
+        3, "fps=24,setpts=0.5*PTS", "signalstats,scdet=t=10");
+    assert (!graph.contains ("concat="));
+    assert (graph.contains ("[0:v]fps=24,setpts=0.5*PTS,signalstats,scdet=t=10[analysis0]"));
+    assert (graph.contains ("[1:v]fps=24,setpts=0.5*PTS,signalstats,scdet=t=10[analysis1]"));
+    assert (graph.contains ("[2:v]fps=24,setpts=0.5*PTS,signalstats,scdet=t=10[analysis2]"));
+}
+
+void test_temporal_tuning_is_signal_driven_and_codec_capped () {
+    var variable = ContentProfile () {
+        content_type = ContentType.LIVE_ACTION,
+        temporal_diff_mean = 8.0,
+        temporal_diff_stddev = 9.6,
+        temporal_samples = 100,
+        static_frame_ratio = 0.02,
+        cuts_per_minute = 15.0
+    };
+    var x264 = SmartOptimizerLogic.decide_temporal_tuning (
+        "x264", EncodeEffort.MAXIMUM, variable, 30.0, false, false);
+    assert (x264.keyint_frames == 60);  // two seconds at 30 fps
+    assert (x264.lookahead_frames >= 100);
+    assert (x264.lookahead_frames % 5 == 0);
+
+    var quiet = ContentProfile () {
+        content_type = ContentType.SCREENCAST,
+        temporal_diff_mean = 0.5,
+        temporal_diff_stddev = 0.1,
+        temporal_samples = 100,
+        static_frame_ratio = 0.80,
+        cuts_per_minute = 0.0
+    };
+    var x265 = SmartOptimizerLogic.decide_temporal_tuning (
+        "x265", EncodeEffort.MAXIMUM, quiet, 30.0, false, false);
+    assert (x265.keyint_frames == 240); // eight seconds at 30 fps
+    assert (x265.lookahead_frames == 20);
+
+    var vp9 = SmartOptimizerLogic.decide_temporal_tuning (
+        "vp9", EncodeEffort.MAXIMUM, variable, 30.0, false, false);
+    assert (vp9.lookahead_frames <= 25);
+
+    var svt_two_pass = SmartOptimizerLogic.decide_temporal_tuning (
+        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false, true);
+    assert (svt_two_pass.lookahead_frames <= 42);
+    assert (svt_two_pass.reason.contains ("capped at 42"));
+
+    // Size Mode uses the compatible setting for both calibration and the
+    // eventual recommendation, whether its late policy selects one or two passes.
+    var svt_calibration = SmartOptimizerLogic.decide_temporal_tuning (
+        "svt-av1", EncodeEffort.MAXIMUM, variable, 30.0, false, true);
+    assert (SmartOptimizerLogic.temporal_tuning_key (svt_calibration)
+        == SmartOptimizerLogic.temporal_tuning_key (svt_two_pass));
+
+    var delivery = SmartOptimizerLogic.decide_temporal_tuning (
+        "x264", EncodeEffort.MAXIMUM, quiet, 24.0, true, false);
+    assert (delivery.keyint_frames == 48);
+    assert (delivery.lookahead_frames <= 40);
+
+    // The optimizer must follow the same positive custom FPS accepted by the
+    // conversion filter, including values outside the old 5..500 range.
+    var one_fps = SmartOptimizerLogic.decide_temporal_tuning (
+        "x265", EncodeEffort.MAXIMUM, quiet, 1.0, false, false);
+    assert (one_fps.keyint_frames == 8);
+    assert (close_to (one_fps.keyint_seconds, 8.0, 1e-9));
+
+    var high_fps = SmartOptimizerLogic.decide_temporal_tuning (
+        "x265", EncodeEffort.MAXIMUM, quiet, 1000.0, false, false);
+    assert (high_fps.keyint_frames == 1920);
+    assert (close_to (high_fps.keyint_seconds, 1.92, 1e-9));
+
+    var extreme_fps = SmartOptimizerLogic.decide_temporal_tuning (
+        "x265", EncodeEffort.MAXIMUM, quiet, double.MAX, false, false);
+    assert (extreme_fps.keyint_frames == 1920);
+}
+
 void test_sum_profile_range_partial_buckets () {
     double[] profile = { 1.0, 2.0, 3.0 };
     double sum = SmartOptimizerLogic.sum_profile_range (profile, 0.5, 1.5);
@@ -2214,6 +2302,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/tuning/probe-matches-applier", test_encoder_tuning_is_one_decision_for_probe_and_applier);
     Test.add_func ("/smart-optimizer-logic/tuning/detail-signal", test_detail_signal_combines_structure_softness_and_noise);
     Test.add_func ("/smart-optimizer-logic/tuning/native-sharpness", test_native_sharpness_is_detail_driven_and_effort_capped);
+    Test.add_func ("/smart-optimizer-logic/tuning/temporal-signals", test_temporal_signals_keep_samples_independent);
+    Test.add_func ("/smart-optimizer-logic/tuning/temporal-policy", test_temporal_tuning_is_signal_driven_and_codec_capped);
     Test.add_func ("/smart-optimizer-logic/quality/three-point-residual", test_fit_residual_is_ignored_on_a_three_point_solve);
     Test.add_func ("/smart-optimizer-logic/quality/verification-confidence", test_verification_delta_drives_confidence);
     Test.add_func ("/smart-optimizer-logic/depth/amplitude-normalisation", test_amplitude_normalisation_by_bit_depth);

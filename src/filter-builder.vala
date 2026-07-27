@@ -40,6 +40,17 @@ namespace FilterBuilder {
         return true;
     }
 
+    /** Effective output playback rate represented by a settings snapshot. */
+    public double get_video_speed_multiplier (GeneralSettingsSnapshot snapshot) {
+        if (!snapshot.video_speed_enabled)
+            return 1.0;
+
+        double multiplier;
+        return try_get_speed_multiplier (
+            snapshot.video_speed_percent, "video", out multiplier)
+            ? multiplier : 1.0;
+    }
+
     private string[] get_rotation_filters_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
         string rot = snapshot.rotate;

@@ -19,6 +19,24 @@ public class CodecPresets : Object {
         }
     }
 
+    /** Select an exact numeric value, adding it when the stock list lacks it. */
+    private static void set_numeric_dropdown_value (DropDown dropdown, int value) {
+        if (value <= 0) return;
+        string label = value.to_string ();
+        var model = dropdown.get_model () as StringList;
+        if (model == null) return;
+
+        for (uint i = 0; i < model.get_n_items (); i++) {
+            if (model.get_string (i) == label) {
+                dropdown.set_selected (i);
+                return;
+            }
+        }
+
+        model.append (label);
+        dropdown.set_selected (model.get_n_items () - 1);
+    }
+
     private static void configure_audio (AudioSettings audio,
                                          string codec_name,
                                          string? bitrate_label = null) {
@@ -181,8 +199,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (1.0);
                     tab.psy_trellis_spin.set_value (0.0);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (40);
                     tab.open_gop_switch.set_active (false);
                     break;
 
@@ -197,8 +213,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (1.0);
                     tab.psy_trellis_spin.set_value (0.1);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (50);
                     tab.open_gop_switch.set_active (false);
                     break;
 
@@ -213,8 +227,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (1.0);
                     tab.psy_trellis_spin.set_value (0.15);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (60);
                     tab.open_gop_switch.set_active (false);
                     break;
 
@@ -229,8 +241,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (-1);
                     tab.psy_rd_spin.set_value (1.0);
                     tab.psy_trellis_spin.set_value (0.2);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (80);
                     tab.open_gop_switch.set_active (true);
                     break;
 
@@ -245,11 +255,14 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (-1);
                     tab.psy_rd_spin.set_value (1.0);
                     tab.psy_trellis_spin.set_value (0.25);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (120);
                     tab.open_gop_switch.set_active (true);
                     break;
             }
+
+            set_numeric_dropdown_value (tab.keyint_combo, rec.keyint_frames);
+            tab.lookahead_expander.set_enable_expansion (rec.lookahead_frames > 0);
+            if (rec.lookahead_frames > 0)
+                tab.lookahead_spin.set_value (rec.lookahead_frames);
 
             // Audio
             configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
@@ -322,8 +335,10 @@ public class CodecPresets : Object {
             // ── Effort-scaled encoder features ───────────────────────────────
             tab.row_mt_switch.set_active (true);
             tab.frame_parallel_switch.set_active (false);
-            tab.lookahead_expander.set_enable_expansion (true);
-            tab.lag_in_frames_spin.set_value (25);   // VP9 max is 25
+            set_numeric_dropdown_value (tab.keyint_combo, rec.keyint_frames);
+            tab.lookahead_expander.set_enable_expansion (rec.lookahead_frames > 0);
+            if (rec.lookahead_frames > 0)
+                tab.lag_in_frames_spin.set_value (rec.lookahead_frames);
 
             switch (effort) {
                 case EncodeEffort.MINIMAL:
@@ -433,8 +448,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (false);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (40);
                     break;
 
                 case EncodeEffort.LOW:
@@ -443,8 +456,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (false);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (50);
                     break;
 
                 case EncodeEffort.MEDIUM:
@@ -453,8 +464,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (0);
                     tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (60);
                     break;
 
                 case EncodeEffort.HIGH:
@@ -463,8 +472,6 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (-1);
                     tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (80);
                     break;
 
                 case EncodeEffort.MAXIMUM:
@@ -473,10 +480,13 @@ public class CodecPresets : Object {
                     tab.deblock_beta_spin.set_value (-1);
                     tab.psy_rd_spin.set_value (tuning.psy_rd);
                     tab.pmode_switch.set_active (true);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (120);
                     break;
             }
+
+            set_numeric_dropdown_value (tab.keyint_combo, rec.keyint_frames);
+            tab.lookahead_expander.set_enable_expansion (rec.lookahead_frames > 0);
+            if (rec.lookahead_frames > 0)
+                tab.lookahead_spin.set_value (rec.lookahead_frames);
 
             // Audio
             configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);
@@ -565,8 +575,6 @@ public class CodecPresets : Object {
                 case EncodeEffort.MINIMAL:
                     tab.grain_expander.set_enable_expansion (false);
                     tab.qm_expander.set_enable_expansion (false);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (60);
                     break;
 
                 case EncodeEffort.LOW:
@@ -576,8 +584,6 @@ public class CodecPresets : Object {
                         tab.grain_denoise_combo.set_selected (1);
                     }
                     tab.qm_expander.set_enable_expansion (false);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (80);
                     break;
 
                 case EncodeEffort.MEDIUM:
@@ -589,8 +595,6 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (12);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (100);
                     break;
 
                 case EncodeEffort.HIGH:
@@ -602,8 +606,6 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (13);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (120);
                     break;
 
                 case EncodeEffort.MAXIMUM:
@@ -615,10 +617,13 @@ public class CodecPresets : Object {
                     tab.qm_expander.set_enable_expansion (true);
                     tab.qm_min_spin.set_value (8);
                     tab.qm_max_spin.set_value (15);
-                    tab.lookahead_expander.set_enable_expansion (true);
-                    tab.lookahead_spin.set_value (120);
                     break;
             }
+
+            set_numeric_dropdown_value (tab.keyint_combo, rec.keyint_frames);
+            tab.lookahead_expander.set_enable_expansion (rec.lookahead_frames > 0);
+            if (rec.lookahead_frames > 0)
+                tab.lookahead_spin.set_value (rec.lookahead_frames);
 
             // Audio
             configure_smart_audio (tab.audio_settings, rec, rec.resolved_container);

@@ -4429,12 +4429,27 @@ private void test_smart_optimizer_report_includes_native_sharpness_decision () {
         detail_score = 0.63,
         native_sharpness = 2,
         effort = EncodeEffort.MAXIMUM,
-        pinned_axis = PinnedAxis.QUALITY
+        pinned_axis = PinnedAxis.QUALITY,
+        keyint_frames = 120,
+        keyint_seconds = 5.0,
+        lookahead_frames = 42,
+        motion_variability = 0.57,
+        cuts_per_minute = 4.5,
+        static_frame_ratio = 0.18,
+        temporal_reason = "variable motion; SVT-AV1 two-pass lookahead capped at 42"
     };
 
     string enabled = SmartOptimizer.format_recommendation (rec);
     assert_contains (enabled, "Sharpness:      level 2 (detail score 63%)",
         "SVT-AV1 report states the applied sharpness level and signal");
+    assert_contains (enabled,
+        "Keyframes:      ≤ 120 frames (5.0s maximum; scene cuts enabled)",
+        "report states the signal-selected maximum GOP");
+    assert_contains (enabled, "Lookahead:      42 frames",
+        "report states the applied lookahead");
+    assert_contains (enabled,
+        "Temporal signal: motion CV 0.57, cuts 4.5/min, static frames 18%",
+        "report exposes the temporal signals behind the decision");
 
     rec.codec = "vp9";
     rec.detail_score = 0.12;
@@ -4448,6 +4463,107 @@ private void test_smart_optimizer_report_includes_native_sharpness_decision () {
     string deferred_codec = SmartOptimizer.format_recommendation (rec);
     assert_false (deferred_codec.contains ("Sharpness:"),
         "x264/x265 do not claim a native sharpness decision");
+}
+
+private void test_smart_optimizer_direct_args_include_temporal_tuning () {
+    var rec = OptimizationRecommendation () {
+        codec = "x264",
+        crf = 23,
+        preset = "slow",
+        recommended_pix_fmt = "yuv420p",
+        keyint_frames = 120,
+        lookahead_frames = 60,
+        native_sharpness = 1
+    };
+
+    string[] x264 = CodecUtils.build_smart_codec_args (rec);
+    assert_array_has_adjacent_pair (x264, "-g", "120",
+        "x264 direct args apply the temporal keyframe interval");
+    assert_array_has_adjacent_pair (x264, "-x264-params", "rc-lookahead=60",
+        "x264 direct args apply the selected lookahead");
+
+    rec.codec = "x265";
+    string[] x265 = CodecUtils.build_smart_codec_args (rec);
+    assert_array_has_adjacent_pair (x265, "-g", "120",
+        "x265 direct args apply the temporal keyframe interval");
+    assert_array_has_adjacent_pair (x265, "-x265-params", "rc-lookahead=60",
+        "x265 direct args apply the selected lookahead");
+
+    rec.codec = "vp9";
+    rec.preset = "cpu-used 5";
+    rec.lookahead_frames = 25;
+    string[] vp9 = CodecUtils.build_smart_codec_args (rec);
+    assert_array_has_adjacent_pair (vp9, "-g", "120",
+        "VP9 direct args apply the temporal keyframe interval");
+    assert_array_has_adjacent_pair (vp9, "-lag-in-frames", "25",
+        "VP9 direct args apply the selected lookahead");
+    assert_array_has_adjacent_pair (vp9, "-sharpness", "1",
+        "VP9 direct args retain the native sharpness decision");
+
+    rec.codec = "svt-av1";
+    rec.preset = "preset 4";
+    rec.lookahead_frames = 42;
+    string[] svt = CodecUtils.build_smart_codec_args (rec);
+    assert_array_has_adjacent_pair (svt, "-g", "120",
+        "SVT-AV1 direct args apply the temporal keyframe interval");
+    assert_array_has_adjacent_pair (svt, "-svtav1-params",
+        "lookahead=42:sharpness=1",
+        "SVT-AV1 direct args combine lookahead and sharpness");
+}
+
+private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+
+    var rec = OptimizationRecommendation () {
+        crf = 24,
+        effort = EncodeEffort.MEDIUM,
+        content_type = ContentType.LIVE_ACTION,
+        source_bit_depth = 8,
+        recommended_pix_fmt = "yuv420p",
+        resolved_container = "mkv",
+        keyint_frames = 173,
+        lookahead_frames = 40,
+        audio_encode_kbps = 192
+    };
+
+    rec.codec = "x264";
+    rec.preset = "medium";
+    var x264 = new X264Tab ();
+    CodecPresets.apply_smart_x264 (x264, rec);
+    assert_true (CodecUtils.get_dropdown_text (x264.keyint_combo) == "173",
+        "x264 tab receives an exact signal-selected GOP");
+    assert_true ((int) x264.lookahead_spin.get_value () == 40,
+        "x264 tab receives signal-selected lookahead");
+
+    rec.codec = "x265";
+    rec.preset = "medium";
+    var x265 = new X265Tab ();
+    CodecPresets.apply_smart_x265 (x265, rec);
+    assert_true (CodecUtils.get_dropdown_text (x265.keyint_combo) == "173",
+        "x265 tab receives an exact signal-selected GOP");
+    assert_true ((int) x265.lookahead_spin.get_value () == 40,
+        "x265 tab receives signal-selected lookahead");
+
+    rec.codec = "vp9";
+    rec.preset = "cpu-used 5";
+    rec.resolved_container = "webm";
+    rec.lookahead_frames = 25;
+    var vp9 = new Vp9Tab ();
+    CodecPresets.apply_smart_vp9 (vp9, rec);
+    assert_true (CodecUtils.get_dropdown_text (vp9.keyint_combo) == "173",
+        "VP9 tab receives an exact signal-selected GOP");
+    assert_true ((int) vp9.lag_in_frames_spin.get_value () == 25,
+        "VP9 tab receives signal-selected lookahead");
+
+    rec.codec = "svt-av1";
+    rec.preset = "preset 7";
+    rec.lookahead_frames = 42;
+    var svt = new SvtAv1Tab ();
+    CodecPresets.apply_smart_svt_av1 (svt, rec);
+    assert_true (CodecUtils.get_dropdown_text (svt.keyint_combo) == "173",
+        "SVT-AV1 tab receives an exact signal-selected GOP");
+    assert_true ((int) svt.lookahead_spin.get_value () == 42,
+        "SVT-AV1 tab receives the two-pass-compatible lookahead");
 }
 
 private void test_svt_av1_crf_two_pass_capability_updates_visibility () {
@@ -4570,6 +4686,50 @@ private void test_svt_av1_crf_two_pass_backstop_fails_fast () {
 // ═════════════════════════════════════════════════════════════════════════════
 //  FILTERBUILDER DRAWTEXT TESTS
 // ═════════════════════════════════════════════════════════════════════════════
+
+private void test_shared_output_timing_resolution () {
+    double fps = 0.0;
+    assert_true (CodecUtils.try_resolve_output_fps (
+        FrameRateLabel.CUSTOM, "1", out fps),
+        "positive low custom FPS is accepted consistently");
+    assert_true (Math.fabs (fps - 1.0) < 1e-9,
+        "low custom FPS is preserved exactly");
+    assert_true (CodecUtils.try_resolve_output_fps (
+        FrameRateLabel.CUSTOM, "1000", out fps),
+        "positive high custom FPS is accepted consistently");
+    assert_true (Math.fabs (fps - 1000.0) < 1e-9,
+        "high custom FPS is preserved exactly");
+    assert_false (CodecUtils.try_resolve_output_fps (
+        FrameRateLabel.ORIGINAL, "60", out fps),
+        "Original delegates to the probed source FPS");
+    assert_false (CodecUtils.try_resolve_output_fps (
+        FrameRateLabel.CUSTOM, "0", out fps),
+        "non-positive custom FPS remains invalid");
+
+    var keyframes = new KeyframeSettingsSnapshot ();
+    keyframes.keyint_text = "Custom";
+    keyframes.custom_mode = 1; // two seconds, expressed in output frames
+    keyframes.frame_rate_text = FrameRateLabel.CUSTOM;
+    keyframes.custom_frame_rate_text = "1";
+    string[] low_fps_gop = CodecUtils.resolve_custom_keyframe_args_from_snapshot (
+        keyframes, "/path/not-probed-when-fps-is-configured");
+    assert_array_has_adjacent_pair (low_fps_gop, "-g", "2",
+        "custom keyframe resolution uses the shared low output FPS");
+    keyframes.custom_frame_rate_text = "1000";
+    string[] high_fps_gop = CodecUtils.resolve_custom_keyframe_args_from_snapshot (
+        keyframes, "/path/not-probed-when-fps-is-configured");
+    assert_array_has_adjacent_pair (high_fps_gop, "-g", "2000",
+        "custom keyframe resolution uses the shared high output FPS");
+
+    var snap = new GeneralSettingsSnapshot ();
+    snap.video_speed_enabled = true;
+    snap.video_speed_percent = 100.0;
+    assert_true (Math.fabs (
+        FilterBuilder.get_video_speed_multiplier (snap) - 2.0) < 1e-9,
+        "optimizer timing sees the same 2x multiplier as setpts");
+    assert_contains (FilterBuilder.build_video_filter_chain_from_snapshot (snap),
+        "setpts=0.500000*PTS", "filter chain uses the matching 2x timeline");
+}
 
 private GeneralSettingsSnapshot make_watermark_snapshot (
     string text,
@@ -5204,6 +5364,12 @@ void main (string[] args) {
         test_vmaf_probe_reports_binary_errors_separately);
     Test.add_func ("/combine/smart-optimizer/report-native-sharpness",
         test_smart_optimizer_report_includes_native_sharpness_decision);
+    Test.add_func ("/combine/smart-optimizer/direct-args-temporal-tuning",
+        test_smart_optimizer_direct_args_include_temporal_tuning);
+    Test.add_func ("/combine/smart-optimizer/apply-temporal-tuning",
+        test_smart_optimizer_applies_temporal_tuning_to_codec_tabs);
+    Test.add_func ("/combine/smart-optimizer/shared-output-timing",
+        test_shared_output_timing_resolution);
     Test.add_func ("/combine/svt-av1/crf-two-pass-ui-reacts-to-capability",
         test_svt_av1_crf_two_pass_capability_updates_visibility);
     Test.add_func ("/combine/svt-av1/crf-two-pass-backstop-fails-fast",

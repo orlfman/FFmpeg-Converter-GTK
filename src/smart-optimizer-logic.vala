@@ -152,6 +152,14 @@ public struct OptimizationRecommendation {
     public double detail_score;        // 0.0–1.0 native-sharpness demand
     /** Exact VP9/SVT-AV1 native sharpness used by calibration; 0 = disabled. */
     public int native_sharpness;
+    /** Exact temporal settings applied to every supported video codec. */
+    public int keyint_frames;
+    public double keyint_seconds;
+    public int lookahead_frames;
+    public double motion_variability;
+    public double static_frame_ratio;
+    public double cuts_per_minute;
+    public string temporal_reason;
 
     // ── Mode-agnostic decision axis ──────────────────────────────────────────
     // Every downstream apply_smart_* switches on `effort`, never on size_tier,
@@ -259,6 +267,13 @@ public struct OptimizationContext {
     /** True when the user requested preserving every source audio track. */
     public bool preserve_all_audio_tracks_requested;
 
+    /** Effective output frame rate; 0 means use the probed source rate. */
+    public double output_fps;
+
+    /** Playback-rate multiplier applied by the video speed filter.
+     *  1.0 is normal speed; 0 means use the safe default of 1.0. */
+    public double video_speed_multiplier;
+
     /** Output container format (e.g. "mkv", "mp4", "webm").
      *  Used for audio stream-copy compatibility checks.
      *  Empty string means infer from codec (conservative fallback). */
@@ -296,6 +311,9 @@ public struct ContentProfile {
     public double      saturation_stddev;
     public double      temporal_diff_mean;   // YDIF average across frames
     public double      temporal_diff_stddev;
+    public int         temporal_samples;     // decoded-frame samples behind temporal metrics
+    public double      static_frame_ratio;   // fraction with near-zero YDIF
+    public double      cuts_per_minute;      // decoded scene cuts, excluding sample joins
     public double      noise_mean;           // TOUT (temporal outlier fraction) average — grain/noise proxy
     public double      noise_stddev;
     public ContentType content_type;
@@ -1917,9 +1935,11 @@ namespace SmartOptimizerLogic {
      * for and did not receive.
      *
      * Only parameters that moved the result meaningfully are carried here.
-     * Quantisation matrices, lookahead depth, reference count, CDEF and the
-     * rest stayed within ±2% and are deliberately left to apply_smart_* alone
-     * — their cost in probe complexity is not repaid. That is a measured
+     * Quantisation matrices, reference count, CDEF and the rest stayed within
+     * ±2% and are deliberately left to apply_smart_* alone. Lookahead and
+     * keyframe interval are carried separately by TemporalTuning because they
+     * now depend on decoded-pixel signals. The remaining probe complexity is
+     * not repaid. That is a measured
      * judgement, not an oversight; re-measure before assuming it still holds
      * if those settings change substantially.
      */
@@ -1942,6 +1962,199 @@ namespace SmartOptimizerLogic {
         return "%s|%d|%d|%.2f|%d|%d".printf (
             t.tune, t.film_grain ? 1 : 0, t.film_grain_strength,
             t.psy_rd, t.fast_decode_level, t.native_sharpness);
+    }
+
+    // ── Temporal tuning: decoded-pixel signals, never source GOP metadata ───
+
+    public const double STATIC_FRAME_YDIF_MAX = 0.05;
+
+    public struct TemporalTuning {
+        /** Maximum GOP length. Encoders may still insert scene-cut keyframes. */
+        public int keyint_frames;
+        public double keyint_seconds;
+        public int lookahead_frames;
+        public double motion_variability;
+        public string reason;
+    }
+
+    /** Fraction of decoded samples that are effectively unchanged frames. */
+    public double static_frame_ratio_from_ydif (double[] normalized_ydif) {
+        if (normalized_ydif.length == 0)
+            return 0.0;
+
+        int static_count = 0;
+        foreach (double value in normalized_ydif) {
+            if (value.is_finite () && value <= STATIC_FRAME_YDIF_MAX)
+                static_count++;
+        }
+        return (double) static_count / normalized_ydif.length;
+    }
+
+    /**
+     * Convert cuts measured in independently filtered sample segments into a
+     * rate on the final output timeline. Each segment has its own filter state,
+     * so equal local timestamps in different segments are distinct real cuts.
+     */
+    public double scene_cuts_per_minute (
+        double[] cut_times,
+        int      segment_count,
+        double   segment_duration,
+        double   video_speed_multiplier = 1.0
+    ) {
+        if (cut_times.length == 0 || segment_count <= 0 || segment_duration <= 0.0)
+            return 0.0;
+
+        int real_cuts = 0;
+        foreach (double cut_time in cut_times) {
+            if (cut_time.is_finite () && cut_time >= 0.0)
+                real_cuts++;
+        }
+
+        double speed = (video_speed_multiplier.is_finite ()
+                && video_speed_multiplier > 0.0)
+            ? video_speed_multiplier : 1.0;
+        double sampled_minutes = segment_count * segment_duration / speed / 60.0;
+        return sampled_minutes > 0.0 ? real_cuts / sampled_minutes : 0.0;
+    }
+
+    /** Pure filter graph used to keep temporal state local to each sample. */
+    public string independent_analysis_filter_spec (
+        int    segment_count,
+        string video_filter_chain,
+        string analysis_filter
+    ) {
+        var fc = new StringBuilder ();
+        for (int i = 0; i < segment_count; i++) {
+            if (i > 0)
+                fc.append (";");
+            fc.append ("[%d:v]".printf (i));
+            if (video_filter_chain.length > 0)
+                fc.append (video_filter_chain + ",");
+            fc.append (analysis_filter);
+            fc.append ("[analysis%d]".printf (i));
+        }
+        return fc.str;
+    }
+
+    private int temporal_lookahead_cap (string codec, EncodeEffort effort) {
+        if (codec == "vp9") {
+            switch (effort) {
+                case EncodeEffort.MINIMAL: return 12;
+                case EncodeEffort.LOW:     return 16;
+                case EncodeEffort.MEDIUM:  return 20;
+                default:                   return 25;
+            }
+        }
+        if (codec == "svt-av1") {
+            switch (effort) {
+                case EncodeEffort.MINIMAL: return 60;
+                case EncodeEffort.LOW:     return 80;
+                case EncodeEffort.MEDIUM:  return 100;
+                default:                   return 120;
+            }
+        }
+        switch (effort) {
+            case EncodeEffort.MINIMAL: return 40;
+            case EncodeEffort.LOW:     return 50;
+            case EncodeEffort.MEDIUM:  return 60;
+            case EncodeEffort.HIGH:    return 80;
+            default:                   return 120;
+        }
+    }
+
+    /** Shared signal decision translated into each encoder's supported range. */
+    public TemporalTuning decide_temporal_tuning (
+        string         codec,
+        EncodeEffort   effort,
+        ContentProfile profile,
+        double         output_fps,
+        bool           optimize_for_delivery,
+        bool           svt_two_pass_compatible
+    ) {
+        double fps = (output_fps.is_finite () && output_fps > 0.0)
+            ? output_fps : 30.0;
+        bool signals_available = profile.temporal_samples > 0;
+        double motion_cv = (profile.temporal_diff_mean > 0.05)
+            ? profile.temporal_diff_stddev / profile.temporal_diff_mean
+            : 0.0;
+
+        double keyint_seconds = 5.0;
+        string reason = "moderate temporal activity";
+        if (optimize_for_delivery) {
+            keyint_seconds = 2.0;
+            reason = "delivery mode favours seeking and stream recovery";
+        } else if (signals_available
+                && (profile.cuts_per_minute >= 12.0 || motion_cv >= 1.0)) {
+            keyint_seconds = 2.0;
+            reason = "frequent cuts or highly variable motion";
+        } else if (signals_available
+                && (profile.cuts_per_minute >= 6.0 || motion_cv >= 0.60)) {
+            keyint_seconds = 4.0;
+            reason = "variable motion or regular scene changes";
+        } else if (signals_available
+                && (profile.content_type == ContentType.SCREENCAST
+                    || (profile.temporal_diff_mean <= 2.0
+                        && profile.static_frame_ratio >= 0.35
+                        && profile.cuts_per_minute <= 2.0))) {
+            keyint_seconds = 8.0;
+            reason = "mostly static frames with few scene changes";
+        } else if (!signals_available) {
+            reason = "temporal signals unavailable; using the neutral policy";
+        }
+
+        double requested_frames = Math.round (keyint_seconds * fps);
+        int keyint_frames;
+        if (!requested_frames.is_finite () || requested_frames >= 1920.0)
+            keyint_frames = 1920;
+        else if (requested_frames <= 1.0)
+            keyint_frames = 1;
+        else
+            keyint_frames = (int) requested_frames;
+        keyint_seconds = keyint_frames / fps;
+
+        double demand = 0.5;
+        if (signals_available) {
+            double motion = ((profile.temporal_diff_mean - 1.0) / 10.0)
+                .clamp (0.0, 1.0);
+            double variability = (motion_cv / 1.0).clamp (0.0, 1.0);
+            double cuts = (profile.cuts_per_minute / 12.0).clamp (0.0, 1.0);
+            demand = (0.35 * motion + 0.40 * variability + 0.25 * cuts
+                - 0.30 * profile.static_frame_ratio.clamp (0.0, 1.0))
+                .clamp (0.0, 1.0);
+            if (profile.content_type == ContentType.SCREENCAST)
+                demand *= 0.60;
+        }
+
+        int cap = temporal_lookahead_cap (codec, effort);
+        int floor = (codec == "vp9") ? 8 : ((codec == "svt-av1") ? 24 : 20);
+        if (codec == "svt-av1" && svt_two_pass_compatible) {
+            cap = int.min (cap, 42);
+            floor = int.min (floor, cap);
+            reason += "; SVT-AV1 lookahead capped at 42 for two-pass compatibility";
+        }
+        if (optimize_for_delivery) {
+            int delivery_cap = (codec == "vp9") ? 12
+                : ((codec == "svt-av1") ? 32 : 40);
+            cap = int.min (cap, delivery_cap);
+            floor = int.min (floor, cap);
+        }
+
+        int lookahead = (int) Math.round (floor + (cap - floor) * demand);
+        if (codec == "x264" || codec == "x265")
+            lookahead = (int) Math.round (lookahead / 5.0) * 5;
+        lookahead = lookahead.clamp (0, cap);
+
+        return TemporalTuning () {
+            keyint_frames = keyint_frames,
+            keyint_seconds = keyint_seconds,
+            lookahead_frames = lookahead,
+            motion_variability = motion_cv,
+            reason = reason
+        };
+    }
+
+    public string temporal_tuning_key (TemporalTuning t) {
+        return "%d|%d".printf (t.keyint_frames, t.lookahead_frames);
     }
 
     /**

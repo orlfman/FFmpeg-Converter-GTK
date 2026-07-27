@@ -438,18 +438,9 @@ public class Converter : Object {
      */
     private static double resolve_output_fps_from_settings (
         GeneralSettingsSnapshot general_settings) {
-        string fr_text = general_settings.frame_rate_text;
-        if (fr_text == FrameRateLabel.CUSTOM) {
-            string custom = general_settings.custom_frame_rate_text;
-            if (custom.length > 0) {
-                double fps = double.parse (custom);
-                if (fps > 0) return fps;
-            }
-        } else if (fr_text != FrameRateLabel.ORIGINAL) {
-            double fps = double.parse (fr_text);
-            if (fps > 0) return fps;
-        }
-        return 0.0;
+        double fps = 0.0;
+        return CodecUtils.try_resolve_output_fps_from_snapshot (
+            general_settings, out fps) ? fps : 0.0;
     }
 
     /**
