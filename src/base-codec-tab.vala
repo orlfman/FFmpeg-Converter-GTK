@@ -443,6 +443,22 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         return pixel_format_selector.snapshot_settings ();
     }
 
+    /**
+     * Apply Smart Optimizer's exact output format to the codec-local selector.
+     * This keeps video filters, overlay filters, and encoder arguments on the
+     * same depth instead of applying the recommendation only at the encoder.
+     */
+    public void apply_recommended_pixel_format (string? pix_fmt) {
+        PixelFormatSettingsSnapshot snapshot =
+            CodecUtils.pixel_format_settings_from_ffmpeg_pix_fmt (pix_fmt);
+        if (!snapshot.eight_bit_selected && !snapshot.ten_bit_selected)
+            return;
+
+        pixel_format_selector.apply_snapshot (snapshot);
+        cancel_pending_pixel_format_sync ();
+        sync_pixel_format_now ();
+    }
+
     public abstract void sync_pixel_format_now ();
 
     private void cancel_pending_pixel_format_sync () {

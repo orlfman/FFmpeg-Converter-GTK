@@ -35,6 +35,8 @@ using GLib;
     //    verify_unknown_audio_copy_preflight = true
     //                                           (default: true → verify audio copy compatibility
     //                                            for MP4/WebM before conversion starts)
+    //    show_bit_depth_warning_dialog = true   (default: true → show the modal
+    //                                            warning; false → log and continue)
 //
 //    [smart_optimizer]
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
@@ -82,6 +84,7 @@ public class AppSettings : Object {
     private bool   _recently_opened_enabled = true;
     private string[] _recent_input_files = {};
     private bool   _verify_unknown_audio_copy_preflight = true;
+    private bool   _show_bit_depth_warning_dialog = true;
     private int    _smart_optimizer_target_mb = 4;
     // On by default: the optimizer exists to configure an encode, so running
     // it is the expected next step rather than an opt-in extra. Turning this
@@ -109,9 +112,10 @@ public class AppSettings : Object {
     //  CONSTRUCTOR — private
     // ═════════════════════════════════════════════════════════════════════════
 
-    private AppSettings () {
+    private AppSettings (string? config_root = null) {
+        string resolved_config_root = config_root ?? Environment.get_user_config_dir ();
         config_dir  = Path.build_filename (
-            Environment.get_user_config_dir (), "FFmpeg-Converter-GTK");
+            resolved_config_root, "FFmpeg-Converter-GTK");
         config_file = Path.build_filename (config_dir, "settings.ini");
 
         bool normalized_path_settings = load ();
@@ -120,6 +124,12 @@ public class AppSettings : Object {
         }
         ensure_output_directory ();
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal static AppSettings create_for_test (string config_root) {
+        return new AppSettings (config_root);
+    }
+#endif
 
     /**
      * Expand a home-relative path for the current user.
@@ -574,6 +584,27 @@ public class AppSettings : Object {
         }
     }
 
+    public bool show_bit_depth_warning_dialog {
+        get {
+            bool show_dialog;
+            mutex.lock ();
+            try {
+                show_dialog = _show_bit_depth_warning_dialog;
+            } finally {
+                mutex.unlock ();
+            }
+            return show_dialog;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _show_bit_depth_warning_dialog = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public bool smart_optimizer_auto_convert {
         get {
             bool auto_convert;
@@ -671,6 +702,8 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "generate_collage_thumbnail", false);
         bool verify_unknown_audio_copy_preflight = read_bool (
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
+        bool show_bit_depth_warning_dialog = read_bool (
+            kf, GROUP_GENERAL, "show_bit_depth_warning_dialog", true);
         bool play_with_ffplay = read_bool (
             kf, GROUP_GENERAL, "play_with_ffplay", false);
         bool recently_opened_enabled = read_bool (
@@ -704,6 +737,7 @@ public class AppSettings : Object {
             _recently_opened_enabled = recently_opened_enabled;
             _recent_input_files = recent_input_files;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
+            _show_bit_depth_warning_dialog = show_bit_depth_warning_dialog;
             _smart_optimizer_target_mb = smart_optimizer_target_mb;
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
             _smart_optimizer_strip_audio = smart_optimizer_strip_audio;
@@ -745,6 +779,7 @@ public class AppSettings : Object {
         bool recently_opened_enabled;
         string[] recent_input_files;
         bool verify_unknown_audio_copy_preflight;
+        bool show_bit_depth_warning_dialog;
         int smart_optimizer_target_mb;
         bool smart_optimizer_auto_convert;
         bool smart_optimizer_strip_audio;
@@ -767,6 +802,7 @@ public class AppSettings : Object {
             for (int i = 0; i < _recent_input_files.length; i++)
                 recent_input_files[i] = _recent_input_files[i];
             verify_unknown_audio_copy_preflight = _verify_unknown_audio_copy_preflight;
+            show_bit_depth_warning_dialog = _show_bit_depth_warning_dialog;
             smart_optimizer_target_mb = _smart_optimizer_target_mb;
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
             smart_optimizer_strip_audio = _smart_optimizer_strip_audio;
@@ -792,6 +828,11 @@ public class AppSettings : Object {
             GROUP_GENERAL,
             "verify_unknown_audio_copy_preflight",
             verify_unknown_audio_copy_preflight
+        );
+        kf.set_boolean (
+            GROUP_GENERAL,
+            "show_bit_depth_warning_dialog",
+            show_bit_depth_warning_dialog
         );
         kf.set_boolean (GROUP_GENERAL, "play_with_ffplay", play_with_ffplay);
         kf.set_boolean (
@@ -837,6 +878,7 @@ public class AppSettings : Object {
             _play_with_ffplay = false;
             _recently_opened_enabled = true;
             _verify_unknown_audio_copy_preflight = true;
+            _show_bit_depth_warning_dialog = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
             _smart_optimizer_auto_convert = true;
             _smart_optimizer_strip_audio = false;

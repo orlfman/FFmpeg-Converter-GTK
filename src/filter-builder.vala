@@ -691,6 +691,171 @@ namespace FilterBuilder {
     }
 
     /**
+     * Map the selected app pixel format to FFmpeg overlay's output-format
+     * names. An empty result preserves the existing Auto/unset behaviour.
+     */
+    public static string get_overlay_output_format (
+        PixelFormatSettingsSnapshot? pixel_format
+    ) {
+        if (pixel_format == null)
+            return "";
+
+        string format_text;
+        string depth_suffix;
+        if (pixel_format.ten_bit_selected) {
+            format_text = pixel_format.ten_bit_format_text;
+            depth_suffix = "p10";
+        } else if (pixel_format.eight_bit_selected) {
+            format_text = pixel_format.eight_bit_format_text;
+            depth_suffix = "";
+        } else {
+            return "";
+        }
+
+        if (format_text.contains (Chroma.C422))
+            return "yuv422" + depth_suffix;
+        if (format_text.contains (Chroma.C444))
+            return "yuv444" + depth_suffix;
+        return "yuv420" + depth_suffix;
+    }
+
+    /** Map an exact FFmpeg YUV pixel format to overlay's format vocabulary. */
+    public static string get_overlay_output_format_from_pix_fmt (string? pix_fmt) {
+        if (pix_fmt == null)
+            return "";
+
+        switch (pix_fmt.down ()) {
+            case PixelFormat.YUV420P:     return "yuv420";
+            case PixelFormat.YUV422P:     return "yuv422";
+            case PixelFormat.YUV444P:     return "yuv444";
+            case PixelFormat.YUV420P10LE: return "yuv420p10";
+            case PixelFormat.YUV422P10LE: return "yuv422p10";
+            case PixelFormat.YUV444P10LE: return "yuv444p10";
+            default:                      return "";
+        }
+    }
+
+    /** Freeze the image overlay settings and file identity for one Smart run. */
+    public static SmartOptimizerImageWatermark? snapshot_smart_image_watermark (
+        GeneralSettingsSnapshot snapshot
+    ) {
+        if (!snapshot.watermark_enabled
+                || snapshot.watermark_mode != "image"
+                || snapshot.watermark_image_path.strip ().length == 0) {
+            return null;
+        }
+
+        var watermark = new SmartOptimizerImageWatermark ();
+        watermark.path = snapshot.watermark_image_path;
+        watermark.width = snapshot.watermark_image_width;
+        watermark.position = snapshot.watermark_position;
+        watermark.opacity = snapshot.watermark_opacity;
+        watermark.margin = snapshot.watermark_margin;
+
+        ConversionUtils.FileSignature? signature =
+            ConversionUtils.query_file_signature (watermark.path);
+        if (signature != null) {
+            watermark.file_identity = "%s|%s|%s|%s".printf (
+                signature.path,
+                signature.size.to_string (),
+                signature.mtime.to_string (),
+                signature.mtime_usec.to_string ());
+        } else {
+            watermark.file_identity = "unreadable";
+        }
+        return watermark;
+    }
+
+    /**
+     * Make an app-generated filter chain end in Smart Optimizer's exact YUV
+     * format without first converting through a stale codec-tab selection.
+     * Existing supported format filters (including the upload/download pair
+     * around nlmeans_opencl) are retargeted in place. If none exists, the
+     * format is appended so alpha-capable overlays cannot leak an encoder-
+     * incompatible yuva format downstream.
+     */
+    public static string retarget_yuv_pixel_format_filters (
+        string filter_chain,
+        string? pix_fmt
+    ) {
+        if (pix_fmt == null
+                || get_overlay_output_format_from_pix_fmt (pix_fmt).length == 0)
+            return filter_chain;
+
+        string target = pix_fmt.down ();
+        string[] filters = split_filter_chain_at_top_level_commas (filter_chain);
+        bool replaced = false;
+
+        for (int i = 0; i < filters.length; i++) {
+            string filter = filters[i].strip ();
+            if (!filter.has_prefix ("format="))
+                continue;
+
+            string existing = filter.substring ("format=".length);
+            if (get_overlay_output_format_from_pix_fmt (existing).length == 0)
+                continue;
+
+            filters[i] = "format=" + target;
+            replaced = true;
+        }
+
+        string result = filters.length > 0 ? string.joinv (",", filters) : "";
+        if (replaced)
+            return result;
+        return result.length > 0
+            ? result + ",format=" + target
+            : "format=" + target;
+    }
+
+    /**
+     * Split a comma-separated FFmpeg filter chain without treating escaped or
+     * quoted commas inside filter arguments as separators. A plain split()
+     * corrupts constructs such as drawtext text and between(t\,start\,end).
+     */
+    private static string[] split_filter_chain_at_top_level_commas (
+        string filter_chain
+    ) {
+        string[] filters = {};
+        var current = new StringBuilder ();
+        bool escaped = false;
+        bool in_single_quotes = false;
+        bool in_double_quotes = false;
+
+        for (int i = 0; i < filter_chain.length; i++) {
+            char c = filter_chain[i];
+            if (escaped) {
+                current.append_c (c);
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                current.append_c (c);
+                escaped = true;
+                continue;
+            }
+            if (c == '\'' && !in_double_quotes) {
+                in_single_quotes = !in_single_quotes;
+                current.append_c (c);
+                continue;
+            }
+            if (c == '"' && !in_single_quotes) {
+                in_double_quotes = !in_double_quotes;
+                current.append_c (c);
+                continue;
+            }
+            if (c == ',' && !in_single_quotes && !in_double_quotes) {
+                filters += current.str;
+                current = new StringBuilder ();
+                continue;
+            }
+            current.append_c (c);
+        }
+
+        filters += current.str;
+        return filters;
+    }
+
+    /**
      * Build the overlay filter fragment for image watermarking.
      *
      * Returns the filter text only (e.g. "scale=150:-1,format=rgba,...overlay=x=...:y=...").
@@ -704,6 +869,7 @@ namespace FilterBuilder {
      * @param margin          margin in pixels
      * @param opacity         opacity 0.05–1.0
      * @param image_width     desired width in pixels, -1 for original
+     * @param output_format   FFmpeg overlay output format, or empty for Auto
      */
     public static string build_image_overlay_fragment (
         string wm_input_label,
@@ -712,7 +878,8 @@ namespace FilterBuilder {
         string position,
         int margin,
         double opacity,
-        int image_width) {
+        int image_width,
+        string output_format = "") {
 
         string x_expr;
         string y_expr;
@@ -732,9 +899,12 @@ namespace FilterBuilder {
             wm_prep += ",colorchannelmixer=aa=%s".printf (alpha_str);
         }
 
-        return "%s%s[wm_ready]; %s[wm_ready]overlay=x=%s:y=%s%s".printf (
+        string format_option = output_format.length > 0
+            ? ":format=" + output_format : "";
+
+        return "%s%s[wm_ready]; %s[wm_ready]overlay=x=%s:y=%s%s%s".printf (
             wm_input_label, wm_prep,
-            video_label, x_expr, y_expr, output_label);
+            video_label, x_expr, y_expr, format_option, output_label);
     }
 
     // Detect Crop helper

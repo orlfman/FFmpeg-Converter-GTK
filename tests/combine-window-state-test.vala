@@ -1179,6 +1179,7 @@ private void test_reencode_command_image_watermark_topology () {
     profile.watermark_position = "Bottom Right";
     profile.watermark_opacity = 0.7;
     profile.watermark_margin = 15;
+    profile.overlay_format = "yuv420p10";
     runner.reencode_profile = profile;
 
     int exit_code = runner.run_reencode_mode_for_widget_test ();
@@ -1205,6 +1206,8 @@ private void test_reencode_command_image_watermark_topology () {
         "filter_complex scales watermark to requested width");
     assert_contains (filter_complex, "main_w-overlay_w-15",
         "filter_complex positions watermark at Bottom Right with margin");
+    assert_contains (filter_complex, ":format=yuv420p10[outv]",
+        "combine runner preserves the selected 10-bit overlay format");
     assert_contains (filter_complex, "[outv_pre_wm]",
         "filter_complex renames [outv] to [outv_pre_wm] before overlay");
     assert_contains (filter_complex, "[outv]",
@@ -1583,6 +1586,27 @@ private void test_conversion_runner_image_watermark_toggle_on_maps_all_audio () 
         "image watermark path should not map only the first audio stream when toggle is on");
     assert_array_not_contains (argv, "0:v:0",
         "image watermark path should not add a redundant direct video map");
+}
+
+private void test_conversion_runner_image_watermark_preserves_selected_10bit () {
+    var profile = make_basic_conversion_profile_for_test ();
+    enable_image_watermark_for_conversion_test (profile);
+    profile.video_filters = "format=" + PixelFormat.YUV420P10LE;
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    profile.overlay_format = "yuv420p10";
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    string filter_complex = extract_filter_complex (argv);
+    assert_contains (filter_complex, "[0:v]format=yuv420p10le[vf_out]",
+        "conversion runner normalizes the main video to selected 10-bit");
+    assert_contains (filter_complex, ":format=yuv420p10[outv]",
+        "conversion runner preserves selected 10-bit through image overlay");
 }
 
 private void test_conversion_runner_pass1_image_watermark_keeps_audio_mapping_disabled () {
@@ -4367,6 +4391,25 @@ private void test_vmaf_filter_parser_requires_exact_libvmaf_name () {
         "exact libvmaf filter is accepted with tab-separated fields");
 }
 
+private void test_encoder_pixel_format_parser_requires_exact_token () {
+    string listing =
+        "Encoder libx264 [libx264 H.264]:\n"
+        + "    Supported pixel formats: yuv420p yuv422p yuv420p10le yuv422p10le\n";
+    assert_true (
+        FfmpegRuntimeCapabilities.encoder_listing_supports_pixel_format (
+            listing, "yuv420p10le"),
+        "libx264 High10 format is detected");
+    assert_false (
+        FfmpegRuntimeCapabilities.encoder_listing_supports_pixel_format (
+            listing, "yuv420p10"),
+        "partial pixel-format names must not match");
+    assert_false (
+        FfmpegRuntimeCapabilities.encoder_listing_supports_pixel_format (
+            "Option help mentions yuv420p10le but no supported-format line\n",
+            "yuv420p10le"),
+        "unrelated help text must not satisfy the capability guard");
+}
+
 private void test_vmaf_probe_reports_supported_and_unsupported () {
     string? dir = null;
     try {
@@ -4574,8 +4617,8 @@ private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
         crf = 24,
         effort = EncodeEffort.MEDIUM,
         content_type = ContentType.LIVE_ACTION,
-        source_bit_depth = 8,
-        recommended_pix_fmt = "yuv420p",
+        source_bit_depth = 10,
+        recommended_pix_fmt = "yuv420p10le",
         resolved_container = "mkv",
         keyint_frames = 173,
         lookahead_frames = 40,
@@ -4590,6 +4633,12 @@ private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
         "x264 tab receives an exact signal-selected GOP");
     assert_true ((int) x264.lookahead_spin.get_value () == 40,
         "x264 tab receives signal-selected lookahead");
+    PixelFormatSettingsSnapshot x264_format =
+        x264.snapshot_pixel_format_settings ();
+    assert_true (x264_format.ten_bit_selected,
+        "x264 tab receives Smart Optimizer's 10-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (x264.profile_combo) == "High10",
+        "x264 Smart Optimizer profile matches its 10-bit output");
 
     rec.codec = "x265";
     rec.preset = "medium";
@@ -4599,6 +4648,23 @@ private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
         "x265 tab receives an exact signal-selected GOP");
     assert_true ((int) x265.lookahead_spin.get_value () == 40,
         "x265 tab receives signal-selected lookahead");
+    PixelFormatSettingsSnapshot x265_format =
+        x265.snapshot_pixel_format_settings ();
+    assert_true (x265_format.ten_bit_selected,
+        "x265 tab receives Smart Optimizer's 10-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (x265.profile_combo) == "Main10",
+        "x265 Smart Optimizer profile matches its 10-bit output");
+    var x265_general = new GeneralSettingsSnapshot ();
+    x265_general.pixel_format = x265_format.copy ();
+    EncodeProfileSnapshot x265_profile = CodecUtils.snapshot_encode_profile (
+        x265.get_codec_builder (), x265, x265_general);
+    assert_string_equal (x265_profile.overlay_format, "yuv420p10",
+        "Smart x265 profile carries 10-bit into overlay filters");
+    assert_contains (x265_profile.video_filters, "format=yuv420p10le",
+        "Smart x265 profile carries 10-bit into the video filter chain");
+    assert_array_has_adjacent_pair (x265_profile.codec_args,
+        "-pix_fmt", PixelFormat.YUV420P10LE,
+        "Smart x265 profile carries 10-bit into encoder arguments");
 
     rec.codec = "vp9";
     rec.preset = "cpu-used 5";
@@ -4610,6 +4676,13 @@ private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
         "VP9 tab receives an exact signal-selected GOP");
     assert_true ((int) vp9.lag_in_frames_spin.get_value () == 25,
         "VP9 tab receives signal-selected lookahead");
+    PixelFormatSettingsSnapshot vp9_format =
+        vp9.snapshot_pixel_format_settings ();
+    assert_true (vp9_format.ten_bit_selected,
+        "VP9 tab receives Smart Optimizer's 10-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (vp9.profile_combo)
+            == "Profile 2 (10-bit 4:2:0)",
+        "VP9 Smart Optimizer profile matches its 10-bit output");
 
     rec.codec = "svt-av1";
     rec.preset = "preset 7";
@@ -4620,6 +4693,44 @@ private void test_smart_optimizer_applies_temporal_tuning_to_codec_tabs () {
         "SVT-AV1 tab receives an exact signal-selected GOP");
     assert_true ((int) svt.lookahead_spin.get_value () == 42,
         "SVT-AV1 tab receives the two-pass-compatible lookahead");
+    PixelFormatSettingsSnapshot svt_format =
+        svt.snapshot_pixel_format_settings ();
+    assert_true (svt_format.ten_bit_selected,
+        "SVT-AV1 tab receives Smart Optimizer's 10-bit recommendation");
+
+    rec.source_bit_depth = 8;
+    rec.recommended_pix_fmt = PixelFormat.YUV420P;
+
+    rec.codec = "x264";
+    rec.preset = "medium";
+    CodecPresets.apply_smart_x264 (x264, rec);
+    assert_true (x264.snapshot_pixel_format_settings ().eight_bit_selected,
+        "x264 tab can transition to Smart Optimizer's 8-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (x264.profile_combo) == "High",
+        "x264 Smart Optimizer selects the matching 8-bit profile");
+
+    rec.codec = "x265";
+    CodecPresets.apply_smart_x265 (x265, rec);
+    assert_true (x265.snapshot_pixel_format_settings ().eight_bit_selected,
+        "x265 tab can transition to Smart Optimizer's 8-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (x265.profile_combo) == "Main",
+        "x265 Smart Optimizer selects the matching 8-bit profile");
+
+    rec.codec = "vp9";
+    rec.preset = "cpu-used 5";
+    rec.resolved_container = "webm";
+    CodecPresets.apply_smart_vp9 (vp9, rec);
+    assert_true (vp9.snapshot_pixel_format_settings ().eight_bit_selected,
+        "VP9 tab can transition to Smart Optimizer's 8-bit recommendation");
+    assert_true (CodecUtils.get_dropdown_text (vp9.profile_combo)
+            == "Profile 0 (8-bit 4:2:0)",
+        "VP9 Smart Optimizer selects the matching 8-bit profile");
+
+    rec.codec = "svt-av1";
+    rec.preset = "preset 7";
+    CodecPresets.apply_smart_svt_av1 (svt, rec);
+    assert_true (svt.snapshot_pixel_format_settings ().eight_bit_selected,
+        "SVT-AV1 tab can transition to Smart Optimizer's 8-bit recommendation");
 }
 
 private void test_svt_av1_crf_two_pass_capability_updates_visibility () {
@@ -4954,6 +5065,89 @@ private void test_image_overlay_fragment_original_size () {
     assert_contains (frag, "y=5", "top left y");
 }
 
+private void test_overlay_output_format_mapping () {
+    var pixel_format = new PixelFormatSettingsSnapshot ();
+
+    pixel_format.eight_bit_selected = true;
+    pixel_format.eight_bit_format_text = "8-bit 4:2:2";
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format (pixel_format),
+        "yuv422", "8-bit 4:2:2 overlay format");
+
+    pixel_format.eight_bit_selected = false;
+    pixel_format.ten_bit_selected = true;
+    pixel_format.ten_bit_format_text = "10-bit 4:4:4";
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format (pixel_format),
+        "yuv444p10", "10-bit 4:4:4 overlay format");
+
+    pixel_format.ten_bit_selected = false;
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format (pixel_format),
+        "", "unset overlay format");
+
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format_from_pix_fmt (
+            PixelFormat.YUV420P),
+        "yuv420", "8-bit 4:2:0 FFmpeg format mapping");
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format_from_pix_fmt (
+            PixelFormat.YUV422P10LE),
+        "yuv422p10", "10-bit 4:2:2 FFmpeg format mapping");
+    assert_string_equal (
+        FilterBuilder.get_overlay_output_format_from_pix_fmt ("unknown"),
+        "", "unknown FFmpeg format remains unset");
+
+    assert_string_equal (
+        FilterBuilder.retarget_yuv_pixel_format_filters (
+            "scale=1280:720,format=yuv420p,eq=contrast=1.1",
+            PixelFormat.YUV420P10LE),
+        "scale=1280:720,format=yuv420p10le,eq=contrast=1.1",
+        "Smart format replaces a stale explicit output depth in place");
+    assert_string_equal (
+        FilterBuilder.retarget_yuv_pixel_format_filters (
+            "scale=1280:720", PixelFormat.YUV420P10LE),
+        "scale=1280:720,format=yuv420p10le",
+        "Smart format is appended when the chain has no format filter");
+    assert_string_equal (
+        FilterBuilder.retarget_yuv_pixel_format_filters (
+            "format=rgba", PixelFormat.YUV420P10LE),
+        "format=rgba,format=yuv420p10le",
+        "unrelated format filters are preserved");
+    assert_string_equal (
+        FilterBuilder.retarget_yuv_pixel_format_filters (
+            "drawtext=text=hello\\,world,format=yuv420p",
+            PixelFormat.YUV420P10LE),
+        "drawtext=text=hello\\,world,format=yuv420p10le",
+        "escaped commas inside filter arguments survive Smart retargeting");
+    assert_string_equal (
+        FilterBuilder.retarget_yuv_pixel_format_filters (
+            "drawtext=text='hello,world',format=yuv420p",
+            PixelFormat.YUV420P10LE),
+        "drawtext=text='hello,world',format=yuv420p10le",
+        "quoted commas inside filter arguments survive Smart retargeting");
+
+    PixelFormatSettingsSnapshot from_ffmpeg =
+        CodecUtils.pixel_format_settings_from_ffmpeg_pix_fmt (
+            PixelFormat.YUV444P10LE);
+    assert_true (from_ffmpeg.ten_bit_selected,
+        "FFmpeg 10-bit format selects the codec tab's 10-bit control");
+    assert_false (from_ffmpeg.eight_bit_selected,
+        "FFmpeg 10-bit format leaves the 8-bit control off");
+    assert_string_equal (from_ffmpeg.ten_bit_format_text,
+        "10-bit 4:4:4", "FFmpeg chroma maps to the codec tab label");
+}
+
+private void test_image_overlay_fragment_preserves_10bit () {
+    string frag = FilterBuilder.build_image_overlay_fragment (
+        "[1:v]", "[0:v]", "[outv]",
+        "Bottom Right", 10, 0.5, 150, "yuv420p10");
+
+    assert_contains (
+        frag, "overlay=x=main_w-overlay_w-10:y=main_h-overlay_h-10:format=yuv420p10[outv]",
+        "overlay fragment preserves selected 10-bit format");
+}
+
 private void test_image_overlay_position_presets () {
     // Top Right
     string x_expr, y_expr;
@@ -5182,6 +5376,37 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
     }
 }
 
+private void test_bit_depth_warning_dialog_preference_persists () {
+    string? config_root = null;
+    try {
+        config_root = DirUtils.make_tmp ("bit-depth-warning-setting-XXXXXX");
+
+        var settings = AppSettings.create_for_test (config_root);
+        assert_true (settings.show_bit_depth_warning_dialog,
+            "bit-depth dialog preference defaults to enabled");
+
+        settings.show_bit_depth_warning_dialog = false;
+        settings.save ();
+
+        var reloaded = AppSettings.create_for_test (config_root);
+        assert_false (reloaded.show_bit_depth_warning_dialog,
+            "disabled bit-depth dialog preference survives reload");
+
+        reloaded.reset_to_defaults ();
+        var reset = AppSettings.create_for_test (config_root);
+        assert_true (reset.show_bit_depth_warning_dialog,
+            "reset restores the bit-depth dialog preference default");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create settings test directory: %s", e.message);
+    } finally {
+        if (config_root != null) {
+            cleanup_exec_test_dir (Path.build_filename (
+                config_root, "FFmpeg-Converter-GTK"));
+            DirUtils.remove (config_root);
+        }
+    }
+}
+
 private void test_recent_input_menu_item_exposes_full_path_tooltip () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -5205,6 +5430,8 @@ void main (string[] args) {
         test_file_pickers_combine_lock_clears_and_disables_input);
     Test.add_func ("/app-settings/recent-inputs/bounded-deduplicated-pruned",
         test_recent_input_history_is_bounded_deduplicated_and_pruned);
+    Test.add_func ("/app-settings/bit-depth-warning/dialog-preference-persists",
+        test_bit_depth_warning_dialog_preference_persists);
     Test.add_func ("/hamburger/recent-inputs/full-path-tooltip",
         test_recent_input_menu_item_exposes_full_path_tooltip);
     Test.add_func ("/combine/information/clears-stale-input-when-removed",
@@ -5255,6 +5482,8 @@ void main (string[] args) {
         test_conversion_runner_image_watermark_toggle_off_maps_first_audio_only);
     Test.add_func ("/convert/runner/image-watermark-toggle-on-maps-all-audio",
         test_conversion_runner_image_watermark_toggle_on_maps_all_audio);
+    Test.add_func ("/convert/runner/image-watermark-preserves-selected-10bit",
+        test_conversion_runner_image_watermark_preserves_selected_10bit);
     Test.add_func ("/convert/runner/pass1-image-watermark-keeps-audio-mapping-disabled",
         test_conversion_runner_pass1_image_watermark_keeps_audio_mapping_disabled);
     Test.add_func ("/convert/runner/pass2-toggle-on-maps-primary-video-and-all-audio",
@@ -5475,6 +5704,8 @@ void main (string[] args) {
         test_svt_av1_crf_two_pass_probe_prefers_error_over_info);
     Test.add_func ("/combine/vmaf/filter-parser-exact-name",
         test_vmaf_filter_parser_requires_exact_libvmaf_name);
+    Test.add_func ("/combine/encoder-pixel-format/parser-exact-token",
+        test_encoder_pixel_format_parser_requires_exact_token);
     Test.add_func ("/combine/vmaf/probe-supported-and-unsupported",
         test_vmaf_probe_reports_supported_and_unsupported);
     Test.add_func ("/combine/vmaf/probe-binary-error",
@@ -5521,6 +5752,10 @@ void main (string[] args) {
         test_image_overlay_fragment_full_opacity);
     Test.add_func ("/combine/image-watermark/overlay-fragment-original-size",
         test_image_overlay_fragment_original_size);
+    Test.add_func ("/combine/image-watermark/overlay-output-format-mapping",
+        test_overlay_output_format_mapping);
+    Test.add_func ("/combine/image-watermark/overlay-fragment-preserves-10bit",
+        test_image_overlay_fragment_preserves_10bit);
     Test.add_func ("/combine/image-watermark/overlay-position-presets",
         test_image_overlay_position_presets);
     Test.add_func ("/combine/image-watermark/effective-state-requires-file",

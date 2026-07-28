@@ -457,14 +457,16 @@ public class ConversionRunner {
                     config.profile.watermark_position,
                     config.profile.watermark_margin,
                     config.profile.watermark_opacity,
-                    config.profile.watermark_image_width);
+                    config.profile.watermark_image_width,
+                    config.profile.overlay_format);
             } else {
                 fc = FilterBuilder.build_image_overlay_fragment (
                     "[1:v]", "[0:v]", "[outv]",
                     config.profile.watermark_position,
                     config.profile.watermark_margin,
                     config.profile.watermark_opacity,
-                    config.profile.watermark_image_width);
+                    config.profile.watermark_image_width,
+                    config.profile.overlay_format);
             }
 
             cmd += "-filter_complex";

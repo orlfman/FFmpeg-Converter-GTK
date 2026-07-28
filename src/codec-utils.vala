@@ -113,6 +113,9 @@ public class EncodeProfileSnapshot : Object {
     public string watermark_position = "Bottom Right";
     public double watermark_opacity = 0.5;
     public int watermark_margin = 10;
+    // FFmpeg overlay filter output family selected for the video. Empty keeps
+    // the filter's default when the user left output depth/chroma on Auto.
+    public string overlay_format = "";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -124,6 +127,50 @@ public class EncodeProfileSnapshot : Object {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace CodecUtils {
+    /**
+     * Translate an FFmpeg YUV pixel-format name into the codec-tab selection
+     * used by the rest of the app. Unknown formats leave both depth switches
+     * unset so callers do not silently invent an output policy.
+     */
+    public PixelFormatSettingsSnapshot pixel_format_settings_from_ffmpeg_pix_fmt (
+        string? pix_fmt
+    ) {
+        var snapshot = new PixelFormatSettingsSnapshot ();
+        if (pix_fmt == null)
+            return snapshot;
+
+        switch (pix_fmt.down ()) {
+            case PixelFormat.YUV420P:
+                snapshot.eight_bit_selected = true;
+                snapshot.eight_bit_format_text = "8-bit " + Chroma.C420;
+                break;
+            case PixelFormat.YUV422P:
+                snapshot.eight_bit_selected = true;
+                snapshot.eight_bit_format_text = "8-bit " + Chroma.C422;
+                break;
+            case PixelFormat.YUV444P:
+                snapshot.eight_bit_selected = true;
+                snapshot.eight_bit_format_text = "8-bit " + Chroma.C444;
+                break;
+            case PixelFormat.YUV420P10LE:
+                snapshot.ten_bit_selected = true;
+                snapshot.ten_bit_format_text = "10-bit " + Chroma.C420;
+                break;
+            case PixelFormat.YUV422P10LE:
+                snapshot.ten_bit_selected = true;
+                snapshot.ten_bit_format_text = "10-bit " + Chroma.C422;
+                break;
+            case PixelFormat.YUV444P10LE:
+                snapshot.ten_bit_selected = true;
+                snapshot.ten_bit_format_text = "10-bit " + Chroma.C444;
+                break;
+            default:
+                break;
+        }
+
+        return snapshot;
+    }
+
     /**
      * Resolve the General tab's configured output frame rate.
      * Returns false for "Original" so callers can use the probed source rate.
@@ -521,6 +568,8 @@ namespace CodecUtils {
             snapshot.watermark_position = general_settings.watermark_position;
             snapshot.watermark_opacity = general_settings.watermark_opacity;
             snapshot.watermark_margin = general_settings.watermark_margin;
+            snapshot.overlay_format = FilterBuilder.get_overlay_output_format (
+                general_settings.pixel_format);
         }
 
         return snapshot;

@@ -546,7 +546,8 @@ public class TrimRunner : Object {
                 reencode_profile.watermark_position,
                 reencode_profile.watermark_margin,
                 reencode_profile.watermark_opacity,
-                reencode_profile.watermark_image_width));
+                reencode_profile.watermark_image_width,
+                reencode_profile.overlay_format));
         }
 
         cmd += "-filter_complex";
@@ -838,7 +839,25 @@ public class TrimRunner : Object {
                 return runner.is_cancelled () ? 1 : PEAK_ANALYSIS_FAILED_EXIT;
             }
 
+            SegmentCodecArgs? smart_settings = null;
+            if (per_segment_codec_args != null
+                && seg_index >= 0
+                && seg_index < per_segment_codec_args.length) {
+                var candidate = per_segment_codec_args[seg_index];
+                if (candidate != null && !candidate.is_empty ())
+                    smart_settings = candidate;
+            }
+
+            string segment_overlay_format = reencode_profile != null
+                ? reencode_profile.overlay_format : "";
+            if (smart_settings != null && smart_settings.overlay_format.length > 0)
+                segment_overlay_format = smart_settings.overlay_format;
+
             string vf = build_segment_vf (seg);
+            if (smart_settings != null && smart_settings.pixel_format.length > 0) {
+                vf = FilterBuilder.retarget_yuv_pixel_format_filters (
+                    vf, smart_settings.pixel_format);
+            }
             bool seg_image_wm = is_trim_image_watermark_active ();
 
             if (seg_image_wm) {
@@ -853,14 +872,16 @@ public class TrimRunner : Object {
                         reencode_profile.watermark_position,
                         reencode_profile.watermark_margin,
                         reencode_profile.watermark_opacity,
-                        reencode_profile.watermark_image_width);
+                        reencode_profile.watermark_image_width,
+                        segment_overlay_format);
                 } else {
                     fc = FilterBuilder.build_image_overlay_fragment (
                         "[1:v]", "[0:v]", "[outv]",
                         reencode_profile.watermark_position,
                         reencode_profile.watermark_margin,
                         reencode_profile.watermark_opacity,
-                        reencode_profile.watermark_image_width);
+                        reencode_profile.watermark_image_width,
+                        segment_overlay_format);
                 }
 
                 cmd += "-filter_complex";
@@ -886,15 +907,10 @@ public class TrimRunner : Object {
 
             // ── Video codec args: per-segment Smart Optimizer or shared builder ──
             bool used_smart_args = false;
-            if (per_segment_codec_args != null
-                && seg_index >= 0
-                && seg_index < per_segment_codec_args.length) {
-                var smart = per_segment_codec_args[seg_index];
-                if (smart != null && !smart.is_empty ()) {
-                    foreach (string arg in smart.args) cmd += arg;
-                    used_smart_args = true;
-                    log_line ("🧠 Segment %d: using Smart Optimizer codec args".printf (seg_index + 1));
-                }
+            if (smart_settings != null) {
+                foreach (string arg in smart_settings.args) cmd += arg;
+                used_smart_args = true;
+                log_line ("🧠 Segment %d: using Smart Optimizer codec args".printf (seg_index + 1));
             }
 
             if (!used_smart_args) {

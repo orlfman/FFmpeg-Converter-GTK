@@ -157,6 +157,25 @@ private double probe_media_duration_seconds (string path, string context) {
     return double.parse (stdout_buf.strip ());
 }
 
+private string probe_video_pixel_format (string path, string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffprobe_path,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=pix_fmt",
+        "-of", "default=nw=1:nk=1",
+        path
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s failed to probe pixel format for '%s': %s",
+            context, path, stderr_buf.strip ());
+    }
+    return stdout_buf.strip ();
+}
+
 private void cleanup_exec_test_dir (string dir) {
     try {
         var d = Dir.open (dir);
@@ -225,6 +244,184 @@ private EncodeProfileSnapshot make_trim_reencode_profile_for_test (string waterm
     profile.watermark_opacity = 1.0;
     profile.watermark_margin = 10;
     return profile;
+}
+
+private SmartOptimizerImageWatermark make_smart_watermark_for_test (
+    string watermark_path
+) {
+    var general = new GeneralSettingsSnapshot ();
+    general.watermark_enabled = true;
+    general.watermark_mode = "image";
+    general.watermark_image_path = watermark_path;
+    general.watermark_image_width = 60;
+    general.watermark_position = "Top Left";
+    general.watermark_opacity = 0.75;
+    general.watermark_margin = 7;
+
+    SmartOptimizerImageWatermark? watermark =
+        FilterBuilder.snapshot_smart_image_watermark (general);
+    assert_true (watermark != null,
+        "Smart image watermark snapshot is active");
+    return watermark;
+}
+
+private void test_smart_watermark_calibration_and_reference_topology () {
+    string input_path = resolve_test_asset_path ("test_dvd.vob");
+    string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+    SmartOptimizerImageWatermark watermark =
+        make_smart_watermark_for_test (watermark_path);
+    var optimizer = new SmartOptimizer ();
+
+    string[] direct = optimizer.build_watermarked_calibration_cmd_for_test (
+        input_path, "/tmp/smart-watermark-direct.mkv",
+        "scale=640:360,format=yuv420p10le", PixelFormat.YUV420P10LE,
+        watermark);
+    assert_array_has_adjacent_pair (direct, "-i", watermark_path,
+        "Smart direct calibration includes watermark input");
+    string direct_fc = get_filter_complex_from_argv (
+        direct, "Smart direct watermark calibration");
+    assert_contains (direct_fc, "concat=n=1:v=1:a=0[vpre]",
+        "Smart direct calibration overlays after filtered sample concat");
+    assert_contains (direct_fc,
+        "overlay=x=7:y=7:format=yuv420p10[v]",
+        "Smart direct calibration preserves decided 10-bit output");
+
+    string[] reference = optimizer.build_watermarked_reference_cmd_for_test (
+        input_path, "/tmp/smart-watermark-reference.mkv",
+        "scale=640:360,format=yuv420p10le", PixelFormat.YUV420P10LE,
+        watermark);
+    assert_array_has_adjacent_pair (reference, "-i", watermark_path,
+        "Quality reference includes watermark input");
+    assert_contains (get_filter_complex_from_argv (
+            reference, "Smart watermarked Quality reference"),
+        "overlay=x=7:y=7:format=yuv420p10[v]",
+        "VMAF reference renders the same 10-bit watermark pixels");
+
+    string[] no_watermark = optimizer.build_watermarked_calibration_cmd_for_test (
+        input_path, "/tmp/smart-no-watermark.mkv",
+        "scale=640:360", PixelFormat.YUV420P, null);
+    assert_array_not_contains (no_watermark, watermark_path,
+        "No-watermark Smart calibration has no extra image input");
+    assert_false (get_filter_complex_from_argv (
+            no_watermark, "Smart calibration without watermark").contains ("overlay="),
+        "No-watermark Smart calibration topology remains unchanged");
+}
+
+private void test_smart_watermark_snapshot_tracks_file_and_settings () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-smart-watermark-identity-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string watermark_path = Path.build_filename (tmp_dir, "watermark.bin");
+        FileUtils.set_contents (watermark_path, "first");
+
+        var general = new GeneralSettingsSnapshot ();
+        general.watermark_enabled = true;
+        general.watermark_mode = "image";
+        general.watermark_image_path = watermark_path;
+        general.watermark_image_width = 80;
+        general.watermark_position = "Bottom Right";
+        general.watermark_opacity = 0.5;
+        general.watermark_margin = 10;
+
+        SmartOptimizerImageWatermark? first =
+            FilterBuilder.snapshot_smart_image_watermark (general);
+        assert_true (first != null, "first watermark snapshot exists");
+        string first_identity = first.cache_identity ();
+
+        // Changing the file in place must miss even though its path is stable.
+        FileUtils.set_contents (watermark_path, "second-and-longer");
+        SmartOptimizerImageWatermark? changed_file =
+            FilterBuilder.snapshot_smart_image_watermark (general);
+        assert_true (changed_file != null, "changed-file watermark snapshot exists");
+        assert_true (changed_file.cache_identity () != first_identity,
+            "watermark file contents change cache identity");
+
+        // A rendered setting change must also miss without touching the file.
+        general.watermark_opacity = 0.75;
+        SmartOptimizerImageWatermark? changed_setting =
+            FilterBuilder.snapshot_smart_image_watermark (general);
+        assert_true (changed_setting != null,
+            "changed-setting watermark snapshot exists");
+        assert_true (changed_setting.cache_identity ()
+                != changed_file.cache_identity (),
+            "watermark rendering setting changes cache identity");
+    } catch (Error e) {
+        Test.fail_printf ("watermark identity test failed: %s", e.message);
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+private void test_smart_watermark_commands_execute_at_8_and_10_bit () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-smart-watermark-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+        SmartOptimizerImageWatermark watermark =
+            make_smart_watermark_for_test (watermark_path);
+        var optimizer = new SmartOptimizer ();
+
+        string output8 = Path.build_filename (tmp_dir, "calibration-8bit.mkv");
+        string[] command8 = optimizer.build_watermarked_calibration_cmd_for_test (
+            input_path, output8, "scale=640:360,format=yuv420p",
+            PixelFormat.YUV420P, watermark);
+        string stdout_buf, stderr_buf;
+        int status8 = run_command_for_test (
+            command8, out stdout_buf, out stderr_buf,
+            "8-bit Smart watermark calibration");
+        assert_true (status8 == 0,
+            "8-bit Smart watermark calibration executes: " + stderr_buf.strip ());
+        assert_string_equal (probe_video_pixel_format (
+                output8, "8-bit Smart watermark output"),
+            PixelFormat.YUV420P,
+            "8-bit Smart watermark output pixel format");
+
+        string output10 = Path.build_filename (tmp_dir, "calibration-10bit.mkv");
+        string[] command10 = optimizer.build_watermarked_calibration_cmd_for_test (
+            input_path, output10, "scale=640:360,format=yuv420p10le",
+            PixelFormat.YUV420P10LE, watermark);
+        int status10 = run_command_for_test (
+            command10, out stdout_buf, out stderr_buf,
+            "10-bit Smart watermark calibration");
+        assert_true (status10 == 0,
+            "10-bit Smart watermark calibration executes: " + stderr_buf.strip ());
+        assert_string_equal (probe_video_pixel_format (
+                output10, "10-bit Smart watermark output"),
+            PixelFormat.YUV420P10LE,
+            "10-bit Smart watermark output pixel format");
+
+        // Quality Mode uses this lossless intermediate as both its encoded
+        // source and its VMAF reference, so the watermark must execute here too.
+        string reference10 = Path.build_filename (tmp_dir, "reference-10bit.mkv");
+        string[] reference_cmd = optimizer.build_watermarked_reference_cmd_for_test (
+            input_path, reference10, "scale=640:360,format=yuv420p10le",
+            PixelFormat.YUV420P10LE, watermark);
+        int reference_status = run_command_for_test (
+            reference_cmd, out stdout_buf, out stderr_buf,
+            "10-bit Smart watermarked Quality reference");
+        assert_true (reference_status == 0,
+            "10-bit Smart watermarked Quality reference executes: "
+                + stderr_buf.strip ());
+        assert_string_equal (probe_video_pixel_format (
+                reference10, "10-bit Smart Quality reference"),
+            PixelFormat.YUV420P10LE,
+            "10-bit Smart Quality reference pixel format");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
 }
 
 private void assert_toggle_aware_audio_mapping (string[] argv,
@@ -575,6 +772,60 @@ private void test_trim_image_watermark_export_maps_first_audio_only () {
     }
 }
 
+private void test_trim_smart_segment_preserves_recommended_10bit_overlay () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-smart-overlay-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string output_path = Path.build_filename (tmp_dir, "smart-overlay.mkv");
+        string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 2.0));
+        runner.set_segments (segments);
+        runner.reencode_profile =
+            make_trim_reencode_profile_for_test (watermark_path);
+        runner.reencode_profile.video_filters_skip_delogo =
+            "scale=iw:ih,format=" + PixelFormat.YUV420P;
+        runner.reencode_profile.video_filters_skip_crop_and_delogo =
+            runner.reencode_profile.video_filters_skip_delogo;
+
+        var smart_args = new GenericArray<SegmentCodecArgs> ();
+        smart_args.add (new SegmentCodecArgs (
+            { "-c:v", "ffv1", "-pix_fmt", PixelFormat.YUV420P10LE },
+            PixelFormat.YUV420P10LE));
+        runner.set_per_segment_codec_args (smart_args);
+
+        int exit_code = runner.run_extract_segment_for_widget_test (0, output_path);
+        assert_true (exit_code == 0,
+            "Smart Trim 10-bit watermark export exit code");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        string filter_complex = get_filter_complex_from_argv (
+            argv, "Smart Trim 10-bit watermark export");
+        assert_contains (filter_complex, "format=yuv420p10le[vf_out]",
+            "Smart Trim normalizes decoded frames to the recommended depth");
+        assert_false (filter_complex.contains ("format=yuv420p,"),
+            "Smart Trim does not first discard precision through stale 8-bit output");
+        assert_contains (filter_complex, ":format=yuv420p10[outv]",
+            "Smart Trim carries the recommendation through the overlay");
+        assert_array_has_adjacent_pair (argv, "-pix_fmt", PixelFormat.YUV420P10LE,
+            "Smart Trim retains the recommendation in encoder arguments");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
 private void test_trim_peak_detect_maps_first_audio_only () {
     string input_path = resolve_test_asset_path ("test_dvd.vob");
     string watermark_path = resolve_test_asset_path ("watermarktestimage.jpg");
@@ -635,6 +886,7 @@ private void test_subtitle_burn_in_bitmap_image_watermark_toggle_off_topology ()
 
     var runner = new SubtitlesRunner ();
     var profile = make_subtitle_burn_in_profile_for_test (false, watermark_path);
+    profile.overlay_format = "yuv420p10";
 
     string[] argv = runner.build_burn_in_command_for_widget_test (
         input_path,
@@ -657,16 +909,18 @@ private void test_subtitle_burn_in_bitmap_image_watermark_toggle_off_topology ()
     string filter_complex = get_filter_complex_from_argv (argv,
         "bitmap subtitle burn-in with image watermark");
 
-    assert_contains (filter_complex, "[0:v][1:0]overlay[subbedv]",
-        "subtitle burn-in overlays external bitmap subtitles first");
+    assert_contains (filter_complex,
+        "[0:v][1:0]overlay=format=yuv420p10[subbedv]",
+        "subtitle burn-in preserves 10-bit while overlaying bitmap subtitles");
     assert_contains (filter_complex, "[subbedv]zscale=",
         "subtitle burn-in applies general video filters after subtitle overlay");
     assert_contains (filter_complex, "[2:v]scale=120:-1",
         "subtitle burn-in uses watermark image as third input");
     assert_contains (filter_complex, "colorchannelmixer=aa=0.85",
         "subtitle burn-in applies watermark opacity");
-    assert_contains (filter_complex, "overlay=x=main_w-overlay_w-10:y=10[outv]",
-        "subtitle burn-in overlays watermark at requested position");
+    assert_contains (filter_complex,
+        "overlay=x=main_w-overlay_w-10:y=10:format=yuv420p10[outv]",
+        "subtitle burn-in preserves 10-bit through the watermark overlay");
 }
 
 private void test_subtitle_burn_in_bitmap_image_watermark_toggle_on_topology () {
@@ -1377,6 +1631,14 @@ void main (string[] args) {
         test_trim_image_watermark_preserves_segment_duration);
     Test.add_func ("/trim/runner/image-watermark-maps-first-audio",
         test_trim_image_watermark_export_maps_first_audio_only);
+    Test.add_func ("/trim/runner/smart-segment-preserves-10bit-overlay",
+        test_trim_smart_segment_preserves_recommended_10bit_overlay);
+    Test.add_func ("/smart-optimizer/watermark/calibration-reference-topology",
+        test_smart_watermark_calibration_and_reference_topology);
+    Test.add_func ("/smart-optimizer/watermark/snapshot-tracks-file-and-settings",
+        test_smart_watermark_snapshot_tracks_file_and_settings);
+    Test.add_func ("/smart-optimizer/watermark/commands-execute-8-and-10-bit",
+        test_smart_watermark_commands_execute_at_8_and_10_bit);
     Test.add_func ("/trim/runner/peak-detect-maps-first-audio",
         test_trim_peak_detect_maps_first_audio_only);
     Test.add_func ("/trim/runner/segment-crop-follows-logo-removal",

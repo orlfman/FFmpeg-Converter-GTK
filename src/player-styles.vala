@@ -16,6 +16,12 @@ namespace PlayerStyles {
         if (loaded) return;
         loaded = true;
 
+        var display = Gdk.Display.get_default ();
+        var icon_theme = Gtk.IconTheme.get_for_display (display);
+        icon_theme.add_resource_path (
+            "/com/github/pieman/FFmpegConverterGTK/icons"
+        );
+
         var css = new CssProvider ();
         css.load_from_string (
             // Transport control bar
@@ -32,7 +38,7 @@ namespace PlayerStyles {
             "}\n"
         );
         GtkCompat.add_provider_for_display (
-            Gdk.Display.get_default (),
+            display,
             css,
             STYLE_PROVIDER_PRIORITY_APPLICATION
         );

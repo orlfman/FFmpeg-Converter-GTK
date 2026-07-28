@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/github/pieman/FFmpegConverterGTK">
+    <file>icons/scalable/actions/video-seek-backward-frame-symbolic.svg</file>
+    <file>icons/scalable/actions/video-seek-forward-frame-symbolic.svg</file>
+    <file>icons/scalable/actions/video-seek-backward-one-second-symbolic.svg</file>
+    <file>icons/scalable/actions/video-seek-forward-one-second-symbolic.svg</file>
+    <file>icons/scalable/actions/video-seek-backward-five-seconds-symbolic.svg</file>
+    <file>icons/scalable/actions/video-seek-forward-five-seconds-symbolic.svg</file>
+  </gresource>
+</gresources>

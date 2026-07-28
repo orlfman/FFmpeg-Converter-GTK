@@ -156,6 +156,9 @@ public struct OptimizationRecommendation {
     public bool stream_copy_audio;     // true when source audio should be copied, not re-encoded
     public bool strip_metadata;        // true for TINY tier — save every byte
     public string recommended_pix_fmt; // "yuv420p10le", "yuv420p", or "" (codec default)
+    /** Unsafe/meaningful depth downgrade that needs explicit user attention. */
+    public bool bit_depth_attention_required;
+    public string bit_depth_attention_reason;
     public string resolved_container;  // effective container after tier policy (e.g. "webm", "mp4", "mkv")
     public int target_size_kib;        // user-requested target size in KiB
     public double grain_score;         // measured TOUT (temporal-outlier fraction) — grain/noise proxy
@@ -225,6 +228,32 @@ public enum ContentOverride {
 }
 
 /**
+ * Frozen image-watermark inputs that affect Smart Optimizer's encoded probes.
+ * The image stays separate from video_filter_chain because FFmpeg overlay is a
+ * two-input filter and therefore requires a filter-complex graph.
+ */
+public class SmartOptimizerImageWatermark : Object {
+    public string path = "";
+    public string file_identity = "";
+    public int width = 150;
+    public string position = "Bottom Right";
+    public double opacity = 0.5;
+    public int margin = 10;
+
+    public bool is_active () {
+        return path.strip ().length > 0;
+    }
+
+    /** Stable cache component for every setting that changes rendered pixels. */
+    public string cache_identity () {
+        if (!is_active ())
+            return "watermark:none";
+        return "watermark:image|%s|%s|%d|%s|%.6f|%d".printf (
+            path, file_identity, width, position, opacity, margin);
+    }
+}
+
+/**
  * Optional context from the caller (GeneralTab settings, etc.) that affects
  * calibration accuracy. All fields have safe defaults.
  */
@@ -247,6 +276,10 @@ public struct OptimizationContext {
      *  Empty string means no filters. Applied to calibration encodes
      *  so size estimates reflect the actual output resolution/processing. */
     public string video_filter_chain;
+
+    /** Optional image overlay, rendered into calibration and VMAF reference
+     *  frames but deliberately excluded from source-content classification. */
+    public SmartOptimizerImageWatermark? image_watermark;
 
     /** Trim start in seconds. 0 means start from the beginning. */
     public double trim_start_seconds;
@@ -339,7 +372,7 @@ public struct ContentProfile {
      */
     public double      spatial_info;
     public double      banding_risk;         // 0.0–1.0 composite score
-    public double      low_luma_ratio;       // fraction of frames with high dark pixel count
+    public double      low_luma_ratio;       // fraction whose 10th-percentile luma is dark
     public double      dark_scene_ratio;     // fraction of frames where avg luma < 60
 }
 
@@ -361,6 +394,9 @@ namespace SmartOptimizerLogic {
     public const int    MIN_SEGMENTS       = 2;        // absolute minimum
     public const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
     public const int    ADAPTIVE_CALIBRATION_BASE_MAX_POINTS = 6; // 4 base + up to 2 follow-up CRFs
+    // signalstats YLOW is the 10th-percentile luma level, not a pixel count.
+    // 16 is studio-range black on the 8-bit-normalized measurement scale.
+    public const double DARK_LUMA_PERCENTILE_THRESHOLD = 16.0;
 
     // Minimum sample coverage target (15%). The segment count is computed
     // from this so that short and medium videos get enough coverage to
@@ -608,6 +644,34 @@ namespace SmartOptimizerLogic {
         if (file_size_bytes <= 0)
             return TARGET_MB_MIN;
         return clamp_target_mb ((int) Math.round (mib_from_bytes (file_size_bytes)));
+    }
+
+    /** Resolve the run's authoritative target independently of async UI state. */
+    public int resolve_target_mb (int configured_target_mb,
+                                  bool match_source_size,
+                                  int64 source_file_size_bytes) {
+        if (match_source_size && source_file_size_bytes > 0)
+            return match_source_target_mb (source_file_size_bytes);
+        return clamp_target_mb (configured_target_mb);
+    }
+
+    /** Compare only the controls that can shape the selected Smart mode. */
+    public bool run_mode_settings_equal (
+        bool left_quality_mode,
+        QualityIntent left_quality_intent,
+        bool left_match_source_size,
+        int left_target_mb,
+        bool right_quality_mode,
+        QualityIntent right_quality_intent,
+        bool right_match_source_size,
+        int right_target_mb
+    ) {
+        if (left_quality_mode != right_quality_mode)
+            return false;
+        if (left_quality_mode)
+            return left_quality_intent == right_quality_intent;
+        return left_match_source_size == right_match_source_size
+            && left_target_mb == right_target_mb;
     }
 
     /**
@@ -1582,9 +1646,7 @@ namespace SmartOptimizerLogic {
     public void compute_banding_metrics (
         ref ContentProfile profile,
         double[] all_yavg,
-        double[] all_ylow,
-        int      width,
-        int      height
+        double[] all_ylow
     ) {
         // Dark scene ratio: fraction of frames where avg luma < 60 (of 235 range)
         if (all_yavg.length > 0) {
@@ -1595,17 +1657,16 @@ namespace SmartOptimizerLogic {
             profile.dark_scene_ratio = (double) dark_count / all_yavg.length;
         }
 
-        // Low luma ratio: fraction of frames with significant dark pixel area.
-        // YLOW counts pixels with luma ≤ 16 — normalize by resolution to make
-        // the threshold resolution-adaptive.
+        // YLOW is signalstats' 10th-percentile luma level. A frame counts when
+        // at least 10% of its pixels are at/below studio-range black. The
+        // caller has already normalized 10-bit measurements onto the 8-bit
+        // scale, so neither a pixel-count nor a resolution adjustment belongs
+        // here.
         if (all_ylow.length > 0) {
-            double resolution_scale = (width > 0 && height > 0)
-                ? (double) (width * height) / 100000.0
-                : 1.0;
             int ylow_count = 0;
             for (int i = 0; i < all_ylow.length; i++) {
-                double normalized = all_ylow[i] / resolution_scale;
-                if (normalized > 5000.0) ylow_count++;
+                if (all_ylow[i] <= DARK_LUMA_PERCENTILE_THRESHOLD)
+                    ylow_count++;
             }
             profile.low_luma_ratio = (double) ylow_count / all_ylow.length;
         }
@@ -1675,6 +1736,21 @@ namespace SmartOptimizerLogic {
         return value / Math.pow (2.0, (double) (source_bit_depth - 8));
     }
 
+    /**
+     * Smart Optimizer supports 8- and 10-bit output. Analyze on that same
+     * effective scale so a pre-existing codec-tab format cannot silently
+     * quantize or inflate signalstats before depth normalization.
+     */
+    public int effective_analysis_bit_depth (int source_bit_depth) {
+        return (source_bit_depth > 8) ? 10 : 8;
+    }
+
+    public string effective_analysis_pixel_format (int source_bit_depth) {
+        return (effective_analysis_bit_depth (source_bit_depth) > 8)
+            ? PixelFormat.YUV420P10LE
+            : PixelFormat.YUV420P;
+    }
+
     public void compute_stats (double[] values, out double mean, out double stddev) {
         mean   = 0.0;
         stddev = 0.0;
@@ -1700,19 +1776,20 @@ namespace SmartOptimizerLogic {
         ContentProfile profile,
         SizeTier tier,
         string codec,
-        bool tone_mapping_active
+        bool tone_mapping_active,
+        bool x264_10bit_supported = false
     ) {
         bool is_hdr = (info.color_transfer == "smpte2084"
                     || info.color_transfer == "arib-std-b67");
         bool is_wide_gamut = (info.color_primaries == "bt2020");
 
-        // Rule 1: x264 has limited 10-bit support — hard constraint
-        // checked before HDR so we don't recommend 10-bit to a codec
-        // that can't handle it reliably.
-        if (codec == "x264") {
+        // Rule 1: only constrain x264 when the configured FFmpeg encoder did
+        // not confirm yuv420p10le support. Builds that advertise High10 follow
+        // the same preservation/banding rules as the other codecs.
+        if (codec == "x264" && !x264_10bit_supported) {
             string reason = (is_hdr || is_wide_gamut) && !tone_mapping_active
-                ? "x264 has limited 10-bit support; staying 8-bit (consider enabling tone mapping or switching codec for HDR/wide-gamut content)"
-                : "x264 has limited 10-bit support; staying 8-bit";
+                ? "Configured x264 10-bit support was not verified; staying 8-bit (enable tone mapping or switch codec for HDR/wide-gamut content)"
+                : "Configured x264 10-bit support was not verified; staying 8-bit";
             return BitDepthDecision () {
                 pix_fmt  = PixelFormat.YUV420P,
                 is_10bit = false,

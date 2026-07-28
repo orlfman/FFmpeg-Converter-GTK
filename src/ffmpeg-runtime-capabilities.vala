@@ -14,6 +14,26 @@ public enum VmafCapabilityStatus {
     ERROR
 }
 
+public enum EncoderPixelFormatCapabilityStatus {
+    SUPPORTED,
+    UNSUPPORTED,
+    ERROR
+}
+
+public class EncoderPixelFormatCapability : Object {
+    public EncoderPixelFormatCapabilityStatus status {
+        get; set; default = EncoderPixelFormatCapabilityStatus.ERROR;
+    }
+    public string? reason { get; set; default = null; }
+
+    public EncoderPixelFormatCapability copy () {
+        var duplicate = new EncoderPixelFormatCapability ();
+        duplicate.status = status;
+        duplicate.reason = reason;
+        return duplicate;
+    }
+}
+
 public class VmafCapability : Object {
     public VmafCapabilityStatus status {
         get; set; default = VmafCapabilityStatus.ERROR;
@@ -49,6 +69,8 @@ public class FfmpegRuntimeCapabilities : Object {
         new HashTable<string, SvtAv1CrfTwoPassCapability> (str_hash, str_equal);
     private HashTable<string, VmafCapability> vmaf_cache =
         new HashTable<string, VmafCapability> (str_hash, str_equal);
+    private HashTable<string, EncoderPixelFormatCapability> encoder_pixel_format_cache =
+        new HashTable<string, EncoderPixelFormatCapability> (str_hash, str_equal);
     private SvtAv1CrfTwoPassCapability current_svt_crf_two_pass =
         new SvtAv1CrfTwoPassCapability ();
 
@@ -104,6 +126,90 @@ public class FfmpegRuntimeCapabilities : Object {
         if (capability.status != VmafCapabilityStatus.ERROR)
             vmaf_cache.insert (cache_key, capability.copy ());
         return capability;
+    }
+
+    /**
+     * Return whether an encoder exposed by this exact FFmpeg binary accepts a
+     * pixel format. The executable signature is part of the cache key, so an
+     * upgraded/replaced FFmpeg is probed again automatically.
+     */
+    public async EncoderPixelFormatCapability get_encoder_pixel_format_capability (
+        string       binary_path,
+        string       encoder_name,
+        string       pixel_format,
+        Cancellable cancellable
+    ) throws Error {
+        string cache_key = build_binary_cache_key (binary_path)
+            + "|" + encoder_name + "|" + pixel_format;
+        EncoderPixelFormatCapability? cached =
+            encoder_pixel_format_cache.lookup (cache_key);
+        if (cached != null)
+            return cached.copy ();
+
+        EncoderPixelFormatCapability capability =
+            yield probe_encoder_pixel_format (
+                binary_path, encoder_name, pixel_format, cancellable);
+        // Launch failures can be transient. Only cache an authoritative
+        // encoder-help result.
+        if (capability.status != EncoderPixelFormatCapabilityStatus.ERROR)
+            encoder_pixel_format_cache.insert (cache_key, capability.copy ());
+        return capability;
+    }
+
+    /** Exact token check within FFmpeg's `Supported pixel formats:` line. */
+    public static bool encoder_listing_supports_pixel_format (
+        string listing,
+        string pixel_format
+    ) {
+        const string PREFIX = "Supported pixel formats:";
+        foreach (unowned string line in listing.split ("\n")) {
+            string clean = line.strip ();
+            int prefix_at = clean.index_of (PREFIX);
+            if (prefix_at < 0)
+                continue;
+
+            string formats = clean.substring (prefix_at + PREFIX.length)
+                .replace ("\t", " ");
+            foreach (unowned string token in formats.split (" ")) {
+                if (token == pixel_format)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /** Ask the configured FFmpeg encoder help table about one pixel format. */
+    public static async EncoderPixelFormatCapability probe_encoder_pixel_format (
+        string       binary_path,
+        string       encoder_name,
+        string       pixel_format,
+        Cancellable cancellable
+    ) throws Error {
+        try {
+            string output = yield run_subprocess_capture ({
+                binary_path, "-hide_banner", "-h", "encoder=" + encoder_name
+            }, cancellable);
+
+            var capability = new EncoderPixelFormatCapability ();
+            if (encoder_listing_supports_pixel_format (output, pixel_format)) {
+                capability.status = EncoderPixelFormatCapabilityStatus.SUPPORTED;
+                capability.reason = "%s supports %s in this FFmpeg build."
+                    .printf (encoder_name, pixel_format);
+            } else {
+                capability.status = EncoderPixelFormatCapabilityStatus.UNSUPPORTED;
+                capability.reason = "%s does not advertise %s in this FFmpeg build."
+                    .printf (encoder_name, pixel_format);
+            }
+            return capability;
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            var capability = new EncoderPixelFormatCapability ();
+            capability.status = EncoderPixelFormatCapabilityStatus.ERROR;
+            capability.reason = "Could not verify whether %s supports %s (%s)."
+                .printf (encoder_name, pixel_format, describe_probe_error (e.message));
+            return capability;
+        }
     }
 
     /** Exact filter-name check: `vmafmotion` must not satisfy the guard. */

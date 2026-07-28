@@ -1,6 +1,33 @@
 using Gtk;
 using GLib;
 
+private class SmartOptimizerRunSnapshot : Object {
+    public string input_file = "";
+    public ConversionUtils.FileSignature? input_signature = null;
+    public ConversionUtils.FileSignature? watermark_image_signature = null;
+    public GeneralSettingsSnapshot general_settings = new GeneralSettingsSnapshot ();
+    public bool seek_enabled = false;
+    public double seek_seconds = 0.0;
+    public bool time_enabled = false;
+    public double time_seconds = 0.0;
+    public string container = "";
+    public int target_mb = 0;
+    public bool match_source_size = false;
+    public int64 source_file_size_bytes = -1;
+    public ContentOverride content_override = ContentOverride.AUTO;
+    public bool optimize_for_delivery = false;
+    public bool quality_mode = false;
+    public SmartOptimizerLogic.QualityIntent quality_intent =
+        SmartOptimizerLogic.QualityIntent.MEDIUM;
+    public bool strip_audio_requested = false;
+    public bool audio_output_enabled = true;
+    public bool audio_probe_pending = false;
+    public bool preserve_all_audio_tracks = false;
+    public bool audio_requires_reencode = false;
+    public string ffmpeg_path = "";
+    public string ffprobe_path = "";
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AppController — Cross-component signal wiring and coordination
 //
@@ -139,6 +166,200 @@ public class AppController : Object {
             smart_opt_cancel.cancel ();
             smart_opt_cancel = null;
         }
+    }
+
+    private void release_smart_optimizer_cancel (Cancellable cancellable) {
+        if (smart_opt_cancel == cancellable)
+            smart_opt_cancel = null;
+    }
+
+    private SmartOptimizerRunSnapshot capture_smart_optimizer_run_snapshot (
+        string input_file,
+        string codec,
+        GeneralSettingsSnapshot general_settings
+    ) {
+        var snapshot = new SmartOptimizerRunSnapshot ();
+        snapshot.input_file = input_file;
+        ConversionUtils.FileSignature? input_signature =
+            ConversionUtils.query_file_signature (input_file);
+        snapshot.input_signature = input_signature;
+        if (input_signature != null)
+            snapshot.source_file_size_bytes = input_signature.size;
+        snapshot.general_settings = general_settings;
+        if (general_settings.watermark_enabled
+                && general_settings.watermark_mode == "image"
+                && general_settings.watermark_image_path.strip ().length > 0) {
+            snapshot.watermark_image_signature =
+                ConversionUtils.query_file_signature (
+                    general_settings.watermark_image_path);
+        }
+
+        var settings = AppSettings.get_default ();
+        snapshot.target_mb = settings.smart_optimizer_target_mb;
+
+        snapshot.seek_enabled = general_tab.is_seek_enabled ();
+        if (snapshot.seek_enabled)
+            snapshot.seek_seconds = general_tab.get_seek_seconds ();
+        snapshot.time_enabled = general_tab.is_time_enabled ();
+        if (snapshot.time_enabled)
+            snapshot.time_seconds = general_tab.get_time_seconds ();
+
+        BaseCodecTab? codec_tab = lookup_base_codec_tab (codec);
+        ISmartCodecTab? smart_tab = codec_registry.get (codec);
+        if (codec_tab != null) {
+            snapshot.container = codec_tab.get_container ();
+            snapshot.match_source_size = codec_tab.match_source_size_active;
+        }
+        if (smart_tab != null) {
+            snapshot.target_mb = smart_tab.get_target_mb ();
+            snapshot.content_override = smart_tab.get_content_override ();
+            snapshot.optimize_for_delivery = smart_tab.get_optimize_for_delivery ();
+            snapshot.quality_mode = smart_tab.get_quality_mode_active ();
+            snapshot.quality_intent = smart_tab.get_quality_intent ();
+            snapshot.strip_audio_requested = smart_tab.get_strip_audio_active ();
+
+            AudioSettings audio = smart_tab.get_audio_settings_ref ();
+            snapshot.audio_output_enabled = audio.is_audio_enabled_for_output ();
+            snapshot.audio_probe_pending = audio.is_audio_probe_pending ();
+            snapshot.preserve_all_audio_tracks = audio.get_keep_all_audio_requested ();
+            snapshot.audio_requires_reencode = audio.requires_audio_reencode ();
+        }
+
+        // Match Source is derived from the same synchronous file identity used
+        // by the stale-result guard. The codec tab's size label is populated
+        // asynchronously and can legitimately change from -1 while Smart is
+        // running; it must never shape or invalidate the optimization target.
+        snapshot.target_mb = SmartOptimizerLogic.resolve_target_mb (
+            snapshot.target_mb,
+            snapshot.match_source_size,
+            input_signature != null ? input_signature.size : -1);
+
+        snapshot.ffmpeg_path = settings.ffmpeg_path;
+        snapshot.ffprobe_path = settings.ffprobe_path;
+        return snapshot;
+    }
+
+    private static bool string_arrays_equal (string[] left, string[] right) {
+        if (left.length != right.length)
+            return false;
+        for (int i = 0; i < left.length; i++) {
+            if (left[i] != right[i])
+                return false;
+        }
+        return true;
+    }
+
+    private static bool general_settings_equal (GeneralSettingsSnapshot left,
+                                                GeneralSettingsSnapshot right) {
+        return left.scale_mode == right.scale_mode
+            && left.resolution_preset_value == right.resolution_preset_value
+            && left.custom_resolution_value == right.custom_resolution_value
+            && left.scale_width_multiplier == right.scale_width_multiplier
+            && left.scale_height_multiplier == right.scale_height_multiplier
+            && left.scale_algorithm == right.scale_algorithm
+            && left.scale_range == right.scale_range
+            && left.rotate == right.rotate
+            && left.crop_enabled == right.crop_enabled
+            && left.crop_value == right.crop_value
+            && left.frame_rate_text == right.frame_rate_text
+            && left.custom_frame_rate_text == right.custom_frame_rate_text
+            && left.video_speed_enabled == right.video_speed_enabled
+            && left.video_speed_percent == right.video_speed_percent
+            && left.audio_speed_enabled == right.audio_speed_enabled
+            && left.audio_speed_percent == right.audio_speed_percent
+            && left.color_filter == right.color_filter
+            && left.preserve_metadata == right.preserve_metadata
+            && left.remove_chapters == right.remove_chapters
+            && left.watermark_enabled == right.watermark_enabled
+            && left.watermark_mode == right.watermark_mode
+            && left.watermark_text == right.watermark_text
+            && left.watermark_position == right.watermark_position
+            && left.watermark_color == right.watermark_color
+            && left.watermark_opacity == right.watermark_opacity
+            && left.watermark_margin == right.watermark_margin
+            && left.watermark_font_size == right.watermark_font_size
+            && left.watermark_image_path == right.watermark_image_path
+            && left.watermark_image_width == right.watermark_image_width
+            && left.delogo_enabled == right.delogo_enabled
+            && left.delogo_regions == right.delogo_regions
+            && left.pixel_format.eight_bit_selected
+                == right.pixel_format.eight_bit_selected
+            && left.pixel_format.eight_bit_format_text
+                == right.pixel_format.eight_bit_format_text
+            && left.pixel_format.ten_bit_selected
+                == right.pixel_format.ten_bit_selected
+            && left.pixel_format.ten_bit_format_text
+                == right.pixel_format.ten_bit_format_text
+            && left.video_filters.hdr_filter == right.video_filters.hdr_filter
+            && string_arrays_equal (
+                left.video_filters.processing_filters,
+                right.video_filters.processing_filters);
+    }
+
+    private static bool smart_optimizer_mode_settings_equal (
+        SmartOptimizerRunSnapshot left,
+        SmartOptimizerRunSnapshot right
+    ) {
+        // Only the active decision axis can shape this run. Target controls
+        // are irrelevant in Quality mode; quality intent is irrelevant in
+        // Target Size mode.
+        return SmartOptimizerLogic.run_mode_settings_equal (
+            left.quality_mode, left.quality_intent,
+            left.match_source_size, left.target_mb,
+            right.quality_mode, right.quality_intent,
+            right.match_source_size, right.target_mb);
+    }
+
+    private static bool optional_file_signatures_equal (
+        ConversionUtils.FileSignature? left,
+        ConversionUtils.FileSignature? right
+    ) {
+        if (left == null || right == null)
+            return left == null && right == null;
+        return left.matches (right);
+    }
+
+    private bool smart_optimizer_run_snapshot_matches (
+        SmartOptimizerRunSnapshot expected,
+        string codec
+    ) {
+        if (file_pickers.input_entry.get_text () != expected.input_file)
+            return false;
+
+        ConversionUtils.FileSignature? current_signature =
+            ConversionUtils.query_file_signature (expected.input_file);
+        if (expected.input_signature == null || current_signature == null
+                || !expected.input_signature.matches (current_signature))
+            return false;
+
+        BaseCodecTab? codec_tab = lookup_base_codec_tab (codec);
+        PixelFormatSettingsSnapshot? pixel_format = (codec_tab != null)
+            ? codec_tab.snapshot_pixel_format_settings () : null;
+        GeneralSettingsSnapshot current_general =
+            general_tab.snapshot_settings (pixel_format);
+        SmartOptimizerRunSnapshot current = capture_smart_optimizer_run_snapshot (
+            expected.input_file, codec, current_general);
+
+        return general_settings_equal (
+                expected.general_settings, current.general_settings)
+            && optional_file_signatures_equal (
+                expected.watermark_image_signature,
+                current.watermark_image_signature)
+            && expected.seek_enabled == current.seek_enabled
+            && expected.seek_seconds == current.seek_seconds
+            && expected.time_enabled == current.time_enabled
+            && expected.time_seconds == current.time_seconds
+            && expected.container == current.container
+            && smart_optimizer_mode_settings_equal (expected, current)
+            && expected.content_override == current.content_override
+            && expected.optimize_for_delivery == current.optimize_for_delivery
+            && expected.strip_audio_requested == current.strip_audio_requested
+            && expected.audio_output_enabled == current.audio_output_enabled
+            && expected.audio_probe_pending == current.audio_probe_pending
+            && expected.preserve_all_audio_tracks == current.preserve_all_audio_tracks
+            && expected.audio_requires_reencode == current.audio_requires_reencode
+            && expected.ffmpeg_path == current.ffmpeg_path
+            && expected.ffprobe_path == current.ffprobe_path;
     }
 
     private void wire_all () {
@@ -497,6 +718,11 @@ public class AppController : Object {
 
     private void wire_file_input_changed () {
         file_pickers.input_entry.changed.connect (() => {
+            // A recommendation belongs to the exact file that was measured.
+            // Cancel immediately; the end-of-run signature guard below is the
+            // backstop for changes that race with async completion.
+            if (smart_opt_cancel != null)
+                cancel_smart_optimizer ();
             string path = file_pickers.input_entry.get_text ();
             info_tab.load_input_info (path);
             info_tab.reset_output ();
@@ -754,11 +980,6 @@ public class AppController : Object {
         // strip-audio, and applying the final recommendation.
         var smart_tab = codec_registry.get (codec);
 
-        // Read target from the per-tab spin box; falls back to stored
-        // preference if no codec tab is found (should not happen).
-        int target_mb = (smart_tab != null)
-            ? smart_tab.get_target_mb ()
-            : AppSettings.get_default ().smart_optimizer_target_mb;
         status_area.start_progress ();
         smart_optimizer_running (true);
 
@@ -777,6 +998,8 @@ public class AppController : Object {
             general_tab.snapshot_settings (pixel_format);
         ctx.video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (
             general_snapshot, false, codec);
+        ctx.image_watermark = FilterBuilder.snapshot_smart_image_watermark (
+            general_snapshot);
         ctx.tone_mapping_active = ctx.video_filter_chain.contains ("tonemap=");
         double parsed_output_fps = 0.0;
         if (CodecUtils.try_resolve_output_fps_from_snapshot (
@@ -789,8 +1012,56 @@ public class AppController : Object {
             ctx.output_container = codec_tab.get_container ();
         }
 
+        // Freeze every input that can shape analysis, calibration, or the
+        // recommendation before the first yield. The same state is verified
+        // again immediately before applying the result.
+        SmartOptimizerRunSnapshot run_snapshot =
+            capture_smart_optimizer_run_snapshot (
+                input_file, codec, general_snapshot);
+        if (run_snapshot.input_signature == null) {
+            status_area.stop_progress ();
+            smart_optimizer_running (false);
+            status_area.set_status (
+                "Smart Optimizer: the selected input file could not be read.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            release_smart_optimizer_cancel (my_cancel);
+            return;
+        }
+        if (ctx.image_watermark != null
+                && run_snapshot.watermark_image_signature == null) {
+            status_area.stop_progress ();
+            smart_optimizer_running (false);
+            status_area.set_status (
+                "Smart Optimizer: the selected watermark image could not be read.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            release_smart_optimizer_cancel (my_cancel);
+            return;
+        }
+        int target_mb = run_snapshot.target_mb;
+        ctx.content_override = run_snapshot.content_override;
+        ctx.optimize_for_delivery = run_snapshot.optimize_for_delivery;
+        bool quality_mode = run_snapshot.quality_mode;
+        var quality_intent = run_snapshot.quality_intent;
+
+        if (run_snapshot.audio_probe_pending) {
+            status_area.set_status (
+                "Checking source audio stream. Please wait a moment and try Smart Optimizer again.",
+                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
+            status_area.stop_progress ();
+            smart_optimizer_running (false);
+            release_smart_optimizer_cancel (my_cancel);
+            return;
+        }
+
+        bool strip_audio = run_snapshot.strip_audio_requested
+            || !run_snapshot.audio_output_enabled;
+        ctx.strip_audio = strip_audio;
+        ctx.preserve_all_audio_tracks_requested =
+            run_snapshot.preserve_all_audio_tracks;
+        ctx.audio_requires_reencode = run_snapshot.audio_requires_reencode;
+
         // Effective duration — if seek/time are set, the encode is shorter
-        if (general_tab.is_seek_enabled () || general_tab.is_time_enabled ()) {
+        if (run_snapshot.seek_enabled || run_snapshot.time_enabled) {
             double full_dur = yield FfprobeUtils.probe_duration_async (
                 input_file, my_cancel);
             // Both halves are load-bearing after a resume: the local token
@@ -805,17 +1076,18 @@ public class AppController : Object {
                     smart_optimizer_running (false);
                     status_area.set_status ("Smart Optimizer cancelled.",
                         StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                    release_smart_optimizer_cancel (my_cancel);
                 }
                 return;
             }
             double start = 0.0;
             double end   = full_dur;
 
-            if (general_tab.is_seek_enabled ()) {
-                start = general_tab.get_seek_seconds ();
+            if (run_snapshot.seek_enabled) {
+                start = run_snapshot.seek_seconds;
             }
-            if (general_tab.is_time_enabled ()) {
-                end = double.min (start + general_tab.get_time_seconds (), full_dur);
+            if (run_snapshot.time_enabled) {
+                end = double.min (start + run_snapshot.time_seconds, full_dur);
             }
 
             ctx.trim_start_seconds = start;
@@ -826,8 +1098,8 @@ public class AppController : Object {
             double eff = end - start;
             if (eff > 0 && eff < full_dur) {
                 ctx.effective_duration = eff;
-            } else if (general_tab.is_time_enabled ()) {
-                double requested = general_tab.get_time_seconds ();
+            } else if (run_snapshot.time_enabled) {
+                double requested = run_snapshot.time_seconds;
                 if (requested > 0) {
                     ctx.effective_duration = requested;
                 }
@@ -838,28 +1110,13 @@ public class AppController : Object {
             // kept so it holds the source's bytes-per-second density instead
             // of inheriting a target large enough to impose no constraint.
             if (codec_tab != null
-                && codec_tab.match_source_size_active
-                && codec_tab.get_source_file_size_bytes () > 0
+                && run_snapshot.match_source_size
+                && run_snapshot.source_file_size_bytes > 0
                 && full_dur > 0 && eff > 0) {
                 target_mb = SmartOptimizerLogic.match_source_target_mb_for_window (
-                    codec_tab.get_source_file_size_bytes (), eff, full_dur);
+                    run_snapshot.source_file_size_bytes, eff, full_dur);
             }
         }
-
-        // Which axis did the user pin? Quality Mode solves for a perceptual
-        // score and reports size; Size Mode does the reverse. They are
-        // mutually exclusive by construction in the UI.
-        // Content assertion applies to both modes.
-        ctx.content_override = (smart_tab != null)
-            ? smart_tab.get_content_override () : ContentOverride.AUTO;
-
-        ctx.optimize_for_delivery = (smart_tab != null)
-            && smart_tab.get_optimize_for_delivery ();
-
-        bool quality_mode = (smart_tab != null) && smart_tab.get_quality_mode_active ();
-        var quality_intent = (smart_tab != null)
-            ? smart_tab.get_quality_intent ()
-            : SmartOptimizerLogic.QualityIntent.MEDIUM;
 
         // Quality Target cannot function without the configured FFmpeg's
         // libvmaf filter. Check before probing the video; Target Size does not
@@ -868,13 +1125,14 @@ public class AppController : Object {
             VmafCapability vmaf_capability;
             try {
                 vmaf_capability = yield ffmpeg_runtime_capabilities.get_vmaf_capability (
-                    AppSettings.get_default ().ffmpeg_path, my_cancel);
+                    run_snapshot.ffmpeg_path, my_cancel);
             } catch (IOError.CANCELLED e) {
                 if (my_generation == smart_opt_generation) {
                     status_area.stop_progress ();
                     smart_optimizer_running (false);
                     status_area.set_status ("Smart Optimizer cancelled.",
-                        StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                    release_smart_optimizer_cancel (my_cancel);
                 }
                 return;
             } catch (Error e) {
@@ -885,11 +1143,20 @@ public class AppController : Object {
                 status_area.set_status (
                     "Quality Target could not check FFmpeg for libvmaf: %s".printf (e.message),
                     StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                release_smart_optimizer_cancel (my_cancel);
                 return;
             }
 
             if (my_generation != smart_opt_generation)
                 return;
+            if (my_cancel.is_cancelled ()) {
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                status_area.set_status ("Smart Optimizer cancelled.",
+                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                release_smart_optimizer_cancel (my_cancel);
+                return;
+            }
             if (vmaf_capability.status != VmafCapabilityStatus.SUPPORTED) {
                 string reason = vmaf_capability.reason
                     ?? "Quality Target requires FFmpeg with the libvmaf filter. "
@@ -899,6 +1166,7 @@ public class AppController : Object {
                 status_area.set_status (reason,
                     StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 console_tab.add_line ("[Smart Optimizer] " + reason);
+                release_smart_optimizer_cancel (my_cancel);
                 return;
             }
         }
@@ -913,31 +1181,6 @@ public class AppController : Object {
         // Audio bitrate — determined by the optimizer based on size tier.
         // Do not override here; the optimizer picks the right audio budget
         // for the target size and stores it in the recommendation.
-
-        // Strip audio
-        if (smart_tab != null && smart_tab.get_audio_settings_ref ().is_audio_probe_pending ()) {
-            status_area.set_status (
-                "Checking source audio stream. Please wait a moment and try Smart Optimizer again.",
-                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
-            status_area.stop_progress ();
-            smart_optimizer_running (false);
-            return;
-        }
-
-        bool strip_audio = (smart_tab != null) ? smart_tab.get_strip_audio_active () : false;
-        if (smart_tab != null && !smart_tab.get_audio_settings_ref ().is_audio_enabled_for_output ()) {
-            strip_audio = true;
-        }
-        ctx.strip_audio = strip_audio;
-        if (smart_tab != null) {
-            ctx.preserve_all_audio_tracks_requested =
-                smart_tab.get_audio_settings_ref ().get_keep_all_audio_requested ();
-        }
-
-        // Audio filters (speed, normalize, concat) prevent stream-copy
-        if (smart_tab != null) {
-            ctx.audio_requires_reencode = smart_tab.get_audio_settings_ref ().requires_audio_reencode ();
-        }
 
         try {
             var rec = quality_mode
@@ -956,6 +1199,29 @@ public class AppController : Object {
             if (my_generation != smart_opt_generation)
                 return;
 
+            // Cancellation can land after the worker completed but before this
+            // continuation resumed. Also reject any result whose file or
+            // analysis-relevant settings no longer match the frozen snapshot.
+            if (my_cancel.is_cancelled ()) {
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                status_area.set_status ("Smart Optimizer cancelled.",
+                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                release_smart_optimizer_cancel (my_cancel);
+                return;
+            }
+            if (!smart_optimizer_run_snapshot_matches (run_snapshot, codec)) {
+                status_area.stop_progress ();
+                smart_optimizer_running (false);
+                status_area.set_status (
+                    "Smart Optimizer: input or settings changed; result discarded. Run it again.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                console_tab.add_line (
+                    "[Smart Optimizer] Input or analysis settings changed while optimization was running; the stale recommendation was not applied.");
+                release_smart_optimizer_cancel (my_cancel);
+                return;
+            }
+
             status_area.stop_progress ();
 
             if (rec.is_impossible) {
@@ -966,6 +1232,7 @@ public class AppController : Object {
                 console_tab.add_line ("[Smart Optimizer] " + rec.notes);
                 if (my_generation == smart_opt_generation)
                     smart_optimizer_running (false);
+                release_smart_optimizer_cancel (my_cancel);
                 return;
             }
 
@@ -994,13 +1261,23 @@ public class AppController : Object {
             }
 
             // Both numbers, always — the pinned one and the predicted one.
-            status_area.set_status (rec.vmaf_measured
-                ? "Smart Optimizer: CRF %d / %s — VMAF %.1f, est. %.1f MiB".printf (
-                    rec.crf, rec.preset, rec.estimated_vmaf,
-                    rec.estimated_size_kib / 1024.0)
-                : "Smart Optimizer: CRF %d / %s — est. %d KiB".printf (
-                    rec.crf, rec.preset, rec.estimated_size_kib),
-                StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+            // A missing x264 High10 capability is surfaced without a modal,
+            // and auto-convert is withheld so the warning is actionable.
+            if (rec.bit_depth_attention_required) {
+                status_area.set_status (
+                    "Smart Optimizer: 10-bit cannot be preserved with this x264; recommendation applied for review.",
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                console_tab.add_line (
+                    "[Smart Optimizer] WARNING: " + rec.bit_depth_attention_reason);
+            } else {
+                status_area.set_status (rec.vmaf_measured
+                    ? "Smart Optimizer: CRF %d / %s — VMAF %.1f, est. %.1f MiB".printf (
+                        rec.crf, rec.preset, rec.estimated_vmaf,
+                        rec.estimated_size_kib / 1024.0)
+                    : "Smart Optimizer: CRF %d / %s — est. %d KiB".printf (
+                        rec.crf, rec.preset, rec.estimated_size_kib),
+                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+            }
 
             // Log full details to console
             string details = SmartOptimizer.format_recommendation (rec);
@@ -1009,15 +1286,22 @@ public class AppController : Object {
             }
 
             // Auto-convert: trigger conversion if the active tab has it enabled
-            bool should_auto_convert = (smart_tab != null) ? smart_tab.get_auto_convert_active () : false;
+            bool auto_convert_enabled = (smart_tab != null)
+                ? smart_tab.get_auto_convert_active () : false;
+            bool should_auto_convert = auto_convert_enabled
+                && !rec.bit_depth_attention_required;
 
             if (should_auto_convert) {
                 console_tab.add_line ("[Smart Optimizer] Auto-convert enabled — starting conversion…");
                 auto_convert_requested (codec);
+            } else if (auto_convert_enabled && rec.bit_depth_attention_required) {
+                console_tab.add_line (
+                    "[Smart Optimizer] Auto-convert not started because the configured x264 cannot preserve this source's bit depth.");
             }
 
             if (my_generation == smart_opt_generation)
                 smart_optimizer_running (false);
+            release_smart_optimizer_cancel (my_cancel);
 
         } catch (IOError e) {
             // Only touch UI if this is still the current run — a superseded
@@ -1033,6 +1317,7 @@ public class AppController : Object {
                         StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
                     console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
                 }
+                release_smart_optimizer_cancel (my_cancel);
             }
         } catch (Error e) {
             if (my_generation == smart_opt_generation) {
@@ -1041,6 +1326,7 @@ public class AppController : Object {
                 status_area.set_status ("Smart Optimizer error: %s".printf (e.message),
                     StatusIcon.ERROR_ICON, StatusIcon.ERROR_CSS);
                 console_tab.add_line ("[Smart Optimizer] ERROR: " + e.message);
+                release_smart_optimizer_cancel (my_cancel);
             }
         }
 

@@ -62,6 +62,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.SwitchRow play_with_ffplay_switch;
     private Adw.SwitchRow recently_opened_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
+    private Adw.SwitchRow show_bit_depth_warning_dialog_switch;
     private Adw.ActionRow overwrite_warning_row;
     private Adw.ActionRow preview_row;
 
@@ -346,6 +347,23 @@ public class SettingsDialog : Adw.PreferencesDialog {
         );
         compatibility_group.add (verify_unknown_audio_copy_switch);
         page.add (compatibility_group);
+
+        var warning_group = new Adw.PreferencesGroup ();
+        warning_group.set_title ("Conversion Warnings");
+        warning_group.set_description (
+            "Choose whether advisory conversion warnings require confirmation."
+        );
+
+        show_bit_depth_warning_dialog_switch = new Adw.SwitchRow ();
+        show_bit_depth_warning_dialog_switch.set_title (
+            "Show Bit-Depth Warning Dialog"
+        );
+        show_bit_depth_warning_dialog_switch.set_subtitle (
+            "When off, an unset output depth for a source above 8-bit is still " +
+            "checked and logged to the Console, but conversion continues automatically"
+        );
+        warning_group.add (show_bit_depth_warning_dialog_switch);
+        page.add (warning_group);
 
         var updates_group = new Adw.PreferencesGroup ();
         updates_group.set_title ("Software Updates");
@@ -1452,6 +1470,9 @@ public class SettingsDialog : Adw.PreferencesDialog {
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
         );
+        show_bit_depth_warning_dialog_switch.set_active (
+            s.show_bit_depth_warning_dialog
+        );
 
         // Explicitly initialize state that relies on notify signals,
         // because set_selected(0) on a fresh combo (already at 0) won't
@@ -1510,6 +1531,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.recently_opened_enabled = recently_opened_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();
+        s.show_bit_depth_warning_dialog =
+            show_bit_depth_warning_dialog_switch.get_active ();
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
         s.smart_optimizer_match_source_size = match_source_size_switch.get_active ();

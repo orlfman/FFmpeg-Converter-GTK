@@ -284,27 +284,59 @@ public class SmartOptimizer : GLib.Object {
      */
     private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
     private SmartOptimizerLogic.TemporalTuning? active_temporal_tuning = null;
-    private FfmpegRuntimeCapabilities? runtime_capabilities;
+    private FfmpegRuntimeCapabilities runtime_capabilities;
 
     public SmartOptimizer (
         FfmpegRuntimeCapabilities? runtime_capabilities = null
     ) {
-        this.runtime_capabilities = runtime_capabilities;
+        this.runtime_capabilities = runtime_capabilities
+            ?? new FfmpegRuntimeCapabilities ();
     }
 
     /** Fail before any video probing or temporary-file work when VMAF is absent. */
     private async void require_vmaf (Cancellable? cancellable) throws Error {
         var probe_cancel = cancellable ?? new Cancellable ();
-        VmafCapability capability = (runtime_capabilities != null)
-            ? yield runtime_capabilities.get_vmaf_capability (
-                AppSettings.get_default ().ffmpeg_path, probe_cancel)
-            : yield FfmpegRuntimeCapabilities.probe_vmaf (
+        VmafCapability capability =
+            yield runtime_capabilities.get_vmaf_capability (
                 AppSettings.get_default ().ffmpeg_path, probe_cancel);
 
         if (capability.status != VmafCapabilityStatus.SUPPORTED) {
             throw new IOError.NOT_SUPPORTED (
                 capability.reason ?? "Quality Target requires FFmpeg with libvmaf support.");
         }
+    }
+
+    /** Probe the configured libx264 rather than assuming its build depth. */
+    private async EncoderPixelFormatCapability get_x264_10bit_capability (
+        Cancellable? cancellable
+    ) throws Error {
+        var probe_cancel = cancellable ?? new Cancellable ();
+        return yield runtime_capabilities.get_encoder_pixel_format_capability (
+            AppSettings.get_default ().ffmpeg_path,
+            "libx264", PixelFormat.YUV420P10LE, probe_cancel);
+    }
+
+    private string x264_depth_attention_reason (
+        string preferred_codec,
+        SmartOptimizerVideoInfo info,
+        bool tone_mapping_active,
+        EncoderPixelFormatCapability capability
+    ) {
+        bool hdr = info.color_transfer == "smpte2084"
+            || info.color_transfer == "arib-std-b67";
+        bool wide_gamut = info.color_primaries == "bt2020";
+        if (preferred_codec != "x264"
+                || capability.status == EncoderPixelFormatCapabilityStatus.SUPPORTED
+                || tone_mapping_active
+                || (!hdr && !wide_gamut && info.source_bit_depth < 10)) {
+            return "";
+        }
+
+        string capability_reason = capability.reason
+            ?? "The configured libx264 encoder did not confirm 10-bit support.";
+        return capability_reason
+            + " This HDR/high-bit-depth/wide-gamut source would be downgraded; "
+            + "enable tone mapping or choose a 10-bit-capable codec.";
     }
 
     // Calibration parallelism: encodes within a batch are independent.
@@ -382,7 +414,7 @@ public class SmartOptimizer : GLib.Object {
             "smart-optimizer",
             "analysis"
         );
-        var intermediate = new IntermediateHolder ();
+        var intermediate = new IntermediateHolder (ctx.image_watermark);
 
         try {
             int requested_target_mb = target_mb;
@@ -410,6 +442,11 @@ public class SmartOptimizer : GLib.Object {
             info.duration = yield verify_probed_duration (
                 input_file, info.duration, cancellable);
 
+            var x264_10bit = new EncoderPixelFormatCapability ();
+            if (preferred_codec == "x264") {
+                x264_10bit = yield get_x264_10bit_capability (cancellable);
+            }
+
             // ── 1b. Trim window, tier, container, audio plan ────────────
             var tw = SmartOptimizerLogic.resolve_trim_window (
                 ctx, info.duration, (double) SEGMENT_DURATION);
@@ -419,7 +456,17 @@ public class SmartOptimizer : GLib.Object {
             string resolved_container = SmartOptimizerLogic.resolve_effective_container (
                 preferred_codec, tier, ctx.output_container);
             var plan = SmartOptimizerLogic.plan_audio (info, ctx, tier, resolved_container);
-            string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
+            string base_vf = (ctx.video_filter_chain != null)
+                ? ctx.video_filter_chain : "";
+            int analysis_depth = SmartOptimizerLogic.effective_analysis_bit_depth (
+                info.source_bit_depth);
+            string analysis_vf = FilterBuilder.retarget_yuv_pixel_format_filters (
+                base_vf,
+                SmartOptimizerLogic.effective_analysis_pixel_format (
+                    info.source_bit_depth));
+            SmartOptimizerVideoInfo analysis_info = info;
+            analysis_info.source_bit_depth = analysis_depth;
+            string vf = base_vf;
 
             // ── 2. Early feasibility check ──────────────────────────────
             // Before running any encode, check if the target is even
@@ -474,7 +521,8 @@ public class SmartOptimizer : GLib.Object {
             try {
                 cancellable_check (cancellable);
                 profile = yield analyze_content (
-                    input_file, positions, tw.sample_segment_duration, info, vf,
+                    input_file, positions, tw.sample_segment_duration,
+                    analysis_info, analysis_vf,
                     ctx.output_fps, ctx.video_speed_multiplier, cancellable);
             } catch (IOError.CANCELLED e) {
                 throw e;
@@ -497,9 +545,21 @@ public class SmartOptimizer : GLib.Object {
             // Decided before expansion so the speed-probe below encodes at the
             // real target preset/pix_fmt. Neither depends on sample positions.
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
-                info, profile, tier, preferred_codec, ctx.tone_mapping_active);
+                info, profile, tier, preferred_codec, ctx.tone_mapping_active,
+                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED);
             bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
                 bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
+            if (preferred_codec == "x264"
+                    && x264_10bit.status != EncoderPixelFormatCapabilityStatus.SUPPORTED
+                    && x264_10bit.reason != null) {
+                bit_depth.reason += " — " + x264_10bit.reason;
+            }
+            string bit_depth_attention = x264_depth_attention_reason (
+                preferred_codec, info, ctx.tone_mapping_active, x264_10bit);
+            // Analysis deliberately ignored the codec tab's stale format.
+            // Calibration must now use the exact depth Smart will apply.
+            vf = FilterBuilder.retarget_yuv_pixel_format_filters (
+                base_vf, bit_depth.pix_fmt);
             int preset_idx = SmartOptimizerLogic.choose_preset_index (
                 profile, tier, preferred_codec);
 
@@ -549,7 +609,8 @@ public class SmartOptimizer : GLib.Object {
                     ProbeResult probe = yield run_speed_memory_probe (
                         input_file, preferred_codec, preset_idx, bit_depth.pix_fmt,
                         vf, tw.sample_segment_duration, tw.trim_start,
-                        tw.encode_duration, temp_run_dir, cancellable);
+                        tw.encode_duration, temp_run_dir, ctx.image_watermark,
+                        cancellable);
                     secs_per_segment = probe.seconds;
                     probe_peak_rss_bytes = probe.peak_rss;
                     calibration_job_cap = memory_capped_calibration_jobs (probe.peak_rss);
@@ -604,7 +665,8 @@ public class SmartOptimizer : GLib.Object {
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, extrapolation_weight,
                 SmartOptimizerLogic.encoder_tuning_key (encoder_tuning)
-                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning));
+                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning),
+                watermark_cache_identity (ctx.image_watermark));
 
             // ── 6/7. Calibration, fit, solve, adaptive refinement ───────
             SmartOptimizerLogic.CalibrationModel model;
@@ -750,6 +812,8 @@ public class SmartOptimizer : GLib.Object {
                 stream_copy_audio     = plan.use_stream_copy,
                 strip_metadata        = (tier == SizeTier.TINY),
                 recommended_pix_fmt   = bit_depth.pix_fmt,
+                bit_depth_attention_required = bit_depth_attention.length > 0,
+                bit_depth_attention_reason = bit_depth_attention,
                 resolved_container    = resolved_container,
                 target_size_kib       = (int) budget.target_total_kib,
                 // Shared decision axis — see SmartOptimizerLogic.EncodeEffort.
@@ -793,9 +857,8 @@ public class SmartOptimizer : GLib.Object {
      *     abandoning it.
      *   - No two-pass. Two-pass exists to hit a byte count.
      *   - No container forcing. That is imageboard-size policy.
-     *   - The calibration cache is not used: it stores sizes only, and a
-     *     cached size still leaves the VMAF unmeasured, so there is nothing to
-     *     save. Extending it to hold VMAF is a worthwhile follow-up.
+     *   - Cached Quality probes carry both size and VMAF; a size-only cache
+     *     entry is deliberately treated as a miss.
      */
     public async OptimizationRecommendation optimize_for_quality (
         string                            input_file,
@@ -808,7 +871,7 @@ public class SmartOptimizer : GLib.Object {
 
         string? temp_run_dir = ConversionUtils.create_managed_temp_run_dir (
             "smart-optimizer", "quality");
-        var intermediate = new IntermediateHolder ();
+        var intermediate = new IntermediateHolder (ctx.image_watermark);
 
         try {
             // ── 1. Probe ────────────────────────────────────────────────
@@ -827,6 +890,11 @@ public class SmartOptimizer : GLib.Object {
             }
             info.duration = yield verify_probed_duration (
                 input_file, info.duration, cancellable);
+
+            var x264_10bit = new EncoderPixelFormatCapability ();
+            if (preferred_codec == "x264") {
+                x264_10bit = yield get_x264_10bit_capability (cancellable);
+            }
 
             // ── 2. Trim window, audio, container ────────────────────────
             var tw = SmartOptimizerLogic.resolve_trim_window (
@@ -850,7 +918,17 @@ public class SmartOptimizer : GLib.Object {
             var plan = SmartOptimizerLogic.plan_audio (
                 info, ctx, SmartOptimizerLogic.quality_audio_tier (intent),
                 resolved_container);
-            string vf = (ctx.video_filter_chain != null) ? ctx.video_filter_chain : "";
+            string base_vf = (ctx.video_filter_chain != null)
+                ? ctx.video_filter_chain : "";
+            int analysis_depth = SmartOptimizerLogic.effective_analysis_bit_depth (
+                info.source_bit_depth);
+            string analysis_vf = FilterBuilder.retarget_yuv_pixel_format_filters (
+                base_vf,
+                SmartOptimizerLogic.effective_analysis_pixel_format (
+                    info.source_bit_depth));
+            SmartOptimizerVideoInfo analysis_info = info;
+            analysis_info.source_bit_depth = analysis_depth;
+            string vf = base_vf;
 
             // ── 3. Sample positions ─────────────────────────────────────
             double[] positions = SmartOptimizerLogic.pick_sample_positions_in_window (
@@ -862,7 +940,7 @@ public class SmartOptimizer : GLib.Object {
                 cancellable_check (cancellable);
                 profile = yield analyze_content (
                     input_file, positions, tw.sample_segment_duration,
-                    info, vf, ctx.output_fps,
+                    analysis_info, analysis_vf, ctx.output_fps,
                     ctx.video_speed_multiplier, cancellable);
             } catch (IOError.CANCELLED e) {
                 throw e;
@@ -883,9 +961,19 @@ public class SmartOptimizer : GLib.Object {
 
             // ── 5. Bit depth, preset, effective target ──────────────────
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
-                info, profile, nominal_tier, preferred_codec, ctx.tone_mapping_active);
+                info, profile, nominal_tier, preferred_codec, ctx.tone_mapping_active,
+                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED);
             bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
                 bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
+            if (preferred_codec == "x264"
+                    && x264_10bit.status != EncoderPixelFormatCapabilityStatus.SUPPORTED
+                    && x264_10bit.reason != null) {
+                bit_depth.reason += " — " + x264_10bit.reason;
+            }
+            string bit_depth_attention = x264_depth_attention_reason (
+                preferred_codec, info, ctx.tone_mapping_active, x264_10bit);
+            vf = FilterBuilder.retarget_yuv_pixel_format_filters (
+                base_vf, bit_depth.pix_fmt);
             int preset_idx = SmartOptimizerLogic.choose_preset_index (
                 profile, nominal_tier, preferred_codec);
 
@@ -952,7 +1040,8 @@ public class SmartOptimizer : GLib.Object {
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, 1.0,
                 SmartOptimizerLogic.encoder_tuning_key (encoder_tuning)
-                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning));
+                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning),
+                watermark_cache_identity (ctx.image_watermark));
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
                 preferred_codec, intent);
@@ -1431,7 +1520,8 @@ public class SmartOptimizer : GLib.Object {
                 final_crf, achieved_vmaf, estimated_total_kib,
                 confidence, coverage, positions.length, positions_trimmed,
                 crf_capped, refined, verification, all_saturated,
-                cached_points, bracket_refined);
+                cached_points, bracket_refined,
+                ctx.image_watermark != null && ctx.image_watermark.is_active ());
 
             return OptimizationRecommendation () {
                 codec                 = preferred_codec,
@@ -1472,6 +1562,8 @@ public class SmartOptimizer : GLib.Object {
                 stream_copy_audio     = plan.use_stream_copy,
                 strip_metadata        = false,
                 recommended_pix_fmt   = bit_depth.pix_fmt,
+                bit_depth_attention_required = bit_depth_attention.length > 0,
+                bit_depth_attention_reason = bit_depth_attention,
                 resolved_container    = resolved_container,
                 target_size_kib       = 0,
                 effort                = SmartOptimizerLogic.effort_from_quality_intent (intent),
@@ -1674,7 +1766,8 @@ public class SmartOptimizer : GLib.Object {
         SmartOptimizerLogic.VmafVerification verification,
         bool                                all_saturated,
         int                                 cached_points,
-        bool                                bracket_refined
+        bool                                bracket_refined,
+        bool                                image_watermark_active
     ) {
         var n = new StringBuilder ();
 
@@ -1744,6 +1837,9 @@ public class SmartOptimizer : GLib.Object {
             codec, final_crf, preset_label,
             bit_depth.is_10bit ? "10-bit" : "8-bit"));
         n.append ("  %s\n".printf (bit_depth.reason));
+        if (image_watermark_active) {
+            n.append ("  Image watermark included in encoded probes and VMAF reference\n");
+        }
 
         if (verification.done) {
             n.append ("  Verified at CRF %d: measured VMAF %.2f "
@@ -1931,6 +2027,18 @@ public class SmartOptimizer : GLib.Object {
     private class IntermediateHolder {
         public string? path = null;
         public bool build_failed = false;
+        public SmartOptimizerImageWatermark? watermark;
+
+        public IntermediateHolder (SmartOptimizerImageWatermark? watermark = null) {
+            this.watermark = watermark;
+        }
+    }
+
+    private static string watermark_cache_identity (
+        SmartOptimizerImageWatermark? watermark
+    ) {
+        return watermark != null
+            ? watermark.cache_identity () : "watermark:none";
     }
 
     /**
@@ -1960,7 +2068,9 @@ public class SmartOptimizer : GLib.Object {
         // force=false and keeps the "skip it and re-filter" fallback.
         if (holder.path != null || holder.build_failed)
             return;
-        if (vf.length == 0 && !force)
+        bool has_watermark = holder.watermark != null
+            && holder.watermark.is_active ();
+        if (vf.length == 0 && !has_watermark && !force)
             return;
 
         double sample_duration = (double) positions.length * segment_duration;
@@ -1980,7 +2090,8 @@ public class SmartOptimizer : GLib.Object {
         cancellable_check (cancellable);
         string tmp = tmp_path ("intermediate", temp_run_dir);
         string[] cmd = build_filtered_intermediate_cmd (
-            input_file, positions, segment_duration, vf, pix_fmt, tmp);
+            input_file, positions, segment_duration, vf, pix_fmt, tmp,
+            holder.watermark);
         try {
             yield run_subprocess_wait (cmd, cancellable);
         } catch (IOError.CANCELLED e) {
@@ -2216,7 +2327,7 @@ public class SmartOptimizer : GLib.Object {
                     encode_duration, sample_segment_duration, vf, cancellable,
                     preset_idx, pix_fmt, temp_run_dir,
                     calibration_jobs, calibration_encoder_threads,
-                    extrapolation_weight, intermediate.path, true);
+                    extrapolation_weight, intermediate, true);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -2326,7 +2437,7 @@ public class SmartOptimizer : GLib.Object {
                     encode_duration, sample_segment_duration, vf, cancellable,
                     preset_idx, pix_fmt, temp_run_dir,
                     calibration_jobs, calibration_encoder_threads,
-                    extrapolation_weight, intermediate.path, false);
+                    extrapolation_weight, intermediate, false);
 
                 for (int ci = 0; ci < fresh_extra_crfs.length; ci++) {
                     if (extra_sizes[ci] <= 0) {
@@ -2431,7 +2542,7 @@ public class SmartOptimizer : GLib.Object {
                 input_file, codec, model.predicted_crf, model.cal_crfs, model.cal_sizes,
                 positions, encode_duration, sample_segment_duration, vf,
                 cancellable, preset_idx, pix_fmt, temp_run_dir,
-                encoder_threads, extrapolation_weight, cache, intermediate.path);
+                encoder_threads, extrapolation_weight, cache, intermediate);
 
             if (outcome.actual_kib > 0) {
                 outcome.correction = outcome.actual_kib / verify_model_kib;
@@ -2471,7 +2582,7 @@ public class SmartOptimizer : GLib.Object {
                                 model.cal_crfs, model.cal_sizes,
                                 positions, encode_duration, sample_segment_duration, vf,
                                 cancellable, preset_idx, pix_fmt, temp_run_dir,
-                                encoder_threads, extrapolation_weight, cache, intermediate.path);
+                                encoder_threads, extrapolation_weight, cache, intermediate);
                             if (re_actual > 0) {
                                 outcome.reverify_actual_kib = re_actual;
                                 outcome.correction = re_actual / reverify_model_kib;
@@ -2774,7 +2885,7 @@ public class SmartOptimizer : GLib.Object {
                          model.cached_points == 1 ? "" : "s"));
         }
         if (used_intermediate) {
-            notes.append ("  Filters pre-rendered once to a lossless intermediate for calibration\n");
+            notes.append ("  Filters/output effects pre-rendered once to a lossless intermediate for calibration\n");
         }
         if (codec == "x265") {
             notes.append ("  x265 psy-rd penalty: confidence × 0.85 (psy-rd inflates complex scenes unpredictably)\n");
@@ -2833,6 +2944,9 @@ public class SmartOptimizer : GLib.Object {
         }
         if (vf.length > 0) {
             notes.append ("  Video filters applied to calibration: yes\n");
+        }
+        if (ctx.image_watermark != null && ctx.image_watermark.is_active ()) {
+            notes.append ("  Image watermark applied to calibration: yes\n");
         }
 
         return notes.str;
@@ -3336,7 +3450,7 @@ public class SmartOptimizer : GLib.Object {
             all_si, out profile.spatial_info, out si_sd);
 
         SmartOptimizerLogic.compute_banding_metrics (
-            ref profile, all_yavg, all_ylow, info.width, info.height);
+            ref profile, all_yavg, all_ylow);
         SmartOptimizerLogic.classify_content (ref profile);
         return profile;
     }
@@ -3545,7 +3659,7 @@ public class SmartOptimizer : GLib.Object {
         int           max_parallel,
         int           encoder_threads,
         double        extrapolation_weight,
-        string?       intermediate_path,
+        IntermediateHolder intermediate,
         bool          fail_fast
     ) throws Error {
         double[] results = new double[crfs.length];
@@ -3566,7 +3680,7 @@ public class SmartOptimizer : GLib.Object {
                     input_file, codec, crf, positions, full_duration,
                     segment_duration, video_filter_chain, cancellable,
                     preset_idx, pix_fmt, temp_run_dir, encoder_threads,
-                    extrapolation_weight, intermediate_path,
+                    extrapolation_weight, intermediate,
                     (obj, res) => {
                         try {
                             results[slot] = calibration_encode.end (res);
@@ -3623,7 +3737,7 @@ public class SmartOptimizer : GLib.Object {
         int           encoder_threads,
         double        extrapolation_weight,
         SmartOptimizerCache? cache,
-        string?       intermediate_path
+        IntermediateHolder intermediate
     ) throws Error {
         for (int i = 0; i < cal_crfs.length; i++) {
             if (cal_crfs[i] == crf && cal_sizes[i] > 0)
@@ -3638,7 +3752,7 @@ public class SmartOptimizer : GLib.Object {
             input_file, codec, crf, positions, full_duration,
             segment_duration, video_filter_chain, cancellable,
             preset_idx, pix_fmt, temp_run_dir, encoder_threads,
-            extrapolation_weight, intermediate_path);
+            extrapolation_weight, intermediate);
         if (cache != null && fresh > 0)
             cache.record (crf, fresh);
         return fresh;
@@ -3666,6 +3780,7 @@ public class SmartOptimizer : GLib.Object {
         double        trim_start,
         double        encode_duration,
         string?       temp_run_dir,
+        SmartOptimizerImageWatermark? watermark = null,
         Cancellable?  cancellable = null
     ) throws Error {
         double probe_secs = double.min (SPEED_PROBE_SECONDS, segment_duration);
@@ -3681,7 +3796,7 @@ public class SmartOptimizer : GLib.Object {
         // representative mid value.
         string[] cmd = build_concat_encode_cmd (
             input_file, codec, 30, one_position, probe_secs, tmp,
-            video_filter_chain, preset_idx, pix_fmt, threads);
+            video_filter_chain, preset_idx, pix_fmt, threads, watermark);
 
         ProbeResult raw;
         try {
@@ -3823,14 +3938,14 @@ public class SmartOptimizer : GLib.Object {
         double[]      positions,
         double        full_duration,
         double        segment_duration,
-        string        video_filter_chain = "",
-        Cancellable?  cancellable = null,
-        int           preset_idx = -1,
-        string        pix_fmt = "",
-        string?       temp_run_dir = null,
-        int           encoder_threads = 0,
-        double        extrapolation_weight = 1.0,
-        string?       intermediate_path = null
+        string        video_filter_chain,
+        Cancellable?  cancellable,
+        int           preset_idx,
+        string        pix_fmt,
+        string?       temp_run_dir,
+        int           encoder_threads,
+        double        extrapolation_weight,
+        IntermediateHolder intermediate
     ) throws Error {
         double sample_duration = double.min (
             (double) positions.length * segment_duration, full_duration);
@@ -3839,13 +3954,14 @@ public class SmartOptimizer : GLib.Object {
 
         // When a pre-filtered lossless intermediate exists, probe from it —
         // same frames, none of the decode+filter cost.
-        string[] cmd = (intermediate_path != null)
+        string[] cmd = (intermediate.path != null)
             ? build_intermediate_probe_cmd (
-                intermediate_path, codec, crf, preset_idx, pix_fmt,
+                intermediate.path, codec, crf, preset_idx, pix_fmt,
                 encoder_threads, tmp)
             : build_concat_encode_cmd (
                 input_file, codec, crf, positions, segment_duration, tmp,
-                video_filter_chain, preset_idx, pix_fmt, encoder_threads);
+                video_filter_chain, preset_idx, pix_fmt, encoder_threads,
+                intermediate.watermark);
 
         try {
             yield run_subprocess_wait (cmd, cancellable);
@@ -4240,9 +4356,15 @@ public class SmartOptimizer : GLib.Object {
      * Filter-complex spec that optionally pre-filters each segment, then
      * concats them into [v].
      */
-    private string concat_filter_spec (int n, string video_filter_chain) {
+    private string concat_filter_spec (
+        int n,
+        string video_filter_chain,
+        SmartOptimizerImageWatermark? watermark = null,
+        string pix_fmt = ""
+    ) {
         var fc = new StringBuilder ();
         bool has_vf = (video_filter_chain.length > 0);
+        bool has_watermark = watermark != null && watermark.is_active ();
 
         if (has_vf) {
             // Pre-filter each segment, then concat
@@ -4254,8 +4376,28 @@ public class SmartOptimizer : GLib.Object {
             for (int i = 0; i < n; i++)
                 fc.append ("[%d:v]".printf (i));
         }
-        fc.append ("concat=n=%d:v=1:a=0[v]".printf (n));
+        fc.append ("concat=n=%d:v=1:a=0%s".printf (
+            n, has_watermark ? "[vpre]" : "[v]"));
+        if (has_watermark) {
+            string overlay_format =
+                FilterBuilder.get_overlay_output_format_from_pix_fmt (pix_fmt);
+            fc.append (";");
+            fc.append (FilterBuilder.build_image_overlay_fragment (
+                "[%d:v]".printf (n), "[vpre]", "[v]",
+                watermark.position, watermark.margin, watermark.opacity,
+                watermark.width, overlay_format));
+        }
         return fc.str;
+    }
+
+    private void append_image_watermark_input (
+        GenericArray<string> cmd,
+        SmartOptimizerImageWatermark? watermark
+    ) {
+        if (watermark == null || !watermark.is_active ())
+            return;
+        cmd.add ("-i");
+        cmd.add (watermark.path);
     }
 
     /** Append the encoder arguments for a calibration probe at @crf. */
@@ -4374,7 +4516,8 @@ public class SmartOptimizer : GLib.Object {
         double   seg_dur,
         string   video_filter_chain,
         string   pix_fmt,
-        string   output
+        string   output,
+        SmartOptimizerImageWatermark? watermark = null
     ) {
         string ffmpeg = AppSettings.get_default ().ffmpeg_path;
         var cmd = new GenericArray<string> ();
@@ -4383,6 +4526,7 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-v"); cmd.add ("warning");
 
         add_segment_inputs (cmd, path, positions, seg_dur);
+        append_image_watermark_input (cmd, watermark);
 
         // Force even dimensions. The intermediate is always encoded with
         // libx264 -qp 0 (8-bit) or FFV1 (10-bit) regardless of the OUTPUT
@@ -4403,7 +4547,8 @@ public class SmartOptimizer : GLib.Object {
             : "crop=trunc(iw/2)*2:trunc(ih/2)*2";
 
         cmd.add ("-filter_complex");
-        cmd.add (concat_filter_spec (positions.length, even_chain));
+        cmd.add (concat_filter_spec (
+            positions.length, even_chain, watermark, pix_fmt));
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");
 
@@ -4484,7 +4629,8 @@ public class SmartOptimizer : GLib.Object {
         string   video_filter_chain = "",
         int      preset_idx = -1,
         string   pix_fmt = "",
-        int      encoder_threads = 0
+        int      encoder_threads = 0,
+        SmartOptimizerImageWatermark? watermark = null
     ) {
         string ffmpeg = AppSettings.get_default ().ffmpeg_path;
         var cmd = new GenericArray<string> ();
@@ -4493,9 +4639,11 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("-v"); cmd.add ("warning");
 
         add_segment_inputs (cmd, path, positions, seg_dur);
+        append_image_watermark_input (cmd, watermark);
 
         cmd.add ("-filter_complex");
-        cmd.add (concat_filter_spec (positions.length, video_filter_chain));
+        cmd.add (concat_filter_spec (
+            positions.length, video_filter_chain, watermark, pix_fmt));
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");             // no audio for calibration
 
@@ -4515,6 +4663,34 @@ public class SmartOptimizer : GLib.Object {
 
         return StringArrayUtils.copy_generic_array (cmd);
     }
+
+#if COMBINE_WINDOW_TEST_BUILD || TRIM_SUBTITLES_STATE_TEST_BUILD
+    /** Exact direct-calibration command used when no intermediate is available. */
+    internal string[] build_watermarked_calibration_cmd_for_test (
+        string input,
+        string output,
+        string video_filter_chain,
+        string pix_fmt,
+        SmartOptimizerImageWatermark? watermark
+    ) {
+        return build_concat_encode_cmd (
+            input, "x264", 23, { 0.0 }, 1.0, output,
+            video_filter_chain, 5, pix_fmt, 0, watermark);
+    }
+
+    /** Exact lossless command used as the Quality/VMAF reference. */
+    internal string[] build_watermarked_reference_cmd_for_test (
+        string input,
+        string output,
+        string video_filter_chain,
+        string pix_fmt,
+        SmartOptimizerImageWatermark? watermark
+    ) {
+        return build_filtered_intermediate_cmd (
+            input, { 0.0 }, 1.0, video_filter_chain, pix_fmt,
+            output, watermark);
+    }
+#endif
 
     // ════════════════════════════════════════════════════════════════════════
     // PARSING
@@ -4981,6 +5157,8 @@ public class SmartOptimizer : GLib.Object {
             stream_copy_audio      = false,
             strip_metadata         = false,
             recommended_pix_fmt    = "",
+            bit_depth_attention_required = false,
+            bit_depth_attention_reason = "",
             resolved_container     = SmartOptimizerLogic.codec_default_container (codec),
             target_size_kib        = 0,
             // Inert — callers bail on is_impossible before applying a

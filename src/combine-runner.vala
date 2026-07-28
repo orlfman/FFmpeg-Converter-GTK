@@ -529,7 +529,8 @@ public class CombineRunner : Object {
                     reencode_profile.watermark_position,
                     reencode_profile.watermark_margin,
                     reencode_profile.watermark_opacity,
-                    reencode_profile.watermark_image_width));
+                    reencode_profile.watermark_image_width,
+                    reencode_profile.overlay_format));
             }
 
             cmd += "-filter_complex";

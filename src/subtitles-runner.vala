@@ -922,9 +922,13 @@ public class SubtitlesRunner : Object {
         }
 
         if (is_bitmap) {
+            string bitmap_overlay = "overlay";
+            if (profile.overlay_format.length > 0)
+                bitmap_overlay += "=format=" + profile.overlay_format;
+
             string overlay_src = has_external_bitmap
-                ? "[0:v][1:0]overlay"
-                : @"[0:v][0:s:$(sub_stream_index)]overlay";
+                ? "[0:v][1:0]" + bitmap_overlay
+                : @"[0:v][0:s:$(sub_stream_index)]$bitmap_overlay";
 
             string fc;
             if (has_image_wm) {
@@ -936,7 +940,8 @@ public class SubtitlesRunner : Object {
                         profile.watermark_position,
                         profile.watermark_margin,
                         profile.watermark_opacity,
-                        profile.watermark_image_width);
+                        profile.watermark_image_width,
+                        profile.overlay_format);
                 } else {
                     fc = overlay_src + "[subbedv]; ";
                     fc += FilterBuilder.build_image_overlay_fragment (
@@ -944,7 +949,8 @@ public class SubtitlesRunner : Object {
                         profile.watermark_position,
                         profile.watermark_margin,
                         profile.watermark_opacity,
-                        profile.watermark_image_width);
+                        profile.watermark_image_width,
+                        profile.overlay_format);
                 }
             } else if (profile.video_filters.length > 0) {
                 fc = overlay_src + "[subbedv]; [subbedv]" + profile.video_filters + "[outv]";
@@ -976,7 +982,8 @@ public class SubtitlesRunner : Object {
                     profile.watermark_position,
                     profile.watermark_margin,
                     profile.watermark_opacity,
-                    profile.watermark_image_width);
+                    profile.watermark_image_width,
+                    profile.overlay_format);
 
                 cmd += "-filter_complex";
                 cmd += fc;

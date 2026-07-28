@@ -809,10 +809,22 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
             string source_depth = "%d-bit".printf (source_bits);
             string fallback_depth = "8-bit";
+            string warning_summary =
+                @"The source video appears to be $source_depth, but no output bit depth is selected in the active codec tab.";
+            string warning_detail =
+                @"Depending on the encoder, FFmpeg may fall back to $fallback_depth unless you explicitly enable 10-Bit Color.";
+
+            console_tab.add_line (
+                "[Bit-depth warning] " + warning_summary + " " + warning_detail);
+
+            if (!AppSettings.get_default ().show_bit_depth_warning_dialog) {
+                on_continue ();
+                return;
+            }
 
             var dialog = new Adw.AlertDialog (
                 "Output Bit Depth Is Unset",
-                @"The source video appears to be $source_depth, but no output bit depth is selected in the active codec tab.\n\nDepending on the encoder, FFmpeg may fall back to $fallback_depth unless you explicitly enable 10-Bit Color."
+                warning_summary + "\n\n" + warning_detail
             );
 
             dialog.add_response ("cancel", "Cancel");

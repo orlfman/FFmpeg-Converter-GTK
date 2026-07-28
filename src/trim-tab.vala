@@ -35,9 +35,15 @@ public class TrimSegment : Object {
 
 public class SegmentCodecArgs : Object {
     public string[] args;
+    public string pixel_format { get; private set; default = ""; }
+    public string overlay_format { get; private set; default = ""; }
 
-    public SegmentCodecArgs (owned string[] args) {
+    public SegmentCodecArgs (owned string[] args, string pixel_format = "") {
         this.args = (owned) args;
+        this.overlay_format =
+            FilterBuilder.get_overlay_output_format_from_pix_fmt (pixel_format);
+        this.pixel_format = this.overlay_format.length > 0
+            ? pixel_format.down () : "";
     }
 
     public bool is_empty () {
@@ -760,6 +766,7 @@ public class TrimTab : Box, ICodecTab {
 
         GeneralSettingsSnapshot? general_settings_snapshot = null;
         string shared_video_filter_chain = "";
+        SmartOptimizerImageWatermark? shared_image_watermark = null;
         if (general_tab != null) {
             PixelFormatSettingsSnapshot? pixel_format = (selected_codec_tab != null)
                 ? selected_codec_tab.snapshot_pixel_format_settings ()
@@ -767,6 +774,8 @@ public class TrimTab : Box, ICodecTab {
             general_settings_snapshot = general_tab.snapshot_settings (pixel_format);
             shared_video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (
                 general_settings_snapshot, false, preferred_codec);
+            shared_image_watermark = FilterBuilder.snapshot_smart_image_watermark (
+                general_settings_snapshot);
         }
 
         // Parallel arrays — only segments that pass optimization are kept
@@ -857,6 +866,7 @@ public class TrimTab : Box, ICodecTab {
                 ctx.video_filter_chain = shared_video_filter_chain;
                 ctx.tone_mapping_active = shared_video_filter_chain.contains ("tonemap=");
             }
+            ctx.image_watermark = shared_image_watermark;
             if (general_settings_snapshot != null) {
                 double parsed_output_fps = 0.0;
                 if (CodecUtils.try_resolve_output_fps_from_snapshot (
@@ -880,7 +890,12 @@ public class TrimTab : Box, ICodecTab {
                 var rec = yield smart_optimizer.optimize_for_target_size (
                     tmp_seg, seg_target_mb, preferred_codec, ctx, cancel);
 
-                if (rec.is_impossible) {
+                if (rec.bit_depth_attention_required) {
+                    console_tab.add_line (
+                        "[Smart Optimizer] ⏭️ Skipping %s — %s".printf (
+                            seg_name, rec.bit_depth_attention_reason));
+                    skipped.add (seg_name);
+                } else if (rec.is_impossible) {
                     console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — target %d MB is unreachable"
                         .printf (seg_name, seg_target_mb));
                     string fail_details = SmartOptimizer.format_recommendation (rec);
@@ -893,7 +908,8 @@ public class TrimTab : Box, ICodecTab {
                     string[] smart_args = CodecUtils.build_smart_codec_args (
                         rec, general_settings_snapshot);
                     ok_segs.add (seg);
-                    ok_args.add (new SegmentCodecArgs (smart_args));
+                    ok_args.add (new SegmentCodecArgs (
+                        smart_args, rec.recommended_pix_fmt));
 
                     console_tab.add_line ("[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KiB, %s)"
                         .printf (seg_name, rec.crf, rec.preset,

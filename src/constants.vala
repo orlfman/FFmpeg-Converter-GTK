@@ -5,7 +5,7 @@
 // ── Application Version ─────────────────────────────────────────────────────
 
 namespace AppVersion {
-    public const string VERSION = "1.6.1";
+    public const string VERSION = "1.6.2";
 }
 
 namespace ProjectUrls {

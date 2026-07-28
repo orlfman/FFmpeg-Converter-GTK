@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '1.6.1',
+  version : '1.6.2',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -94,6 +94,15 @@ sources = files(
   'src/combine-window.vala',
   'src/combine-runner.vala'
 )
+
+player_icon_resources = gnome.compile_resources(
+  'player-icons',
+  'Resources/player-icons.gresource.xml',
+  source_dir : 'Resources',
+  c_name : 'player_icons',
+)
+sources += player_icon_resources
+
 executable('ffmpeg-converter-gtk',
   sources,
   dependencies : dependencies,

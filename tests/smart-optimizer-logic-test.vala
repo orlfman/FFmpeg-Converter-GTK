@@ -203,6 +203,69 @@ void test_match_source_target_rounding () {
             == SmartOptimizerLogic.TARGET_MB_MAX);
 }
 
+void test_match_source_target_ignores_async_ui_size () {
+    const int64 MIB = 1024 * 1024;
+
+    // Match Source always derives the target from the synchronously stat'd
+    // input, regardless of a stale/manual value still shown in the codec tab.
+    assert (SmartOptimizerLogic.resolve_target_mb (4, true, 377 * MIB) == 377);
+    assert (SmartOptimizerLogic.resolve_target_mb (999, true, 9 * MIB) == 9);
+
+    // Manual mode remains governed by the configured control and its bounds.
+    assert (SmartOptimizerLogic.resolve_target_mb (42, false, 377 * MIB) == 42);
+    assert (SmartOptimizerLogic.resolve_target_mb (0, false, 377 * MIB)
+        == SmartOptimizerLogic.TARGET_MB_MIN);
+
+    // An unavailable signature safely falls back to the configured target;
+    // AppController rejects an unreadable input before optimization begins.
+    assert (SmartOptimizerLogic.resolve_target_mb (23, true, -1) == 23);
+}
+
+void test_stale_guard_compares_only_active_mode_controls () {
+    var low = SmartOptimizerLogic.QualityIntent.LOW;
+    var ultra = SmartOptimizerLogic.QualityIntent.ULTRA;
+
+    // Quality mode ignores both size controls, but not its active intent.
+    assert (SmartOptimizerLogic.run_mode_settings_equal (
+        true, low, false, 25, true, low, true, 900));
+    assert (!SmartOptimizerLogic.run_mode_settings_equal (
+        true, low, false, 25, true, ultra, false, 25));
+
+    // Target Size mode ignores quality intent, but not target/match changes.
+    assert (SmartOptimizerLogic.run_mode_settings_equal (
+        false, low, false, 25, false, ultra, false, 25));
+    assert (!SmartOptimizerLogic.run_mode_settings_equal (
+        false, low, false, 25, false, low, false, 26));
+    assert (!SmartOptimizerLogic.run_mode_settings_equal (
+        false, low, false, 25, false, low, true, 25));
+
+    // Switching modes always invalidates the run.
+    assert (!SmartOptimizerLogic.run_mode_settings_equal (
+        false, low, false, 25, true, low, false, 25));
+}
+
+void test_image_watermark_cache_identity_tracks_rendered_pixels () {
+    var watermark = new SmartOptimizerImageWatermark ();
+    assert (watermark.cache_identity () == "watermark:none");
+
+    watermark.path = "/tmp/watermark.png";
+    watermark.file_identity = "size=100|mtime=1";
+    watermark.width = 150;
+    watermark.position = "Bottom Right";
+    watermark.opacity = 0.5;
+    watermark.margin = 10;
+    string baseline = watermark.cache_identity ();
+
+    watermark.opacity = 0.6;
+    assert (watermark.cache_identity () != baseline);
+    watermark.opacity = 0.5;
+    watermark.file_identity = "size=101|mtime=2";
+    assert (watermark.cache_identity () != baseline);
+    watermark.file_identity = "size=100|mtime=1";
+    watermark.position = "Top Left";
+    assert (watermark.cache_identity () != baseline);
+}
+
 void test_match_source_target_scaled_to_window () {
     const int64 MIB = 1024 * 1024;
 
@@ -1707,9 +1770,15 @@ void test_decide_bit_depth_rules () {
     hdr.color_transfer = "smpte2084";
     hdr.color_primaries = "bt2020";
 
-    // x264 never goes 10-bit, even for HDR
-    var x264 = SmartOptimizerLogic.decide_bit_depth (hdr, profile, SizeTier.MEDIUM, "x264", false);
-    assert (!x264.is_10bit);
+    // x264 follows the normal preservation policy when the configured encoder
+    // advertises High10, and fails conservatively when it does not.
+    var x264_high10 = SmartOptimizerLogic.decide_bit_depth (
+        hdr, profile, SizeTier.MEDIUM, "x264", false, true);
+    assert (x264_high10.is_10bit);
+    var x264_unverified = SmartOptimizerLogic.decide_bit_depth (
+        hdr, profile, SizeTier.MEDIUM, "x264", false, false);
+    assert (!x264_unverified.is_10bit);
+    assert (x264_unverified.reason.contains ("not verified"));
 
     // Other codecs preserve HDR in 10-bit
     var av1 = SmartOptimizerLogic.decide_bit_depth (hdr, profile, SizeTier.MEDIUM, "svt-av1", false);
@@ -1723,10 +1792,21 @@ void test_decide_bit_depth_rules () {
 void test_banding_metrics_dark_content () {
     var profile = ContentProfile ();
     double[] yavg = { 30.0, 40.0, 50.0, 55.0 };   // all below 60 → dark
-    double[] ylow = {};
-    SmartOptimizerLogic.compute_banding_metrics (ref profile, yavg, ylow, 1920, 1080);
+    // YLOW is a luma level: three of four frames have their 10th percentile at
+    // or below studio black. Resolution must not affect this ratio.
+    double[] ylow = { 15.0, 16.0, 17.0, 8.0 };
+    SmartOptimizerLogic.compute_banding_metrics (ref profile, yavg, ylow);
     assert (close_to (profile.dark_scene_ratio, 1.0, 1e-9));
+    assert (close_to (profile.low_luma_ratio, 0.75, 1e-9));
     assert (profile.banding_risk > 0.0);
+
+    assert (SmartOptimizerLogic.effective_analysis_bit_depth (8) == 8);
+    assert (SmartOptimizerLogic.effective_analysis_bit_depth (9) == 10);
+    assert (SmartOptimizerLogic.effective_analysis_bit_depth (12) == 10);
+    assert (SmartOptimizerLogic.effective_analysis_pixel_format (8)
+        == PixelFormat.YUV420P);
+    assert (SmartOptimizerLogic.effective_analysis_pixel_format (10)
+        == PixelFormat.YUV420P10LE);
 }
 
 void test_audio_measurement_floor () {
@@ -2149,6 +2229,10 @@ void test_calibration_cache_round_trip () {
     var other_filters = SmartOptimizerCache.try_create (
         input, "svt-av1", 4, "yuv420p", "scale=640:-2", 0.0, 100.0, 8.0, positions, 1.0);
     assert (other_filters != null && !other_filters.lookup (30, out v));
+    var other_watermark = SmartOptimizerCache.try_create (
+        input, "svt-av1", 4, "yuv420p", "", 0.0, 100.0, 8.0,
+        positions, 1.0, "", "watermark:image|different-file");
+    assert (other_watermark != null && !other_watermark.lookup (30, out v));
 
     // Missing input file → no cache handle
     assert (SmartOptimizerCache.try_create (
@@ -2260,6 +2344,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/trim-window/effective-duration", test_trim_window_effective_duration_caps_end);
     Test.add_func ("/smart-optimizer-logic/units/round-trip", test_unit_conversions_round_trip);
     Test.add_func ("/smart-optimizer-logic/match-source/rounding", test_match_source_target_rounding);
+    Test.add_func ("/smart-optimizer-logic/match-source/ignores-async-ui-size", test_match_source_target_ignores_async_ui_size);
+    Test.add_func ("/smart-optimizer-logic/stale-guard/active-mode-controls", test_stale_guard_compares_only_active_mode_controls);
     Test.add_func ("/smart-optimizer-logic/match-source/window-scaled", test_match_source_target_scaled_to_window);
     Test.add_func ("/smart-optimizer-logic/container-overhead/duration-scaled", test_container_overhead_scales_with_duration);
     Test.add_func ("/smart-optimizer-logic/fit/recovers-exponential", test_fit_recovers_exponential);
@@ -2349,6 +2435,7 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/cache/round-trip", test_calibration_cache_round_trip);
     Test.add_func ("/smart-optimizer-logic/cache/vmaf-samples", test_cache_stores_vmaf_and_stays_compatible);
     Test.add_func ("/smart-optimizer-logic/cache/legacy-samples", test_cache_reads_legacy_two_element_samples);
+    Test.add_func ("/smart-optimizer-logic/cache/image-watermark-identity", test_image_watermark_cache_identity_tracks_rendered_pixels);
 
     Test.run ();
 }

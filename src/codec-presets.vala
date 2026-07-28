@@ -150,7 +150,11 @@ public class CodecPresets : Object {
             } else {
                 tab.container_combo.set_selected (saved_container);
             }
-            set_dropdown_by_label (tab.profile_combo, "High");
+            bool recommended_10bit = rec.recommended_pix_fmt != null
+                && rec.recommended_pix_fmt.contains ("10");
+            set_dropdown_by_label (tab.profile_combo,
+                recommended_10bit ? "High10" : "High");
+            tab.apply_recommended_pixel_format (rec.recommended_pix_fmt);
 
             // Preset
             set_dropdown_by_label (tab.preset_combo, rec.preset);
@@ -295,6 +299,16 @@ public class CodecPresets : Object {
                 tab.container_combo.set_selected (saved_container);
             }
 
+            if (rec.recommended_pix_fmt != null
+                    && rec.recommended_pix_fmt.length > 0) {
+                bool recommended_10bit = rec.recommended_pix_fmt.contains ("10");
+                set_dropdown_by_label (tab.profile_combo,
+                    recommended_10bit
+                        ? "Profile 2 (10-bit 4:2:0)"
+                        : "Profile 0 (8-bit 4:2:0)");
+                tab.apply_recommended_pixel_format (rec.recommended_pix_fmt);
+            }
+
             // Speed
             string speed_str = rec.preset.replace ("cpu-used ", "");
             int speed_val = int.parse (speed_str);
@@ -408,6 +422,14 @@ public class CodecPresets : Object {
                 tab.container_combo.set_selected (saved_container);
             }
 
+            if (rec.recommended_pix_fmt != null
+                    && rec.recommended_pix_fmt.length > 0) {
+                bool recommended_10bit = rec.recommended_pix_fmt.contains ("10");
+                set_dropdown_by_label (tab.profile_combo,
+                    recommended_10bit ? "Main10" : "Main");
+                tab.apply_recommended_pixel_format (rec.recommended_pix_fmt);
+            }
+
             // Preset
             set_dropdown_by_label (tab.preset_combo, rec.preset);
 
@@ -518,6 +540,8 @@ public class CodecPresets : Object {
             } else {
                 tab.container_combo.set_selected (saved_container);
             }
+
+            tab.apply_recommended_pixel_format (rec.recommended_pix_fmt);
 
             // Preset
             string preset_str = rec.preset.replace ("preset ", "");

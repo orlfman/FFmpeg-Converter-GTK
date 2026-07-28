@@ -4,10 +4,10 @@
 // A calibration sample is a measured (CRF → full-length size KiB) point.
 // It stays valid as long as everything that shaped the measurement is
 // unchanged: the input file (path, size, mtime), codec, calibration
-// preset, pixel format, video filter chain, trim window, sample
-// positions, and the complexity extrapolation weight.  All of those are
-// folded into the cache key, so a stale hit is impossible short of an
-// mtime-preserving file edit.
+// preset, pixel format, video filter chain, non-linear output effects such as
+// image overlays, trim window, sample positions, and the complexity
+// extrapolation weight. All of those are folded into the cache key, so a stale
+// hit is impossible short of an identity-preserving file edit.
 //
 // The payoff: re-running the optimizer with only a different target size
 // (same tier → same preset/pix_fmt) reuses the measured points and skips
@@ -25,7 +25,7 @@ using Json;
 
 public class SmartOptimizerCache : GLib.Object {
 
-    private const int    CACHE_FORMAT_VERSION = 1;
+    private const int    CACHE_FORMAT_VERSION = 2;
     private const int    MAX_ENTRIES = 32;
     private const string FIELD_SEP = "\x1f";
 
@@ -70,7 +70,8 @@ public class SmartOptimizerCache : GLib.Object {
         double   segment_duration,
         double[] positions,
         double   extrapolation_weight,
-        string   encoder_tuning = ""
+        string   encoder_tuning = "",
+        string   output_effects_identity = "watermark:none"
     ) {
         int64 file_size, mtime;
         if (!stat_input (input_file, out file_size, out mtime))
@@ -79,7 +80,7 @@ public class SmartOptimizerCache : GLib.Object {
             input_file, file_size, mtime, codec, preset_idx, pix_fmt,
             video_filter_chain, trim_start, encode_duration,
             segment_duration, positions, extrapolation_weight,
-            encoder_tuning);
+            encoder_tuning, output_effects_identity);
         return new SmartOptimizerCache (key);
     }
 
@@ -101,7 +102,8 @@ public class SmartOptimizerCache : GLib.Object {
         double   segment_duration,
         double[] positions,
         double   extrapolation_weight,
-        string   encoder_tuning
+        string   encoder_tuning,
+        string   output_effects_identity = "watermark:none"
     ) {
         var sb = new StringBuilder ();
         sb.append ("v%d".printf (CACHE_FORMAT_VERSION));
@@ -120,6 +122,10 @@ public class SmartOptimizerCache : GLib.Object {
         // moves size by a third — so a sample taken under different tuning is
         // a different measurement and must not be reused.
         sb.append (FIELD_SEP); sb.append (encoder_tuning);
+        // Two-input output effects such as image overlays are deliberately not
+        // part of the linear video_filter_chain, but they change every encoded
+        // calibration frame and therefore belong in the same cache identity.
+        sb.append (FIELD_SEP); sb.append (output_effects_identity);
         for (int i = 0; i < positions.length; i++) {
             sb.append (FIELD_SEP);
             sb.append ("%.2f".printf (positions[i]));

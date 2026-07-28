@@ -9,6 +9,7 @@ public class VideoPlayer : Box {
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
+    private Gtk.ToggleButton mute_button;
     private Gtk.Button popout_btn;
     private Gtk.Overlay video_overlay;
 
@@ -99,12 +100,23 @@ public class VideoPlayer : Box {
         var back_group = new Box (Orientation.HORIZONTAL, 0);
         back_group.add_css_class ("linked");
 
-        var seek_back = new Button.from_icon_name ("media-seek-backward-symbolic");
+        var seek_back = new Button.from_icon_name (
+            "video-seek-backward-five-seconds-symbolic"
+        );
         seek_back.set_tooltip_text ("Seek back 5 seconds");
         seek_back.clicked.connect (() => seek_relative (-5.0));
         back_group.append (seek_back);
 
-        var frame_back = new Button.from_icon_name ("go-previous-symbolic");
+        var seek_back_one = new Button.from_icon_name (
+            "video-seek-backward-one-second-symbolic"
+        );
+        seek_back_one.set_tooltip_text ("Seek back 1 second");
+        seek_back_one.clicked.connect (() => seek_relative (-1.0));
+        back_group.append (seek_back_one);
+
+        var frame_back = new Button.from_icon_name (
+            "video-seek-backward-frame-symbolic"
+        );
         frame_back.set_tooltip_text ("Step back 1 frame (~33 ms)");
         frame_back.clicked.connect (() => step_frame (-1));
         back_group.append (frame_back);
@@ -125,17 +137,36 @@ public class VideoPlayer : Box {
         var fwd_group = new Box (Orientation.HORIZONTAL, 0);
         fwd_group.add_css_class ("linked");
 
-        var frame_fwd = new Button.from_icon_name ("go-next-symbolic");
+        var frame_fwd = new Button.from_icon_name (
+            "video-seek-forward-frame-symbolic"
+        );
         frame_fwd.set_tooltip_text ("Step forward 1 frame (~33 ms)");
         frame_fwd.clicked.connect (() => step_frame (1));
         fwd_group.append (frame_fwd);
 
-        var seek_fwd = new Button.from_icon_name ("media-seek-forward-symbolic");
+        var seek_fwd_one = new Button.from_icon_name (
+            "video-seek-forward-one-second-symbolic"
+        );
+        seek_fwd_one.set_tooltip_text ("Seek forward 1 second");
+        seek_fwd_one.clicked.connect (() => seek_relative (1.0));
+        fwd_group.append (seek_fwd_one);
+
+        var seek_fwd = new Button.from_icon_name (
+            "video-seek-forward-five-seconds-symbolic"
+        );
         seek_fwd.set_tooltip_text ("Seek forward 5 seconds");
         seek_fwd.clicked.connect (() => seek_relative (5.0));
         fwd_group.append (seek_fwd);
 
         controls.append (fwd_group);
+
+        // Mute toggle — preserves the stream volume for unmuting
+        mute_button = new Gtk.ToggleButton ();
+        mute_button.set_icon_name ("audio-volume-high-symbolic");
+        mute_button.set_tooltip_text ("Mute audio");
+        mute_button.set_margin_start (10);
+        mute_button.toggled.connect (on_mute_toggled);
+        controls.append (mute_button);
 
         // Time display — styled readout
         var time_box = new Box (Orientation.HORIZONTAL, 4);
@@ -179,6 +210,7 @@ public class VideoPlayer : Box {
 
         var file = GLib.File.new_for_path (path);
         media = Gtk.MediaFile.for_file (file);
+        media.set_muted (mute_button.get_active ());
         picture.set_paintable (media);
 
         start_fps_probe (path, media);
@@ -464,6 +496,21 @@ public class VideoPlayer : Box {
             is_playing = true;
             play_button.set_icon_name ("media-playback-pause-symbolic");
         }
+    }
+
+    private void on_mute_toggled () {
+        bool muted = mute_button.get_active ();
+
+        if (media != null) {
+            media.set_muted (muted);
+        }
+
+        mute_button.set_icon_name (muted
+            ? "audio-volume-muted-symbolic"
+            : "audio-volume-high-symbolic");
+        mute_button.set_tooltip_text (muted
+            ? "Unmute audio"
+            : "Mute audio");
     }
 
     private void seek_relative (double seconds) {
