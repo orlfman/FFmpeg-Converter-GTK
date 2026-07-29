@@ -28,19 +28,13 @@ setup:
 	@pkg-config --exists libadwaita-1 || { echo "Error: libadwaita-1 development files are not installed"; exit 1; }
 	@pkg-config --exists json-glib-1.0 || { echo "Error: json-glib-1.0 development files are not installed"; exit 1; }
 	@pkg-config --exists libsoup-3.0 || { echo "Error: libsoup-3.0 development files are not installed"; exit 1; }
+	@pkg-config --exists mpv || { echo "Error: libmpv development files are not installed"; exit 1; }
 	@command -v ffmpeg >/dev/null || { echo "Error: ffmpeg is not installed"; exit 1; }
 	@command -v ffprobe >/dev/null || { echo "Error: ffprobe is not installed"; exit 1; }
-	@command -v gst-inspect-1.0 >/dev/null || { echo "Error: GStreamer runtime tools are not installed (missing gst-inspect-1.0)"; exit 1; }
-	@{ gst-inspect-1.0 playbin >/dev/null 2>&1 || gst-inspect-1.0 playbin3 >/dev/null 2>&1; } || { echo "Error: GStreamer playback support is not installed"; exit 1; }
-	@gst-inspect-1.0 matroskademux >/dev/null 2>&1 || { echo "Error: GStreamer Matroska/WebM support is not installed"; exit 1; }
-	@gst-inspect-1.0 qtdemux >/dev/null 2>&1 || { echo "Error: GStreamer MP4/QuickTime support is not installed"; exit 1; }
-	@gst-inspect-1.0 opusdec >/dev/null 2>&1 || { echo "Error: GStreamer Opus support is not installed"; exit 1; }
-	@gst-inspect-1.0 vorbisdec >/dev/null 2>&1 || { echo "Error: GStreamer Vorbis support is not installed"; exit 1; }
-	@{ gst-inspect-1.0 avdec_aac >/dev/null 2>&1 || gst-inspect-1.0 faad >/dev/null 2>&1; } || { echo "Error: GStreamer AAC support is not installed"; exit 1; }
-	@{ gst-inspect-1.0 avdec_h264 >/dev/null 2>&1 || gst-inspect-1.0 openh264dec >/dev/null 2>&1; } || { echo "Error: GStreamer H.264 support is not installed"; exit 1; }
-	@{ gst-inspect-1.0 avdec_h265 >/dev/null 2>&1 || gst-inspect-1.0 libde265dec >/dev/null 2>&1; } || { echo "Error: GStreamer H.265/HEVC support is not installed"; exit 1; }
-	@{ gst-inspect-1.0 vp9dec >/dev/null 2>&1 || gst-inspect-1.0 avdec_vp9 >/dev/null 2>&1; } || { echo "Error: GStreamer VP9 support is not installed"; exit 1; }
-	@{ gst-inspect-1.0 av1dec >/dev/null 2>&1 || gst-inspect-1.0 dav1ddec >/dev/null 2>&1 || gst-inspect-1.0 avdec_av1 >/dev/null 2>&1; } || { echo "Error: GStreamer AV1 support is not installed"; exit 1; }
+	@# Preview playback is libmpv, not GStreamer, so the old per-codec
+	@# gst-inspect probes are gone: they would now reject a working install.
+	@# mpv decodes through the FFmpeg libraries it links, so if libmpv is
+	@# present the formats this application handles are covered.
 	@ffmpeg -hide_banner -filters 2>/dev/null | awk '$$2 == "libvmaf" { found=1 } END { exit !found }' || echo "Warning: FFmpeg has no libvmaf filter; Quality Target mode will be unavailable"
 	@command -v ffplay >/dev/null || echo "Warning: ffplay was not found; the ffplay preference will use its fallback"
 	@if [ ! -d $(BUILDDIR) ]; then \

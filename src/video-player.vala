@@ -4,7 +4,6 @@ public class VideoPlayer : Box {
 
     // ── Widgets ──────────────────────────────────────────────────────────────
     private Gtk.Picture picture;
-    private Gtk.MediaFile? media = null;
     private Gtk.Scale scrubber;
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
@@ -17,12 +16,17 @@ public class VideoPlayer : Box {
     private CropOverlay _crop_overlay;
     public  CropOverlay crop_overlay { get { return _crop_overlay; } }
 
+    // ── Playback backend ─────────────────────────────────────────────────────
+    // libmpv rather than Gtk.MediaFile: the latter is playbin3-based and buffers
+    // whole AV1-in-Matroska files into memory.  See
+    // docs/upstream-gstreamer-playbin3-matroska-memory.md.
+    private MpvBackend backend;
+
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
-    private uint prepare_poll  = 0;
     private uint scrub_reset_source = 0;
     private uint fps_probe_generation = 0;
-    private ulong media_prepared_handler_id = 0;
+    private uint load_generation = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
     private bool prepared_handled = false;
@@ -51,6 +55,13 @@ public class VideoPlayer : Box {
         Object (orientation: Orientation.VERTICAL, spacing: 6);
         PlayerStyles.ensure_loaded ();
         build_ui ();
+
+        backend = new MpvBackend (true);
+        backend.attach_picture (picture);
+        backend.file_loaded.connect (on_media_prepared);
+        backend.load_failed.connect (() => {
+            warning ("VideoPlayer: mpv could not open the selected file");
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -208,27 +219,15 @@ public class VideoPlayer : Box {
     public void load_file (string path) {
         reset_player_state ();
 
-        var file = GLib.File.new_for_path (path);
-        media = Gtk.MediaFile.for_file (file);
-        media.set_muted (mute_button.get_active ());
-        picture.set_paintable (media);
+        uint generation = ++load_generation;
 
-        start_fps_probe (path, media);
+        if (!backend.open (path)) {
+            warning ("VideoPlayer: could not start playback for %s", path);
+            return;
+        }
 
-        // Two-pronged approach to detect when GStreamer finishes probing:
-        //  1. Property notification (ideal, fires immediately when ready)
-        //  2. Polling fallback (catches cases where notify fires before connects)
-        media_prepared_handler_id = media.notify["prepared"].connect (on_media_prepared_notify);
-
-        // Poll every 100 ms until prepared
-        prepare_poll = Timeout.add (100, () => {
-            if (media != null && media.is_prepared ()) {
-                on_media_prepared (media);
-                prepare_poll = 0;
-                return Source.REMOVE;
-            }
-            return Source.CONTINUE;
-        });
+        backend.set_muted (mute_button.get_active ());
+        start_fps_probe (path, generation);
     }
 
     /**
@@ -236,8 +235,6 @@ public class VideoPlayer : Box {
      */
     public void clear () {
         reset_player_state ();
-        media = null;
-        picture.set_paintable (null);
         scrubber.set_range (0.0, 1.0);
         scrubber.set_value (0.0);
         time_label.set_text (format_time (0.0));
@@ -248,29 +245,21 @@ public class VideoPlayer : Box {
      * Returns the current playback position in seconds.
      */
     public double get_position_seconds () {
-        if (media == null) return 0.0;
-        return (double) media.get_timestamp () / 1000000.0;
+        return backend.get_position ();
     }
 
     /**
      * Returns the total media duration in seconds.
      */
     public double get_duration_seconds () {
-        if (media == null) return 0.0;
-        return (double) media.get_duration () / 1000000.0;
+        return backend.duration;
     }
 
     /**
      * Seek to an absolute position in seconds.
      */
     public void seek_to (double seconds) {
-        if (media == null) return;
-        int64 target = (int64) (seconds * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            target = target.clamp (0, dur);
-        }
-        media.seek (target);
+        backend.seek_absolute (seconds);
     }
 
     /**
@@ -397,30 +386,14 @@ public class VideoPlayer : Box {
         }
     }
 
-    private void disconnect_media_prepared_handler () {
-        if (media != null && media_prepared_handler_id != 0) {
-            media.disconnect (media_prepared_handler_id);
-            media_prepared_handler_id = 0;
-        }
-    }
-
-    private void on_media_prepared_notify (Object source_object, ParamSpec pspec) {
-        var source_media = source_object as Gtk.MediaFile;
-        if (source_media != null) {
-            on_media_prepared (source_media);
-        }
-    }
-
     private void reset_player_state () {
         stop_update_timer ();
-        stop_prepare_poll ();
         cancel_fps_probe ();
         cancel_scrub_reset ();
-        disconnect_media_prepared_handler ();
 
-        if (media != null) {
-            media.set_playing (false);
-        }
+        // Tears the mpv core down outright rather than leaving it idle, so the
+        // demuxer buffers and decoder working set are handed back immediately.
+        backend.close ();
 
         user_scrubbing = false;
         is_playing = false;
@@ -431,10 +404,10 @@ public class VideoPlayer : Box {
         play_button.set_icon_name ("media-playback-start-symbolic");
     }
 
-    private void start_fps_probe (string path, Gtk.MediaFile probe_media) {
+    private void start_fps_probe (string path, uint generation) {
         var cancellable = new Cancellable ();
         fps_probe_cancellable = cancellable;
-        uint generation = ++fps_probe_generation;
+        uint probe_generation = ++fps_probe_generation;
         FfprobeUtils.probe_input_fps_async.begin (path, cancellable, (obj, res) => {
             double probed = FfprobeUtils.probe_input_fps_async.end (res);
 
@@ -446,34 +419,30 @@ public class VideoPlayer : Box {
                 return;
 
             // Discard stale results if a newer load replaced the active media.
-            if (generation != fps_probe_generation || media != probe_media)
+            if (probe_generation != fps_probe_generation || generation != load_generation)
                 return;
 
             _fps = probed;
         });
     }
 
-    private void on_media_prepared (Gtk.MediaFile source_media) {
-        if (media == null || source_media != media || !source_media.is_prepared ()) return;
-
-        double dur = (double) source_media.get_duration () / 1000000.0;
+    private void on_media_prepared () {
+        double dur = backend.duration;
         if (dur <= 0.0) return; // not actually ready yet
 
-        // Guard against both the notify signal and the poll timer firing
+        // mpv reports file-loaded once per load, but stay idempotent so a
+        // repeated notification cannot restart the update timer.
         if (prepared_handled) return;
         prepared_handled = true;
-
-        stop_prepare_poll ();
-        disconnect_media_prepared_handler ();
 
         scrubber.set_range (0.0, dur);
         scrubber.set_value (0.0);
         duration_label.set_text (format_time (dur));
         time_label.set_text (format_time (0.0));
 
-        // Capture intrinsic video dimensions from the paintable
-        _intrinsic_width  = source_media.get_intrinsic_width ();
-        _intrinsic_height = source_media.get_intrinsic_height ();
+        // Coded video dimensions — the coordinate space the crop filter works in
+        _intrinsic_width  = backend.video_width;
+        _intrinsic_height = backend.video_height;
 
         // Keep the crop overlay informed of the video size
         _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
@@ -483,16 +452,16 @@ public class VideoPlayer : Box {
     }
 
     private void toggle_playback () {
-        if (media == null) return;
+        if (!backend.loaded) return;
 
         if (is_playing) {
             // ── Pause ────────────────────────────────────────────────────────
-            media.set_playing (false);
+            backend.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
         } else {
             // ── Play ─────────────────────────────────────────────────────────
-            media.set_playing (true);
+            backend.set_playing (true);
             is_playing = true;
             play_button.set_icon_name ("media-playback-pause-symbolic");
         }
@@ -501,9 +470,7 @@ public class VideoPlayer : Box {
     private void on_mute_toggled () {
         bool muted = mute_button.get_active ();
 
-        if (media != null) {
-            media.set_muted (muted);
-        }
+        backend.set_muted (muted);
 
         mute_button.set_icon_name (muted
             ? "audio-volume-muted-symbolic"
@@ -514,28 +481,21 @@ public class VideoPlayer : Box {
     }
 
     private void seek_relative (double seconds) {
-        if (media == null) return;
-        int64 current = media.get_timestamp ();
-        int64 target = current + (int64) (seconds * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            target = target.clamp (0, dur);
-        }
-        media.seek (target);
+        backend.seek_relative (seconds);
     }
 
     private void step_frame (int direction) {
-        if (media == null) return;
+        if (!backend.loaded) return;
 
         // Pause first so the user sees the exact frame
         if (is_playing) {
-            media.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
         }
-        // Use the probed frame rate when available, fall back to 30 fps
-        double effective_fps = (_fps > 0.0) ? _fps : 30.0;
-        seek_relative (direction * (1.0 / effective_fps));
+
+        // mpv steps by decoded frames, so this lands on the true adjacent frame
+        // instead of seeking by an assumed frame duration.
+        backend.frame_step (direction);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -543,16 +503,16 @@ public class VideoPlayer : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private bool on_scrubber_changed (ScrollType scroll_type, double new_value) {
-        if (media == null) return false;
+        if (!backend.loaded) return false;
 
         user_scrubbing = true;
 
-        int64 seek_pos = (int64) (new_value * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            seek_pos = seek_pos.clamp (0, dur);
-        }
-        media.seek (seek_pos);
+        // Always an exact seek, never a keyframe one. TrimTab reads
+        // get_position_seconds () straight from the backend when a trim point is
+        // set, so the real position must match the frame on screen at every
+        // instant — deferring precision to the end of the drag would leave a
+        // window where a trim point captures the preceding keyframe instead.
+        backend.seek_absolute (new_value);
         time_label.set_text (format_time (new_value));
 
         // Cancel any previous anti-fight timeout to prevent stacking
@@ -579,16 +539,15 @@ public class VideoPlayer : Box {
     private void start_update_timer () {
         stop_update_timer ();
         update_source = Timeout.add (100, () => {
-            if (!user_scrubbing && media != null) {
+            if (!user_scrubbing && backend.loaded) {
                 double pos = get_position_seconds ();
                 scrubber.set_value (pos);
                 time_label.set_text (format_time (pos));
                 position_changed (pos);
 
-                // Sync the play state if GStreamer stopped on its own
+                // Sync the play state if playback stopped on its own
                 // (e.g. reached end of file)
-                bool gst_playing = media.get_playing ();
-                if (is_playing && !gst_playing) {
+                if (is_playing && !backend.get_playing ()) {
                     is_playing = false;
                     play_button.set_icon_name ("media-playback-start-symbolic");
                 }
@@ -601,13 +560,6 @@ public class VideoPlayer : Box {
         if (update_source != 0) {
             Source.remove (update_source);
             update_source = 0;
-        }
-    }
-
-    private void stop_prepare_poll () {
-        if (prepare_poll != 0) {
-            Source.remove (prepare_poll);
-            prepare_poll = 0;
         }
     }
 }

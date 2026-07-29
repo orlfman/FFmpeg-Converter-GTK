@@ -172,6 +172,40 @@ Two points matter for anyone reproducing this:
 This is the measured basis for item 3 below. It is a real fix for residual RSS,
 not a speculative one.
 
+### Confirmed again on the shipped implementation
+
+Item 3 was then implemented and re-measured end to end, with no debugger
+involved — the application trimmed itself on input change:
+
+```text
+  before        36.20 GiB
+  after          0.40 GiB
+  recovered     35.80 GiB   (98.9%)
+  subheaps      588 @ 35.83 GiB resident → 585 @ 0.08 GiB resident
+```
+
+Identical reclamation to the manual `gdb` call, so the automatic path loses
+nothing.
+
+**The trim must not run on the main loop.** A synthetic benchmark reproducing
+the arena structure measured roughly **55 ms per GiB reclaimed** (0.70 GiB in
+38.3 ms), which extrapolates to about two seconds for the 36 GiB case — a
+visible UI freeze. `malloc_trim` is thread-safe, so the implementation runs it
+on a worker thread; the main thread then blocks only if it happens to allocate
+from an arena the trim currently holds, rather than for the whole walk.
+
+### Note for the peak investigation
+
+While building that benchmark, a simple synthetic workload — two threads
+allocating 30 GiB of frame-sized blocks and freeing them — returned to near-zero
+RSS **without any explicit trim**. glibc's automatic `heap_trim` released the
+subheaps on `free()`.
+
+The real application demonstrably does not do this; it sits at 36 GiB. Something
+about its allocation pattern specifically defeats automatic subheap release.
+Whatever that is may be related to whatever holds 17.83 GiB live per pipeline,
+and is worth checking when heaptrack results arrive.
+
 ### Why the memory is in subheaps rather than `mmap`
 
 Direct `mmap` allocations totalled only 7.0 MiB (10 blocks) while loaded. A
@@ -192,8 +226,9 @@ to the kernel, because non-main arenas only shrink from the top subheap and ther
 are 288 per arena.
 
 **`malloc_trim(0)` works — measured, not predicted.** Called on the live process
-it recovered 35.88 GiB of 36.29 GiB (98.9%) in well under 4.5 s, leaving the
-application fully functional.
+it recovered 35.88 GiB of 36.29 GiB (98.9%). The shipped implementation then
+reproduced this unaided: 35.80 GiB of 36.20 GiB, also 98.9%. Residual RSS is
+solved; see item 3.
 
 **Peak memory is the more serious defect.** 17.83 GiB of *live* allocation for a
 single playback pipeline is unbounded buffering, not duplication. Removing the
@@ -217,6 +252,90 @@ up afterwards.
 The waveform helper process was separately measured at 645 MiB RSS with 20
 threads while running. Non-trivial, but 1.8% of the parent's footprint, and it
 exits.
+
+## Root cause of the peak: a GStreamer bug, not application code
+
+Investigated 2026-07-28 with a duration ladder, heaptrack, and a minimal
+reproducer. **The peak is not caused by anything this project does.**
+
+### Memory scales with duration, not resolution
+
+Three stream-copied clips of the same source — identical codec, resolution and
+bitrate, differing only in length:
+
+| clip | peak RSS | above idle | per second of video |
+|---|---|---|---|
+| 30 s | 0.68 GiB | 0.47 GiB | 15.7 MiB/s |
+| 120 s | 2.13 GiB | 1.54 GiB | 12.8 MiB/s |
+| 600 s | 8.15 GiB | 7.13 GiB | 12.2 MiB/s |
+
+A fixed resolution-sized frame pool would have been flat. It is not: the whole
+file is being ingested. Allocation completes within one to three seconds of
+selection and then stays flat — this is load-time behaviour, not playback.
+
+### heaptrack: the allocations are entirely inside GStreamer
+
+Peak heap 1.63 GB while loading the 120 s clip, which is 361 MB on disk:
+
+| bytes | calls | stack |
+|---|---|---|
+| 741 MB | 16402 | `gst_buffer_new_memdup` ← `libgstvideoparsersbad` (av1parse) |
+| 573 MB | 10184 | `gst_buffer_map_range` ← `libgstmatroska` |
+| 108 MB | 8146 | file reads ← `libgstgio` → `gst_pad_pull_range` |
+
+No application code appears in any top stack. The file ends up resident roughly
+four times over. Leak analysis shows the same three stacks with exactly half the
+peak bytes still live at exit — one pipeline's worth — consistent with the
+two-pipeline duplication and with teardown otherwise working correctly.
+
+### Isolated to AV1 + Matroska + playbin3
+
+`Gtk.MediaFile` is built on `GstPlay`, which is playbin3-based. Testing the same
+600 s stream directly:
+
+| | Matroska | MP4 |
+|---|---|---|
+| **playbin2** | 200 MiB | 192 MiB |
+| **playbin3** | **3471 MiB** | 111 MiB |
+
+All three conditions are required: AV1, Matroska, and playbin3. The codec
+requirement is shown by two Blu-ray remuxes, both Matroska, both 10-bit HDR,
+both 23.976 fps, near-identical size and duration:
+
+| | AV1, 8.5 GB, 2h00 | HEVC, 8.4 GB, 2h20 |
+|---|---|---|
+| t+5 s | 234.62 MiB | 159.30 MiB |
+| t+90 s | **2608.68 MiB** | 162.14 MiB |
+| trend | +27.9 MiB/s, no plateau | flat |
+
+**Practical consequence for this project:** only AV1-in-Matroska inputs are
+affected. HEVC, H.264 and anything in MP4 behave normally, which is why this was
+never reported by users with ordinary files.
+
+A 40-line GTK program that only calls `Gtk.MediaFile.for_file()` reproduces it
+fully — attaching to a widget, polling `is_prepared()`, and calling
+`set_playing(true)` all make no measurable difference (860 / 860 / 872 MiB). See
+`DevTools/mediafile-probe.vala`.
+
+Full write-up for maintainers, including what could *not* be reproduced
+synthetically, is in
+[`upstream-gstreamer-playbin3-matroska-memory.md`](upstream-gstreamer-playbin3-matroska-memory.md).
+
+### Consequences for the proposals below
+
+- Item 1 (bound the buffering) **cannot be fixed in this project**. There is no
+  API to bound a `Gtk.MediaFile` pipeline. It is now an upstream report plus, if
+  a local fix is ever needed, a structural change: drive GStreamer directly with
+  playbin2, or preview a remuxed proxy.
+- Items 2 and 4 (drop the duplicate pipeline, construct lazily) are now the
+  *only* effective mitigations, and both are worth more than previously thought:
+  they are the difference between paying this cost twice, once, or not at all.
+- The affected inputs are **AV1 in Matroska/WebM** — what yt-dlp and gallery-dl
+  produce, and what AV1 encoders default to. HEVC/H.264 users, and anyone using
+  MP4, would never have noticed.
+- A cheap partial mitigation exists if the upstream fix is slow: detect AV1 in a
+  Matroska container at probe time and skip or proxy the preview for those
+  inputs only, leaving every other format on the current path.
 
 ## Relevant load paths
 
@@ -258,32 +377,73 @@ Additional eager full-file work:
 Ordered by impact. Items 1 and 2 address peak memory, which is what makes the
 application unusable on lower-end machines. Item 3 addresses residual RSS.
 
-### 1. Bound the playback pipeline's buffering
+### 1. Bound the playback pipeline's buffering — RESOLVED BY REPLACING THE BACKEND
 
-**Highest-value change, and not previously identified.**
+**Done. `Gtk.MediaFile` is gone; both players now run on libmpv.**
 
-One pipeline holding 17.83 GiB of live allocations is the core defect. Every
-other item on this list is a multiplier or a cleanup on top of it.
+The defect could not be fixed while `Gtk.MediaFile` was in the picture — it is
+playbin3-based via `GstPlay` and exposes no handle on the pipeline, so there were
+no queue limits to set. Rather than wait for upstream, the backend was replaced:
+`src/mpv-backend.vala` drives libmpv directly, with `demuxer-max-bytes` set to
+32 MiB, so unbounded read-ahead is not merely avoided but impossible.
 
-Investigation needed before a fix can be specified:
+Measured with `DevTools/mpv-backend-probe.vala` against
+`DevTools/mediafile-probe.vala` on the same synthetic AV1-in-Matroska files,
+identical window and sampling:
 
-- Run `heaptrack` against a fresh launch and load the stress fixture. This names
-  the allocation sites directly and is the fastest route to the answer.
-- Dump the pipeline topology with `GST_DEBUG_DUMP_DOT_DIR` to see what decodebin
-  actually instantiates.
-- The doubled `multiqueue0:src` … `multiqueue3:src` threads are the first place
-  to look; decodebin's multiqueue can grow substantially when downstream does not
-  consume.
-- Test whether a pipeline whose widget is never mapped (the Audio tab case, and
-  any hidden-tab case after item 4) fails to apply back-pressure, allowing
-  decoded frames to accumulate in the paintable sink. For scale: 17.83 GiB at
-  12.4 MiB per 4K frame is roughly 1,430 frames.
+| clip | file size | Gtk.MediaFile growth | libmpv growth |
+|---:|---:|---:|---:|
+| 120 s | 115 MiB | 254.52 MiB | 120.80 MiB |
+| 600 s | 573 MiB | 765.92 MiB | **120.69 MiB** |
 
-Likely mitigations, to be confirmed by the above: explicit `max-size-bytes` /
-`max-size-time` limits on the queues, capping decoder threads, or not running a
-video decode path at all for the audio-only use case (see item 2).
+The old backend scales with how much of the file has been read. libmpv is flat to
+within 0.11 MiB across a 5× change in duration — the growth is the decode working
+set, and it no longer depends on file size at all. Audio-only mode on the same
+600 s file grows 50.11 MiB, because no video is decoded.
 
-### 2. Never load the full video into the Audio player
+Costs of the change, for the record:
+
+- libmpv adds roughly 30 MiB of baseline RSS at startup, from the library and its
+  bundled FFmpeg stack, before any file is opened.
+- It is a new hard runtime dependency. GStreamer is no longer needed at all, and
+  the Makefile's per-codec `gst-inspect` preflight has been removed.
+- Rendering is libmpv's software renderer into a `Gdk.MemoryTexture`, sized to
+  the widget and capped at 1920×1080. There is no GL context and no new widget:
+  `Gtk.Picture` and `CropOverlay` are untouched.
+- mpv refuses to start unless `LC_NUMERIC` is `C`; the backend forces it.
+
+The upstream report in
+[`upstream-gstreamer-playbin3-matroska-memory.md`](upstream-gstreamer-playbin3-matroska-memory.md)
+is still worth filing — the GStreamer bug is real and affects every GTK4
+application using `Gtk.MediaFile` — but this project no longer depends on it
+being fixed.
+
+### 2. Never load the full video into the Audio player — RESOLVED BY ITEM 1
+
+**Done, and the proposal below is obsolete: no proxy is extracted at all.**
+
+The plan was to stream-copy the selected audio stream into a temporary `.mka` and
+play that, to stop the Audio tab opening a second video pipeline. libmpv makes the
+whole approach unnecessary: `AudioPlayer` opens the *original* file with
+`vid=no` and `aid=<index+1>`, so no video decoder is instantiated in the first
+place. The `aid` mapping was verified against `-map 0:a:N` on a two-track file.
+
+Everything the proposal below worried about therefore does not arise:
+
+- No extraction, so no full-file demux before the tab can play, and no progress
+  indication needed for one.
+- No temporary files, so no proxy cache, no cleanup, and no
+  `fallback_to_primary_stream ()` reopening the original file and reintroducing
+  the memory risk. That method and the whole extraction path are deleted.
+- No timestamp offset to compensate, and no duration divergence: mpv reports the
+  source's own duration, so `AudioTab.loaded_duration` stays correct whether it
+  comes from the probe or from `media_ready`.
+- Switching tracks is a reload of the same file with a different `aid`, not a
+  re-extraction.
+
+The original proposal is kept below for context only.
+
+### 2 (original proposal, superseded)
 
 Eliminates one of the two pipelines outright, halving peak.
 
@@ -399,10 +559,23 @@ private extern int malloc_trim (size_t pad);
 
 (`src/subprocess-compat.c` is already in the build if a C shim is preferred.)
 
+Run it on a worker thread, not the main loop — see the timing note above.
+
 Caveats: it cannot release still-referenced allocations, cannot prove GStreamer
 teardown completed, and may cost performance as later allocations fault pages
 back in. Run it after exceptional large-media teardown, not on routine UI
 operations.
+
+**Implemented** in `src/heap-trim.vala`, gated on measured RSS rather than file
+size so it self-calibrates, debounced so typing a path schedules one trim, and
+wired into `AppController.wire_file_input_changed()`. Policy thresholds and
+`/proc` parsing are pure and covered by `tests/heap-trim-policy-test.vala`; the
+debounce plumbing is not yet covered.
+
+Known limitation: switching directly from one large file to another fires the
+trim while the new file is still loading, so the reclaim is partial. This is
+largely self-correcting, because glibc prefers reusing the freed chunks for the
+new pipeline over mapping fresh subheaps.
 
 #### Optional: pin `M_MMAP_THRESHOLD`
 

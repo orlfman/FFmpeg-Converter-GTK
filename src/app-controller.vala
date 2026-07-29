@@ -74,6 +74,11 @@ public class AppController : Object {
     private int smart_opt_generation = 0;
     private FfmpegRuntimeCapabilities ffmpeg_runtime_capabilities;
 
+    // ── Input tracking ───────────────────────────────────────────────────────
+    // Whether an input change is replacing an earlier file, which is the only
+    // case where a heap trim has anything to hand back.
+    private string previous_input_path = "";
+
     // ── FFmpeg capability probing ────────────────────────────────────────────
     private Cancellable? drawtext_probe_cancel = null;
     private int drawtext_probe_generation = 0;
@@ -724,6 +729,8 @@ public class AppController : Object {
             if (smart_opt_cancel != null)
                 cancel_smart_optimizer ();
             string path = file_pickers.input_entry.get_text ();
+            bool replaced_previous_input = previous_input_path.strip ().length > 0;
+            previous_input_path = path;
             info_tab.load_input_info (path);
             info_tab.reset_output ();
             general_tab.reset_crop ();
@@ -738,6 +745,11 @@ public class AppController : Object {
                     : AudioProbeDisplayState.UNKNOWN
             );
             update_codec_source_file_size (path);
+
+            // Both players have just torn down their pipelines for the outgoing
+            // file. Hand the freed pages back once teardown and the new load
+            // settle; the request coalesces and is a no-op below the RSS gate.
+            HeapTrim.request (replaced_previous_input);
         });
     }
 

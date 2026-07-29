@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '1.6.2',
+  version : '1.6.4',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -10,6 +10,13 @@ project('ffmpeg-converter-gtk',
 gnome = import('gnome')
 fs = import('fs')
 add_project_arguments('--target-glib=2.0', '--pkg=posix', language : 'vala')
+# libmpv bindings live in-tree (no VAPI ships with mpv); mpv-compat.h sits in src/.
+add_project_arguments(
+  '--vapidir', meson.current_source_dir() / 'vapi',
+  '--pkg=mpv',
+  language : 'vala'
+)
+add_project_arguments('-I' + meson.current_source_dir() / 'src', language : 'c')
 headless_gtk_test_env = environment()
 headless_gtk_test_env.set('DISPLAY', '')
 headless_gtk_test_env.set('WAYLAND_DISPLAY', '')
@@ -23,14 +30,18 @@ dependencies = [
   dependency('libadwaita-1', version : '>= 1.5'),
   dependency('json-glib-1.0'),
   dependency('libsoup-3.0'),
+  dependency('mpv'),
 ]
 sources = files(
   'src/main.vala',
   'src/subprocess-compat.c',
+  'src/mpv-compat.c',
+  'src/mpv-backend.vala',
   'src/ffmpeg-runtime-capabilities.vala',
   'src/app-controller.vala',
   'src/process-runner.vala',
   'src/conversion-utils.vala',
+  'src/heap-trim.vala',
   'src/operation-output-result.vala',
   'src/progress-tracker.vala',
   'src/constants.vala',
@@ -175,6 +186,23 @@ if fs.exists('tests/subtitle-language-guesser-test.vala')
   )
 
   test('subtitle-language-guesser', subtitle_language_guesser_test)
+endif
+
+if fs.exists('tests/heap-trim-policy-test.vala')
+  heap_trim_policy_test = executable(
+    'heap-trim-policy-test',
+    files(
+      'src/heap-trim.vala',
+      'tests/heap-trim-policy-test.vala',
+    ),
+    dependencies : [
+      dependency('glib-2.0'),
+      dependency('gobject-2.0'),
+    ],
+    build_by_default : false,
+  )
+
+  test('heap-trim-policy', heap_trim_policy_test)
 endif
 
 if fs.exists('tests/logo-detector-logic-test.vala')
@@ -372,6 +400,8 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
     'trim-subtitles-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/mpv-compat.c',
+      'src/mpv-backend.vala',
       'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',
@@ -451,6 +481,8 @@ if fs.exists('tests/combine-window-state-test.vala')
     'combine-window-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/mpv-compat.c',
+      'src/mpv-backend.vala',
       'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',
@@ -532,6 +564,8 @@ if fs.exists('tests/audio-reorder-state-test.vala')
     'audio-reorder-state-test',
     files(
       'src/subprocess-compat.c',
+      'src/mpv-compat.c',
+      'src/mpv-backend.vala',
       'src/ffmpeg-runtime-capabilities.vala',
       'src/process-runner.vala',
       'src/conversion-utils.vala',

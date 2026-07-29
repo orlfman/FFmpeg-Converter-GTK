@@ -25,6 +25,9 @@ using GLib;
     //                                            4-4-4 PNG collage sidecar)
     //    play_with_ffplay = false                (default: false → use desktop
     //                                            player for Playback menu actions)
+    //    hardware_decoding = true                (default: true → preview players
+    //                                            may offload decoding to the GPU;
+    //                                            false forces software decoding)
     //    recently_opened_enabled = true          (default: true → remember and
     //                                            show up to 20 input files)
     //    container_default_mode = default        (default|mkv|codec_specific)
@@ -81,6 +84,7 @@ public class AppSettings : Object {
     // video, so overriding it silently would be presumptuous. ffplay is the
     // opt-in for people who want the raw decode rather than their player's.
     private bool   _play_with_ffplay = false;
+    private bool   _hardware_decoding = true;
     private bool   _recently_opened_enabled = true;
     private string[] _recent_input_files = {};
     private bool   _verify_unknown_audio_copy_preflight = true;
@@ -390,6 +394,35 @@ public class AppSettings : Object {
             mutex.lock ();
             try {
                 _play_with_ffplay = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
+    /**
+     * Whether the preview players may offload decoding to the GPU.
+     *
+     * On by default: it lowers system memory use and, on machines whose CPU
+     * struggles with 4K AV1, is the difference between a usable preview and a
+     * stuttering one. Turning it off forces software decoding, which is the
+     * remedy if a driver produces corrupt or missing preview frames.
+     */
+    public bool hardware_decoding {
+        get {
+            bool hardware_decoding;
+            mutex.lock ();
+            try {
+                hardware_decoding = _hardware_decoding;
+            } finally {
+                mutex.unlock ();
+            }
+            return hardware_decoding;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _hardware_decoding = value;
             } finally {
                 mutex.unlock ();
             }
@@ -706,6 +739,8 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "show_bit_depth_warning_dialog", true);
         bool play_with_ffplay = read_bool (
             kf, GROUP_GENERAL, "play_with_ffplay", false);
+        bool hardware_decoding = read_bool (
+            kf, GROUP_GENERAL, "hardware_decoding", true);
         bool recently_opened_enabled = read_bool (
             kf, GROUP_GENERAL, "recently_opened_enabled", true);
         string[] raw_recent_input_files = read_string_list (
@@ -734,6 +769,7 @@ public class AppSettings : Object {
             _overwrite_enabled = overwrite_enabled;
             _generate_collage_thumbnail = generate_collage_thumbnail;
             _play_with_ffplay = play_with_ffplay;
+            _hardware_decoding = hardware_decoding;
             _recently_opened_enabled = recently_opened_enabled;
             _recent_input_files = recent_input_files;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
@@ -776,6 +812,7 @@ public class AppSettings : Object {
         bool overwrite_enabled;
         bool generate_collage_thumbnail;
         bool play_with_ffplay;
+        bool hardware_decoding;
         bool recently_opened_enabled;
         string[] recent_input_files;
         bool verify_unknown_audio_copy_preflight;
@@ -797,6 +834,7 @@ public class AppSettings : Object {
             overwrite_enabled = _overwrite_enabled;
             generate_collage_thumbnail = _generate_collage_thumbnail;
             play_with_ffplay = _play_with_ffplay;
+            hardware_decoding = _hardware_decoding;
             recently_opened_enabled = _recently_opened_enabled;
             recent_input_files = new string[_recent_input_files.length];
             for (int i = 0; i < _recent_input_files.length; i++)
@@ -835,6 +873,7 @@ public class AppSettings : Object {
             show_bit_depth_warning_dialog
         );
         kf.set_boolean (GROUP_GENERAL, "play_with_ffplay", play_with_ffplay);
+        kf.set_boolean (GROUP_GENERAL, "hardware_decoding", hardware_decoding);
         kf.set_boolean (
             GROUP_GENERAL,
             "recently_opened_enabled",
@@ -876,6 +915,7 @@ public class AppSettings : Object {
             _overwrite_enabled  = false;
             _generate_collage_thumbnail = false;
             _play_with_ffplay = false;
+            _hardware_decoding = true;
             _recently_opened_enabled = true;
             _verify_unknown_audio_copy_preflight = true;
             _show_bit_depth_warning_dialog = true;

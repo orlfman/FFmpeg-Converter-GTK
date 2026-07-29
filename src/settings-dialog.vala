@@ -60,6 +60,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow generate_collage_thumbnail_switch;
     private Adw.SwitchRow play_with_ffplay_switch;
+    private Adw.SwitchRow hardware_decoding_switch;
     private Adw.SwitchRow recently_opened_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.SwitchRow show_bit_depth_warning_dialog_switch;
@@ -290,6 +291,24 @@ public class SettingsDialog : Adw.PreferencesDialog {
         );
         playback_group.add (play_with_ffplay_switch);
         page.add (playback_group);
+
+        // Separate from Playback above: that group governs the external player
+        // launched from the Playback menu, this one the embedded preview.
+        var preview_group = new Adw.PreferencesGroup ();
+        preview_group.set_title ("Preview Player");
+        preview_group.set_description (
+            "Settings for the video and audio previews shown in Crop & Trim and the Audio tab."
+        );
+
+        hardware_decoding_switch = new Adw.SwitchRow ();
+        hardware_decoding_switch.set_title ("Hardware Decoding");
+        hardware_decoding_switch.set_subtitle (
+            "Let the GPU decode preview video where it can, falling back to the "
+            + "CPU otherwise. Uses less memory and helps most on slower processors. "
+            + "Turn off if previews show corrupt or missing frames"
+        );
+        preview_group.add (hardware_decoding_switch);
+        page.add (preview_group);
 
         var history_group = new Adw.PreferencesGroup ();
         history_group.set_title ("Recent Files");
@@ -1466,6 +1485,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_switch.set_active (s.overwrite_enabled);
         generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
         play_with_ffplay_switch.set_active (s.play_with_ffplay);
+        hardware_decoding_switch.set_active (s.hardware_decoding);
         recently_opened_switch.set_active (s.recently_opened_enabled);
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
@@ -1528,6 +1548,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
         s.play_with_ffplay = play_with_ffplay_switch.get_active ();
+        s.hardware_decoding = hardware_decoding_switch.get_active ();
         s.recently_opened_enabled = recently_opened_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();

@@ -131,18 +131,21 @@ Package names differ between distributions, but a source build needs:
 
 - **Build tools:** GNU Make, Meson, Ninja, Vala, `pkg-config`, and a C compiler.
 - **Development libraries:** GLib/GObject/GIO, GTK4, libadwaita, Cairo, Pango,
-  JSON-GLib, and libsoup 3.
-- **Runtime:** FFmpeg (including FFprobe), GStreamer, the GStreamer playback
-  core, and plugins supporting Matroska/WebM, MP4, Opus, Vorbis, AAC, H.264,
-  H.265/HEVC, VP9, and AV1. The hicolor icon theme is also required for the
-  installed application icon.
+  JSON-GLib, libsoup 3, and libmpv.
+- **Runtime:** FFmpeg (including FFprobe) and libmpv, which powers the in-app
+  preview players and decodes through its own bundled FFmpeg libraries. The
+  hicolor icon theme is also required for the installed application icon.
 - **Optional:** FFmpeg's `libvmaf` filter enables Smart Optimizer Quality
   Target mode. FFplay enables the optional ffplay playback preference; the app
   falls back to the system player when it is unavailable.
 
 The Makefile checks these capabilities before building and reports the missing
-tool, library, or GStreamer feature rather than assuming distribution-specific
-package names.
+tool or library rather than assuming distribution-specific package names.
+
+> The preview players use libmpv rather than GTK's GStreamer-backed
+> `Gtk.MediaFile`. GStreamer is no longer required at all. See
+> [`docs/upstream-gstreamer-playbin3-matroska-memory.md`](docs/upstream-gstreamer-playbin3-matroska-memory.md)
+> for the memory defect that motivated the change.
 
 ### Dependencies (Arch Linux)
 
@@ -150,8 +153,7 @@ Install everything needed to build and run the application from source:
 
 ```bash
 sudo pacman -S --needed base-devel meson ninja vala pkgconf gtk4 libadwaita \
-  json-glib libsoup3 cairo pango ffmpeg gstreamer gst-plugins-base \
-  gst-plugins-good gst-plugins-bad gst-libav hicolor-icon-theme
+  json-glib libsoup3 cairo pango ffmpeg mpv hicolor-icon-theme
 ```
 
 On Arch, FFmpeg supplies FFmpeg, FFprobe, FFplay, and the `libvmaf`-enabled

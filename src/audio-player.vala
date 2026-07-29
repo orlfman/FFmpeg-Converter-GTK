@@ -37,9 +37,9 @@ class AudioWaveformCacheEntry : Object {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AudioPlayer — Waveform-based audio player with segment highlights
 //
-//  Uses Gtk.MediaFile for playback and FFmpeg showwavespic for waveform
-//  generation.  The waveform is displayed as a Gtk.Picture with an
-//  click-to-seek waveform and segment highlight drawing.
+//  Uses libmpv for playback (audio-only, so no video is ever decoded here) and
+//  FFmpeg showwavespic for waveform generation.  The waveform is displayed as a
+//  Gtk.Picture with an click-to-seek waveform and segment highlight drawing.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class AudioPlayer : Box {
@@ -56,13 +56,16 @@ public class AudioPlayer : Box {
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
-    private Gtk.MediaFile? media = null;
+
+    // ── Playback backend ─────────────────────────────────────────────────────
+    // Audio-only libmpv instance: it selects the wanted audio track directly from
+    // the source with video decoding switched off, so no playback proxy has to be
+    // extracted and no video pipeline is ever created for this tab.
+    private MpvBackend backend;
 
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
-    private uint prepare_poll = 0;
     private uint scrub_reset_source = 0;
-    private ulong media_prepared_handler_id = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
     private bool prepared_handled = false;
@@ -73,12 +76,7 @@ public class AudioPlayer : Box {
     private uint waveform_generation = 0;
     private string current_waveform_input_path = "";
     private int current_waveform_stream_index = 0;
-    private string? playback_tmp_path = null;
-    private Cancellable? playback_extract_cancellable = null;
-    private Subprocess? playback_extract_proc = null;
-    private uint playback_extract_generation = 0;
     private string? temp_run_dir = null;
-    private string? playback_temp_dir = null;
     private string? waveform_temp_dir = null;
     private ulong style_manager_dark_handler_id = 0;
     private HashTable<string, AudioWaveformCacheEntry> waveform_cache =
@@ -104,6 +102,12 @@ public class AudioPlayer : Box {
         inject_audio_player_css ();
         build_ui ();
         connect_style_manager ();
+
+        backend = new MpvBackend (false);
+        backend.file_loaded.connect (on_media_prepared);
+        backend.load_failed.connect (() => {
+            warning ("AudioPlayer: mpv could not open the selected audio stream");
+        });
     }
 
     private static bool audio_player_css_injected = false;
@@ -319,122 +323,21 @@ public class AudioPlayer : Box {
         // Start waveform generation (targets specific stream)
         generate_waveform_async (path, stream_index, signature);
 
-        if (stream_index > 0) {
-            // Extract specific audio stream to temp file for playback
-            extract_and_load_playback.begin (path, stream_index);
-        } else {
-            // Default: load original file directly (first audio stream)
-            load_media_from_path (path);
-        }
-    }
-
-    // ── Playback stream extraction (for non-primary streams) ────────────────
-
-    private void load_media_from_path (string path) {
-        var file = GLib.File.new_for_path (path);
-        media = Gtk.MediaFile.for_file (file);
-
-        media_prepared_handler_id = media.notify["prepared"].connect (on_media_prepared_notify);
-
-        prepare_poll = Timeout.add (100, () => {
-            if (media != null && media.is_prepared ()) {
-                on_media_prepared (media);
-                prepare_poll = 0;
-                return Source.REMOVE;
-            }
-            return Source.CONTINUE;
-        });
-    }
-
-    private async void extract_and_load_playback (string input_path,
-                                                  int stream_index) {
-        uint gen = ++playback_extract_generation;
-        var cancel = new Cancellable ();
-        playback_extract_cancellable = cancel;
-
-        string tmp_path;
-        if (!create_playback_temp_path (out tmp_path)) {
-            debug ("AudioPlayer: failed to create playback temp file, falling back");
-            fallback_to_primary_stream (input_path);
+        if (path.length == 0)
             return;
-        }
 
-        playback_tmp_path = tmp_path;
-
-        string[] cmd = {
-            AppSettings.get_default ().ffmpeg_path,
-            "-y",
-            "-i", input_path,
-            "-map", "0:a:%d".printf (stream_index),
-            "-vn", "-sn",
-            "-c:a", "copy",
-            tmp_path
-        };
-
-        try {
-            var launcher = new SubprocessLauncher (
-                SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
-            var proc = SubprocessCompat.spawnv (launcher, cmd);
-            playback_extract_proc = proc;
-
-            string? stdout_buf, stderr_buf;
-            try {
-                yield proc.communicate_utf8_async (null, cancel, out stdout_buf, out stderr_buf);
-            } catch (Error e) {
-                clear_playback_extract_proc (proc);
-                if (cancel.is_cancelled () || gen != playback_extract_generation) {
-                    FileUtils.unlink (tmp_path);
-                    return;
-                }
-                debug ("AudioPlayer: playback extraction failed: %s, falling back", e.message);
-                cleanup_playback_tmp ();
-                fallback_to_primary_stream (input_path);
-                return;
-            }
-
-            clear_playback_extract_proc (proc);
-
-            // Stale: a newer extraction has started — clean up our file only
-            if (cancel.is_cancelled () || gen != playback_extract_generation) {
-                FileUtils.unlink (tmp_path);
-                return;
-            }
-
-            if (proc.get_successful ()) {
-                load_media_from_path (tmp_path);
-            } else {
-                debug ("AudioPlayer: playback extraction ffmpeg failed, falling back to original");
-                cleanup_playback_tmp ();
-                fallback_to_primary_stream (input_path);
-            }
-        } catch (Error e) {
-            debug ("AudioPlayer: failed to spawn playback extraction: %s, falling back", e.message);
-            if (gen == playback_extract_generation) {
-                cleanup_playback_tmp ();
-                fallback_to_primary_stream (input_path);
-            } else {
-                FileUtils.unlink (tmp_path);
-            }
-        }
-    }
-
-    private void fallback_to_primary_stream (string input_path) {
-        current_waveform_input_path = input_path;
-        current_waveform_stream_index = 0;
-        generate_waveform_async (input_path, 0);
-        load_media_from_path (input_path);
-    }
-
-    private void clear_playback_extract_proc (Subprocess proc) {
-        if (playback_extract_proc == proc) {
-            playback_extract_proc = null;
+        // mpv selects the audio track directly from the source with video
+        // decoding disabled, so every stream — including the first — plays from
+        // the original file. There is no extraction step, no temporary proxy,
+        // and the reported duration stays the source's own.
+        if (!backend.open (path, stream_index)) {
+            warning ("AudioPlayer: could not start playback for %s", path);
         }
     }
 
     private bool ensure_temp_dirs () {
-        if (temp_run_dir != null && playback_temp_dir != null && waveform_temp_dir != null) {
+        if (temp_run_dir != null && waveform_temp_dir != null) {
             if (FileUtils.test (temp_run_dir, FileTest.IS_DIR)
-                && FileUtils.test (playback_temp_dir, FileTest.IS_DIR)
                 && FileUtils.test (waveform_temp_dir, FileTest.IS_DIR)) {
                 return true;
             }
@@ -446,15 +349,11 @@ public class AudioPlayer : Box {
         if (run_dir == null)
             return false;
 
-        string? next_playback_dir = ConversionUtils.ensure_managed_temp_subdir (
-            run_dir,
-            "playback"
-        );
         string? next_waveform_dir = ConversionUtils.ensure_managed_temp_subdir (
             run_dir,
             "waveform"
         );
-        if (next_playback_dir == null || next_waveform_dir == null) {
+        if (next_waveform_dir == null) {
             ConversionUtils.try_remove_empty_dir_chain (
                 run_dir,
                 ConversionUtils.get_app_temp_root ()
@@ -463,33 +362,8 @@ public class AudioPlayer : Box {
         }
 
         temp_run_dir = run_dir;
-        playback_temp_dir = next_playback_dir;
         waveform_temp_dir = next_waveform_dir;
         return true;
-    }
-
-    private bool create_playback_temp_path (out string path) {
-        path = "";
-
-        if (ensure_temp_dirs () && playback_temp_dir != null) {
-            string? managed_path = ConversionUtils.create_managed_temp_file (
-                playback_temp_dir,
-                "audio-play",
-                ".mka"
-            );
-            if (managed_path != null) {
-                path = managed_path;
-                return true;
-            }
-        }
-
-        try {
-            int fd = FileUtils.open_tmp ("audio-play-XXXXXX.mka", out path);
-            Posix.close (fd);
-            return true;
-        } catch (Error e) {
-            return false;
-        }
     }
 
     private bool create_waveform_temp_path (out string path) {
@@ -522,42 +396,18 @@ public class AudioPlayer : Box {
         if (waveform_temp_dir != null) {
             ConversionUtils.try_remove_empty_dir_chain (waveform_temp_dir, root);
         }
-        if (playback_temp_dir != null) {
-            ConversionUtils.try_remove_empty_dir_chain (playback_temp_dir, root);
-        }
         if (temp_run_dir != null) {
             ConversionUtils.try_remove_empty_dir_chain (temp_run_dir, root);
         }
 
         temp_run_dir = null;
-        playback_temp_dir = null;
         waveform_temp_dir = null;
-    }
-
-    private void cleanup_playback_tmp () {
-        if (playback_tmp_path != null) {
-            FileUtils.unlink (playback_tmp_path);
-            playback_tmp_path = null;
-        }
-    }
-
-    private void cancel_playback_extract () {
-        if (playback_extract_cancellable != null) {
-            playback_extract_cancellable.cancel ();
-            playback_extract_cancellable = null;
-        }
-        if (playback_extract_proc != null) {
-            playback_extract_proc.force_exit ();
-            playback_extract_proc = null;
-        }
-        cleanup_playback_tmp ();
     }
 
     public void clear () {
         reset_player_state ();
         current_waveform_input_path = "";
         current_waveform_stream_index = 0;
-        media = null;
         time_label.set_text (VideoPlayer.format_time (0.0));
         duration_label.set_text (VideoPlayer.format_time (0.0));
         waveform_picture.set_paintable (null);
@@ -565,18 +415,11 @@ public class AudioPlayer : Box {
     }
 
     public double get_position_seconds () {
-        if (media == null) return 0.0;
-        return (double) media.get_timestamp () / 1000000.0;
+        return backend.get_position ();
     }
 
     public void seek_to (double seconds) {
-        if (media == null) return;
-        int64 target = (int64) (seconds * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            target = target.clamp (0, dur);
-        }
-        media.seek (target);
+        backend.seek_absolute (seconds);
     }
 
     public void set_segments (GenericArray<AudioSegment> segs) {
@@ -928,16 +771,12 @@ public class AudioPlayer : Box {
 
     private void reset_player_state () {
         stop_update_timer ();
-        stop_prepare_poll ();
         cancel_waveform ();
-        cancel_playback_extract ();
         cancel_scrub_reset ();
-        disconnect_media_prepared_handler ();
 
-        if (media != null) {
-            media.set_playing (false);
-            media = null;
-        }
+        // Tears the mpv core down outright so its demuxer buffers are returned
+        // rather than held for as long as the tab stays open.
+        backend.close ();
 
         user_scrubbing = false;
         is_playing = false;
@@ -946,39 +785,19 @@ public class AudioPlayer : Box {
     }
 
     private void ensure_paused () {
-        if (media == null) return;
         if (is_playing) {
-            media.set_playing (false);
+            backend.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
         }
     }
 
-    private void disconnect_media_prepared_handler () {
-        if (media != null && media_prepared_handler_id != 0) {
-            media.disconnect (media_prepared_handler_id);
-            media_prepared_handler_id = 0;
-        }
-    }
-
-    private void on_media_prepared_notify (Object source_object, ParamSpec pspec) {
-        var source_media = source_object as Gtk.MediaFile;
-        if (source_media != null) {
-            on_media_prepared (source_media);
-        }
-    }
-
-    private void on_media_prepared (Gtk.MediaFile source_media) {
-        if (media == null || source_media != media || !source_media.is_prepared ()) return;
-
-        double dur = (double) source_media.get_duration () / 1000000.0;
+    private void on_media_prepared () {
+        double dur = backend.duration;
         if (dur <= 0.0) return;
 
         if (prepared_handled) return;
         prepared_handled = true;
-
-        stop_prepare_poll ();
-        disconnect_media_prepared_handler ();
 
         _duration = dur;
         duration_label.set_text (VideoPlayer.format_time (dur));
@@ -989,28 +808,21 @@ public class AudioPlayer : Box {
     }
 
     private void toggle_playback () {
-        if (media == null) return;
+        if (!backend.loaded) return;
 
         if (is_playing) {
-            media.set_playing (false);
+            backend.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
         } else {
-            media.set_playing (true);
+            backend.set_playing (true);
             is_playing = true;
             play_button.set_icon_name ("media-playback-pause-symbolic");
         }
     }
 
     private void seek_relative (double seconds) {
-        if (media == null) return;
-        int64 current = media.get_timestamp ();
-        int64 target = current + (int64) (seconds * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            target = target.clamp (0, dur);
-        }
-        media.seek (target);
+        backend.seek_relative (seconds);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1018,7 +830,7 @@ public class AudioPlayer : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void seek_to_waveform_x (double x) {
-        if (media == null || _duration <= 0.0) return;
+        if (!backend.loaded || _duration <= 0.0) return;
 
         int width = segment_overlay.get_width ();
         if (width <= 0) return;
@@ -1026,12 +838,7 @@ public class AudioPlayer : Box {
         double fraction = (x / (double) width).clamp (0.0, 1.0);
         double seconds = fraction * _duration;
 
-        int64 seek_pos = (int64) (seconds * 1000000.0);
-        int64 dur = media.get_duration ();
-        if (dur > 0) {
-            seek_pos = seek_pos.clamp (0, dur);
-        }
-        media.seek (seek_pos);
+        backend.seek_absolute (seconds);
         time_label.set_text (VideoPlayer.format_time (seconds));
         segment_overlay.queue_draw ();
     }
@@ -1058,14 +865,13 @@ public class AudioPlayer : Box {
     private void start_update_timer () {
         stop_update_timer ();
         update_source = Timeout.add (100, () => {
-            if (!user_scrubbing && media != null) {
+            if (!user_scrubbing && backend.loaded) {
                 double pos = get_position_seconds ();
                 time_label.set_text (VideoPlayer.format_time (pos));
                 position_changed (pos);
                 segment_overlay.queue_draw ();
 
-                bool gst_playing = media.get_playing ();
-                if (is_playing && !gst_playing) {
+                if (is_playing && !backend.get_playing ()) {
                     is_playing = false;
                     play_button.set_icon_name ("media-playback-start-symbolic");
                 }
@@ -1078,13 +884,6 @@ public class AudioPlayer : Box {
         if (update_source != 0) {
             Source.remove (update_source);
             update_source = 0;
-        }
-    }
-
-    private void stop_prepare_poll () {
-        if (prepare_poll != 0) {
-            Source.remove (prepare_poll);
-            prepare_poll = 0;
         }
     }
 }
