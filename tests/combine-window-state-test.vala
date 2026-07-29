@@ -152,10 +152,16 @@ private CombineRunner make_capture_runner (GenericArray<CombineFile> files,
 }
 
 private ConversionRunner make_conversion_runner_for_test (EncodeProfileSnapshot profile,
-                                                          double output_duration_seconds = 1.0) {
+                                                          double output_duration_seconds = 1.0,
+                                                          bool topology_known = true,
+                                                          bool has_subtitles = false,
+                                                          bool has_chapters = false) {
     var config = new ConversionConfig ();
     config.profile = profile;
     config.output_duration_seconds = output_duration_seconds;
+    config.timed_stream_topology_known = topology_known;
+    config.input_has_subtitle_stream = has_subtitles;
+    config.input_has_chapters = has_chapters;
     return new ConversionRunner.for_command_test (config);
 }
 
@@ -1547,6 +1553,152 @@ private void test_conversion_runner_non_watermark_on_maps_primary_video_and_all_
         "on path maps all audio streams");
 }
 
+private void test_conversion_runner_video_only_resets_output_timestamps () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    profile.video_filters = "scale=1280:720";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] single_pass = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+    string[] pass1 = runner.build_pass1_argv_for_test ("/tmp/input.mkv");
+    string[] pass2 = runner.build_pass2_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    string expected = "scale=1280:720,setpts=PTS-STARTPTS";
+    assert_array_has_adjacent_pair (single_pass, "-vf", expected,
+        "video-only single-pass conversion resets the final timeline");
+    assert_array_has_adjacent_pair (pass1, "-vf", expected,
+        "video-only pass 1 uses the normalized timeline");
+    assert_array_has_adjacent_pair (pass2, "-vf", expected,
+        "video-only pass 2 uses the same normalized timeline");
+}
+
+private void test_conversion_runner_video_only_adds_timestamp_filter_to_empty_chain () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "setpts=PTS-STARTPTS",
+        "video-only conversion normalizes timestamps even without other filters");
+}
+
+private void test_conversion_runner_retained_audio_does_not_reset_video_independently () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.video_filters = "scale=1280:720";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    var runner = make_conversion_runner_for_test (profile);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "scale=1280:720",
+        "audio-bearing conversion preserves its original A/V timestamp relationship");
+    assert_array_not_contains (argv, "scale=1280:720,setpts=PTS-STARTPTS",
+        "audio-bearing conversion does not reset only the video timeline");
+}
+
+private void test_conversion_runner_subtitles_block_independent_video_reset () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    profile.video_filters = "scale=1280:720";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    var runner = make_conversion_runner_for_test (
+        profile, 1.0, true, true, false);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input-with-subtitles.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "scale=1280:720",
+        "automatically mapped subtitles keep their original relation to video");
+}
+
+private void test_conversion_runner_retained_chapters_block_video_reset () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    profile.video_filters = "scale=1280:720";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    var runner = make_conversion_runner_for_test (
+        profile, 1.0, true, false, true);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input-with-chapters.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "scale=1280:720",
+        "retained chapter timestamps block an independent video reset");
+}
+
+private void test_conversion_runner_removed_chapters_allow_video_reset () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    profile.remove_chapters = true;
+    var runner = make_conversion_runner_for_test (
+        profile, 1.0, true, false, true);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input-with-removed-chapters.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "setpts=PTS-STARTPTS",
+        "removed chapters no longer constrain the output timeline");
+}
+
+private void test_conversion_runner_unknown_topology_fails_closed () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    profile.video_filters = "scale=1280:720";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+    var runner = make_conversion_runner_for_test (
+        profile, 1.0, false, false, false);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/unprobeable-input.mkv",
+        "/tmp/output.mkv"
+    );
+
+    assert_array_has_adjacent_pair (argv, "-vf", "scale=1280:720",
+        "unknown topology does not risk shifting one stream independently");
+}
+
+private void test_conversion_runner_video_only_watermark_excludes_input_subtitles () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_args = { "-an" };
+    enable_image_watermark_for_conversion_test (profile);
+    var runner = make_conversion_runner_for_test (
+        profile, 1.0, true, true, false);
+
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input-with-subtitles.mkv",
+        "/tmp/output.mkv"
+    );
+
+    string filter_complex = extract_filter_complex (argv);
+    assert_contains (filter_complex, "[0:v]setpts=PTS-STARTPTS[vf_out]",
+        "explicit video-only watermark mapping can safely reset timestamps");
+}
+
 private void test_conversion_runner_image_watermark_toggle_off_maps_first_audio_only () {
     var profile = make_basic_conversion_profile_for_test ();
     enable_image_watermark_for_conversion_test (profile);
@@ -1729,34 +1881,37 @@ private void test_conversion_runner_collage_command_uses_percentage_timestamps (
     string[] argv = runner.build_collage_argv_for_test (
         "/tmp/output.mkv",
         "/tmp/output-collage.png",
-        100.0
+        100.0,
+        10.0
     );
 
     assert_array_occurrence_count (argv, "-ss", 12,
         "collage command seeks to twelve normalized timeline positions");
-    assert_array_has_adjacent_pair (argv, "-ss", "8.000000",
+    assert_array_occurrence_count (argv, "-seek_timestamp", 12,
+        "collage command treats every capture position as an absolute timestamp");
+    assert_array_has_adjacent_pair (argv, "-ss", "18.000000",
         "collage command captures the 8 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "16.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "26.000000",
         "collage command captures the 16 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "24.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "34.000000",
         "collage command captures the 24 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "32.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "42.000000",
         "collage command captures the 32 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "40.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "50.000000",
         "collage command captures the 40 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "48.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "58.000000",
         "collage command captures the 48 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "56.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "66.000000",
         "collage command captures the 56 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "64.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "74.000000",
         "collage command captures the 64 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "72.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "82.000000",
         "collage command captures the 72 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "80.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "90.000000",
         "collage command captures the 80 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "88.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "98.000000",
         "collage command captures the 88 percent frame");
-    assert_array_has_adjacent_pair (argv, "-ss", "96.000000",
+    assert_array_has_adjacent_pair (argv, "-ss", "106.000000",
         "collage command captures the 96 percent frame");
     assert_array_has_adjacent_pair (argv, "-frames:v", "1",
         "collage command writes a single PNG frame");
@@ -1778,11 +1933,200 @@ private void test_conversion_runner_collage_command_uses_percentage_timestamps (
 
     assert_contains (filter_complex, "xstack=inputs=12",
         "collage command combines twelve captured frames");
+    assert_contains (filter_complex, "[0:v]setpts=PTS-STARTPTS,scale=",
+        "collage resets each captured tile before framesync");
     assert_contains (
         filter_complex,
         "layout=0_0|480_0|960_0|1440_0|0_270|480_270|960_270|1440_270|0_540|480_540|960_540|1440_540",
         "collage command arranges frames in a 4-by-3 grid"
     );
+}
+
+private void test_conversion_runner_nonzero_pts_media_and_collage_integration () {
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("conversion-timestamp-collage-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create timestamp integration directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (temp_dir, "nonzero-input.mkv");
+        string output_path = Path.build_filename (temp_dir, "normalized-output.mkv");
+        string collage_path = Path.build_filename (temp_dir, "input-collage.png");
+        string stdout_buf, stderr_buf;
+
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-vf", "setpts=PTS+1.5/TB",
+            "-c:v", "ffv1",
+            "-an",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create nonzero-PTS integration input");
+        assert_true (make_status == 0,
+            "nonzero-PTS integration input is created");
+
+        VideoTimelineProbeResult input_timeline =
+            FfprobeUtils.probe_video_timeline (input_path);
+        assert_true (input_timeline.success,
+            "nonzero-PTS input video timeline is readable");
+        assert_true (Math.fabs (input_timeline.start_time - 1.5) < 0.01,
+            "integration input keeps its nonzero video start");
+
+        var profile = make_basic_conversion_profile_for_test ();
+        profile.codec_args = { "-c:v", "ffv1" };
+        profile.audio_args = { "-an" };
+        var runner = make_conversion_runner_for_test (
+            profile, input_timeline.get_duration (), true, false, false);
+
+        string[] conversion_argv = runner.build_single_pass_argv_for_test (
+            input_path, output_path);
+        int conversion_status = run_command_for_test (
+            conversion_argv, out stdout_buf, out stderr_buf,
+            "normalize nonzero-PTS integration input");
+        assert_true (conversion_status == 0,
+            "nonzero-PTS integration conversion succeeds");
+
+        VideoTimelineProbeResult output_timeline =
+            FfprobeUtils.probe_video_timeline (output_path);
+        assert_true (output_timeline.success,
+            "normalized integration output video timeline is readable");
+        assert_true (Math.fabs (output_timeline.start_time) < 0.001,
+            "normalized integration output starts at zero");
+        assert_true (Math.fabs (
+                output_timeline.get_duration () - input_timeline.get_duration ()) < 0.02,
+            "timestamp normalization preserves the video duration");
+
+        string[] collage_argv = runner.build_collage_argv_for_test (
+            input_path,
+            collage_path,
+            input_timeline.get_duration (),
+            input_timeline.start_time
+        );
+        int collage_status = run_command_for_test (
+            collage_argv, out stdout_buf, out stderr_buf,
+            "generate collage from nonzero-PTS integration input");
+        assert_true (collage_status == 0,
+            "absolute video-timeline collage generation succeeds");
+        assert_true (FileUtils.test (collage_path, FileTest.EXISTS),
+            "absolute video-timeline collage creates its PNG");
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
+}
+
+private void test_process_runner_capture_is_cancellable () {
+    var runner = new ProcessRunner ();
+    runner.prepare_for_new_execution ();
+
+    int exit_status = 0;
+    string captured_stdout = "";
+    string captured_stderr = "";
+    int64 started_us = GLib.get_monotonic_time ();
+
+    var worker = new Thread<void> ("capture-cancel-test", () => {
+        exit_status = runner.execute_capture (
+            { "/usr/bin/sleep", "30" },
+            out captured_stdout,
+            out captured_stderr
+        );
+    });
+
+    Thread.usleep (150000);
+    runner.cancel ();
+    worker.join ();
+
+    double elapsed_seconds =
+        (GLib.get_monotonic_time () - started_us) / 1000000.0;
+    assert_true (exit_status != 0,
+        "cancelled capture returns a nonzero status");
+    assert_true (runner.is_cancelled (),
+        "capture cancellation remains visible to its owner");
+    assert_true (elapsed_seconds < 5.0,
+        "capture cancellation stops the helper promptly");
+}
+
+private void test_converter_progress_prefers_real_video_duration () {
+    var config = new ConversionConfig ();
+    config.output_duration_seconds = 17.766;
+    config.video_output_duration_seconds = 16.2;
+
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        486,
+        "frame progress excludes a container leading timestamp gap"
+    );
+
+    config.video_output_duration_seconds = 0.0;
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        533,
+        "frame progress retains container-duration fallback when video timing is unavailable"
+    );
+}
+
+private void test_conversion_runner_single_frame_collage_integration () {
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("conversion-single-frame-collage-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create single-frame collage directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (temp_dir, "single-frame.mkv");
+        string collage_path = Path.build_filename (temp_dir, "single-frame-collage.png");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:size=320x180:rate=1",
+            "-frames:v", "1", "-c:v", "ffv1", "-an",
+            input_path
+        };
+        assert_true (run_command_for_test (
+                make_input, out stdout_buf, out stderr_buf,
+                "create single-frame collage input") == 0,
+            "single-frame collage input is created");
+
+        VideoTimelineProbeResult timeline =
+            FfprobeUtils.probe_video_timeline (input_path);
+        assert_true (timeline.success, "single-frame timeline is readable");
+        assert_uint64_equal ((uint64) timeline.packet_count, 1,
+            "single-frame timeline reports one packet");
+        assert_true (timeline.packet_count_complete,
+            "single-frame classification is based on a complete packet count");
+
+        var profile = make_basic_conversion_profile_for_test ();
+        var runner = make_conversion_runner_for_test (profile);
+        string[] collage_argv = runner.build_collage_argv_for_test (
+            input_path,
+            collage_path,
+            timeline.get_duration (),
+            timeline.start_time,
+            true
+        );
+        assert_array_occurrence_count (collage_argv, "0.000000", 12,
+            "single-frame collage samples the sole frame for every tile");
+
+        assert_true (run_command_for_test (
+                collage_argv, out stdout_buf, out stderr_buf,
+                "generate single-frame collage") == 0,
+            "single-frame collage command succeeds");
+        assert_true (FileUtils.test (collage_path, FileTest.EXISTS),
+            "single-frame collage creates its PNG");
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
 }
 
 private void test_idle_close_request_cancels_pending_probes () {
@@ -5478,6 +5822,22 @@ void main (string[] args) {
         test_conversion_runner_non_watermark_off_keeps_existing_mapping_behavior);
     Test.add_func ("/convert/runner/non-watermark-on-maps-primary-video-and-all-audio",
         test_conversion_runner_non_watermark_on_maps_primary_video_and_all_audio);
+    Test.add_func ("/convert/runner/video-only-resets-output-timestamps",
+        test_conversion_runner_video_only_resets_output_timestamps);
+    Test.add_func ("/convert/runner/video-only-adds-timestamp-filter-to-empty-chain",
+        test_conversion_runner_video_only_adds_timestamp_filter_to_empty_chain);
+    Test.add_func ("/convert/runner/retained-audio-does-not-reset-video-independently",
+        test_conversion_runner_retained_audio_does_not_reset_video_independently);
+    Test.add_func ("/convert/runner/subtitles-block-independent-video-reset",
+        test_conversion_runner_subtitles_block_independent_video_reset);
+    Test.add_func ("/convert/runner/retained-chapters-block-video-reset",
+        test_conversion_runner_retained_chapters_block_video_reset);
+    Test.add_func ("/convert/runner/removed-chapters-allow-video-reset",
+        test_conversion_runner_removed_chapters_allow_video_reset);
+    Test.add_func ("/convert/runner/unknown-topology-fails-closed",
+        test_conversion_runner_unknown_topology_fails_closed);
+    Test.add_func ("/convert/runner/video-only-watermark-excludes-input-subtitles",
+        test_conversion_runner_video_only_watermark_excludes_input_subtitles);
     Test.add_func ("/convert/runner/image-watermark-toggle-off-maps-first-audio",
         test_conversion_runner_image_watermark_toggle_off_maps_first_audio_only);
     Test.add_func ("/convert/runner/image-watermark-toggle-on-maps-all-audio",
@@ -5500,6 +5860,14 @@ void main (string[] args) {
         test_conversion_runner_collage_output_path_uses_png_sidecar_name);
     Test.add_func ("/convert/runner/collage-command-uses-percentage-timestamps",
         test_conversion_runner_collage_command_uses_percentage_timestamps);
+    Test.add_func ("/convert/runner/nonzero-pts-media-and-collage-integration",
+        test_conversion_runner_nonzero_pts_media_and_collage_integration);
+    Test.add_func ("/process-runner/capture-is-cancellable",
+        test_process_runner_capture_is_cancellable);
+    Test.add_func ("/convert/progress-prefers-real-video-duration",
+        test_converter_progress_prefers_real_video_duration);
+    Test.add_func ("/convert/runner/single-frame-collage-integration",
+        test_conversion_runner_single_frame_collage_integration);
     Test.add_func ("/combine/window/uses-live-main-output-folder",
         test_combine_uses_live_main_output_folder);
     Test.add_func ("/combine/window/idle-close-cancels-pending-probes",

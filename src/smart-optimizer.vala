@@ -523,7 +523,8 @@ public class SmartOptimizer : GLib.Object {
                 profile = yield analyze_content (
                     input_file, positions, tw.sample_segment_duration,
                     analysis_info, analysis_vf,
-                    ctx.output_fps, ctx.video_speed_multiplier, cancellable);
+                    ctx.output_fps, ctx.video_speed_multiplier, cancellable,
+                    temp_run_dir);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -546,7 +547,8 @@ public class SmartOptimizer : GLib.Object {
             // real target preset/pix_fmt. Neither depends on sample positions.
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
                 info, profile, tier, preferred_codec, ctx.tone_mapping_active,
-                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED);
+                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED,
+                true);
             bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
                 bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
             if (preferred_codec == "x264"
@@ -941,7 +943,7 @@ public class SmartOptimizer : GLib.Object {
                 profile = yield analyze_content (
                     input_file, positions, tw.sample_segment_duration,
                     analysis_info, analysis_vf, ctx.output_fps,
-                    ctx.video_speed_multiplier, cancellable);
+                    ctx.video_speed_multiplier, cancellable, temp_run_dir);
             } catch (IOError.CANCELLED e) {
                 throw e;
             } catch (Error e) {
@@ -962,7 +964,8 @@ public class SmartOptimizer : GLib.Object {
             // ── 5. Bit depth, preset, effective target ──────────────────
             var bit_depth = SmartOptimizerLogic.decide_bit_depth (
                 info, profile, nominal_tier, preferred_codec, ctx.tone_mapping_active,
-                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED);
+                x264_10bit.status == EncoderPixelFormatCapabilityStatus.SUPPORTED,
+                false);
             bit_depth = SmartOptimizerLogic.apply_delivery_bit_depth_preference (
                 bit_depth, ctx.optimize_for_delivery, info, ctx.tone_mapping_active);
             if (preferred_codec == "x264"
@@ -1782,6 +1785,7 @@ public class SmartOptimizer : GLib.Object {
             n.append (" (confidence: %.0f%%)".printf (profile.type_confidence * 100));
         n.append ("\n");
         n.append ("  Grain/noise (TOUT): %.4f\n".printf (profile.noise_mean));
+        append_banding_assessment_notes (n, profile);
 
         n.append ("\n── Measured quality curve ──\n");
         for (int i = 0; i < crfs.length; i++) {
@@ -2673,6 +2677,8 @@ public class SmartOptimizer : GLib.Object {
         notes.append ("\n── Bit Depth ──\n");
         notes.append ("  Source: %s\n".printf (
             info.source_bit_depth > 0 ? "%d-bit".printf (info.source_bit_depth) : "unknown"));
+        if (info.color_range.length > 0)
+            notes.append ("  Source range metadata: %s\n".printf (info.color_range));
 
         // Color space info
         if (is_hdr_source && is_wide_gamut_source) {
@@ -2692,8 +2698,7 @@ public class SmartOptimizer : GLib.Object {
             notes.append ("  Note: Tone mapping is enabled but source is not HDR or wide-gamut — it may be unnecessary\n");
         }
 
-        notes.append ("  Banding risk: %.0f%%\n".printf (profile.banding_risk * 100.0));
-        notes.append ("  Dark scenes: %.0f%% of frames\n".printf (profile.dark_scene_ratio * 100.0));
+        append_banding_assessment_notes (notes, profile);
         notes.append ("  Decision: %s (%s)\n".printf (
             bit_depth.is_10bit ? "10-bit" : "8-bit", bit_depth.reason));
         notes.append ("  Output pixel format: %s\n".printf (bit_depth.pix_fmt));
@@ -2952,6 +2957,32 @@ public class SmartOptimizer : GLib.Object {
         return notes.str;
     }
 
+    private void append_banding_assessment_notes (
+        StringBuilder notes,
+        ContentProfile profile
+    ) {
+        if (profile.banding_confidence <= 0.0 || profile.banding_samples <= 0) {
+            notes.append ("  Gradient analysis: unavailable — no 10-bit claim inferred\n");
+            return;
+        }
+
+        notes.append (("  Gradient vulnerability: %.0f%% (confidence %.0f%%, "
+            + "%d sampled frames)\n").printf (
+                profile.gradient_vulnerability * 100.0,
+                profile.banding_confidence * 100.0,
+                profile.banding_samples));
+        notes.append (("  Gradient coverage: luma %.0f%%, chroma %.0f%%; "
+            + "dark share %.0f%%\n").printf (
+                profile.gradient_area_ratio * 100.0,
+                profile.chroma_gradient_ratio * 100.0,
+                profile.dark_gradient_ratio * 100.0));
+        notes.append ("  Existing posterization evidence: %.0f%%\n".printf (
+            profile.existing_banding * 100.0));
+        if (profile.existing_banding >= 0.5) {
+            notes.append ("  Note: 10-bit can avoid worsening existing bands but cannot restore missing shades; debanding/dithering is needed to remove them\n");
+        }
+    }
+
     /**
      * Format a recommendation for display.
      */
@@ -3133,6 +3164,7 @@ public class SmartOptimizer : GLib.Object {
             all_source_audio        = {},
             file_size_bytes         = source_size_bytes,
             source_bit_depth        = 0,
+            color_range             = "",
             color_transfer          = "",
             color_primaries         = ""
         };
@@ -3166,6 +3198,7 @@ public class SmartOptimizer : GLib.Object {
                             info.source_bit_depth = FfprobeUtils.infer_bit_depth_from_pix_fmt (pix_fmt);
                         }
                     }
+                    info.color_range = s.get_string_member_with_default ("color_range", "");
                     info.color_transfer = s.get_string_member_with_default ("color_transfer", "");
                     info.color_primaries = s.get_string_member_with_default ("color_primaries", "");
 
@@ -3323,7 +3356,8 @@ public class SmartOptimizer : GLib.Object {
         string        video_filter_chain = "",
         double        output_fps = 0.0,
         double        video_speed_multiplier = 1.0,
-        Cancellable?  cancellable = null
+        Cancellable?  cancellable = null,
+        string?       temp_run_dir = null
     ) throws Error {
         double speed = (video_speed_multiplier.is_finite ()
                 && video_speed_multiplier > 0.0)
@@ -3449,8 +3483,39 @@ public class SmartOptimizer : GLib.Object {
         SmartOptimizerLogic.compute_stats (
             all_si, out profile.spatial_info, out si_sd);
 
-        SmartOptimizerLogic.compute_banding_metrics (
-            ref profile, all_yavg, all_ylow);
+        // ── Spatial gradient / existing-banding evidence ─────────────────
+        // signalstats' darkness and temporal SATAVG were formerly combined
+        // into a value called "banding risk". Neither measures a spatial
+        // gradient. Analyze a bounded set of normalized yuv444p frames instead;
+        // failure leaves confidence at zero rather than inventing a 35% score.
+        BandingAssessment banding = BandingAssessment ();
+        string banding_path = tmp_raw_path ("banding", temp_run_dir);
+        try {
+            double banding_duration = positions.length * segment_duration / speed;
+            double banding_cadence = (output_fps.is_finite () && output_fps > 0.0)
+                ? output_fps : info.fps;
+            BandingSamplingPlan sampling = SmartOptimizerLogic.plan_banding_sampling (
+                banding_duration, banding_cadence);
+            string[] banding_cmd = build_banding_analysis_cmd (
+                path, positions, segment_duration,
+                analysis_video_filter_chain, sampling.frames_per_second,
+                banding_path);
+            yield run_subprocess_wait (banding_cmd, cancellable);
+            uint8[] raw_frames;
+            FileUtils.get_data (banding_path, out raw_frames);
+            banding = SmartOptimizerLogic.assess_banding_from_yuv444p (
+                raw_frames,
+                SmartOptimizerLogic.BANDING_ANALYSIS_WIDTH,
+                SmartOptimizerLogic.BANDING_ANALYSIS_HEIGHT,
+                sampling.expected_frames);
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            warning ("Spatial banding analysis unavailable: %s", e.message);
+        } finally {
+            cleanup_file (banding_path);
+        }
+        SmartOptimizerLogic.apply_banding_assessment (ref profile, banding);
         SmartOptimizerLogic.classify_content (ref profile);
         return profile;
     }
@@ -4278,11 +4343,10 @@ public class SmartOptimizer : GLib.Object {
         // Measured at the source's NATIVE bit depth, deliberately.
         //
         // signalstats reports in the native range, so a 10-bit source yields
-        // ~4x the values of the same content at 8-bit. Every threshold in the
-        // classifier, the grain gate and the banding metrics compares these
-        // across sources, so that scale difference has to be removed — but it
-        // is removed in the parser (normalise_amplitude_for_depth), NOT with a
-        // format filter here.
+        // ~4x the values of the same content at 8-bit. Content-classification
+        // thresholds compare these across sources, so that scale difference is
+        // removed in the parser (normalise_amplitude_for_depth), NOT here. The
+        // spatial banding detector has its own full-range normalization pass.
         //
         // Converting to 8-bit before measuring does not merely rescale: it
         // quantises away the sub-LSB variation that fine film grain lives in.
@@ -4335,6 +4399,43 @@ public class SmartOptimizer : GLib.Object {
         cmd.add ("null");
         cmd.add ("-");
 
+        return StringArrayUtils.copy_generic_array (cmd);
+    }
+
+    /**
+     * Decode a bounded spatial-analysis stream.  `out_range=full` is the range
+     * normalization boundary: the pure detector therefore sees identical code
+     * values for equivalent limited/full-range input and does not need to guess
+     * from container metadata after the user's filter chain has run.
+     */
+    private string[] build_banding_analysis_cmd (
+        string   path,
+        double[] positions,
+        double   seg_dur,
+        string   video_filter_chain,
+        double   sampling_fps,
+        string   output
+    ) {
+        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        var cmd = new GenericArray<string> ();
+        cmd.add (ffmpeg);
+        cmd.add ("-v"); cmd.add ("warning");
+        add_segment_inputs (cmd, path, positions, seg_dur);
+
+        string graph = concat_filter_spec (positions.length, video_filter_chain)
+            + ";[v]fps=%s:eof_action=pass,scale=%d:%d:flags=area:out_range=full,"
+                .printf (
+                         ConversionUtils.format_ffmpeg_double (sampling_fps, "%.6f"),
+                         SmartOptimizerLogic.BANDING_ANALYSIS_WIDTH,
+                         SmartOptimizerLogic.BANDING_ANALYSIS_HEIGHT)
+            + "format=yuv444p[banding]";
+        cmd.add ("-filter_complex"); cmd.add (graph);
+        cmd.add ("-map");            cmd.add ("[banding]");
+        cmd.add ("-an");
+        cmd.add ("-c:v");            cmd.add ("rawvideo");
+        cmd.add ("-pix_fmt");        cmd.add ("yuv444p");
+        cmd.add ("-f");              cmd.add ("rawvideo");
+        cmd.add ("-y");              cmd.add (output);
         return StringArrayUtils.copy_generic_array (cmd);
     }
 
@@ -5105,6 +5206,21 @@ public class SmartOptimizer : GLib.Object {
         return GLib.Path.build_filename (
             Environment.get_tmp_dir (),
             "smart_opt_%s_%s.mkv".printf (label, get_real_time ().to_string ()));
+    }
+
+    private string tmp_raw_path (string label, string? temp_run_dir = null) {
+        if (temp_run_dir != null) {
+            string? managed_path = ConversionUtils.create_managed_temp_file (
+                temp_run_dir,
+                "smart-opt-" + label,
+                ".raw"
+            );
+            if (managed_path != null)
+                return managed_path;
+        }
+        return GLib.Path.build_filename (
+            Environment.get_tmp_dir (),
+            "smart_opt_%s_%s.raw".printf (label, get_real_time ().to_string ()));
     }
 
     private void cleanup_temp_run_dir (string? run_dir) {

@@ -272,11 +272,42 @@ public class ConversionRunner {
         }
         string final_collage_path = collage_output_path;
 
-        double duration_seconds = FfprobeUtils.probe_duration (output_path);
-        if (duration_seconds <= 0.0) {
-            duration_seconds = config.output_duration_seconds;
+        double video_start_time = 0.0;
+        bool single_frame_video = false;
+        VideoTimelineProbeResult video_timeline =
+            FfprobeUtils.probe_video_timeline (
+                output_path, process_runner.execute_capture);
+        if (converter.is_cancelled (process_runner)) {
+            collage_cancelled = true;
+            return null;
         }
-        if (duration_seconds <= 0.0) {
+
+        bool confirmed_single_frame = video_timeline.success
+            && video_timeline.packet_count_complete
+            && video_timeline.packet_count == 1;
+        double duration_seconds = video_timeline.get_duration ();
+        if (confirmed_single_frame) {
+            video_start_time = video_timeline.start_time;
+            single_frame_video = true;
+        } else if (video_timeline.success && duration_seconds > 0.0) {
+            video_start_time = video_timeline.start_time;
+            duration_seconds = video_timeline.get_seek_span ();
+        } else if (video_timeline.start_time_known
+                   && config.video_output_duration_seconds > 0.0) {
+            video_start_time = video_timeline.start_time;
+            duration_seconds = config.video_output_duration_seconds;
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] Could not read the tail packet; using the encoded video duration with the measured video start."
+            );
+        } else {
+            converter.log_console_if_active (
+                process_runner,
+                "[Collage] Could not determine a safe video timeline; skipping collage generation."
+            );
+            return null;
+        }
+        if (!single_frame_video && duration_seconds <= 0.0) {
             converter.log_console_if_active (
                 process_runner,
                 "[Collage] Could not determine the finished video duration; skipping collage generation."
@@ -296,7 +327,9 @@ public class ConversionRunner {
             AppSettings.get_default ().ffmpeg_path,
             output_path,
             final_collage_path,
-            duration_seconds
+            duration_seconds,
+            video_start_time,
+            single_frame_video
         );
         string display_cmd = ConversionUtils.format_command_for_display (collage_cmd);
         converter.log_console_if_active (process_runner, "Collage command: " + display_cmd);
@@ -420,6 +453,24 @@ public class ConversionRunner {
     private bool is_audio_disabled () {
         return config.profile.audio_args.length > 0
             && config.profile.audio_args[0] == "-an";
+    }
+
+    private bool can_reset_video_timestamps_without_desync () {
+        if (!is_audio_disabled ())
+            return false;
+
+        // Chapters are copied independently of stream mapping unless the user
+        // explicitly removes them. Their timestamps would not follow setpts.
+        if (!config.timed_stream_topology_known)
+            return false;
+        if (config.input_has_chapters && !config.profile.remove_chapters)
+            return false;
+
+        // Image-watermark commands explicitly map only [outv] when audio is
+        // disabled, so embedded subtitles cannot be selected. The ordinary
+        // -vf path uses FFmpeg's automatic mapping and may retain one.
+        return is_image_watermark_active ()
+            || !config.input_has_subtitle_stream;
     }
 
     private string get_explicit_audio_map_spec () {
@@ -546,8 +597,27 @@ public class ConversionRunner {
         double span = config.time_enabled
             ? ConversionUtils.parse_ffmpeg_timestamp (config.time_timestamp)
             : 0.0;
-        return FilterBuilder.build_video_filter_chain_for_segment (
+        string filters = FilterBuilder.build_video_filter_chain_for_segment (
             config.profile, offset, null, span);
+
+        // A genuinely video-only output can begin at a positive PTS because
+        // an omitted stream (usually audio) started earlier. If that offset is carried
+        // into the output, the muxer reports the last timestamp as its
+        // duration: players then reach EOF while their seek bars still show
+        // the leading gap, and percentage-based collage seeks can run past
+        // the final frame.  Reset the completed video timeline after every
+        // other timestamp-changing filter so the first encoded frame is zero.
+        //
+        // Do not independently reset video when audio is retained.  Doing so
+        // could erase an intentional A/V start offset and desynchronize the
+        // converted file.
+        if (can_reset_video_timestamps_without_desync ()) {
+            filters = filters.length > 0
+                ? filters + ",setpts=PTS-STARTPTS"
+                : "setpts=PTS-STARTPTS";
+        }
+
+        return filters;
     }
 
     private string[] build_peak_analysis_pre_input_args () {
@@ -791,12 +861,16 @@ public class ConversionRunner {
 
     internal string[] build_collage_argv_for_test (string output_path,
                                                    string collage_output_path,
-                                                   double duration_seconds) {
+                                                   double duration_seconds,
+                                                   double video_start_time = 0.0,
+                                                   bool single_frame_video = false) {
         return ConversionUtils.build_collage_argv (
             AppSettings.get_default ().ffmpeg_path,
             output_path,
             collage_output_path,
-            duration_seconds
+            duration_seconds,
+            video_start_time,
+            single_frame_video
         );
     }
 #endif

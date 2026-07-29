@@ -425,4 +425,63 @@ public class ProcessRunner : Object {
             return -1;
         }
     }
+
+    /**
+     * Run a command while capturing both output streams and retaining the same
+     * cancellation guarantees as execute().  This is intended for short,
+     * bounded helper probes whose stdout is their result rather than a progress
+     * stream.
+     */
+    public int execute_capture (string[] argv,
+                                out string stdout_text,
+                                out string stderr_text) {
+        stdout_text = "";
+        stderr_text = "";
+
+        uint64 execution_id = 0;
+        Pid exec_pid = 0;
+        Subprocess? process = null;
+
+        try {
+            var launcher = new SubprocessLauncher (
+                SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
+            process = SubprocessCompat.spawnv (launcher, argv);
+            bool should_cancel_immediately;
+
+            exec_pid = extract_pid (process);
+
+            state_mutex.lock ();
+            try {
+                execution_id = next_execution_id++;
+                current_execution_id = execution_id;
+                current_process = process;
+                current_pid = exec_pid;
+                escalation_execution_id = 0;
+                should_cancel_immediately = cancelled;
+                if (should_cancel_immediately) {
+                    escalation_execution_id = execution_id;
+                }
+            } finally {
+                state_mutex.unlock ();
+            }
+
+            if (should_cancel_immediately) {
+                request_cancel (execution_id, process, exec_pid);
+            }
+
+            process.communicate_utf8 (
+                null, null, out stdout_text, out stderr_text);
+
+            bool cancel_requested = is_cancelled ();
+            int result = get_process_result (process, exec_pid, cancel_requested);
+            clear_current_process_if_current (execution_id, process);
+            return result;
+        } catch (Error e) {
+            stderr_text = e.message;
+            if (execution_id != 0 && process != null) {
+                clear_current_process_if_current (execution_id, process);
+            }
+            return -1;
+        }
+    }
 }

@@ -65,6 +65,8 @@ public class TrimRunner : Object {
     // ── Progress tracker (fix #3: consistent with Converter) ────────────────
     private ProgressTracker? tracker = null;
     private string[]? resolved_reencode_codec_args = null;
+    private string timed_topology_input_file = "";
+    private TimedStreamTopologyProbeResult? timed_topology_cache = null;
     private Mutex run_mutex = Mutex ();
     private bool run_active = false;
 
@@ -860,6 +862,12 @@ public class TrimRunner : Object {
             }
             bool seg_image_wm = is_trim_image_watermark_active ();
 
+            if (can_reset_segment_video_timestamps_without_desync (seg_image_wm)) {
+                vf = vf.length > 0
+                    ? vf + ",setpts=PTS-STARTPTS"
+                    : "setpts=PTS-STARTPTS";
+            }
+
             if (seg_image_wm) {
                 cmd += "-i";
                 cmd += reencode_profile.watermark_image_path;
@@ -1139,6 +1147,32 @@ public class TrimRunner : Object {
         return reencode_profile != null && reencode_profile.remove_chapters;
     }
 
+    private TimedStreamTopologyProbeResult get_timed_stream_topology () {
+        if (timed_topology_cache == null || timed_topology_input_file != input_file) {
+            timed_topology_input_file = input_file;
+            timed_topology_cache = FfprobeUtils.probe_timed_stream_topology (
+                input_file, runner.execute_capture);
+        }
+        return timed_topology_cache;
+    }
+
+    private bool can_reset_segment_video_timestamps_without_desync (
+        bool explicit_video_mapping
+    ) {
+        string[] audio_args = get_audio_args ();
+        bool audio_disabled = audio_args.length > 0 && audio_args[0] == "-an";
+        if (!audio_disabled)
+            return false;
+
+        TimedStreamTopologyProbeResult topology = get_timed_stream_topology ();
+        if (!topology.success)
+            return false;
+        if (topology.has_chapters && !should_remove_chapters ())
+            return false;
+
+        return explicit_video_mapping || !topology.has_subtitle_stream;
+    }
+
     private bool is_trim_image_watermark_active () {
         return reencode_profile != null
             && reencode_profile.watermark_enabled
@@ -1338,15 +1372,40 @@ public class TrimRunner : Object {
                 continue;
             }
 
-            double duration_seconds = FfprobeUtils.probe_duration (output_path);
-            if (duration_seconds <= 0.0
-                && i < fallback_durations.length
-                && fallback_durations[i] > 0.0) {
-                duration_seconds = fallback_durations[i];
-                log_line ("[Collage] ffprobe could not read duration of %s; using segment-derived %.3fs."
-                    .printf (output_path, duration_seconds));
+            double video_start_time = 0.0;
+            bool single_frame_video = false;
+            VideoTimelineProbeResult video_timeline =
+                FfprobeUtils.probe_video_timeline (
+                    output_path, runner.execute_capture);
+            if (runner.is_cancelled ()) {
+                summary.cancelled = true;
+                break;
             }
-            if (duration_seconds <= 0.0) {
+
+            bool confirmed_single_frame = video_timeline.success
+                && video_timeline.packet_count_complete
+                && video_timeline.packet_count == 1;
+            double duration_seconds = video_timeline.get_duration ();
+            if (confirmed_single_frame) {
+                video_start_time = video_timeline.start_time;
+                single_frame_video = true;
+            } else if (video_timeline.success && duration_seconds > 0.0) {
+                video_start_time = video_timeline.start_time;
+                duration_seconds = video_timeline.get_seek_span ();
+            } else if (video_timeline.start_time_known
+                       && i < fallback_durations.length
+                       && fallback_durations[i] > 0.0) {
+                video_start_time = video_timeline.start_time;
+                duration_seconds = fallback_durations[i];
+                log_line ("[Collage] Could not read the tail packet for %s; using segment-derived %.3fs with the measured video start."
+                    .printf (output_path, duration_seconds));
+            } else {
+                log_line ("[Collage] Could not determine a safe video timeline for %s; skipping collage generation."
+                    .printf (output_path));
+                summary.failed = true;
+                continue;
+            }
+            if (!single_frame_video && duration_seconds <= 0.0) {
                 log_line ("[Collage] Could not determine duration of %s; skipping collage generation."
                     .printf (output_path));
                 summary.failed = true;
@@ -1363,7 +1422,9 @@ public class TrimRunner : Object {
                 AppSettings.get_default ().ffmpeg_path,
                 output_path,
                 collage_output_path,
-                duration_seconds
+                duration_seconds,
+                video_start_time,
+                single_frame_video
             );
             log_line ("Collage command: "
                 + ConversionUtils.format_command_for_display (collage_cmd));

@@ -1617,6 +1617,191 @@ private void test_trim_segment_crop_export_keeps_logo_removal_in_source_frame ()
     }
 }
 
+private void test_trim_video_only_reencode_normalizes_nonzero_pts () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-nonzero-pts-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create nonzero-PTS trim directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (tmp_dir, "nonzero-input.mkv");
+        string output_path = Path.build_filename (tmp_dir, "normalized-trim.mkv");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-vf", "setpts=PTS+1.5/TB",
+            "-c:v", "ffv1",
+            "-an",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create nonzero-PTS trim input");
+        assert_true (make_status == 0,
+            "nonzero-PTS trim input is created");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (0.0, 4.0));
+        runner.set_segments (segments);
+
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = { "-c:v", "ffv1" };
+        profile.audio_args = { "-an" };
+        runner.reencode_profile = profile;
+
+        int exit_code = runner.run_extract_segment_for_widget_test (
+            0, output_path);
+        assert_true (exit_code == 0,
+            "nonzero-PTS video-only trim re-encode succeeds");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_has_adjacent_pair (argv, "-vf", "setpts=PTS-STARTPTS",
+            "video-only trim re-encode resets its final video timeline");
+
+        VideoTimelineProbeResult timeline =
+            FfprobeUtils.probe_video_timeline (output_path);
+        assert_true (timeline.success,
+            "normalized trim output video timeline is readable");
+        assert_true (Math.fabs (timeline.start_time) < 0.001,
+            "normalized trim output starts at zero");
+        assert_true (Math.fabs (timeline.get_duration () - 4.0) < 0.02,
+            "normalized trim output retains the requested duration");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+private void test_trim_timestamp_normalization_respects_subtitles_and_chapters () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-timed-streams-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create timed-stream trim directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string sub_source = resolve_test_asset_path ("eng-test-sub.srt");
+        string subtitle_input = Path.build_filename (tmp_dir, "subtitle-input.mkv");
+        string subtitle_output = Path.build_filename (tmp_dir, "subtitle-output.mkv");
+        string metadata_path = Path.build_filename (tmp_dir, "chapters.ffmeta");
+        string chapter_input = Path.build_filename (tmp_dir, "chapter-input.mkv");
+        string chapter_output = Path.build_filename (tmp_dir, "chapter-output.mkv");
+        string chapters_removed_output =
+            Path.build_filename (tmp_dir, "chapters-removed-output.mkv");
+        string stdout_buf, stderr_buf;
+
+        string[] make_subtitle_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-i", sub_source,
+            "-map", "0:v:0", "-map", "1:s:0",
+            "-vf", "setpts=PTS+1.5/TB",
+            "-c:v", "ffv1", "-c:s", "srt",
+            subtitle_input
+        };
+        assert_true (run_command_for_test (
+                make_subtitle_input, out stdout_buf, out stderr_buf,
+                "create embedded-subtitle trim input") == 0,
+            "embedded-subtitle trim input is created");
+
+        var subtitle_runner = new TrimRunner ();
+        subtitle_runner.input_file = subtitle_input;
+        subtitle_runner.copy_mode = false;
+        var subtitle_segments = new GenericArray<TrimSegment> ();
+        subtitle_segments.add (new TrimSegment (0.0, 4.0));
+        subtitle_runner.set_segments (subtitle_segments);
+        var subtitle_profile = new EncodeProfileSnapshot ();
+        subtitle_profile.container = ContainerExt.MKV;
+        subtitle_profile.codec_args = { "-c:v", "ffv1" };
+        subtitle_profile.audio_args = { "-an" };
+        subtitle_runner.reencode_profile = subtitle_profile;
+
+        assert_true (subtitle_runner.run_extract_segment_for_widget_test (
+                0, subtitle_output) == 0,
+            "subtitle-bearing video-only trim succeeds");
+        assert_array_not_contains (
+            subtitle_runner.get_last_ffmpeg_argv_for_widget_test (),
+            "setpts=PTS-STARTPTS",
+            "retained subtitle blocks independent video timestamp reset");
+        TimedStreamTopologyProbeResult subtitle_topology =
+            FfprobeUtils.probe_timed_stream_topology (subtitle_output);
+        assert_true (subtitle_topology.success && subtitle_topology.has_subtitle_stream,
+            "retained subtitle remains present after trim");
+
+        FileUtils.set_contents (
+            metadata_path,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Intro\n"
+        );
+        string[] make_chapter_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-f", "ffmetadata", "-i", metadata_path,
+            "-map", "0:v:0", "-map_metadata", "1", "-map_chapters", "1",
+            "-vf", "setpts=PTS+1.5/TB",
+            "-c:v", "ffv1", "-an",
+            chapter_input
+        };
+        assert_true (run_command_for_test (
+                make_chapter_input, out stdout_buf, out stderr_buf,
+                "create chaptered trim input") == 0,
+            "chaptered trim input is created");
+
+        var chapter_runner = new TrimRunner ();
+        chapter_runner.input_file = chapter_input;
+        chapter_runner.copy_mode = false;
+        var chapter_segments = new GenericArray<TrimSegment> ();
+        chapter_segments.add (new TrimSegment (0.0, 4.0));
+        chapter_runner.set_segments (chapter_segments);
+        var chapter_profile = new EncodeProfileSnapshot ();
+        chapter_profile.container = ContainerExt.MKV;
+        chapter_profile.codec_args = { "-c:v", "ffv1" };
+        chapter_profile.audio_args = { "-an" };
+        chapter_profile.preserve_metadata = true;
+        chapter_runner.reencode_profile = chapter_profile;
+
+        assert_true (chapter_runner.run_extract_segment_for_widget_test (
+                0, chapter_output) == 0,
+            "chapter-retaining video-only trim succeeds");
+        assert_array_not_contains (
+            chapter_runner.get_last_ffmpeg_argv_for_widget_test (),
+            "setpts=PTS-STARTPTS",
+            "retained chapters block independent video timestamp reset");
+
+        chapter_profile.remove_chapters = true;
+        assert_true (chapter_runner.run_extract_segment_for_widget_test (
+                0, chapters_removed_output) == 0,
+            "chapter-removing video-only trim succeeds");
+        assert_array_has_adjacent_pair (
+            chapter_runner.get_last_ffmpeg_argv_for_widget_test (),
+            "-vf", "setpts=PTS-STARTPTS",
+            "removing chapters permits safe timestamp normalization");
+        TimedStreamTopologyProbeResult removed_topology =
+            FfprobeUtils.probe_timed_stream_topology (chapters_removed_output);
+        assert_true (removed_topology.success && !removed_topology.has_chapters,
+            "removed chapters are absent from normalized trim output");
+    } catch (Error e) {
+        Test.fail_printf ("timed-stream trim integration setup failed: %s",
+            e.message);
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -1649,6 +1834,10 @@ void main (string[] args) {
         test_trim_segment_shifts_timed_regions_to_segment_time);
     Test.add_func ("/trim/runner/segment-crop-export-keeps-logo-removal-in-source-frame",
         test_trim_segment_crop_export_keeps_logo_removal_in_source_frame);
+    Test.add_func ("/trim/runner/video-only-reencode-normalizes-nonzero-pts",
+        test_trim_video_only_reencode_normalizes_nonzero_pts);
+    Test.add_func ("/trim/runner/timestamp-normalization-respects-subtitles-and-chapters",
+        test_trim_timestamp_normalization_respects_subtitles_and_chapters);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-off-maps-first-audio",
         test_subtitle_peak_detect_toggle_off_maps_first_audio_only);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-on-maps-all-audio",

@@ -30,6 +30,14 @@ public class ConversionConfig : Object {
     public bool   time_enabled   { get; set; default = false; }
     public string time_timestamp { get; set; default = "00:00:00"; }
     public double output_duration_seconds { get; set; default = 0.0; }
+    public double video_output_duration_seconds { get; set; default = 0.0; }
+
+    // Timed input content that FFmpeg may carry into the output implicitly.
+    // A failed probe remains "unknown" so timestamp normalization can fail
+    // closed rather than shifting video independently of another timeline.
+    public bool timed_stream_topology_known { get; set; default = false; }
+    public bool input_has_subtitle_stream { get; set; default = false; }
+    public bool input_has_chapters { get; set; default = false; }
 
     // Set only when this conversion follows a successful size-pinned Smart
     // Optimizer recommendation. The runner uses it for an actual-vs-requested
@@ -338,6 +346,12 @@ public class Converter : Object {
                 // Probe duration and fps on background thread
                 double dur = FfprobeUtils.probe_duration (input_file);
                 double probed_fps = FfprobeUtils.probe_input_fps (input_file);
+                TimedStreamTopologyProbeResult timed_topology =
+                    FfprobeUtils.probe_timed_stream_topology (
+                        input_file, runner.execute_capture);
+                VideoTimelineProbeResult video_timeline =
+                    FfprobeUtils.probe_video_timeline (
+                        input_file, runner.execute_capture);
                 bool still_active;
 
                 state_mutex.lock ();
@@ -350,6 +364,18 @@ public class Converter : Object {
                             dur, config.seek_enabled ? config.seek_timestamp : "",
                             config.time_enabled ? config.time_timestamp : ""
                         );
+                        double video_duration = video_timeline.get_duration ();
+                        config.video_output_duration_seconds = video_duration > 0.0
+                            ? compute_output_duration_seconds (
+                                video_duration,
+                                config.seek_enabled ? config.seek_timestamp : "",
+                                config.time_enabled ? config.time_timestamp : ""
+                            )
+                            : 0.0;
+                        config.timed_stream_topology_known = timed_topology.success;
+                        config.input_has_subtitle_stream =
+                            timed_topology.has_subtitle_stream;
+                        config.input_has_chapters = timed_topology.has_chapters;
                     }
                 } finally {
                     state_mutex.unlock ();
@@ -363,14 +389,13 @@ public class Converter : Object {
                 // Use effective output fps: custom frame rate from the profile
                 // takes precedence over the probed input fps.
                 double output_fps = resolve_output_fps (config, probed_fps);
-                int64 expected_frames = 0;
-                if (output_fps > 0 && config.output_duration_seconds > 0) {
-                    expected_frames = (int64) Math.round (
-                        output_fps * config.output_duration_seconds);
-                }
+                int64 expected_frames = compute_expected_frame_count (
+                    config, output_fps);
                 progress_tracker.set_expected_frames (expected_frames);
 
-                bool pulse = (dur <= 0);
+                // The packet timeline may still provide a reliable video
+                // duration when container duration metadata is unavailable.
+                bool pulse = expected_frames <= 0;
                 if (!accepts_runner_updates (runner)) {
                     finish_conversion (operation_id, runner, false);
                     return;
@@ -525,6 +550,27 @@ public class Converter : Object {
                                               double probed_fps) {
         return config.output_fps > 0 ? config.output_fps : probed_fps;
     }
+
+    private static int64 compute_expected_frame_count (ConversionConfig config,
+                                                       double output_fps) {
+        double expected_video_duration =
+            config.video_output_duration_seconds > 0.0
+                ? config.video_output_duration_seconds
+                : config.output_duration_seconds;
+        if (output_fps <= 0.0 || expected_video_duration <= 0.0)
+            return 0;
+
+        return (int64) Math.round (output_fps * expected_video_duration);
+    }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal static int64 compute_expected_frame_count_for_test (
+        ConversionConfig config,
+        double output_fps
+    ) {
+        return compute_expected_frame_count (config, output_fps);
+    }
+#endif
 
     // ═════════════════════════════════════════════════════════════════════════
     //  FFMPEG PROCESS EXECUTION (delegates to ProcessRunner)

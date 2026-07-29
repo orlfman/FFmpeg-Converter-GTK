@@ -68,6 +68,38 @@ private void assert_true (bool value, string context) {
     }
 }
 
+private void assert_near (double actual,
+                          double expected,
+                          double tolerance,
+                          string context) {
+    if (Math.fabs (actual - expected) > tolerance) {
+        Test.fail_printf ("%s expected %.6f but got %.6f",
+            context, expected, actual);
+    }
+}
+
+private class ScriptedFfprobeCapture : Object {
+    private string[] outputs;
+    private int[] statuses;
+    private int next_result = 0;
+    public GenericArray<string> commands = new GenericArray<string> ();
+
+    public ScriptedFfprobeCapture (string[] outputs, int[] statuses = {}) {
+        this.outputs = outputs;
+        this.statuses = statuses;
+    }
+
+    public int run (string[] argv,
+                    out string stdout_text,
+                    out string stderr_text) {
+        commands.add (string.joinv (" ", argv));
+        int index = next_result++;
+        stdout_text = index < outputs.length ? outputs[index] : "";
+        stderr_text = "";
+        return index < statuses.length ? statuses[index] : 0;
+    }
+}
+
 private void test_primary_audio_probe_parser_uses_ffprobe_csv_order () {
     AudioStreamProbeResult result =
         FfprobeUtils.parse_primary_audio_stream_output_for_test ("pcm_s24le,s32,1,24\n");
@@ -106,6 +138,189 @@ private void test_all_audio_streams_probe_parser_reads_string_bits_field () {
     assert_equal_int (result.streams[0].sample_rate, 48000, "all streams sample rate");
 }
 
+private void test_timed_stream_topology_parser_detects_subtitles_and_chapters () {
+    string json = """
+{
+  "streams": [
+    { "codec_type": "video" },
+    { "codec_type": "subtitle" }
+  ],
+  "chapters": [
+    { "start_time": "0.0", "end_time": "3.0" }
+  ]
+}
+""";
+
+    TimedStreamTopologyProbeResult result =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (json);
+
+    assert_true (result.success, "timed-stream topology parse success");
+    assert_true (result.has_subtitle_stream, "subtitle stream detected");
+    assert_true (result.has_chapters, "chapter metadata detected");
+}
+
+private void test_timed_stream_topology_parser_handles_video_only_input () {
+    string json = """
+{
+  "streams": [ { "codec_type": "video" } ],
+  "chapters": []
+}
+""";
+
+    TimedStreamTopologyProbeResult result =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (json);
+
+    assert_true (result.success, "video-only topology parse success");
+    assert_true (!result.has_subtitle_stream, "video-only input has no subtitles");
+    assert_true (!result.has_chapters, "video-only input has no chapters");
+}
+
+private void test_timed_stream_topology_parser_rejects_incomplete_json () {
+    TimedStreamTopologyProbeResult missing =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test ("{}");
+    assert_true (!missing.success,
+        "missing topology fields fail closed");
+
+    TimedStreamTopologyProbeResult wrong_types =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (
+            "{\"streams\":{},\"chapters\":[]}");
+    assert_true (!wrong_types.success,
+        "wrong topology field types fail closed");
+
+    TimedStreamTopologyProbeResult invalid_after_subtitle =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (
+            "{\"streams\":[{\"codec_type\":\"subtitle\"},3],\"chapters\":[]}");
+    assert_true (!invalid_after_subtitle.success,
+        "every topology element is validated after detecting a subtitle");
+
+    TimedStreamTopologyProbeResult missing_codec_type =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (
+            "{\"streams\":[{}],\"chapters\":[]}");
+    assert_true (!missing_codec_type.success,
+        "stream objects without codec_type fail closed");
+
+    TimedStreamTopologyProbeResult non_string_codec_type =
+        FfprobeUtils.parse_timed_stream_topology_output_for_test (
+            "{\"streams\":[{\"codec_type\":3}],\"chapters\":[]}");
+    assert_true (!non_string_codec_type.success,
+        "non-string codec_type values fail closed");
+}
+
+private void test_video_packet_timeline_parser_uses_real_packet_extent () {
+    VideoTimelineProbeResult result =
+        FfprobeUtils.parse_video_packet_timeline_output_for_test (
+            "1.567000,0.033000\n"
+            + "1.600000,0.033000\n"
+            + "17.733000,0.033000\n");
+
+    assert_true (result.success, "video packet timeline parse success");
+    assert_near (result.start_time, 1.567, 0.000001, "video packet start");
+    assert_near (result.end_time, 17.766, 0.000001, "video packet end");
+    assert_near (result.get_duration (), 16.199, 0.000001,
+        "video packet duration excludes leading timestamp gap");
+    assert_near (result.get_seek_span (), 16.166, 0.000001,
+        "collage seek span stops at the last real packet timestamp");
+    assert_equal_int (result.packet_count, 3, "video packet count");
+}
+
+private void test_video_packet_timeline_parser_ignores_invalid_rows () {
+    VideoTimelineProbeResult result =
+        FfprobeUtils.parse_video_packet_timeline_output_for_test (
+            "N/A,N/A\n"
+            + "4.000000,N/A\n"
+            + "5.000000,0.040000\n");
+
+    assert_true (result.success, "timeline with partial packet data succeeds");
+    assert_near (result.start_time, 4.0, 0.000001, "partial timeline start");
+    assert_near (result.end_time, 5.04, 0.000001, "partial timeline end");
+}
+
+private void test_video_packet_timeline_parser_preserves_single_packet_start () {
+    VideoTimelineProbeResult result =
+        FfprobeUtils.parse_video_packet_timeline_output_for_test (
+            "7.500000,N/A\n");
+
+    assert_true (result.success, "single packet establishes a partial timeline");
+    assert_true (result.start_time_known, "single packet start is known");
+    assert_near (result.start_time, 7.5, 0.000001, "single packet start");
+    assert_equal_int (result.packet_count, 1, "single packet count");
+    assert_near (result.get_duration (), 0.0, 0.000001,
+        "single packet without duration has no invented span");
+    assert_near (result.get_seek_span (), 0.0, 0.000001,
+        "single packet has no seek span beyond its own timestamp");
+}
+
+private void test_video_timeline_probe_uses_bounded_tail_window () {
+    var capture = new ScriptedFfprobeCapture ({
+        "1.500000,0.100000\n",
+        "17.500000\n",
+        "12.000000,0.100000\n17.400000,0.100000\n"
+    });
+
+    VideoTimelineProbeResult result = FfprobeUtils.probe_video_timeline (
+        "/tmp/fake-video.mkv", capture.run);
+
+    assert_true (result.success, "bounded timeline probe succeeds");
+    assert_near (result.start_time, 1.5, 0.000001, "bounded probe start");
+    assert_near (result.end_time, 17.5, 0.000001, "bounded probe end");
+    assert_near (result.get_duration (), 16.0, 0.000001,
+        "bounded probe excludes leading gap");
+    assert_equal_int (result.packet_count, 3,
+        "bounded probe knows there is more than one packet");
+    assert_true (!result.packet_count_complete,
+        "tail-only probe does not claim a complete packet count");
+    assert_equal_int ((int) capture.commands.length, 3,
+        "bounded probe uses first, duration, and tail commands");
+    assert_true (capture.commands[0].contains ("-read_intervals %+#1"),
+        "first probe reads one packet");
+    assert_true (capture.commands[2].contains (
+            "-read_intervals 12.500000%18.500000"),
+        "tail probe uses an explicitly bounded final window");
+}
+
+private void test_video_timeline_probe_preserves_start_when_tail_is_unavailable () {
+    var capture = new ScriptedFfprobeCapture ({
+        "1.500000,0.100000\n",
+        "17.500000\n",
+        "", "", ""
+    });
+
+    VideoTimelineProbeResult result = FfprobeUtils.probe_video_timeline (
+        "/tmp/fake-video.mkv", capture.run);
+
+    assert_true (!result.success, "missing tail does not invent a duration");
+    assert_true (result.start_time_known,
+        "missing tail preserves the trustworthy first-packet timestamp");
+    assert_near (result.start_time, 1.5, 0.000001,
+        "partial result keeps measured video start");
+    assert_equal_int (result.packet_count, 1,
+        "partial result preserves first packet count");
+    assert_true (!result.packet_count_complete,
+        "partial result does not misidentify a multi-frame video as one frame");
+}
+
+private void test_video_timeline_probe_confirms_single_packet_without_duration () {
+    var capture = new ScriptedFfprobeCapture ({
+        "7.500000,N/A\n",
+        "8.000000\n",
+        "7.500000,N/A\n"
+    });
+
+    VideoTimelineProbeResult result = FfprobeUtils.probe_video_timeline (
+        "/tmp/fake-single-frame.mkv", capture.run);
+
+    assert_true (result.success,
+        "complete packet scan confirms a duration-less single frame");
+    assert_true (result.packet_count_complete,
+        "single-frame packet count is complete");
+    assert_equal_int (result.packet_count, 1,
+        "duration-less single-frame packet count");
+    assert_near (result.start_time, 7.5, 0.000001,
+        "duration-less single-frame timestamp");
+    assert_near (result.get_duration (), 0.0, 0.000001,
+        "single frame needs no invented duration");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -116,6 +331,42 @@ void main (string[] args) {
     Test.add_func (
         "/ffprobe-utils/all-audio-streams-parser-reads-string-bits-field",
         test_all_audio_streams_probe_parser_reads_string_bits_field
+    );
+    Test.add_func (
+        "/ffprobe-utils/timed-stream-topology-detects-subtitles-and-chapters",
+        test_timed_stream_topology_parser_detects_subtitles_and_chapters
+    );
+    Test.add_func (
+        "/ffprobe-utils/timed-stream-topology-handles-video-only",
+        test_timed_stream_topology_parser_handles_video_only_input
+    );
+    Test.add_func (
+        "/ffprobe-utils/timed-stream-topology-rejects-incomplete-json",
+        test_timed_stream_topology_parser_rejects_incomplete_json
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-packet-timeline-uses-real-extent",
+        test_video_packet_timeline_parser_uses_real_packet_extent
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-packet-timeline-ignores-invalid-rows",
+        test_video_packet_timeline_parser_ignores_invalid_rows
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-packet-timeline-preserves-single-packet-start",
+        test_video_packet_timeline_parser_preserves_single_packet_start
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-timeline-probe-uses-bounded-tail-window",
+        test_video_timeline_probe_uses_bounded_tail_window
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-timeline-probe-preserves-start-without-tail",
+        test_video_timeline_probe_preserves_start_when_tail_is_unavailable
+    );
+    Test.add_func (
+        "/ffprobe-utils/video-timeline-probe-confirms-duration-less-single-frame",
+        test_video_timeline_probe_confirms_single_packet_without_duration
     );
 
     Test.run ();

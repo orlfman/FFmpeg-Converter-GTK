@@ -341,8 +341,36 @@ public struct SmartOptimizerVideoInfo {
     public AudioSourceInfo[] all_source_audio; // every source audio stream
     public int64  file_size_bytes;            // source file size from format.size or stat
     public int    source_bit_depth;           // 8, 10, 12… (0 = unknown)
+    public string color_range;                // "tv", "pc", or "" when unknown
     public string color_transfer;             // "smpte2084", "arib-std-b67", ""
     public string color_primaries;            // "bt2020", "bt709", ""
+}
+
+/**
+ * Spatial evidence used by the 8-bit/10-bit decision.
+ *
+ * Frames are normalized to full-range 8-bit YUV before this is calculated, so
+ * the values are comparable across limited/full-range and 8/10/12-bit inputs.
+ * `vulnerability` estimates how much of the picture consists of long, clean,
+ * low-texture gradients that an 8-bit encode could posterize.  It deliberately
+ * does not treat darkness or a flat fill as proof that a gradient exists.
+ */
+public struct BandingAssessment {
+    public double vulnerability;          // 0.0–1.0; drives the depth decision
+    public double existing_banding;       // 0.0–1.0; visible quantized-step evidence
+    public double confidence;             // 0.0–1.0; 0 means no usable frame evidence
+    public double gradient_area_ratio;    // vulnerable luma blocks / luma blocks
+    public double chroma_gradient_ratio;  // vulnerable chroma blocks / chroma blocks
+    public double dark_gradient_ratio;    // vulnerable luma blocks that are dark
+    public double dark_scene_ratio;       // dark frames / analyzed frames
+    public double low_luma_ratio;         // frames with >=10% near-black pixels
+    public int    valid_frames;
+}
+
+/** Sampling cadence for the bounded spatial banding pass. */
+public struct BandingSamplingPlan {
+    public double frames_per_second;
+    public int    expected_frames;
 }
 
 public struct ContentProfile {
@@ -371,9 +399,15 @@ public struct ContentProfile {
      * every frame for free, so it is used for that instead.
      */
     public double      spatial_info;
-    public double      banding_risk;         // 0.0–1.0 composite score
-    public double      low_luma_ratio;       // fraction whose 10th-percentile luma is dark
-    public double      dark_scene_ratio;     // fraction of frames where avg luma < 60
+    public double      gradient_vulnerability; // spatial gradient vulnerability, 0.0–1.0
+    public double      existing_banding;     // measured quantized-step evidence, 0.0–1.0
+    public double      banding_confidence;   // 0.0 when spatial evidence is unavailable
+    public double      gradient_area_ratio;  // vulnerable luma-block coverage
+    public double      chroma_gradient_ratio;// vulnerable chroma-block coverage
+    public double      dark_gradient_ratio;  // dark share of vulnerable luma blocks
+    public int         banding_samples;      // normalized raw frames analyzed
+    public double      low_luma_ratio;       // frames with >=10% near-black pixels
+    public double      dark_scene_ratio;     // fraction of frames where avg luma is dark
 }
 
 public struct BitDepthDecision {
@@ -394,10 +428,6 @@ namespace SmartOptimizerLogic {
     public const int    MIN_SEGMENTS       = 2;        // absolute minimum
     public const int    ADAPTIVE_MAX_SEGMENTS = 16;    // cap when content variance is high
     public const int    ADAPTIVE_CALIBRATION_BASE_MAX_POINTS = 6; // 4 base + up to 2 follow-up CRFs
-    // signalstats YLOW is the 10th-percentile luma level, not a pixel count.
-    // 16 is studio-range black on the 8-bit-normalized measurement scale.
-    public const double DARK_LUMA_PERCENTILE_THRESHOLD = 16.0;
-
     // Minimum sample coverage target (15%). The segment count is computed
     // from this so that short and medium videos get enough coverage to
     // avoid the "representative samples" problem where 4 fixed segments
@@ -1640,43 +1670,287 @@ namespace SmartOptimizerLogic {
         }
     }
 
+    // The spatial detector uses small enough frames to stay cheap but large
+    // enough that a sky/wall gradient spans many independent blocks.  FFmpeg
+    // emits planar yuv444p, so every plane has exactly this many bytes.
+    public const int BANDING_ANALYSIS_WIDTH = 320;
+    public const int BANDING_ANALYSIS_HEIGHT = 180;
+    private const int BANDING_BLOCK_SIZE = 12;
+    public const int BANDING_CONFIDENT_FRAME_TARGET = 6;
+    private const double BANDING_MIN_SAMPLE_FPS = 0.25;
+
+    private struct GradientPlaneEvidence {
+        public int    blocks;
+        public double gradient_weight;
+        public double dark_gradient_weight;
+        public double step_weight;
+    }
+
     /**
-     * Banding / dark-scene metrics from per-frame YAVG and YLOW samples.
+     * Choose enough temporal samples for short clips without increasing the
+     * existing long-form bound of one frame every four seconds.  The cadence
+     * never exceeds the effective source/output cadence, so `fps` does not
+     * manufacture confidence by deliberately duplicating frames.
      */
-    public void compute_banding_metrics (
-        ref ContentProfile profile,
-        double[] all_yavg,
-        double[] all_ylow
+    public BandingSamplingPlan plan_banding_sampling (
+        double sampled_duration,
+        double effective_fps
     ) {
-        // Dark scene ratio: fraction of frames where avg luma < 60 (of 235 range)
-        if (all_yavg.length > 0) {
-            int dark_count = 0;
-            for (int i = 0; i < all_yavg.length; i++) {
-                if (all_yavg[i] < 60.0) dark_count++;
-            }
-            profile.dark_scene_ratio = (double) dark_count / all_yavg.length;
+        double duration = (sampled_duration.is_finite () && sampled_duration > 0.0)
+            ? sampled_duration : 0.0;
+        double cadence = (effective_fps.is_finite () && effective_fps > 0.0)
+            ? effective_fps : 30.0;
+
+        if (duration <= 0.0) {
+            return BandingSamplingPlan () {
+                frames_per_second = BANDING_MIN_SAMPLE_FPS,
+                expected_frames = 0
+            };
         }
 
-        // YLOW is signalstats' 10th-percentile luma level. A frame counts when
-        // at least 10% of its pixels are at/below studio-range black. The
-        // caller has already normalized 10-bit measurements onto the 8-bit
-        // scale, so neither a pixel-count nor a resolution adjustment belongs
-        // here.
-        if (all_ylow.length > 0) {
-            int ylow_count = 0;
-            for (int i = 0; i < all_ylow.length; i++) {
-                if (all_ylow[i] <= DARK_LUMA_PERCENTILE_THRESHOLD)
-                    ylow_count++;
+        double available = duration * cadence;
+        int expected = available >= BANDING_CONFIDENT_FRAME_TARGET
+            ? BANDING_CONFIDENT_FRAME_TARGET
+            : int.max (1, (int) Math.ceil (available - 1e-9));
+        double adaptive_fps = expected / duration;
+
+        return BandingSamplingPlan () {
+            frames_per_second = double.min (
+                cadence,
+                double.max (BANDING_MIN_SAMPLE_FPS, adaptive_fps)),
+            expected_frames = expected
+        };
+    }
+
+    /**
+     * Measure clean spatial gradients in normalized, full-range yuv444p frames.
+     *
+     * The detector fits a plane (z = ax + by + c) inside each block.  A real
+     * smooth gradient has a non-zero fitted span and a small residual; a solid
+     * fill has zero span, while texture/noise has a large residual.  This is the
+     * distinction the former darkness+saturation proxy could not make.
+     */
+    public BandingAssessment assess_banding_from_yuv444p (
+        uint8[] frames,
+        int width = BANDING_ANALYSIS_WIDTH,
+        int height = BANDING_ANALYSIS_HEIGHT,
+        int expected_frames = BANDING_CONFIDENT_FRAME_TARGET
+    ) {
+        var result = BandingAssessment ();
+        if (width < BANDING_BLOCK_SIZE || height < BANDING_BLOCK_SIZE)
+            return result;
+
+        int64 pixels64 = (int64) width * height;
+        int64 frame_bytes64 = pixels64 * 3;
+        if (pixels64 <= 0 || frame_bytes64 <= 0 || frame_bytes64 > int.MAX)
+            return result;
+        int pixels = (int) pixels64;
+        int frame_bytes = (int) frame_bytes64;
+        int frame_count = frames.length / frame_bytes;
+        if (frame_count <= 0)
+            return result;
+
+        GradientPlaneEvidence y_evidence = GradientPlaneEvidence ();
+        GradientPlaneEvidence u_evidence = GradientPlaneEvidence ();
+        GradientPlaneEvidence v_evidence = GradientPlaneEvidence ();
+        int dark_frames = 0;
+        int low_luma_frames = 0;
+
+        for (int frame = 0; frame < frame_count; frame++) {
+            int frame_offset = frame * frame_bytes;
+            double y_sum = 0.0;
+            int near_black = 0;
+            for (int i = 0; i < pixels; i++) {
+                uint8 value = frames[frame_offset + i];
+                y_sum += value;
+                if (value <= 16)
+                    near_black++;
             }
-            profile.low_luma_ratio = (double) ylow_count / all_ylow.length;
+            if (y_sum / pixels < 60.0)
+                dark_frames++;
+            if ((double) near_black / pixels >= 0.10)
+                low_luma_frames++;
+
+            assess_gradient_plane (frames, frame_offset, width, height,
+                ref y_evidence, true);
+            assess_gradient_plane (frames, frame_offset + pixels, width, height,
+                ref u_evidence, false);
+            assess_gradient_plane (frames, frame_offset + pixels * 2, width, height,
+                ref v_evidence, false);
         }
 
-        // Composite banding risk: weighted combination of dark/luma/smoothness
-        double dark_factor = profile.dark_scene_ratio;
-        double ylow_factor = profile.low_luma_ratio;
-        double smooth_factor = (1.0 - (profile.saturation_stddev / 40.0)).clamp (0.0, 1.0);
-        profile.banding_risk = (dark_factor * 0.35 + ylow_factor * 0.30 + smooth_factor * 0.35)
+        result.valid_frames = frame_count;
+        result.dark_scene_ratio = (double) dark_frames / frame_count;
+        result.low_luma_ratio = (double) low_luma_frames / frame_count;
+
+        double y_area = y_evidence.blocks > 0
+            ? y_evidence.gradient_weight / y_evidence.blocks : 0.0;
+        double u_area = u_evidence.blocks > 0
+            ? u_evidence.gradient_weight / u_evidence.blocks : 0.0;
+        double v_area = v_evidence.blocks > 0
+            ? v_evidence.gradient_weight / v_evidence.blocks : 0.0;
+        result.gradient_area_ratio = y_area.clamp (0.0, 1.0);
+        result.chroma_gradient_ratio = double.max (u_area, v_area).clamp (0.0, 1.0);
+        result.dark_gradient_ratio = y_evidence.gradient_weight > 0.0
+            ? (y_evidence.dark_gradient_weight / y_evidence.gradient_weight)
+                .clamp (0.0, 1.0)
+            : 0.0;
+
+        // Luma carries most visible structure; chroma still matters for skies,
+        // animation fills and graphics. Darkness increases the visibility of a
+        // gradient that was actually measured, never the existence of one.
+        double combined_area = result.gradient_area_ratio * 0.72
+            + result.chroma_gradient_ratio * 0.28;
+        double visibility = 1.0 + result.dark_gradient_ratio * 0.25;
+        result.vulnerability = (combined_area * 2.4 * visibility).clamp (0.0, 1.0);
+
+        double total_gradient_weight = y_evidence.gradient_weight
+            + u_evidence.gradient_weight + v_evidence.gradient_weight;
+        double total_step_weight = y_evidence.step_weight
+            + u_evidence.step_weight + v_evidence.step_weight;
+        double step_mean = total_gradient_weight > 0.0
+            ? total_step_weight / total_gradient_weight : 0.0;
+        result.existing_banding = (step_mean * combined_area * 3.0).clamp (0.0, 1.0);
+
+        // Normal clips target six temporal samples. Very short clips use the
+        // smaller number of frames that can physically exist at their cadence,
+        // so complete coverage is not mislabeled as permanently low confidence.
+        int confidence_target = int.max (1, expected_frames);
+        result.confidence = ((double) frame_count / confidence_target)
             .clamp (0.0, 1.0);
+        return result;
+    }
+
+    private void assess_gradient_plane (
+        uint8[] frames,
+        int plane_offset,
+        int width,
+        int height,
+        ref GradientPlaneEvidence evidence,
+        bool measure_darkness
+    ) {
+        int block = BANDING_BLOCK_SIZE;
+        double center = (block - 1) / 2.0;
+        double one_axis_denominator = 0.0;
+        for (int x = 0; x < block; x++) {
+            double dx = x - center;
+            one_axis_denominator += dx * dx;
+        }
+        one_axis_denominator *= block;
+
+        for (int by = 0; by + block <= height; by += block) {
+            for (int bx = 0; bx + block <= width; bx += block) {
+                evidence.blocks++;
+                double sum = 0.0;
+                double xz = 0.0;
+                double yz = 0.0;
+                int min_value = 255;
+                int max_value = 0;
+
+                for (int y = 0; y < block; y++) {
+                    double dy = y - center;
+                    for (int x = 0; x < block; x++) {
+                        double dx = x - center;
+                        int value = frames[plane_offset + (by + y) * width + bx + x];
+                        sum += value;
+                        xz += dx * value;
+                        yz += dy * value;
+                        min_value = int.min (min_value, value);
+                        max_value = int.max (max_value, value);
+                    }
+                }
+
+                double mean = sum / (block * block);
+                double slope_x = xz / one_axis_denominator;
+                double slope_y = yz / one_axis_denominator;
+                double slope = Math.sqrt (slope_x * slope_x + slope_y * slope_y);
+                double span = slope * (block - 1);
+
+                double residual_sum = 0.0;
+                for (int y = 0; y < block; y++) {
+                    double dy = y - center;
+                    for (int x = 0; x < block; x++) {
+                        double dx = x - center;
+                        double predicted = mean + slope_x * dx + slope_y * dy;
+                        double actual = frames[plane_offset + (by + y) * width + bx + x];
+                        double residual = actual - predicted;
+                        residual_sum += residual * residual;
+                    }
+                }
+                double residual_rms = Math.sqrt (residual_sum / (block * block));
+
+                // Smooth but non-flat: at least a sub-code-value fitted span,
+                // no hard edge, and little energy left after subtracting the
+                // fitted plane. The residual allowance grows slightly with the
+                // gradient so compressed sources are not rejected outright.
+                double residual_limit = 1.35 + span * 0.06;
+                if (span < 0.70 || span > 48.0
+                        || max_value - min_value > 64
+                        || residual_rms > residual_limit) {
+                    continue;
+                }
+
+                double span_weight = ((span - 0.50) / 2.5).clamp (0.10, 1.0);
+                double cleanliness = (1.0 - residual_rms / residual_limit)
+                    .clamp (0.05, 1.0);
+                double gradient_weight = span_weight * cleanliness;
+                evidence.gradient_weight += gradient_weight;
+                if (measure_darkness && mean < 80.0)
+                    evidence.dark_gradient_weight += gradient_weight;
+
+                int flat_pairs = 0;
+                int stepped_pairs = 0;
+                int pair_count = 0;
+                bool horizontal = Math.fabs (slope_x) >= Math.fabs (slope_y);
+                if (horizontal) {
+                    for (int y = 0; y < block; y++) {
+                        for (int x = 1; x < block; x++) {
+                            int here = frames[plane_offset + (by + y) * width + bx + x];
+                            int prev = frames[plane_offset + (by + y) * width + bx + x - 1];
+                            int delta = (here - prev).abs ();
+                            if (delta == 0) flat_pairs++;
+                            if (delta >= 4) stepped_pairs++;
+                            pair_count++;
+                        }
+                    }
+                } else {
+                    for (int y = 1; y < block; y++) {
+                        for (int x = 0; x < block; x++) {
+                            int here = frames[plane_offset + (by + y) * width + bx + x];
+                            int prev = frames[plane_offset + (by + y - 1) * width + bx + x];
+                            int delta = (here - prev).abs ();
+                            if (delta == 0) flat_pairs++;
+                            if (delta >= 4) stepped_pairs++;
+                            pair_count++;
+                        }
+                    }
+                }
+                double flat_ratio = pair_count > 0
+                    ? (double) flat_pairs / pair_count : 0.0;
+                double stepped_ratio = pair_count > 0
+                    ? (double) stepped_pairs / pair_count : 0.0;
+                double stepiness = (((flat_ratio - 0.55) / 0.45).clamp (0.0, 1.0) * 0.7
+                    + (stepped_ratio / 0.20).clamp (0.0, 1.0) * 0.3)
+                    .clamp (0.0, 1.0);
+                evidence.step_weight += gradient_weight * stepiness;
+            }
+        }
+    }
+
+    /** Copy a completed assessment onto the profile consumed by all policies. */
+    public void apply_banding_assessment (
+        ref ContentProfile profile,
+        BandingAssessment assessment
+    ) {
+        profile.gradient_vulnerability = assessment.vulnerability;
+        profile.existing_banding = assessment.existing_banding;
+        profile.banding_confidence = assessment.confidence;
+        profile.gradient_area_ratio = assessment.gradient_area_ratio;
+        profile.chroma_gradient_ratio = assessment.chroma_gradient_ratio;
+        profile.dark_gradient_ratio = assessment.dark_gradient_ratio;
+        profile.banding_samples = assessment.valid_frames;
+        profile.dark_scene_ratio = assessment.dark_scene_ratio;
+        profile.low_luma_ratio = assessment.low_luma_ratio;
     }
 
     /**
@@ -1715,9 +1989,9 @@ namespace SmartOptimizerLogic {
      * Rescale a signalstats amplitude to its 8-bit equivalent.
      *
      * signalstats reports in the source's native range, so a 10-bit source
-     * yields ~4x the values of identical content at 8-bit. Every threshold in
-     * the classifier, the grain gate and the banding metrics compares these
-     * figures ACROSS sources, so without this a 10-bit input reads as four
+     * yields ~4x the values of identical content at 8-bit. The content
+     * classifier compares these figures ACROSS sources, so without this a
+     * 10-bit input reads as four
      * times the motion it actually has — which is exactly what happened: two
      * corpus films measured YDIF 13.83 and 11.71 and were classified as
      * high-motion live action, when their true motion is 3.46 and 2.93.
@@ -1777,7 +2051,8 @@ namespace SmartOptimizerLogic {
         SizeTier tier,
         string codec,
         bool tone_mapping_active,
-        bool x264_10bit_supported = false
+        bool x264_10bit_supported = false,
+        bool small_target_size_policy = true
     ) {
         bool is_hdr = (info.color_transfer == "smpte2084"
                     || info.color_transfer == "arib-std-b67");
@@ -1836,12 +2111,14 @@ namespace SmartOptimizerLogic {
             };
         }
 
-        // Rule 6: Small target with low banding risk → 8-bit for speed
-        if (tier <= SizeTier.SMALL && profile.banding_risk < 0.5) {
+        // Rule 6: Tiny/Small is an explicit Target Size policy. Quality Mode
+        // passes false because its nominal tier is only an effort mapping and
+        // there is no byte target to protect.
+        if (small_target_size_policy && tier <= SizeTier.SMALL) {
             return BitDepthDecision () {
                 pix_fmt  = PixelFormat.YUV420P,
                 is_10bit = false,
-                reason   = "8-bit for speed at small target size"
+                reason   = "8-bit for predictable Tiny/Small target size"
             };
         }
 
@@ -1858,32 +2135,45 @@ namespace SmartOptimizerLogic {
             };
         }
 
-        // Rule 8: Anime with moderate banding risk → 10-bit
-        if (profile.content_type == ContentType.ANIME && profile.banding_risk >= 0.3) {
+        // One or two frames can describe an isolated title card, fade or sky
+        // rather than the clip as a whole. Keep partial results reportable, but
+        // require enough temporal evidence before they can change bit depth.
+        bool banding_available = profile.banding_confidence > 0.0
+            && profile.banding_samples > 0;
+        bool banding_measured = profile.banding_confidence >= 0.5
+            && profile.banding_samples >= 3;
+
+        // Rule 8: Anime with moderate measured gradient vulnerability → 10-bit
+        if (banding_measured
+                && profile.content_type == ContentType.ANIME
+                && profile.gradient_vulnerability >= 0.3) {
             return BitDepthDecision () {
                 pix_fmt  = PixelFormat.YUV420P10LE,
                 is_10bit = true,
-                reason   = "Anime with banding risk %.0f%% — 10-bit reduces banding".printf (
-                    profile.banding_risk * 100.0)
+                reason   = "Animation with gradient vulnerability %.0f%% — 10-bit protects smooth fills".printf (
+                    profile.gradient_vulnerability * 100.0)
             };
         }
 
-        // Rule 9: High banding risk for any content → 10-bit
-        if (profile.banding_risk >= 0.6) {
+        // Rule 9: High measured vulnerability for any content → 10-bit
+        if (banding_measured && profile.gradient_vulnerability >= 0.6) {
             return BitDepthDecision () {
                 pix_fmt  = PixelFormat.YUV420P10LE,
                 is_10bit = true,
-                reason   = "High banding risk (%.0f%%) — 10-bit improves gradients".printf (
-                    profile.banding_risk * 100.0)
+                reason   = "High gradient vulnerability (%.0f%%) — 10-bit protects smooth gradients".printf (
+                    profile.gradient_vulnerability * 100.0)
             };
         }
 
-        // Rule 10: Dark content with banding risk → 10-bit
-        if (profile.dark_scene_ratio >= 0.5 && profile.banding_risk >= 0.4) {
+        // Rule 10: dark gradients become visible sooner, but darkness alone is
+        // never evidence — dark_gradient_ratio only counts measured gradients.
+        if (banding_measured
+                && profile.dark_gradient_ratio >= 0.5
+                && profile.gradient_vulnerability >= 0.4) {
             return BitDepthDecision () {
                 pix_fmt  = PixelFormat.YUV420P10LE,
                 is_10bit = true,
-                reason   = "Dark content with banding risk — 10-bit reduces artifacts"
+                reason   = "Dark smooth gradients are vulnerable to 8-bit quantization"
             };
         }
 
@@ -1891,7 +2181,11 @@ namespace SmartOptimizerLogic {
         return BitDepthDecision () {
             pix_fmt  = PixelFormat.YUV420P,
             is_10bit = false,
-            reason   = "Standard 8-bit — no banding risk detected"
+            reason   = banding_measured
+                ? "Standard 8-bit — no material gradient vulnerability detected"
+                : (banding_available
+                    ? "Standard 8-bit — gradient evidence has insufficient confidence"
+                    : "Standard 8-bit — gradient evidence unavailable")
         };
     }
 

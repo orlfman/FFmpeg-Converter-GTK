@@ -1006,11 +1006,19 @@ namespace ConversionUtils {
     public string[] build_collage_argv (string ffmpeg_path,
                                         string source_video_path,
                                         string collage_output_path,
-                                        double duration_seconds) {
+                                        double duration_seconds,
+                                        double video_start_time = 0.0,
+                                        bool single_frame_video = false) {
         string[] cmd = { ffmpeg_path, "-y" };
 
         foreach (double fraction in get_collage_capture_fractions ()) {
-            double capture_time = duration_seconds * fraction;
+            double capture_time = single_frame_video
+                ? video_start_time
+                : video_start_time + duration_seconds * fraction;
+            // capture_time is an absolute packet timestamp. Without this,
+            // input-side -ss adds the file's nonzero start time again.
+            cmd += "-seek_timestamp";
+            cmd += "1";
             cmd += "-ss";
             cmd += format_ffmpeg_double (capture_time, "%.6f");
             cmd += "-i";
@@ -1043,6 +1051,10 @@ namespace ConversionUtils {
         var filter = new StringBuilder ();
         for (int i = 0; i < input_count; i++) {
             filter.append ("[%d:v]".printf (i));
+            // Input seeking can leave each decoder a few milliseconds apart.
+            // xstack is a framesync filter, so give every tile the same zero
+            // origin after the requested frame has been decoded.
+            filter.append ("setpts=PTS-STARTPTS,");
             filter.append (
                 "scale=%d:%d:force_original_aspect_ratio=decrease,".printf (
                     tile_width,

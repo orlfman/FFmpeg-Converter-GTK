@@ -34,6 +34,54 @@ public class AudioStreamsProbeResult : Object {
     }
 }
 
+public class TimedStreamTopologyProbeResult : Object {
+    public bool success { get; set; default = false; }
+    public bool has_subtitle_stream { get; set; default = false; }
+    public bool has_chapters { get; set; default = false; }
+
+    public TimedStreamTopologyProbeResult () {
+        success = false;
+        has_subtitle_stream = false;
+        has_chapters = false;
+    }
+}
+
+public class VideoTimelineProbeResult : Object {
+    public bool success { get; set; default = false; }
+    public bool start_time_known { get; set; default = false; }
+    public double start_time { get; set; default = 0.0; }
+    public double end_time { get; set; default = 0.0; }
+    public double last_packet_time { get; set; default = 0.0; }
+    public int packet_count { get; set; default = 0; }
+    public bool packet_count_complete { get; set; default = false; }
+
+    public VideoTimelineProbeResult () {
+        success = false;
+        start_time_known = false;
+        start_time = 0.0;
+        end_time = 0.0;
+        last_packet_time = 0.0;
+        packet_count = 0;
+        packet_count_complete = false;
+    }
+
+    public double get_duration () {
+        return success
+            ? (end_time - start_time).clamp (0.0, double.MAX)
+            : 0.0;
+    }
+
+    public double get_seek_span () {
+        return success
+            ? (last_packet_time - start_time).clamp (0.0, double.MAX)
+            : 0.0;
+    }
+}
+
+public delegate int FfprobeCaptureRunner (string[] argv,
+                                          out string stdout_text,
+                                          out string stderr_text);
+
 namespace FfprobeUtils {
 
     private string summarize_ffprobe_text (string? text, int max_len = 200) {
@@ -86,6 +134,30 @@ namespace FfprobeUtils {
         }
 
         return true;
+    }
+
+    private bool run_ffprobe_controlled (string[] cmd,
+                                         FfprobeCaptureRunner? capture_runner,
+                                         out string stdout_text,
+                                         out string stderr_text) {
+        if (capture_runner == null) {
+            return run_ffprobe_sync (
+                cmd, out stdout_text, out stderr_text);
+        }
+
+        stdout_text = "";
+        stderr_text = "";
+        int status = capture_runner (
+            cmd, out stdout_text, out stderr_text);
+        if (status == 0 && stdout_text != null)
+            return true;
+
+        string detail = "exit=%d".printf (status);
+        string stderr_summary = summarize_ffprobe_text (stderr_text);
+        if (stderr_summary.length > 0)
+            detail = @"$detail stderr=$stderr_summary";
+        log_ffprobe_debug ("controlled probe failed", cmd, detail);
+        return false;
     }
 
     private async bool run_ffprobe_async (string[] cmd,
@@ -494,6 +566,130 @@ namespace FfprobeUtils {
         return result;
     }
 
+    private TimedStreamTopologyProbeResult parse_timed_stream_topology_output (
+        string stdout_text
+    ) {
+        var result = new TimedStreamTopologyProbeResult ();
+        if (stdout_text == null || stdout_text.strip ().length == 0)
+            return result;
+
+        try {
+            var parser = new Json.Parser ();
+            parser.load_from_data (stdout_text);
+
+            var root = parser.get_root ();
+            if (root == null || root.get_node_type () != Json.NodeType.OBJECT)
+                return result;
+
+            var root_obj = root.get_object ();
+            if (!root_obj.has_member ("streams")
+                || !root_obj.has_member ("chapters"))
+                return result;
+
+            var streams_node = root_obj.get_member ("streams");
+            var chapters_node = root_obj.get_member ("chapters");
+            if (streams_node == null || chapters_node == null
+                || streams_node.get_node_type () != Json.NodeType.ARRAY
+                || chapters_node.get_node_type () != Json.NodeType.ARRAY)
+                return result;
+
+            var streams = streams_node.get_array ();
+            for (uint i = 0; i < streams.get_length (); i++) {
+                var stream_node = streams.get_element (i);
+                if (stream_node == null
+                    || stream_node.get_node_type () != Json.NodeType.OBJECT)
+                    return result;
+
+                var stream = stream_node.get_object ();
+                if (!stream.has_member ("codec_type"))
+                    return result;
+
+                var codec_type_node = stream.get_member ("codec_type");
+                if (codec_type_node == null
+                    || codec_type_node.get_node_type () != Json.NodeType.VALUE
+                    || codec_type_node.get_value_type () != typeof (string))
+                    return result;
+
+                if (stream.get_string_member ("codec_type") == "subtitle") {
+                    result.has_subtitle_stream = true;
+                }
+            }
+
+            var chapters = chapters_node.get_array ();
+            for (uint i = 0; i < chapters.get_length (); i++) {
+                var chapter_node = chapters.get_element (i);
+                if (chapter_node == null
+                    || chapter_node.get_node_type () != Json.NodeType.OBJECT) {
+                    return result;
+                }
+            }
+
+            result.has_chapters = chapters.get_length () > 0;
+
+            result.success = true;
+        } catch (Error e) {
+            debug ("FfprobeUtils: failed to parse timed-stream topology: %s | stdout=%s",
+                   e.message, summarize_ffprobe_text (stdout_text));
+        }
+
+        return result;
+    }
+
+    private VideoTimelineProbeResult parse_video_packet_timeline_output (
+        string stdout_text
+    ) {
+        var result = new VideoTimelineProbeResult ();
+        if (stdout_text == null || stdout_text.strip ().length == 0)
+            return result;
+
+        bool found_packet = false;
+        int packet_count = 0;
+        double first_pts = double.MAX;
+        double final_pts = -double.MAX;
+        double final_end = -double.MAX;
+
+        foreach (unowned string raw_line in stdout_text.split ("\n")) {
+            string line = raw_line.strip ();
+            if (line.length == 0)
+                continue;
+
+            string[] fields = line.split (",");
+            if (fields.length == 0)
+                continue;
+
+            double pts = 0.0;
+            if (!double.try_parse (fields[0].strip (), out pts) || !pts.is_finite ())
+                continue;
+
+            double packet_duration = 0.0;
+            if (fields.length > 1) {
+                double parsed_duration = 0.0;
+                if (double.try_parse (fields[1].strip (), out parsed_duration)
+                    && parsed_duration.is_finite ()
+                    && parsed_duration > 0.0) {
+                    packet_duration = parsed_duration;
+                }
+            }
+
+            found_packet = true;
+            packet_count++;
+            first_pts = double.min (first_pts, pts);
+            final_pts = double.max (final_pts, pts);
+            final_end = double.max (final_end, pts + packet_duration);
+        }
+
+        if (found_packet) {
+            result.success = true;
+            result.start_time_known = true;
+            result.start_time = first_pts;
+            result.end_time = double.max (first_pts, final_end);
+            result.last_packet_time = double.max (first_pts, final_pts);
+            result.packet_count = packet_count;
+        }
+
+        return result;
+    }
+
 #if FFPROBE_UTILS_TEST_BUILD
     internal AudioStreamProbeResult parse_primary_audio_stream_output_for_test (string stdout_text) {
         return parse_primary_audio_stream_output (stdout_text);
@@ -501,6 +697,18 @@ namespace FfprobeUtils {
 
     internal AudioStreamsProbeResult parse_all_audio_streams_output_for_test (string stdout_text) {
         return parse_all_audio_streams_output (stdout_text);
+    }
+
+    internal TimedStreamTopologyProbeResult parse_timed_stream_topology_output_for_test (
+        string stdout_text
+    ) {
+        return parse_timed_stream_topology_output (stdout_text);
+    }
+
+    internal VideoTimelineProbeResult parse_video_packet_timeline_output_for_test (
+        string stdout_text
+    ) {
+        return parse_video_packet_timeline_output (stdout_text);
     }
 #endif
 
@@ -587,6 +795,160 @@ namespace FfprobeUtils {
             return false;
 
         return stdout_text.strip ().length > 0;
+    }
+
+    public TimedStreamTopologyProbeResult probe_timed_stream_topology (
+        string input_file,
+        FfprobeCaptureRunner? capture_runner = null
+    ) {
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-show_entries", "stream=codec_type:chapter=start_time,end_time",
+            "-of", "json",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!run_ffprobe_controlled (
+                cmd, capture_runner, out stdout_text, out stderr_text))
+            return new TimedStreamTopologyProbeResult ();
+
+        return parse_timed_stream_topology_output (stdout_text);
+    }
+
+    /**
+     * Read the first video stream's real packet timeline. Container duration
+     * cannot be used for thumbnails: it may include a leading timestamp gap,
+     * a longer audio/subtitle stream, or chapter metadata beyond the video.
+     */
+    public VideoTimelineProbeResult probe_video_timeline (
+        string input_file,
+        FfprobeCaptureRunner? capture_runner = null
+    ) {
+        // Read just the first packet. This establishes the real video origin
+        // without trusting the container's start time.
+        string[] first_cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-read_intervals", "%+#1",
+            "-show_packets",
+            "-show_entries", "packet=pts_time,duration_time",
+            "-of", "csv=p=0",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!run_ffprobe_controlled (
+                first_cmd, capture_runner, out stdout_text, out stderr_text))
+            return new VideoTimelineProbeResult ();
+
+        VideoTimelineProbeResult first =
+            parse_video_packet_timeline_output (stdout_text);
+        if (!first.success)
+            return new VideoTimelineProbeResult ();
+
+        // Preserve the trustworthy first-packet timestamp even if the bounded
+        // tail lookup fails. Callers may combine it with a duration derived
+        // from their own encode/trim request, but never with container duration.
+        var partial = new VideoTimelineProbeResult ();
+        partial.success = false;
+        partial.start_time_known = true;
+        partial.start_time = first.start_time;
+        partial.end_time = first.start_time;
+        partial.last_packet_time = first.last_packet_time;
+        partial.packet_count = first.packet_count;
+        partial.packet_count_complete = false;
+
+        // Container duration is only a hint for locating a small tail window;
+        // it is never returned as the video duration. This keeps the original
+        // leading-gap bug from reappearing when metadata is misleading.
+        string[] duration_cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "quiet",
+            "-print_format", "csv=p=0",
+            "-show_entries", "format=duration",
+            input_file
+        };
+        if (!run_ffprobe_controlled (
+                duration_cmd, capture_runner, out stdout_text, out stderr_text))
+            return partial;
+
+        double duration_hint = parse_ffprobe_duration_output (stdout_text);
+        if (duration_hint <= 0.0)
+            return partial;
+
+        double approximate_end = duration_hint;
+        if (approximate_end <= first.start_time) {
+            approximate_end = first.start_time + duration_hint;
+        }
+
+        // Normal files succeed with the five-second window. Larger windows
+        // handle containers whose duration is governed by a longer subtitle
+        // or audio stream, while bounding captured packet output to roughly
+        // two minutes instead of scanning every packet in a long movie.
+        double[] tail_windows = { 5.0, 15.0, 30.0, 60.0, 120.0 };
+        double previous_start = double.MAX;
+
+        foreach (double window in tail_windows) {
+            double tail_start = double.max (
+                first.start_time, approximate_end - window);
+            if (Math.fabs (tail_start - previous_start) < 0.000001)
+                continue;
+            previous_start = tail_start;
+
+            // An explicit end keeps the probe truly bounded and avoids an
+            // ffprobe edge case where an open-ended interval beginning at
+            // exactly zero can return no packets under allocator poisoning.
+            double tail_end = approximate_end + 1.0;
+            string interval = ConversionUtils.format_ffmpeg_double (
+                tail_start, "%.6f") + "%"
+                + ConversionUtils.format_ffmpeg_double (tail_end, "%.6f");
+            string[] tail_cmd = {
+                AppSettings.get_default ().ffprobe_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-read_intervals", interval,
+                "-show_packets",
+                "-show_entries", "packet=pts_time,duration_time",
+                "-of", "csv=p=0",
+                input_file
+            };
+
+            if (!run_ffprobe_controlled (
+                    tail_cmd, capture_runner, out stdout_text, out stderr_text))
+                return partial;
+
+            VideoTimelineProbeResult tail =
+                parse_video_packet_timeline_output (stdout_text);
+            bool covers_entire_timeline =
+                tail_start <= first.start_time + 0.000001;
+            bool confirmed_single_packet = covers_entire_timeline
+                && tail.success
+                && tail.packet_count == 1
+                && Math.fabs (tail.start_time - first.start_time) < 0.000001;
+            if (!tail.success
+                || (tail.end_time <= first.start_time
+                    && !confirmed_single_packet))
+                continue;
+
+            var result = new VideoTimelineProbeResult ();
+            result.success = true;
+            result.start_time_known = true;
+            result.start_time = first.start_time;
+            result.end_time = tail.end_time;
+            result.last_packet_time = tail.last_packet_time;
+            result.packet_count_complete = covers_entire_timeline;
+            result.packet_count = result.packet_count_complete
+                ? tail.packet_count
+                : tail.packet_count + first.packet_count;
+            return result;
+        }
+
+        return partial;
     }
 
     /**

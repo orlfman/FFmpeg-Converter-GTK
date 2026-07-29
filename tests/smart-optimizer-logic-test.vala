@@ -93,6 +93,7 @@ SmartOptimizerVideoInfo make_video_info (AudioSourceInfo[] audio) {
         all_source_audio = {},
         file_size_bytes = 0,
         source_bit_depth = 8,
+        color_range = "tv",
         color_transfer = "",
         color_primaries = ""
     };
@@ -1789,16 +1790,143 @@ void test_decide_bit_depth_rules () {
     assert (!mapped.is_10bit);
 }
 
-void test_banding_metrics_dark_content () {
-    var profile = ContentProfile ();
-    double[] yavg = { 30.0, 40.0, 50.0, 55.0 };   // all below 60 → dark
-    // YLOW is a luma level: three of four frames have their 10th percentile at
-    // or below studio black. Resolution must not affect this ratio.
-    double[] ylow = { 15.0, 16.0, 17.0, 8.0 };
-    SmartOptimizerLogic.compute_banding_metrics (ref profile, yavg, ylow);
-    assert (close_to (profile.dark_scene_ratio, 1.0, 1e-9));
-    assert (close_to (profile.low_luma_ratio, 0.75, 1e-9));
-    assert (profile.banding_risk > 0.0);
+uint8[] make_banding_test_frames (int width, int height, int frame_count) {
+    int pixels = width * height;
+    var data = new uint8[pixels * 3 * frame_count];
+    for (int frame = 0; frame < frame_count; frame++) {
+        int offset = frame * pixels * 3;
+        for (int i = 0; i < pixels; i++) {
+            data[offset + pixels + i] = 128;
+            data[offset + pixels * 2 + i] = 128;
+        }
+    }
+    return data;
+}
+
+void test_banding_spatial_assessment () {
+    const int width = 96;
+    const int height = 48;
+    const int frames = 6;
+    int pixels = width * height;
+
+    // A bright, clean luma ramp is genuine gradient evidence even though none
+    // of it is dark. This was the former heuristic's principal false negative.
+    uint8[] gradient = make_banding_test_frames (width, height, frames);
+    for (int frame = 0; frame < frames; frame++) {
+        int offset = frame * pixels * 3;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++)
+                gradient[offset + y * width + x] = (uint8) (72 + x * 120 / (width - 1));
+        }
+    }
+    var bright = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        gradient, width, height);
+    assert (bright.confidence == 1.0);
+    assert (bright.gradient_area_ratio > 0.5);
+    assert (bright.vulnerability >= 0.6);
+    assert (bright.dark_scene_ratio == 0.0);
+
+    // Chroma-only gradients also matter (animation fills and blue skies), even
+    // when luma is perfectly flat.
+    uint8[] chroma = make_banding_test_frames (width, height, frames);
+    for (int frame = 0; frame < frames; frame++) {
+        int offset = frame * pixels * 3;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                chroma[offset + y * width + x] = 160;
+                chroma[offset + pixels + y * width + x] =
+                    (uint8) (48 + x * 144 / (width - 1));
+            }
+        }
+    }
+    var chroma_only = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        chroma, width, height);
+    assert (chroma_only.gradient_area_ratio == 0.0);
+    assert (chroma_only.chroma_gradient_ratio > 0.5);
+    assert (chroma_only.vulnerability > 0.3);
+
+    // Darkness boosts the visibility of measured gradients, but only after a
+    // gradient exists.
+    uint8[] dark_gradient = make_banding_test_frames (width, height, frames);
+    for (int frame = 0; frame < frames; frame++) {
+        int offset = frame * pixels * 3;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++)
+                dark_gradient[offset + y * width + x] =
+                    (uint8) (8 + x * 48 / (width - 1));
+        }
+    }
+    var dark = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        dark_gradient, width, height);
+    assert (dark.dark_scene_ratio == 1.0);
+    assert (dark.dark_gradient_ratio > 0.9);
+    assert (dark.vulnerability > 0.4);
+
+    // Long repeated plateaus inside an otherwise clean shallow ramp are
+    // existing quantization-step evidence, reported separately from the risk
+    // of introducing more banding during the next encode.
+    uint8[] shallow_steps = make_banding_test_frames (width, height, frames);
+    for (int frame = 0; frame < frames; frame++) {
+        int offset = frame * pixels * 3;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++)
+                shallow_steps[offset + y * width + x] = (uint8) (40 + x / 8);
+        }
+    }
+    var stepped = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        shallow_steps, width, height);
+    assert (stepped.existing_banding > 0.1);
+
+    // Darkness by itself is not a gradient. A solid black frame must remain at
+    // zero vulnerability rather than reproducing the former 100% result.
+    uint8[] black = make_banding_test_frames (width, height, frames);
+    var solid = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        black, width, height);
+    assert (solid.dark_scene_ratio == 1.0);
+    assert (solid.low_luma_ratio == 1.0);
+    assert (solid.gradient_area_ratio == 0.0);
+    assert (solid.vulnerability == 0.0);
+
+    // High-frequency texture/noise is a poor plane fit and must not be confused
+    // with a smooth gradient merely because its average saturation is stable.
+    uint8[] texture = make_banding_test_frames (width, height, frames);
+    for (int frame = 0; frame < frames; frame++) {
+        int offset = frame * pixels * 3;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++)
+                texture[offset + y * width + x] = ((x + y) % 2 == 0) ? 32 : 224;
+        }
+    }
+    var noisy = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        texture, width, height);
+    assert (noisy.vulnerability < bright.vulnerability);
+
+    // Missing/truncated output is explicitly unknown, not a synthetic 35%.
+    uint8[] missing = {};
+    var unavailable = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        missing, width, height);
+    assert (unavailable.confidence == 0.0);
+    assert (unavailable.vulnerability == 0.0);
+
+    // Normal analysis expects six frames, while a physically shorter clip can
+    // declare its smaller attainable target without being under-confident.
+    uint8[] one_frame = make_banding_test_frames (width, height, 1);
+    var partial = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        one_frame, width, height);
+    var complete_short = SmartOptimizerLogic.assess_banding_from_yuv444p (
+        one_frame, width, height, 1);
+    assert (close_to (partial.confidence, 1.0 / 6.0, 1e-9));
+    assert (complete_short.confidence == 1.0);
+
+    var tenth_second = SmartOptimizerLogic.plan_banding_sampling (0.1, 30.0);
+    assert (tenth_second.expected_frames == 3);
+    assert (close_to (tenth_second.frames_per_second, 30.0, 1e-9));
+    var half_second = SmartOptimizerLogic.plan_banding_sampling (0.5, 30.0);
+    assert (half_second.expected_frames == 6);
+    assert (close_to (half_second.frames_per_second, 12.0, 1e-9));
+    var long_samples = SmartOptimizerLogic.plan_banding_sampling (128.0, 30.0);
+    assert (long_samples.expected_frames == 6);
+    assert (close_to (long_samples.frames_per_second, 0.25, 1e-9));
 
     assert (SmartOptimizerLogic.effective_analysis_bit_depth (8) == 8);
     assert (SmartOptimizerLogic.effective_analysis_bit_depth (9) == 10);
@@ -1807,6 +1935,51 @@ void test_banding_metrics_dark_content () {
         == PixelFormat.YUV420P);
     assert (SmartOptimizerLogic.effective_analysis_pixel_format (10)
         == PixelFormat.YUV420P10LE);
+}
+
+void test_banding_bit_depth_mode_policy () {
+    var info = make_video_info ({});
+    var profile = ContentProfile () {
+        content_type = ContentType.LIVE_ACTION,
+        gradient_vulnerability = 0.8,
+        banding_confidence = 1.0,
+        banding_samples = 6
+    };
+
+    // Target Size owns the intentional Tiny/Small 8-bit policy.
+    var size_small = SmartOptimizerLogic.decide_bit_depth (
+        info, profile, SizeTier.SMALL, "x265", false, false, true);
+    assert (!size_small.is_10bit);
+    assert (size_small.reason.contains ("Tiny/Small target size"));
+
+    // Quality Ceiling's nominal SMALL tier is only an effort mapping; it has no
+    // byte target, so the same measured evidence remains free to choose 10-bit.
+    var quality_low = SmartOptimizerLogic.decide_bit_depth (
+        info, profile, SizeTier.SMALL, "x265", false, false, false);
+    assert (quality_low.is_10bit);
+
+    // A high vulnerability score from one frame remains reportable but cannot
+    // control output depth. At least three frames and 50% confidence are needed.
+    profile.banding_confidence = 1.0 / 6.0;
+    profile.banding_samples = 1;
+    var partial = SmartOptimizerLogic.decide_bit_depth (
+        info, profile, SizeTier.MEDIUM, "x265", false, false, false);
+    assert (!partial.is_10bit);
+    assert (partial.reason.contains ("insufficient confidence"));
+
+    profile.banding_confidence = 0.5;
+    profile.banding_samples = 3;
+    var sufficient = SmartOptimizerLogic.decide_bit_depth (
+        info, profile, SizeTier.MEDIUM, "x265", false, false, false);
+    assert (sufficient.is_10bit);
+
+    // A numeric score without valid evidence is never treated as measured.
+    profile.banding_confidence = 0.0;
+    profile.banding_samples = 0;
+    var unknown = SmartOptimizerLogic.decide_bit_depth (
+        info, profile, SizeTier.MEDIUM, "x265", false, false, false);
+    assert (!unknown.is_10bit);
+    assert (unknown.reason.contains ("unavailable"));
 }
 
 void test_audio_measurement_floor () {
@@ -2382,7 +2555,8 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/segments/budget-expanded", test_budget_expanded_count);
     Test.add_func ("/smart-optimizer-logic/grain/warranted", test_grain_warranted);
     Test.add_func ("/smart-optimizer-logic/bit-depth/rules", test_decide_bit_depth_rules);
-    Test.add_func ("/smart-optimizer-logic/banding/dark-content", test_banding_metrics_dark_content);
+    Test.add_func ("/smart-optimizer-logic/banding/spatial-assessment", test_banding_spatial_assessment);
+    Test.add_func ("/smart-optimizer-logic/banding/mode-policy", test_banding_bit_depth_mode_policy);
     Test.add_func ("/smart-optimizer-logic/confidence/extrapolation", test_assess_confidence_interpolation_vs_extrapolation);
     Test.add_func ("/smart-optimizer-logic/confidence/coverage", test_assess_confidence_coverage_penalty);
     Test.add_func ("/smart-optimizer-logic/policy/two-pass", test_decide_two_pass_policies);
