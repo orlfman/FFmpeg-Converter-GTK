@@ -56,6 +56,7 @@ public class AudioPlayer : Box {
     private Gtk.Label time_label;
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
+    private Gtk.ToggleButton mute_button;
 
     // ── Playback backend ─────────────────────────────────────────────────────
     // Audio-only libmpv instance: it selects the wanted audio track directly from
@@ -76,6 +77,18 @@ public class AudioPlayer : Box {
     private uint waveform_generation = 0;
     private string current_waveform_input_path = "";
     private int current_waveform_stream_index = 0;
+
+    // Waveform rendering is an ffmpeg pass over every audio sample in the source,
+    // so it is not started just because a file was selected: the request is held
+    // until this player is actually on screen. GTK unmaps the widget both when the
+    // Audio tab is not the visible page and while the player itself is hidden
+    // (during probing, or when the source has no audio), so map state is a
+    // faithful "worth rendering now" signal. The signature cache means returning
+    // to the tab after the first render costs nothing.
+    private string pending_waveform_path = "";
+    private int pending_waveform_stream_index = 0;
+    private bool waveform_request_pending = false;
+    private bool player_on_screen = false;
     private string? temp_run_dir = null;
     private string? waveform_temp_dir = null;
     private ulong style_manager_dark_handler_id = 0;
@@ -107,6 +120,14 @@ public class AudioPlayer : Box {
         backend.file_loaded.connect (on_media_prepared);
         backend.load_failed.connect (() => {
             warning ("AudioPlayer: mpv could not open the selected audio stream");
+        });
+
+        map.connect (() => {
+            player_on_screen = true;
+            flush_pending_waveform ();
+        });
+        unmap.connect (() => {
+            player_on_screen = false;
         });
     }
 
@@ -156,7 +177,10 @@ public class AudioPlayer : Box {
         if (current_waveform_input_path.length == 0)
             return;
 
-        generate_waveform_async (
+        // Goes through the same visibility gate: the cache is keyed by theme, so a
+        // player that is off screen when the theme flips re-renders when it next
+        // appears rather than immediately.
+        request_waveform (
             current_waveform_input_path,
             current_waveform_stream_index
         );
@@ -237,14 +261,26 @@ public class AudioPlayer : Box {
         controls.set_margin_bottom (4);
         controls.add_css_class ("transport-bar");
 
-        // Seek buttons — grouped as a linked box
-        var seek_group = new Box (Orientation.HORIZONTAL, 0);
-        seek_group.add_css_class ("linked");
+        // Back seek group — linked. Mirrors VideoPlayer's transport layout, with
+        // the innermost pair stepping 0.1 s: audio has no frame to step by, so
+        // the generic step arrows are kept rather than the frame icons, which
+        // would claim something untrue here.
+        var back_group = new Box (Orientation.HORIZONTAL, 0);
+        back_group.add_css_class ("linked");
 
-        var seek_back = new Button.from_icon_name ("media-seek-backward-symbolic");
+        var seek_back = new Button.from_icon_name (
+            "video-seek-backward-five-seconds-symbolic"
+        );
         seek_back.set_tooltip_text ("Seek back 5 seconds");
         seek_back.clicked.connect (() => seek_relative (-5.0));
-        seek_group.append (seek_back);
+        back_group.append (seek_back);
+
+        var seek_back_one = new Button.from_icon_name (
+            "video-seek-backward-one-second-symbolic"
+        );
+        seek_back_one.set_tooltip_text ("Seek back 1 second");
+        seek_back_one.clicked.connect (() => seek_relative (-1.0));
+        back_group.append (seek_back_one);
 
         var fine_back = new Button.from_icon_name ("go-previous-symbolic");
         fine_back.set_tooltip_text ("Step back 0.1 seconds");
@@ -252,9 +288,9 @@ public class AudioPlayer : Box {
             ensure_paused ();
             seek_relative (-0.1);
         });
-        seek_group.append (fine_back);
+        back_group.append (fine_back);
 
-        controls.append (seek_group);
+        controls.append (back_group);
 
         // Play / Pause — center focus
         play_button = new Button.from_icon_name ("media-playback-start-symbolic");
@@ -266,7 +302,7 @@ public class AudioPlayer : Box {
         play_button.clicked.connect (toggle_playback);
         controls.append (play_button);
 
-        // Forward seek group
+        // Forward seek group — linked
         var fwd_group = new Box (Orientation.HORIZONTAL, 0);
         fwd_group.add_css_class ("linked");
 
@@ -278,12 +314,29 @@ public class AudioPlayer : Box {
         });
         fwd_group.append (fine_fwd);
 
-        var seek_fwd = new Button.from_icon_name ("media-seek-forward-symbolic");
+        var seek_fwd_one = new Button.from_icon_name (
+            "video-seek-forward-one-second-symbolic"
+        );
+        seek_fwd_one.set_tooltip_text ("Seek forward 1 second");
+        seek_fwd_one.clicked.connect (() => seek_relative (1.0));
+        fwd_group.append (seek_fwd_one);
+
+        var seek_fwd = new Button.from_icon_name (
+            "video-seek-forward-five-seconds-symbolic"
+        );
         seek_fwd.set_tooltip_text ("Seek forward 5 seconds");
         seek_fwd.clicked.connect (() => seek_relative (5.0));
         fwd_group.append (seek_fwd);
 
         controls.append (fwd_group);
+
+        // Mute toggle — preserves the stream volume for unmuting
+        mute_button = new Gtk.ToggleButton ();
+        mute_button.set_icon_name ("audio-volume-high-symbolic");
+        mute_button.set_tooltip_text ("Mute audio");
+        mute_button.set_margin_start (10);
+        mute_button.toggled.connect (on_mute_toggled);
+        controls.append (mute_button);
 
         // Time display — styled readout
         var time_box = new Box (Orientation.HORIZONTAL, 4);
@@ -316,12 +369,11 @@ public class AudioPlayer : Box {
         reset_player_state ();
         current_waveform_input_path = path;
         current_waveform_stream_index = stream_index;
-        ConversionUtils.FileSignature? signature = (path.length > 0)
-            ? ConversionUtils.query_file_signature (path)
-            : null;
 
-        // Start waveform generation (targets specific stream)
-        generate_waveform_async (path, stream_index, signature);
+        // Queue the waveform rather than rendering it now; it starts when this
+        // player is on screen. The file signature is queried at render time, not
+        // here, so a long deferral cannot key the cache against a stale identity.
+        request_waveform (path, stream_index);
 
         if (path.length == 0)
             return;
@@ -333,6 +385,38 @@ public class AudioPlayer : Box {
         if (!backend.open (path, stream_index)) {
             warning ("AudioPlayer: could not start playback for %s", path);
         }
+
+        backend.set_muted (mute_button.get_active ());
+    }
+
+    /**
+     * Hold a waveform request until the player is visible, then render it.
+     *
+     * Passing "" cancels any pending or running render without queuing a new one.
+     */
+    private void request_waveform (string path, int stream_index) {
+        cancel_waveform ();
+
+        pending_waveform_path = path;
+        pending_waveform_stream_index = stream_index;
+        waveform_request_pending = path.length > 0;
+
+        if (player_on_screen)
+            flush_pending_waveform ();
+    }
+
+    private void flush_pending_waveform () {
+        if (!waveform_request_pending)
+            return;
+
+        // Own the values before handing them over: generate_waveform_async takes
+        // its arguments unowned and calls cancel_waveform first, so passing the
+        // fields directly would expose them to being reset mid-call.
+        string path = pending_waveform_path;
+        int stream_index = pending_waveform_stream_index;
+
+        waveform_request_pending = false;
+        generate_waveform_async (path, stream_index);
     }
 
     private bool ensure_temp_dirs () {
@@ -574,6 +658,19 @@ public class AudioPlayer : Box {
     }
 
     private void cancel_waveform () {
+        // Also drops any request still waiting on visibility. This is the single
+        // choke point every teardown path reaches (reset_player_state, and so
+        // clear/cleanup/load_file), so a cleared player cannot render the previous
+        // file's waveform the next time it is shown. request_waveform calls this
+        // before queuing, so queuing still works.
+        //
+        // Only the flag is cleared, deliberately: pending_waveform_path is passed
+        // by reference into generate_waveform_async, which calls this function
+        // first, so freeing it here would leave that caller holding a dangling
+        // string. The flag alone is authoritative — nothing reads the path unless
+        // request_waveform has just set it.
+        waveform_request_pending = false;
+
         if (waveform_cancellable != null) {
             waveform_cancellable.cancel ();
             waveform_cancellable = null;
@@ -823,6 +920,19 @@ public class AudioPlayer : Box {
 
     private void seek_relative (double seconds) {
         backend.seek_relative (seconds);
+    }
+
+    private void on_mute_toggled () {
+        bool muted = mute_button.get_active ();
+
+        backend.set_muted (muted);
+
+        mute_button.set_icon_name (muted
+            ? "audio-volume-muted-symbolic"
+            : "audio-volume-high-symbolic");
+        mute_button.set_tooltip_text (muted
+            ? "Unmute audio"
+            : "Mute audio");
     }
 
     // ═════════════════════════════════════════════════════════════════════════

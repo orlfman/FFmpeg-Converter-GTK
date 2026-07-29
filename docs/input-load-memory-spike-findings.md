@@ -30,6 +30,28 @@ There is **no leak**. Teardown is correct. This was confirmed by dumping
 The file also triggers two eager full-file helper scans, which add substantial
 I/O but do not own the retained memory.
 
+### Status of the proposed items
+
+| Item | Status |
+|---|---|
+| 1. Bound the playback pipeline's buffering | **Done** — backend replaced with libmpv |
+| 2. Never load the full video into the Audio player | **Done** — resolved by item 1 |
+| 3. Return freed heap pages to the kernel | **Done** — `src/heap-trim.vala` |
+| 4. Lazily create playback pipelines | **Won't do** — justification removed by item 1 |
+| 5. Make waveform generation lazy | **Done** — deferred to player visibility |
+| 6. Remove eager full-file keyframe counting | **Done** — deferred, streamed, cached |
+| 7. Add cancellation and stale-load protection | **Done for `InformationTab`** |
+
+Note that items 6 and 7 were untouched by the libmpv migration: that fixed
+pipeline buffering, whereas these concern a blocking full-file `ffprobe` demux.
+Item 4 went the other way — libmpv removed its reason to exist, so it was closed
+as won't-do rather than deferred.
+
+With item 5 done, **every item is now either implemented or explicitly closed**.
+Nothing eager remains on the input-selection path: the header probe is cheap by
+construction, and the two full-file passes (keyframe count and waveform render)
+both wait for the tab that owns them.
+
 ## Reproduction
 
 The original 2026-07-27 reproduction file has since been deleted. The pathology
@@ -374,8 +396,10 @@ Additional eager full-file work:
 
 ## Proposed solution
 
-Ordered by impact. Items 1 and 2 address peak memory, which is what makes the
-application unusable on lower-end machines. Item 3 addresses residual RSS.
+Ordered by impact as originally assessed. Items 1 and 2 address peak memory,
+which is what makes the application unusable on lower-end machines. Item 3
+addresses residual RSS. Items 6 and 7 turned out to be independent of the memory
+work entirely — see the status table above.
 
 ### 1. Bound the playback pipeline's buffering — RESOLVED BY REPLACING THE BACKEND
 
@@ -592,81 +616,175 @@ and benchmark playback smoothness before adopting.
 Unsafe alternatives — dropping the kernel filesystem cache, or applying
 `madvise()` directly to allocator-owned mappings — must not be used.
 
-### 4. Lazily create playback pipelines
+### 4. Lazily create playback pipelines — WON'T DO
 
-Selecting an input while working on a codec tab should not immediately prepare
-players on hidden pages.
+**Decided against on 2026-07-29. The libmpv migration removed the justification
+and the remaining benefit does not cover the risk.**
 
-- Store the selected path in Crop & Trim and Audio state.
-- Construct the `Gtk.MediaFile` only when the corresponding tab becomes visible,
-  or immediately if that tab is already visible.
-- Stop and release the pipeline when leaving a heavy preview tab if preserving
-  exact playback position is not required.
-- Ensure at most one full-video preview pipeline is active at a time.
+The item existed because a single pipeline could hold 17.8 GiB, and two were
+opened eagerly. After item 1 a video pipeline is a flat ~120 MiB and an
+audio-only one ~50 MiB, so the whole prize is roughly **170 MiB of pipelines on
+tabs you are not looking at** — no longer the difference between usable and
+unusable on a low-end machine.
 
-**Unlisted dependency that will otherwise break trim defaults.** `TrimTab` reads
-values populated only by `VideoPlayer.on_media_prepared()`:
+Against that, the change is not the local edit it appears to be. `TrimTab` reads
+values populated only when the pipeline is prepared:
 
 - `player.intrinsic_width` / `intrinsic_height` (`src/trim-tab.vala:561-562`)
 - `player.get_duration_seconds()` (`src/trim-tab.vala:481`, `:765`, `:1302`,
   `:2200`)
 
-Defer the pipeline and these return 0 for any consumer running before the tab is
-shown. `VideoPlayer` already demonstrates the fix: `start_fps_probe()`
-(`src/video-player.vala:434`) sources fps from `FfprobeUtils` independently of
-the media pipeline. Duration and dimensions should come from the ffprobe path
-too — `InformationTab` already probes the file.
+All of these bottom out in `backend` (`src/video-player.vala:255`, `:444-445`).
+Defer the pipeline and they return 0, which does not fail loudly — it produces
+wrong trim defaults and a broken crop-overlay coordinate mapping. Doing this
+correctly means rerouting duration and dimensions through ffprobe first (as
+`start_fps_probe()` already does for fps) and then re-establishing every
+ordering assumption that `on_media_prepared` currently guarantees. The proposal's
+"release the pipeline when leaving a heavy preview tab" additionally trades the
+170 MiB for a reload on every tab switch.
 
-### 5. Make waveform generation lazy
+The risk concentrates in Crop & Trim and Audio — the paths that are hardest to
+verify here, since every GTK widget test in this repo self-skips without a
+display (see Automated coverage). Regression risk in manually-tested playback
+code, in exchange for 170 MiB, is the wrong trade.
 
-Generate the waveform when the Audio tab is first shown rather than on every
-global input selection. Keep the existing file-signature cache so revisiting the
-tab remains fast.
+Revisit only if per-pipeline memory regresses substantially, or if a concrete
+low-end-machine report points at these pipelines specifically.
 
-For very long sources, consider a bounded representative waveform. The helper
-process was measured at 645 MiB and is not the owner of the retained memory, so
-this is an I/O and latency change, not a memory fix.
+### 5. Make waveform generation lazy — DONE
 
-### 6. Remove eager full-file keyframe counting
+**Done. Same shape of fix as item 6.**
 
-`InformationTab.count_keyframes()` should not scan a multi-gigabyte video just
-because it was selected.
+`AudioPlayer.load_file()` called `generate_waveform_async()` unconditionally, and
+before it even checked for an empty path. That is an ffmpeg `showwavespic` pass
+over every audio sample in the source, run on every input selection whether or
+not the Audio tab was ever opened. It is a worse offender than the keyframe count
+was, because `showwavespic` **decodes** audio rather than just demuxing it, so it
+costs CPU as well as I/O.
 
-Preferred options, in order:
+Rendering is now queued by `request_waveform()` and released by
+`flush_pending_waveform()` when the player is mapped. GTK unmaps the widget both
+when the Audio tab is not the visible page *and* while the player itself is
+hidden — during probing, or when the source has no audio — so map state gates on
+"worth rendering now" rather than merely "tab selected". The existing
+signature-keyed cache is untouched, so returning to the tab is still free, and
+`refresh_waveform_for_theme_change()` goes through the same gate: a player that is
+off screen when the theme flips re-renders when it next appears.
 
-1. Defer exact keyframe counting until the Information tab is visible.
-2. Present the value as unavailable unless explicitly requested.
-3. If exact counting remains automatic, stream and count `ffprobe` output
-   incrementally.
+The file signature is now queried at render time rather than at selection time,
+so a long deferral cannot key the cache against an identity the file no longer
+has.
 
-Note that the dominant cost is the full demux (I/O and time), not the captured
-string: a 4K60 hour-long source yields on the order of 220,000 packets, roughly
-1 MB of CSV.
+Verified by pointing `AppSettings.ffmpeg_path` at a logging wrapper: no
+`showwavespic` invocation while the player was off screen, one after switching to
+it.
 
-The doc comment at `src/information-tab.vala:1340` must also be corrected —
-`-show_entries packet=flags` demuxes packets across the file and does not read a
-container index.
+The item's original suggestion of a bounded representative waveform for very long
+sources was not implemented and is still available if render latency on first
+view turns out to matter.
 
-### 7. Add cancellation and stale-load protection across all consumers
+#### Trap hit while implementing this
 
-Rapidly selecting another file should cancel every probe, waveform job, audio
-extraction, and pending media preparation associated with the previous path.
+Cancelling a pending request was centralised into `cancel_waveform()`, which is
+the choke point every teardown path reaches. That initially cleared
+`pending_waveform_path` as well as the flag — which broke, because
+`generate_waveform_async` takes its `string input_path` **unowned** and calls
+`cancel_waveform()` as its first statement. Passing the field directly therefore
+freed the buffer the parameter pointed at, and ffmpeg was invoked with a garbage
+path (`-i \xef\xbf\xbdO{\xc3\xa8U`) — visible only because the verification
+harness logged the actual argv rather than just checking for success.
 
-`InformationTab` is the worst offender and needs more than "follow the existing
-pattern" — it has **no cancellation and no generation guards at all**
-(`grep -n 'generation\|Cancellable\|cancel' src/information-tab.vala` returns
-nothing):
+`cancel_waveform()` now clears only the flag, which is the authoritative gate, and
+`flush_pending_waveform()` copies into owned locals before handing them over. Note
+that this is the same underlying hazard as the async-array borrow recorded under
+item 7: **Vala's default unowned parameter passing means a callee that mutates the
+caller's field can invalidate its own argument.**
 
-- `load_input_info()` (`:397-415`) spawns a raw detached `Thread` per input
-  change.
-- That thread runs two blocking `Process.spawn_sync` ffprobe calls (`:1355` and
-  the `-show_format -show_streams` probe), one of which is a full-file demux.
-- The result is delivered via `Idle.add()` with **no staleness check**, so a slow
-  probe of a large file overwrites a newer, faster probe. Last-to-finish wins
-  rather than last-requested.
-- Nothing bounds thread creation under rapid input switching, and
-  `Process.spawn_sync` cannot be cancelled at all — it must be converted to an
-  async subprocess before cancellation is even possible.
+### 6. Remove eager full-file keyframe counting — DONE
+
+**Done. The count is preserved exactly; only its timing changed.**
+
+Options 1 and 3 below were taken together; option 2 was rejected, because the
+exact number is a feature worth keeping.
+
+The old `count_keyframes()` ran inside `probe_file()` on every input selection.
+Two comments described it as cheap — "This is fast (no decoding) — it reads the
+container index only" and "separate fast probe via packet flags" — and that is
+why it survived. Both were wrong: `-show_entries packet=flags` demuxes every
+packet in the file. It does not decode, so it is I/O-bound rather than CPU-bound,
+which is worse on a slow disk. There is no cheap exact alternative: ffprobe
+exposes no index-only mode, and reading MP4 `stss` boxes or Matroska cues
+directly is far too much machinery for one info row. The cost is inherent to
+wanting an exact number, so what changed is *when* and *how visibly* it is paid.
+
+Counting now lives in `FfprobeUtils.VideoKeyframeCounter` and is driven by
+`InformationTab.KeyframeRow`, one instance per Keyframes row (input and output),
+sharing one signature-keyed cache:
+
+- **Deferred to tab visibility.** `GtkStack` unmaps pages that are not showing,
+  so `InformationTab`'s own `map`/`unmap` is a faithful "this tab is on screen"
+  signal and no controller wiring is needed. Verified against `Adw.ViewStack`:
+  the hidden page reports `get_mapped () == false`. If the tab is already
+  visible when a file is selected, counting starts immediately — unchanged from
+  the user's point of view.
+- **Streamed, not buffered.** Output is read in chunks and scanned over raw
+  bytes, so the row shows `Counting… 12431` climbing rather than staying hidden.
+  Progress emission is throttled to 250 ms.
+- **Cached** by `ConversionUtils.FileSignature`, so revisiting the tab does not
+  recount. The signature is re-checked at completion, so a file rewritten
+  underneath a long count is not cached against its old identity.
+- **Cancellable.** An abandoned count is killed, not merely ignored — verified
+  by cancelling mid-stream and confirming zero surviving probe processes.
+
+Display behavior is unchanged: a count of zero or a failed probe hides the row,
+as the old `"N/A"` did. Equivalence with the old line-splitting count is pinned
+by `tests/ffprobe-utils-test.vala`, including a chunk-boundary invariance case
+(the count must not depend on where reads happen to split) and a direct
+comparison against the previous `contains ("K")` logic. Measured against the old
+command on real files: 12, 10, 0 and 600 keyframes, matching exactly.
+
+`read_all_async` is used rather than `read_async` deliberately. ffprobe
+line-buffers into the pipe, so a plain `read_async` returns one short line per
+call — measured at 23,243 main-context dispatches for a 10-minute clip, which
+would scale to roughly 220,000 on an hour-long 4K60 source. Filling a 16 KiB
+buffer instead brought that to **9 dispatches** for the same clip with identical
+counts.
+
+One deliberate consequence: multi-file output (`load_output_info_multiple`) no
+longer counts keyframes at all. It never displayed them, so the previous code was
+running a full demux per output file and discarding the result.
+
+### 7. Add cancellation and stale-load protection across all consumers — DONE for `InformationTab`
+
+**Done for `InformationTab`. Other consumers are unaffected and already had
+guards** — `TrimTab.load_video()` calls `cancel_chapter_scan()` and
+`AudioTab.load_video()` calls `cancel_probe()`.
+
+`InformationTab` had **no cancellation and no generation guards at all**. All
+three probe entry points now have both, plus a real fix for the underlying
+blocker: `Process.spawn_sync` cannot be cancelled, so the probes were converted
+to async subprocesses (`FfprobeUtils.probe_format_and_streams_async`) and the
+raw detached `Thread` per input change is gone.
+
+The bug this fixes was **reproduced and confirmed**, not just reasoned about.
+Select a large file, then immediately a small one; the large file's slower probe
+lands last and repopulates the tab, so it ends up describing a file the user is
+no longer working on. With a probe artificially delayed to make the race
+deterministic, the pre-fix build displays `slow-source.mp4` after both probes
+settle and the fixed build displays `fast-source.mp4`.
+
+A hazard introduced while doing this is worth recording, because it is a Vala
+footgun rather than a logic slip. Vala **duplicates `string` arguments into an
+async closure but only borrows array ones**. `probe_files_async (string[] paths, …)`
+therefore held a dangling pointer: the coroutine suspends at its first `yield`,
+control returns to `load_output_info_multiple`, and that caller frees the array
+before it is ever read. The generated C made it plain — `_data_->paths = paths;`
+with no `g_strdupv`, followed by `_vala_array_free (paths, …)` in the caller.
+Under `MALLOC_PERTURB_` the borrowed version segfaults (exit 139) while the fixed
+one exits cleanly. The parameter is now a refcounted `GenericArray<string>`,
+which removes the whole class of problem; `_g_ptr_array_ref0` in the closure
+confirms the transfer. Any future async method here taking an array needs the
+same care.
 
 ## Verification plan
 
@@ -746,3 +864,18 @@ fallback policy without depending on GTK media playback.
 
 The stress fixture should remain a manual, regenerable test input rather than
 being added to the repository.
+
+Added for item 6: `tests/ffprobe-utils-test.vala` covers `KeyframeFlagScanner` —
+flagged-packet counting, unterminated final lines, chunk-boundary invariance, and
+equivalence with the previous line-splitting count.
+
+**Gap worth knowing about.** The tab-visibility deferral and the stale-result
+guard are *not* in the committed suite, because they need a real display:
+`headless_gtk_test_env` blanks `DISPLAY`/`WAYLAND_DISPLAY`, so `Gtk.init_check ()`
+fails and every widget test in this repo self-skips. Both behaviors were verified
+with throwaway harnesses driving the real `InformationTab` inside a real
+`Adw.ViewStack`, observing which `ffprobe` commands actually got invoked via a
+logging wrapper on `AppSettings.ffprobe_path` — a technique worth reusing, since
+sampling `/proc` for short-lived probes proved unreliable. Making these
+permanent needs a display in the test environment, or an injection seam for the
+probe runner comparable to the existing `FfprobeCaptureRunner` delegate.
