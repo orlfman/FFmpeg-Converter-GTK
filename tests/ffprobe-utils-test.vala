@@ -321,6 +321,83 @@ private void test_video_timeline_probe_confirms_single_packet_without_duration (
         "single frame needs no invented duration");
 }
 
+// ── Keyframe flag scanning ──────────────────────────────────────────────────
+
+/**
+ * Feed text through the scanner in fixed-size chunks, mimicking how the real
+ * counter sees ffprobe's stdout arrive in arbitrary reads.
+ */
+private int scan_keyframes (string text, int chunk_size) {
+    var scanner = new FfprobeUtils.KeyframeFlagScanner ();
+    uint8[] bytes = text.data;
+
+    int offset = 0;
+    while (offset < bytes.length) {
+        int take = int.min (chunk_size, bytes.length - offset);
+        var chunk = new uint8[take];
+        for (int i = 0; i < take; i++)
+            chunk[i] = bytes[offset + i];
+        scanner.feed (chunk, take);
+        offset += take;
+    }
+
+    scanner.finish ();
+    return scanner.count;
+}
+
+private void test_keyframe_scanner_counts_flagged_packets () {
+    // csv=p=0 over packet=flags: 'K' marks a keyframe, '_' a non-keyframe, and
+    // 'D' a discardable packet that may accompany either.
+    string csv = "K_\n__\n__\nK_\n__\nKD\n";
+
+    assert_equal_int (scan_keyframes (csv, 4096), 3,
+        "keyframe lines counted");
+}
+
+private void test_keyframe_scanner_ignores_non_keyframe_lines () {
+    assert_equal_int (scan_keyframes ("__\n__\n__\n", 4096), 0,
+        "a stream with no keyframes counts zero");
+    assert_equal_int (scan_keyframes ("", 4096), 0,
+        "empty output counts zero");
+    assert_equal_int (scan_keyframes ("\n\n\n", 4096), 0,
+        "blank lines are not keyframes");
+}
+
+private void test_keyframe_scanner_counts_unterminated_final_line () {
+    // ffprobe normally ends with a newline, but a truncated read must not drop
+    // the last packet.
+    assert_equal_int (scan_keyframes ("K_\n__\nK_", 4096), 2,
+        "final line without a trailing newline still counts");
+}
+
+private void test_keyframe_scanner_is_independent_of_chunk_boundaries () {
+    // The property that matters: the count cannot depend on where the reads
+    // happen to split, including a split between a 'K' and its newline.
+    string csv = "K_\n__\nKD\n__\n__\nK_\n";
+    int expected = 3;
+
+    for (int chunk_size = 1; chunk_size <= csv.length + 2; chunk_size++) {
+        assert_equal_int (scan_keyframes (csv, chunk_size), expected,
+            "keyframe count is stable at chunk size %d".printf (chunk_size));
+    }
+}
+
+private void test_keyframe_scanner_matches_line_split_counting () {
+    // Equivalence with the previous implementation, which split stdout on "\n"
+    // and counted lines containing "K". Any drift here changes a number the
+    // Information tab has always shown.
+    string csv = "K_\n__\n__\nKD\n__\nK_\n__\n__\n__\nK_\n";
+
+    int line_split_count = 0;
+    foreach (string line in csv.split ("\n")) {
+        if (line.contains ("K"))
+            line_split_count++;
+    }
+
+    assert_equal_int (scan_keyframes (csv, 7), line_split_count,
+        "byte scanner agrees with the previous line-splitting count");
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -367,6 +444,26 @@ void main (string[] args) {
     Test.add_func (
         "/ffprobe-utils/video-timeline-probe-confirms-duration-less-single-frame",
         test_video_timeline_probe_confirms_single_packet_without_duration
+    );
+    Test.add_func (
+        "/ffprobe-utils/keyframe-scanner-counts-flagged-packets",
+        test_keyframe_scanner_counts_flagged_packets
+    );
+    Test.add_func (
+        "/ffprobe-utils/keyframe-scanner-ignores-non-keyframe-lines",
+        test_keyframe_scanner_ignores_non_keyframe_lines
+    );
+    Test.add_func (
+        "/ffprobe-utils/keyframe-scanner-counts-unterminated-final-line",
+        test_keyframe_scanner_counts_unterminated_final_line
+    );
+    Test.add_func (
+        "/ffprobe-utils/keyframe-scanner-is-independent-of-chunk-boundaries",
+        test_keyframe_scanner_is_independent_of_chunk_boundaries
+    );
+    Test.add_func (
+        "/ffprobe-utils/keyframe-scanner-matches-line-split-counting",
+        test_keyframe_scanner_matches_line_split_counting
     );
 
     Test.run ();

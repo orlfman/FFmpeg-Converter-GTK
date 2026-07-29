@@ -1183,4 +1183,175 @@ namespace FfprobeUtils {
 
         return parse_all_audio_streams_output (stdout_text);
     }
+
+    /**
+     * Probe a file's container and stream metadata, returning ffprobe's raw
+     * key=value text for the caller to parse.
+     *
+     * This reads headers only — it does not demux packets — so it stays cheap
+     * regardless of file size.
+     *
+     * Returns null if ffprobe could not be run or exited non-zero.
+     */
+    public async string? probe_format_and_streams_async (string input_file,
+                                                         Cancellable? cancellable = null) {
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path, "-v", "error",
+            "-show_format", "-show_streams",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text)))
+            return null;
+
+        return stdout_text;
+    }
+
+    /**
+     * Incremental keyframe counter over ffprobe's `packet=flags` CSV output.
+     *
+     * ffprobe emits one flags field per packet, one per line, and a keyframe
+     * packet carries 'K'. Scanning raw bytes rather than splitting strings keeps
+     * the pass allocation-free across a file that can emit hundreds of thousands
+     * of lines, and lets the caller feed arbitrary chunk boundaries: a line split
+     * across two reads is still counted exactly once.
+     */
+    internal class KeyframeFlagScanner : Object {
+        private bool pending_line_has_key = false;
+        private int _count = 0;
+
+        /** Keyframes seen in the bytes fed so far. */
+        public int count { get { return _count; } }
+
+        public void feed (uint8[] chunk, ssize_t length) {
+            for (ssize_t i = 0; i < length; i++) {
+                uint8 b = chunk[i];
+                if (b == (uint8) '\n') {
+                    if (pending_line_has_key)
+                        _count++;
+                    pending_line_has_key = false;
+                } else if (b == (uint8) 'K') {
+                    pending_line_has_key = true;
+                }
+            }
+        }
+
+        /**
+         * Account for a trailing line that had no terminating newline. Safe to
+         * call when the stream did end with one: an empty pending line carries
+         * no 'K' and so contributes nothing.
+         */
+        public void finish () {
+            if (pending_line_has_key)
+                _count++;
+            pending_line_has_key = false;
+        }
+    }
+
+    /**
+     * Counts keyframes in a file's first video stream, reporting a running total
+     * while it works.
+     *
+     * There is no cheap exact count available: `-show_entries packet=flags`
+     * demuxes every packet in the file by design, and ffprobe exposes no way to
+     * read a container index alone. The cost is therefore inherent to wanting an
+     * exact number, so this streams the output — staying cancellable and
+     * reporting progress — rather than blocking on a single capture.
+     */
+    public class VideoKeyframeCounter : Object {
+        // ffprobe line-buffers into the pipe, so a plain read_async returns a
+        // single short line per call — tens of thousands of main-context
+        // dispatches for a long file. read_all_async fills the buffer instead,
+        // which at this size is roughly one dispatch per 4000 packets: frequent
+        // enough to keep progress moving, rare enough not to compete with frame
+        // callbacks while the user is interacting.
+        private const size_t READ_CHUNK = 16384;
+
+        // Emit no more often than this, so a long count updates visibly without
+        // flooding the main loop with label updates.
+        private const int64 PROGRESS_INTERVAL_US = 250000;
+
+        /** Running keyframe total, emitted on the main context while counting. */
+        public signal void progress (int running_count);
+
+        public async bool count (string input_file,
+                                 Cancellable? cancellable,
+                                 out int total) {
+            total = 0;
+
+            string[] cmd = {
+                AppSettings.get_default ().ffprobe_path, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "packet=flags",
+                "-of", "csv=p=0",
+                input_file
+            };
+
+            Subprocess proc;
+            try {
+                var launcher = new SubprocessLauncher (
+                    SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_SILENCE);
+                proc = SubprocessCompat.spawnv (launcher, cmd);
+            } catch (Error e) {
+                log_ffprobe_debug ("keyframe count spawn failed", cmd, e.message);
+                return false;
+            }
+
+            var scanner = new KeyframeFlagScanner ();
+            var stdout_stream = proc.get_stdout_pipe ();
+            var buffer = new uint8[READ_CHUNK];
+            int64 last_emit = GLib.get_monotonic_time ();
+
+            try {
+                while (true) {
+                    size_t got;
+                    yield stdout_stream.read_all_async (
+                        buffer, Priority.LOW, cancellable, out got);
+
+                    if (got > 0) {
+                        scanner.feed (buffer, (ssize_t) got);
+
+                        int64 now = GLib.get_monotonic_time ();
+                        if (now - last_emit >= PROGRESS_INTERVAL_US) {
+                            last_emit = now;
+                            progress (scanner.count);
+                        }
+                    }
+
+                    // A short fill means the stream ended.
+                    if (got < buffer.length)
+                        break;
+                }
+            } catch (Error e) {
+                // Cancellation surfaces here as IOError.CANCELLED. Kill the
+                // probe so an abandoned full-file demux stops reading.
+                proc.force_exit ();
+                if (cancellable == null || !cancellable.is_cancelled ())
+                    log_ffprobe_debug ("keyframe count read failed", cmd, e.message);
+                return false;
+            }
+
+            scanner.finish ();
+
+            try {
+                yield proc.wait_async (cancellable);
+            } catch (Error e) {
+                proc.force_exit ();
+                return false;
+            }
+
+            if (!proc.get_successful ()) {
+                string detail = proc.get_if_exited ()
+                    ? "exit=%d".printf (proc.get_exit_status ())
+                    : "subprocess unsuccessful";
+                log_ffprobe_debug ("keyframe count probe failed", cmd, detail);
+                return false;
+            }
+
+            total = scanner.count;
+            return true;
+        }
+    }
 }

@@ -36,7 +36,6 @@ internal class VideoInfo : Object {
     public string color_space = "N/A";
     public string hdr_format  = "N/A";
     public string scan_type   = "N/A";
-    public string keyframe_count = "N/A";
 
     // Audio (all tracks)
     public GenericArray<AudioTrackInfo> audio_tracks = new GenericArray<AudioTrackInfo> ();
@@ -158,9 +157,218 @@ public class InformationTab : Box {
     private Adw.ActionRow ov_genre_row;
     private Adw.ActionRow ov_track_number_row;
 
+    // ── Probe lifecycle ───────────────────────────────────────────────────────
+    //  Every probe is cancellable and generation-guarded. Without the guard the
+    //  last probe to *finish* wins rather than the last one requested, so
+    //  selecting a large file and then a small one leaves the tab describing the
+    //  large file once its slower probe completes.
+    private Cancellable? input_probe_cancellable = null;
+    private uint input_probe_generation = 0;
+
+    private Cancellable? output_probe_cancellable = null;
+    private uint output_probe_generation = 0;
+
+    private Cancellable? multi_output_probe_cancellable = null;
+    private uint multi_output_probe_generation = 0;
+
+    // ── Keyframe counting ─────────────────────────────────────────────────────
+    private KeyframeRow input_keyframes;
+    private KeyframeRow output_keyframes;
+    private ConversionUtils.CachedFileProbe<string> keyframe_cache =
+        new ConversionUtils.CachedFileProbe<string> ();
+    private bool tab_visible = false;
+
+    /**
+     * Drives one "Keyframes" row.
+     *
+     * Counting keyframes means demuxing every packet in the file, so it is not
+     * run just because a file was selected: the row holds its path and starts
+     * only once the Information tab is actually on screen. Results are cached by
+     * file signature, so returning to the tab does not recount.
+     */
+    private class KeyframeRow : Object {
+        private Adw.ActionRow row;
+        private Label label;
+        private ConversionUtils.CachedFileProbe<string> cache;
+
+        private string path = "";
+        private ConversionUtils.FileSignature? signature = null;
+        private Cancellable? cancellable = null;
+        private uint generation = 0;
+        private bool have_value = false;
+        private bool tab_visible = false;
+
+        public KeyframeRow (Adw.ActionRow row,
+                            Label label,
+                            ConversionUtils.CachedFileProbe<string> cache) {
+            this.row = row;
+            this.label = label;
+            this.cache = cache;
+        }
+
+        /**
+         * Point the row at a file, or "" to clear it. Cancels any count still
+         * running for the previous file.
+         */
+        public void set_path (string next_path) {
+            cancel ();
+            path = next_path;
+            have_value = false;
+            signature = null;
+
+            if (path.strip ().length == 0) {
+                row.set_visible (false);
+                return;
+            }
+
+            signature = ConversionUtils.query_file_signature (path);
+            if (signature != null) {
+                var cached = cache.lookup (signature);
+                if (cached != null) {
+                    apply_count (int.parse (cached.value));
+                    return;
+                }
+            }
+
+            row.set_visible (false);
+            maybe_start ();
+        }
+
+        public void set_tab_visible (bool visible) {
+            tab_visible = visible;
+            if (visible)
+                maybe_start ();
+        }
+
+        public void cancel () {
+            if (cancellable != null) {
+                cancellable.cancel ();
+                cancellable = null;
+            }
+            generation++;
+        }
+
+        /**
+         * Publish a completed count. A non-positive total means the stream had no
+         * keyframes to report — an audio-only file, for instance — and hides the
+         * row, matching how the previous implementation treated that as "N/A".
+         * Either way the count is settled, so it is not retried.
+         */
+        private void apply_count (int total) {
+            have_value = true;
+            if (total > 0) {
+                label.set_text (total.to_string ());
+                row.set_visible (true);
+            } else {
+                row.set_visible (false);
+            }
+        }
+
+        private void maybe_start () {
+            if (!tab_visible || have_value || cancellable != null)
+                return;
+            if (path.strip ().length == 0)
+                return;
+
+            string counting_path = path;
+            var cancel_token = new Cancellable ();
+            cancellable = cancel_token;
+            uint gen = ++generation;
+
+            label.set_text ("Counting…");
+            row.set_visible (true);
+
+            var counter = new FfprobeUtils.VideoKeyframeCounter ();
+            counter.progress.connect ((running) => {
+                if (gen != generation)
+                    return;
+                label.set_text ("Counting… %d".printf (running));
+            });
+
+            counter.count.begin (counting_path, cancel_token, (obj, res) => {
+                int total;
+                bool ok = counter.count.end (res, out total);
+
+                if (cancellable == cancel_token)
+                    cancellable = null;
+
+                // A newer file, or a cancel, retired this count.
+                if (gen != generation || cancel_token.is_cancelled ())
+                    return;
+
+                if (!ok) {
+                    // ffprobe failed outright. Hide the row as the previous
+                    // implementation did, and leave the result unsettled so
+                    // reopening the tab retries rather than caching a failure.
+                    row.set_visible (false);
+                    return;
+                }
+
+                apply_count (total);
+
+                // Re-check the signature: the file may have been rewritten
+                // underneath a long count, which would make the total stale.
+                var current = ConversionUtils.query_file_signature (counting_path);
+                if (signature != null && current != null && signature.matches (current))
+                    cache.store (signature, total.to_string ());
+            });
+        }
+    }
+
     public InformationTab () {
         Object (orientation: Orientation.VERTICAL, spacing: 0);
         build_ui ();
+
+        // GtkStack unmaps the pages that are not showing, so the widget's own
+        // map state is exactly "this tab is on screen" — no wiring from the
+        // controller needed.
+        map.connect (() => { set_tab_visible (true); });
+        unmap.connect (() => { set_tab_visible (false); });
+    }
+
+    private void set_tab_visible (bool visible) {
+        if (tab_visible == visible)
+            return;
+        tab_visible = visible;
+
+        // Deliberately not cancelled when the tab is hidden: a count already
+        // under way was asked for by opening the tab, and discarding the work
+        // done so far would mean restarting from zero on return. Input changes
+        // and disposal still cancel it.
+        input_keyframes.set_tab_visible (visible);
+        output_keyframes.set_tab_visible (visible);
+    }
+
+    public override void dispose () {
+        cancel_input_probe ();
+        cancel_output_probes ();
+        if (input_keyframes != null)
+            input_keyframes.cancel ();
+        if (output_keyframes != null)
+            output_keyframes.cancel ();
+        base.dispose ();
+    }
+
+    private void cancel_input_probe () {
+        if (input_probe_cancellable != null) {
+            input_probe_cancellable.cancel ();
+            input_probe_cancellable = null;
+        }
+        input_probe_generation++;
+    }
+
+    private void cancel_output_probes () {
+        if (output_probe_cancellable != null) {
+            output_probe_cancellable.cancel ();
+            output_probe_cancellable = null;
+        }
+        output_probe_generation++;
+
+        if (multi_output_probe_cancellable != null) {
+            multi_output_probe_cancellable.cancel ();
+            multi_output_probe_cancellable = null;
+        }
+        multi_output_probe_generation++;
     }
 
     // ── UI Construction ───────────────────────────────────────────────────────
@@ -235,6 +443,7 @@ public class InformationTab : Box {
         iv_hdr        = make_row_conditional (in_video_group, "HDR", out iv_hdr_row);
         iv_scan       = make_row_conditional (in_video_group, "Scan Type", out iv_scan_row);
         iv_keyframes  = make_row_conditional (in_video_group, "Keyframes", out iv_keyframes_row);
+        input_keyframes = new KeyframeRow (iv_keyframes_row, iv_keyframes, keyframe_cache);
         input_sections_box.append (in_video_group);
 
         // ────────────── Input: Audio (dynamic — one group per stream) ────────
@@ -314,6 +523,7 @@ public class InformationTab : Box {
         ov_hdr        = make_row_conditional (ov_video_group, "HDR", out ov_hdr_row);
         ov_scan       = make_row_conditional (ov_video_group, "Scan Type", out ov_scan_row);
         ov_keyframes  = make_row_conditional (ov_video_group, "Keyframes", out ov_keyframes_row);
+        output_keyframes = new KeyframeRow (ov_keyframes_row, ov_keyframes, keyframe_cache);
         single_output_box.append (ov_video_group);
 
         // Output: Audio (dynamic — one group per stream)
@@ -396,6 +606,12 @@ public class InformationTab : Box {
     // Call when the input file path changes (even to "")
     public void load_input_info (string file_path) {
         apply_output_source_context (OperationOutputSource.GENERIC, "");
+
+        // Retire whatever the previous path started before touching the display,
+        // so a slower probe of the outgoing file cannot repopulate it later.
+        cancel_input_probe ();
+        input_keyframes.set_path (file_path);
+
         if (file_path.strip () == "") {
             clear_input_display ();
             main_stack.set_visible_child_name ("empty");
@@ -405,12 +621,20 @@ public class InformationTab : Box {
         main_stack.set_visible_child_name ("info");
         set_input_loading ();
 
-        new Thread<void> ("info-input", () => {
-            var info = probe_file (file_path);
-            Idle.add (() => {
-                populate_input (info);
-                return Source.REMOVE;
-            });
+        var cancel_token = new Cancellable ();
+        input_probe_cancellable = cancel_token;
+        uint gen = input_probe_generation;
+
+        probe_file_async.begin (file_path, cancel_token, (obj, res) => {
+            var info = probe_file_async.end (res);
+
+            if (input_probe_cancellable == cancel_token)
+                input_probe_cancellable = null;
+
+            if (gen != input_probe_generation || cancel_token.is_cancelled ())
+                return;
+
+            populate_input (info);
         });
     }
 
@@ -426,18 +650,31 @@ public class InformationTab : Box {
         multi_output_box.set_visible (false);
         clear_multi_output ();
 
-        new Thread<void> ("info-output", () => {
-            var info = probe_file (file_path);
-            Idle.add (() => {
-                populate_output (info);
-                output_revealer.set_reveal_child (true);
-                return Source.REMOVE;
-            });
+        cancel_output_probes ();
+        output_keyframes.set_path (file_path);
+
+        var cancel_token = new Cancellable ();
+        output_probe_cancellable = cancel_token;
+        uint gen = output_probe_generation;
+
+        probe_file_async.begin (file_path, cancel_token, (obj, res) => {
+            var info = probe_file_async.end (res);
+
+            if (output_probe_cancellable == cancel_token)
+                output_probe_cancellable = null;
+
+            if (gen != output_probe_generation || cancel_token.is_cancelled ())
+                return;
+
+            populate_output (info);
+            output_revealer.set_reveal_child (true);
         });
     }
 
     // Call when a new input file is selected so stale output data is hidden
     public void reset_output () {
+        cancel_output_probes ();
+        output_keyframes.set_path ("");
         Idle.add (() => {
             apply_output_source_context (OperationOutputSource.GENERIC, "");
             output_revealer.set_reveal_child (false);
@@ -458,24 +695,34 @@ public class InformationTab : Box {
         clear_multi_output ();
         multi_output_box.set_visible (true);
 
-        // Snapshot paths for background thread
-        string[] paths = new string[file_paths.length];
-        for (int i = 0; i < file_paths.length; i++)
-            paths[i] = file_paths[i];
+        cancel_output_probes ();
+        // The multi-output list has no Keyframes row of its own.
+        output_keyframes.set_path ("");
 
-        new Thread<void> ("info-multi-output", () => {
-            var infos = new GenericArray<VideoInfo> ();
-            foreach (unowned string path in paths) {
-                if (path.strip ().length > 0
-                    && FileUtils.test (path, FileTest.EXISTS)) {
-                    infos.add (probe_file (path));
-                }
-            }
-            Idle.add (() => {
-                populate_multi_output (infos);
-                output_revealer.set_reveal_child (true);
-                return Source.REMOVE;
-            });
+        // Snapshot paths so a later mutation of the caller's array cannot change
+        // what this run probes. A GenericArray rather than a plain string[]:
+        // Vala duplicates string arguments into an async closure but only borrows
+        // array ones, and this array's owner returns as soon as the coroutine
+        // first suspends. Refcounting keeps the snapshot alive for the whole run.
+        var paths = new GenericArray<string> ();
+        foreach (unowned string path in file_paths)
+            paths.add (path);
+
+        var cancel_token = new Cancellable ();
+        multi_output_probe_cancellable = cancel_token;
+        uint gen = multi_output_probe_generation;
+
+        probe_files_async.begin (paths, cancel_token, (obj, res) => {
+            var infos = probe_files_async.end (res);
+
+            if (multi_output_probe_cancellable == cancel_token)
+                multi_output_probe_cancellable = null;
+
+            if (gen != multi_output_probe_generation || cancel_token.is_cancelled ())
+                return;
+
+            populate_multi_output (infos);
+            output_revealer.set_reveal_child (true);
         });
     }
 
@@ -518,7 +765,8 @@ public class InformationTab : Box {
         iv_colorspace.set_text ("—");
         iv_hdr_row.set_visible (false);
         iv_scan_row.set_visible (false);
-        iv_keyframes_row.set_visible (false);
+        // The Keyframes row is owned by input_keyframes, which clears it when
+        // its path changes. Touching it here would fight that.
 
         clear_box (iv_audio_container);
         iv_audio_container.set_visible (false);
@@ -560,7 +808,8 @@ public class InformationTab : Box {
         iv_colorspace.set_text ("…");
         iv_hdr_row.set_visible (false);
         iv_scan_row.set_visible (false);
-        iv_keyframes_row.set_visible (false);
+        // Not reset here: input_keyframes may already be counting, or may have
+        // filled the row from cache, and neither should be hidden by this pass.
 
         set_audio_loading (iv_audio_container);
 
@@ -595,7 +844,8 @@ public class InformationTab : Box {
         iv_colorspace.set_text (i.color_space);
         show_conditional (iv_hdr_row, iv_hdr, i.hdr_format);
         show_conditional (iv_scan_row, iv_scan, i.scan_type);
-        show_conditional (iv_keyframes_row, iv_keyframes, i.keyframe_count);
+        // Keyframes are counted separately by input_keyframes: the count needs a
+        // full demux, so it is not part of this header-only probe.
 
         populate_audio_groups (iv_audio_container, i.audio_tracks, false);
 
@@ -644,7 +894,7 @@ public class InformationTab : Box {
             ov_colorspace.set_text (i.color_space);
             show_conditional (ov_hdr_row, ov_hdr, i.hdr_format);
             show_conditional (ov_scan_row, ov_scan, i.scan_type);
-            show_conditional (ov_keyframes_row, ov_keyframes, i.keyframe_count);
+            // Counted separately by output_keyframes, as for the input side.
         } else {
             ov_vcodec_row.set_title ("Codec");
             ov_vcodec_row.set_visible (false);
@@ -961,9 +1211,14 @@ public class InformationTab : Box {
     }
 #endif
 
-    // ── ffprobe probing (runs on background thread) ───────────────────────────
+    // ── ffprobe probing ───────────────────────────────────────────────────────
+    //  Async subprocesses rather than Process.spawn_sync on a detached thread:
+    //  spawn_sync cannot be cancelled at all, which made stale-result protection
+    //  impossible to express. Keyframe counting is deliberately not part of this
+    //  probe — see KeyframeRow.
 
-    private VideoInfo probe_file (string file_path) {
+    private async VideoInfo probe_file_async (string file_path,
+                                              Cancellable? cancellable) {
         var info = new VideoInfo ();
 
         // ── Basic filesystem metadata ─────────────────────────────────────────
@@ -974,34 +1229,42 @@ public class InformationTab : Box {
 
         try {
             var f  = GLib.File.new_for_path (file_path);
-            var fi = f.query_info ("standard::size", GLib.FileQueryInfoFlags.NONE);
+            var fi = yield f.query_info_async ("standard::size",
+                                               GLib.FileQueryInfoFlags.NONE,
+                                               Priority.DEFAULT,
+                                               cancellable);
             int64 bytes = fi.get_size ();
             info.file_size = CodecUtils.format_file_size (bytes);
         } catch (Error e) {}
 
         // ── Run ffprobe ───────────────────────────────────────────────────────
-        try {
-            string[] cmd = {
-                AppSettings.get_default ().ffprobe_path, "-v", "error",
-                "-show_format", "-show_streams",
-                file_path
-            };
-            string stdout_text, stderr_text;
-            int exit_status;
+        string? probe_text = yield FfprobeUtils.probe_format_and_streams_async (
+            file_path, cancellable);
 
-            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
-                                null, out stdout_text, out stderr_text, out exit_status);
-
-            if (exit_status == 0 && stdout_text != null && stdout_text.length > 0)
-                parse_ffprobe (stdout_text, info);
-        } catch (Error e) {
+        if (probe_text != null && probe_text.length > 0) {
+            parse_ffprobe (probe_text, info);
+        } else if (cancellable == null || !cancellable.is_cancelled ()) {
             info.video_codec = "Probe failed";
         }
 
-        // ── Count keyframes (separate fast probe via packet flags) ────────────
-        info.keyframe_count = count_keyframes (file_path);
-
         return info;
+    }
+
+    private async GenericArray<VideoInfo> probe_files_async (GenericArray<string> paths,
+                                                             Cancellable? cancellable) {
+        var infos = new GenericArray<VideoInfo> ();
+
+        for (uint i = 0; i < paths.length; i++) {
+            if (cancellable != null && cancellable.is_cancelled ())
+                break;
+
+            string path = paths.get ((int) i);
+            if (path.strip ().length > 0 && FileUtils.test (path, FileTest.EXISTS)) {
+                infos.add (yield probe_file_async (path, cancellable));
+            }
+        }
+
+        return infos;
     }
 
     // Parses the key=value ffprobe output.
@@ -1331,46 +1594,6 @@ public class InformationTab : Box {
             track.audio_encoder = aenc;
 
         return track;
-    }
-
-    // ── Keyframe counting ─────────────────────────────────────────────────────
-
-    /**
-     * Count keyframes by reading packet flags from the demuxer.
-     * This is fast (no decoding) — it reads the container index only.
-     * Returns "N/A" on any failure so the row stays hidden.
-     */
-    private static string count_keyframes (string file_path) {
-        try {
-            string[] cmd = {
-                AppSettings.get_default ().ffprobe_path, "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "packet=flags",
-                "-of", "csv=p=0",
-                file_path
-            };
-            string stdout_text, stderr_text;
-            int exit_status;
-
-            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
-                                null, out stdout_text, out stderr_text, out exit_status);
-
-            if (exit_status != 0 || stdout_text == null || stdout_text.length == 0)
-                return "N/A";
-
-            int key_count = 0;
-            foreach (string line in stdout_text.split ("\n")) {
-                // Keyframe packets have "K" in the flags field
-                if (line.contains ("K"))
-                    key_count++;
-            }
-
-            if (key_count > 0)
-                return key_count.to_string ();
-        } catch (Error e) {
-            // probe failed
-        }
-        return "N/A";
     }
 
     // ── Formatting helpers ────────────────────────────────────────────────────
