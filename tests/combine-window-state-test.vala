@@ -938,6 +938,193 @@ private void test_audio_player_duration_state_transitions () {
 }
 
 /**
+ * Playback rate is per-preview and must not survive a reset.
+ *
+ * The reset path closes the mpv core, so a rate carried over from the previous
+ * file would sit on the transport with nothing applying it — and then be
+ * silently applied to the next load. Reset also has to stay quiet: reporting a
+ * change at a player mid-teardown would push a rate at a null handle.
+ */
+private void assert_speed_selector_resets (SpeedMenuButton speed,
+                                           owned Func<void*> reset_player,
+                                           string label) {
+    int change_count = 0;
+    double last_reported = -1.0;
+    speed.speed_changed.connect ((rate) => {
+        change_count++;
+        last_reported = rate;
+    });
+
+    assert_true (speed.speed == 1.0,
+        "%s speed starts at 1x".printf (label));
+    assert_string_equal (speed.get_face_text_for_widget_test (), "1×",
+        "%s speed face starts at 1x".printf (label));
+
+    speed.select_rate_for_widget_test (2.0);
+    assert_true (speed.speed == 2.0,
+        "%s speed selection is retained".printf (label));
+    assert_string_equal (speed.get_face_text_for_widget_test (), "2×",
+        "%s speed selection reaches the button face".printf (label));
+    assert_true (change_count == 1 && last_reported == 2.0,
+        "%s speed selection reports exactly one change".printf (label));
+
+    reset_player (null);
+    assert_true (speed.speed == 1.0,
+        "%s reset returns the rate to 1x".printf (label));
+    assert_string_equal (speed.get_face_text_for_widget_test (), "1×",
+        "%s reset returns the button face to 1x".printf (label));
+    assert_true (change_count == 1,
+        "%s reset does not report a rate change".printf (label));
+}
+
+private void test_video_player_speed_resets_per_preview () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var player = new VideoPlayer ();
+    var speed = player.speed_button_for_widget_test ();
+
+    assert_false (speed.get_sensitive (),
+        "video speed selection is disabled before a file loads");
+    player.prepare_duration_for_widget_test (42.0);
+    assert_true (speed.get_sensitive (),
+        "video ready state enables speed selection");
+
+    assert_speed_selector_resets (speed, (unused) => player.clear (), "video");
+
+    assert_false (speed.get_sensitive (),
+        "video reset disables speed selection again");
+
+    // Duration is what gates the scrubber, not the rate selector: an unknown
+    // duration still leaves speed adjustable.
+    player.prepare_duration_for_widget_test (0.0);
+    assert_false (player.is_scrubber_sensitive_for_widget_test (),
+        "video unknown duration keeps timeline seeking disabled");
+    assert_true (speed.get_sensitive (),
+        "video unknown duration still allows speed selection");
+    player.cleanup ();
+}
+
+private void test_audio_player_speed_resets_per_preview () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var player = new AudioPlayer ();
+    var speed = player.speed_button_for_widget_test ();
+
+    assert_false (speed.get_sensitive (),
+        "audio speed selection is disabled before a stream loads");
+    player.prepare_duration_for_widget_test (18.5);
+    assert_true (speed.get_sensitive (),
+        "audio ready state enables speed selection");
+
+    assert_speed_selector_resets (speed, (unused) => player.clear (), "audio");
+
+    assert_false (speed.get_sensitive (),
+        "audio reset disables speed selection again");
+
+    player.prepare_duration_for_widget_test (0.0);
+    assert_false (player.is_waveform_seek_sensitive_for_widget_test (),
+        "audio unknown duration keeps waveform seeking disabled");
+    assert_true (speed.get_sensitive (),
+        "audio unknown duration still allows speed selection");
+    player.cleanup ();
+}
+
+/**
+ * A selected rate must actually reach the mpv core, and must not move the
+ * media clock once it is there.
+ *
+ * The widget-state tests above stop at the signal boundary. This one goes the
+ * rest of the way: it reads "speed" back off a live core, which is the only
+ * thing that catches mpv rejecting the property — libmpv reports that as a
+ * debug line and set_property otherwise looks like it worked.
+ *
+ * The seek assertion is the half that matters for correctness rather than
+ * comfort. Trim points are taken from get_position_seconds (), so if rate ever
+ * scaled the reported time, previewing at 2x would silently halve every cut
+ * coordinate the user picked.
+ */
+private void test_video_player_speed_reaches_mpv_without_scaling_time () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    string? temp_dir = null;
+    try {
+        temp_dir = DirUtils.make_tmp ("video-player-speed-XXXXXX");
+        string path = Path.build_filename (temp_dir, "speed.mkv");
+
+        string[] argv = {
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=s=320x180:rate=24:d=4",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            path
+        };
+        int status = 0;
+        Process.spawn_sync (null, argv, null,
+                            SpawnFlags.SEARCH_PATH
+                            | SpawnFlags.STDOUT_TO_DEV_NULL
+                            | SpawnFlags.STDERR_TO_DEV_NULL,
+                            null, null, null, out status);
+        if (status != 0 || !FileUtils.test (path, FileTest.EXISTS)) {
+            Test.skip ("ffmpeg unavailable, cannot build a video fixture");
+            return;
+        }
+
+        var player = new VideoPlayer ();
+        bool ready = false;
+        player.media_ready.connect (() => ready = true);
+
+        player.load_file (path);
+        assert_true (spin_main_context_until (() => ready, 5000),
+            "video speed fixture reaches readiness");
+        assert_cmpfloat (player.backend_speed_for_widget_test (),
+            CompareOperator.EQ, 1.0);
+
+        var speed = player.speed_button_for_widget_test ();
+        speed.select_rate_for_widget_test (2.0);
+        assert_cmpfloat (player.backend_speed_for_widget_test (),
+            CompareOperator.EQ, 2.0);
+
+        // An exact seek must still land on the source time it was given while a
+        // non-1x rate is active.
+        player.seek_to (2.0);
+        assert_true (spin_main_context_until (
+            () => player.get_position_seconds () > 1.9, 5000),
+            "exact seek lands while playing back at 2x");
+        assert_cmpfloat (player.get_position_seconds (),
+            CompareOperator.LT, 2.1);
+
+        speed.select_rate_for_widget_test (0.25);
+        assert_cmpfloat (player.backend_speed_for_widget_test (),
+            CompareOperator.EQ, 0.25);
+        assert_cmpfloat (player.get_position_seconds (),
+            CompareOperator.GT, 1.9);
+        assert_cmpfloat (player.get_position_seconds (),
+            CompareOperator.LT, 2.1);
+
+        // A fresh load starts back at 1x on the core, not just on the button.
+        ready = false;
+        player.load_file (path);
+        assert_true (spin_main_context_until (() => ready, 5000),
+            "video speed fixture reloads");
+        assert_cmpfloat (player.backend_speed_for_widget_test (),
+            CompareOperator.EQ, 1.0);
+
+        player.cleanup ();
+        FileUtils.remove (path);
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create video speed test directory: %s",
+            e.message);
+    } catch (SpawnError e) {
+        Test.skip ("ffmpeg unavailable, cannot build a video fixture");
+    } finally {
+        if (temp_dir != null)
+            DirUtils.remove (temp_dir);
+    }
+}
+
+/**
  * A video preview must run with video-timing-offset=0.
  *
  * That option is what keeps mpv's software render call from blocking the GTK
@@ -6004,6 +6191,12 @@ void main (string[] args) {
         test_video_player_duration_state_transitions);
     Test.add_func ("/players/audio/duration-state-transitions",
         test_audio_player_duration_state_transitions);
+    Test.add_func ("/players/video/speed-resets-per-preview",
+        test_video_player_speed_resets_per_preview);
+    Test.add_func ("/players/audio/speed-resets-per-preview",
+        test_audio_player_speed_resets_per_preview);
+    Test.add_func ("/players/video/speed-reaches-mpv-without-scaling-time",
+        test_video_player_speed_reaches_mpv_without_scaling_time);
     Test.add_func ("/players/video/failed-load-releases-backend-resources",
         test_video_player_failed_load_releases_backend_resources);
     Test.add_func ("/players/video/disables-mpv-timing-lookahead",

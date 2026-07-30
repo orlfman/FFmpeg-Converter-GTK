@@ -57,6 +57,7 @@ public class AudioPlayer : Box {
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
     private Gtk.ToggleButton mute_button;
+    private SpeedMenuButton speed_button;
     private Gtk.Label media_status_label;
 
     // ── Playback backend ─────────────────────────────────────────────────────
@@ -350,6 +351,13 @@ public class AudioPlayer : Box {
         mute_button.toggled.connect (on_mute_toggled);
         controls.append (mute_button);
 
+        // Playback speed
+        speed_button = new SpeedMenuButton ();
+        speed_button.set_margin_start (6);
+        speed_button.set_sensitive (false);
+        speed_button.speed_changed.connect (on_speed_changed);
+        controls.append (speed_button);
+
         // Time display — styled readout
         var time_box = new Box (Orientation.HORIZONTAL, 4);
         time_box.add_css_class ("transport-time");
@@ -409,6 +417,7 @@ public class AudioPlayer : Box {
         }
 
         backend.set_muted (mute_button.get_active ());
+        backend.set_speed (speed_button.speed);
     }
 
     /**
@@ -570,6 +579,10 @@ public class AudioPlayer : Box {
 
     internal bool is_waveform_seek_sensitive_for_widget_test () {
         return segment_overlay.get_sensitive ();
+    }
+
+    internal SpeedMenuButton speed_button_for_widget_test () {
+        return speed_button;
     }
 
     internal bool is_media_status_visible_for_widget_test () {
@@ -938,6 +951,10 @@ public class AudioPlayer : Box {
         fallback_duration = 0.0;
         segment_overlay.set_sensitive (false);
         play_button.set_icon_name ("media-playback-start-symbolic");
+        // Rate is per-preview: a 0.25x left over from the previous stream would
+        // otherwise sound like the new one decodes badly.
+        speed_button.reset ();
+        speed_button.set_sensitive (false);
         time_label.set_text (VideoPlayer.format_time (0.0));
         duration_label.set_text (VideoPlayer.format_time (0.0));
         hide_media_status ();
@@ -990,6 +1007,9 @@ public class AudioPlayer : Box {
 
         if (prepared_handled) return;
         prepared_handled = true;
+
+        // Unlike waveform seeking, rate selection does not need a known duration.
+        speed_button.set_sensitive (true);
 
         double effective_duration = dur > 0.0 ? dur : fallback_duration;
         _duration = effective_duration;
@@ -1044,6 +1064,10 @@ public class AudioPlayer : Box {
         mute_button.set_tooltip_text (muted
             ? "Unmute audio"
             : "Mute audio");
+    }
+
+    private void on_speed_changed (double speed) {
+        backend.set_speed (speed);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

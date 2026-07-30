@@ -653,6 +653,28 @@ public class MpvBackend : Object {
         Mpv.set_flag (handle, "mute", muted ? 1 : 0);
     }
 
+    /**
+     * Scale playback rate. Audio keeps its pitch: mpv defaults
+     * audio-pitch-correction to yes and inserts scaletempo2 itself.
+     *
+     * Rate does not enter the media clock — time-pos, seeks and duration all
+     * stay in source time — so trim coordinates read back off a sped-up
+     * preview are the same ones a 1x preview would give.
+     */
+    public void set_speed (double speed) {
+        if (handle == null) return;
+        Mpv.set_double (handle, "speed", speed.clamp (0.01, 100.0));
+    }
+
+    public double get_speed () {
+        if (handle == null) return 1.0;
+
+        double value = 1.0;
+        if (Mpv.get_double (handle, "speed", out value) < 0)
+            return 1.0;
+        return value;
+    }
+
     private bool at_end_of_file () {
         if (handle == null) return false;
 

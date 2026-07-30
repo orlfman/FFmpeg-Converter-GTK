@@ -102,6 +102,7 @@ sources = files(
   'src/audio-tab.vala',
   'src/audio-player.vala',
   'src/player-styles.vala',
+  'src/speed-menu-button.vala',
   'src/audio-builder.vala',
   'src/audio-runner.vala',
   'src/video-file-constants.vala',
@@ -556,6 +557,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/audio-tab.vala',
       'src/audio-player.vala',
       'src/player-styles.vala',
+      'src/speed-menu-button.vala',
       'src/audio-builder.vala',
       'src/audio-runner.vala',
       'src/video-file-constants.vala',
@@ -637,6 +639,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/audio-tab.vala',
       'src/audio-player.vala',
       'src/player-styles.vala',
+      'src/speed-menu-button.vala',
       'src/audio-builder.vala',
       'src/audio-runner.vala',
       'src/video-file-constants.vala',
@@ -668,6 +671,20 @@ if fs.exists('tests/combine-window-state-test.vala')
     env : display_gtk_test_env,
     is_parallel : false,
     timeout : 30,
+  )
+  # Widget-state only — no mpv core — but constructing a player still needs GTK
+  # to initialize, so this follows the same display-or-skip rule as above.
+  test(
+    'player-speed-selection',
+    combine_window_state_test,
+    args : [
+      '-p', '/players/video/speed-resets-per-preview',
+      '-p', '/players/audio/speed-resets-per-preview',
+      '-p', '/players/video/speed-reaches-mpv-without-scaling-time',
+    ],
+    env : display_gtk_test_env,
+    is_parallel : false,
+    timeout : 60,
   )
 endif
 
@@ -738,6 +755,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/audio-tab.vala',
       'src/audio-player.vala',
       'src/player-styles.vala',
+      'src/speed-menu-button.vala',
       'src/audio-builder.vala',
       'src/audio-runner.vala',
       'src/video-file-constants.vala',

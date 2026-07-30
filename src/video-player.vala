@@ -9,6 +9,7 @@ public class VideoPlayer : Box {
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
     private Gtk.ToggleButton mute_button;
+    private SpeedMenuButton speed_button;
     private Gtk.Button popout_btn;
     private Gtk.Overlay video_overlay;
     private Gtk.Label media_status_label;
@@ -184,6 +185,13 @@ public class VideoPlayer : Box {
         mute_button.toggled.connect (on_mute_toggled);
         controls.append (mute_button);
 
+        // Playback speed
+        speed_button = new SpeedMenuButton ();
+        speed_button.set_margin_start (6);
+        speed_button.set_sensitive (false);
+        speed_button.speed_changed.connect (on_speed_changed);
+        controls.append (speed_button);
+
         // Time display — styled readout
         var time_box = new Box (Orientation.HORIZONTAL, 4);
         time_box.add_css_class ("transport-time");
@@ -230,6 +238,7 @@ public class VideoPlayer : Box {
         }
 
         backend.set_muted (mute_button.get_active ());
+        backend.set_speed (speed_button.speed);
     }
 
     /**
@@ -335,6 +344,14 @@ public class VideoPlayer : Box {
 
     internal bool is_scrubber_sensitive_for_widget_test () {
         return scrubber.get_sensitive ();
+    }
+
+    internal SpeedMenuButton speed_button_for_widget_test () {
+        return speed_button;
+    }
+
+    internal double backend_speed_for_widget_test () {
+        return backend.get_speed ();
     }
 
     internal bool is_media_status_visible_for_widget_test () {
@@ -450,6 +467,10 @@ public class VideoPlayer : Box {
         _intrinsic_height = 0;
         prepared_handled = false;
         play_button.set_icon_name ("media-playback-start-symbolic");
+        // Rate is per-preview: a 0.25x left over from the previous file would
+        // otherwise look like the new one decodes badly.
+        speed_button.reset ();
+        speed_button.set_sensitive (false);
         scrubber.set_range (0.0, 1.0);
         scrubber.set_value (0.0);
         scrubber.set_sensitive (false);
@@ -496,6 +517,9 @@ public class VideoPlayer : Box {
         // repeated notification cannot restart the update timer.
         if (prepared_handled) return;
         prepared_handled = true;
+
+        // Unlike the scrubber, rate selection does not need a known duration.
+        speed_button.set_sensitive (true);
 
         if (dur > 0.0) {
             scrubber.set_range (0.0, dur);
@@ -583,6 +607,10 @@ public class VideoPlayer : Box {
         mute_button.set_tooltip_text (muted
             ? "Unmute audio"
             : "Mute audio");
+    }
+
+    private void on_speed_changed (double speed) {
+        backend.set_speed (speed);
     }
 
     private void seek_relative (double seconds) {
