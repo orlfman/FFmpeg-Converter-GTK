@@ -126,7 +126,32 @@ namespace Mpv {
     [CCode (cname = "fcg_mpv_next_event")]
     public int next_event (Handle h,
                            out int end_file_reason,
-                           out int end_file_error);
+                           out int end_file_error,
+                           out string? log_prefix,
+                           out string? log_text);
+
+    // Which decoder mpv picked, and on what, is not exposed as a property —
+    // "hwdec-interop" belongs to vo=gpu and reads "(unavailable)" under the
+    // software render API this application uses. The log stream is the only
+    // place the device is named. See MpvBackend.on_log_message.
+    [CCode (cname = "mpv_request_log_messages")]
+    public int request_log_messages (Handle h, string min_level);
+
+    [CCode (cname = "MPV_EVENT_LOG_MESSAGE")]
+    public const int EVENT_LOG_MESSAGE;
+
+    // Observed with MPV_FORMAT_NONE: the event carries no value, so it needs no
+    // shim to unpack, and the property is read back the usual way once the
+    // notification says it is worth reading. See MpvBackend.report_active_decoder.
+    [CCode (cname = "mpv_observe_property")]
+    public int observe_property (Handle h, uint64 reply_userdata,
+                                 string name, int format);
+
+    [CCode (cname = "MPV_FORMAT_NONE")]
+    public const int FORMAT_NONE;
+
+    [CCode (cname = "MPV_EVENT_PROPERTY_CHANGE")]
+    public const int EVENT_PROPERTY_CHANGE;
 
     [CCode (cname = "MPV_EVENT_NONE")]
     public const int EVENT_NONE;

@@ -290,6 +290,283 @@ public enum ContainerDefaultMode {
     }
 }
 
+// ── Preview Hardware Decoding ────────────────────────────────────────────────
+
+/**
+ * Which decoder the preview players ask mpv for.
+ *
+ * Stored as the token from to_string (), never as the dropdown index: the
+ * order of the rows is a presentation detail, and an index would silently
+ * change everyone's decoder the first time the list is reordered.
+ *
+ * to_mpv_option () is deliberately the only place the mpv spelling appears.
+ * Every mode below is a "-copy" variant because the preview renders in
+ * software and needs frames in system memory — see MpvBackend.apply_options.
+ * If a GPU render path is ever added, the copy suffixes come off here and
+ * nowhere else, and stored settings keep working untouched.
+ */
+public enum HwdecMode {
+    AUTOMATIC,
+    AUTOMATIC_NO_VULKAN,
+    VAAPI,
+    NVDEC,
+    VULKAN,
+    OFF;
+
+    public string to_string () {
+        switch (this) {
+            case AUTOMATIC_NO_VULKAN: return "auto_no_vulkan";
+            case VAAPI:               return "vaapi";
+            case NVDEC:               return "nvdec";
+            case VULKAN:              return "vulkan";
+            case OFF:                 return "off";
+            default:                  return "auto";
+        }
+    }
+
+    public static HwdecMode from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "auto_no_vulkan": return AUTOMATIC_NO_VULKAN;
+            case "vaapi":          return VAAPI;
+            case "nvdec":          return NVDEC;
+            case "vulkan":         return VULKAN;
+            case "off":            return OFF;
+            default:               return AUTOMATIC;
+        }
+    }
+
+    /**
+     * The value handed to mpv's "hwdec" option.
+     *
+     * mpv accepts a comma-separated priority list and skips entries the machine
+     * cannot provide, falling back to software decoding when none of them work
+     * — which is what makes AUTOMATIC_NO_VULKAN portable rather than a
+     * one-machine workaround. Verified against mpv 2.5.0.
+     */
+    public string to_mpv_option () {
+        switch (this) {
+            // Every hardware decoder except Vulkan, in the order mpv's own
+            // auto-safe list prefers them. The escape hatch for the AV1/RADV
+            // abort in docs/mpv-hwdec-vulkan-crash.md that still leaves an
+            // NVIDIA or Intel machine hardware-decoding.
+            case AUTOMATIC_NO_VULKAN:
+                return "vaapi-copy,nvdec-copy,cuda-copy,amf-copy,no";
+            case VAAPI:   return "vaapi-copy";
+            case NVDEC:   return "nvdec-copy";
+            case VULKAN:  return "vulkan-copy";
+            case OFF:     return "no";
+            // "safe" restricts mpv to the decoders it considers reliable, which
+            // matters because this runs on hardware the project cannot test.
+            default:      return "auto-copy-safe";
+        }
+    }
+
+    public string get_label () {
+        switch (this) {
+            case AUTOMATIC_NO_VULKAN: return "Automatic, skip Vulkan";
+            case VAAPI:               return "VAAPI (AMD / Intel)";
+            case NVDEC:               return "NVDEC (NVIDIA)";
+            case VULKAN:              return "Vulkan";
+            case OFF:                 return "Off — software decoding";
+            default:                  return "Automatic (recommended)";
+        }
+    }
+
+    /**
+     * Kept to roughly one line each. The row splits its width between this and
+     * the selected value, so a description that wraps to two lines ellipsises
+     * the value itself — leaving the user unable to read which mode is set,
+     * which matters more than the extra sentence.
+     */
+    public string get_description () {
+        switch (this) {
+            case AUTOMATIC_NO_VULKAN:
+                return "Every hardware decoder except Vulkan, which some drivers botch";
+            case VAAPI:
+                return "Force VAAPI, the usual choice on AMD and Intel graphics";
+            case NVDEC:
+                return "Force NVDEC, the usual choice on NVIDIA graphics";
+            case VULKAN:
+                return "Force Vulkan. Not all drivers decode reliably through it";
+            case OFF:
+                return "Decode previews on the CPU only — slower, and the last resort";
+            default:
+                return "Let mpv pick a decoder it considers reliable on this machine";
+        }
+    }
+
+    /** Every mode, in the order the Preferences dropdown lists them. */
+    public static HwdecMode[] all () {
+        return { AUTOMATIC, AUTOMATIC_NO_VULKAN, VAAPI, NVDEC, VULKAN, OFF };
+    }
+}
+
+// ── Preview Scaler Quality ───────────────────────────────────────────────────
+
+/**
+ * How much CPU the preview players spend converting and scaling each frame.
+ *
+ * The preview renders in software, so this is paid per frame on one CPU thread
+ * — which is why Fast is the default and stays that way. Accurate exists
+ * because judging banding, crop edges and chroma artifacts is the whole point
+ * of previewing a conversion, and bilinear with no dithering hides all three.
+ *
+ * Both modes set every option explicitly rather than Fast applying mpv's
+ * "sw-fast" profile. A profile cannot be un-applied at runtime, and this
+ * setting has to be changeable in both directions on an open player. The Fast
+ * values below are exactly what "mpv --show-profile=sw-fast" prints for
+ * mpv 2.5.0, with the chroma scaler added because sw-fast leaves it at mpv's
+ * default and Accurate raises it.
+ */
+public enum PreviewQuality {
+    FAST,
+    ACCURATE;
+
+    public string to_string () {
+        switch (this) {
+            case ACCURATE: return "accurate";
+            default:       return "fast";
+        }
+    }
+
+    public static PreviewQuality from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "accurate": return ACCURATE;
+            default:         return FAST;
+        }
+    }
+
+    public string get_label () {
+        switch (this) {
+            case ACCURATE: return "Accurate";
+            default:       return "Fast";
+        }
+    }
+
+    public string get_description () {
+        switch (this) {
+            case ACCURATE:
+                return "Sharper scaling and dithering. Costs CPU on every frame";
+            default:
+                return "Cheapest scaling, for previews that must stay smooth";
+        }
+    }
+
+    /**
+     * Flat name/value pairs for mpv, applied in order.
+     *
+     * mpv converts with zimg where it can and libswscale otherwise
+     * (sws-allow-zimg defaults to yes), so both families have to be set or the
+     * mode only half applies depending on the source pixel format.
+     */
+    public string[] to_mpv_options () {
+        switch (this) {
+            case ACCURATE:
+                return {
+                    "sws-scaler",         "lanczos",
+                    "sws-fast",           "no",
+                    "zimg-scaler",        "lanczos",
+                    "zimg-scaler-chroma", "lanczos",
+                    "zimg-dither",        "error-diffusion",
+                    "zimg-fast",          "no"
+                };
+            default:
+                return {
+                    "sws-scaler",         "bilinear",
+                    "sws-fast",           "yes",
+                    "zimg-scaler",        "bilinear",
+                    "zimg-scaler-chroma", "bilinear",
+                    "zimg-dither",        "no",
+                    "zimg-fast",          "yes"
+                };
+        }
+    }
+
+    /** Every mode, in the order the Preferences dropdown lists them. */
+    public static PreviewQuality[] all () {
+        return { FAST, ACCURATE };
+    }
+}
+
+// ── Preview Demuxer Cache ────────────────────────────────────────────────────
+
+/**
+ * How much of the input the preview players keep buffered.
+ *
+ * This is a memory bound first and a performance setting second. Read-ahead is
+ * what makes scrubbing feel immediate on slow or network storage, but every
+ * byte of it is resident memory — and an unbounded demuxer is the exact
+ * pathology this backend was written to escape (see
+ * docs/upstream-gstreamer-playbin3-matroska-memory.md). Small is therefore the
+ * default and is the value the backend used before this was configurable.
+ *
+ * The back buffer is half the forward one throughout, which is the ratio the
+ * original fixed pair used.
+ */
+public enum PreviewCacheSize {
+    SMALL,
+    MEDIUM,
+    LARGE;
+
+    public string to_string () {
+        switch (this) {
+            case MEDIUM: return "medium";
+            case LARGE:  return "large";
+            default:     return "small";
+        }
+    }
+
+    public static PreviewCacheSize from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "medium": return MEDIUM;
+            case "large":  return LARGE;
+            default:       return SMALL;
+        }
+    }
+
+    /** mpv's "demuxer-max-bytes". */
+    public string forward_bytes () {
+        switch (this) {
+            case MEDIUM: return "128MiB";
+            case LARGE:  return "512MiB";
+            default:     return "32MiB";
+        }
+    }
+
+    /** mpv's "demuxer-max-back-bytes", kept at half the forward buffer. */
+    public string back_bytes () {
+        switch (this) {
+            case MEDIUM: return "64MiB";
+            case LARGE:  return "256MiB";
+            default:     return "16MiB";
+        }
+    }
+
+    public string get_label () {
+        switch (this) {
+            case MEDIUM: return "Medium (128 MiB)";
+            case LARGE:  return "Large (512 MiB)";
+            default:     return "Small (32 MiB)";
+        }
+    }
+
+    public string get_description () {
+        switch (this) {
+            case MEDIUM:
+                return "More read-ahead, for large files or slower disks";
+            case LARGE:
+                return "Most read-ahead, for network or multi-gigabyte sources";
+            default:
+                return "Least memory, and enough for local files on a fast disk";
+        }
+    }
+
+    /** Every size, in the order the Preferences dropdown lists them. */
+    public static PreviewCacheSize[] all () {
+        return { SMALL, MEDIUM, LARGE };
+    }
+}
+
 // ── Scaling Mode Labels ──────────────────────────────────────────────────────
 
 namespace ScaleMode {

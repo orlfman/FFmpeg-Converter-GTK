@@ -395,6 +395,95 @@ private void test_rotation_settles_only_once_axes_swap () {
     assert_true (MpvBackend.rotation_is_settled (90, 1080, 1080, 1080, 1080));
 }
 
+/**
+ * The Preferences enums are stored as tokens, never as dropdown indices, so
+ * that reordering a list cannot silently change what an existing settings file
+ * means. These check the tokens survive a round trip and that the values handed
+ * to mpv keep the properties the backend depends on.
+ */
+private void test_preview_enums_round_trip_and_stay_valid () {
+    foreach (HwdecMode mode in HwdecMode.all ()) {
+        assert_true (HwdecMode.from_string (mode.to_string ()) == mode);
+
+        // The preview renders in software, so frames must come back to system
+        // memory: every decoder offered has to be a copy mode, or "no". A
+        // plain GPU-surface mode would render nothing at all.
+        //
+        // Matched on "copy" appearing anywhere rather than as a suffix,
+        // because mpv spells the automatic ones "auto-copy-safe" and
+        // "auto-copy-unsafe" — the qualifier comes after the copy.
+        foreach (string part in mode.to_mpv_option ().split (",")) {
+            assert_true (part == "no" || "copy" in part);
+        }
+
+        assert_true (mode.get_label () != "");
+        assert_true (mode.get_description () != "");
+    }
+
+    foreach (PreviewQuality quality in PreviewQuality.all ()) {
+        assert_true (PreviewQuality.from_string (quality.to_string ()) == quality);
+
+        // Flat name/value pairs, so an odd length would silently drop the last
+        // option — or read past the end of the array.
+        string[] opts = quality.to_mpv_options ();
+        assert_true (opts.length > 0);
+        assert_true (opts.length % 2 == 0);
+    }
+
+    foreach (PreviewCacheSize size in PreviewCacheSize.all ()) {
+        assert_true (PreviewCacheSize.from_string (size.to_string ()) == size);
+        assert_true (size.forward_bytes () != "");
+        assert_true (size.back_bytes () != "");
+    }
+
+    // An unknown token is a settings file from a newer build, or a corrupt
+    // one. Both must land on the safe default rather than anything exotic.
+    assert_true (HwdecMode.from_string ("bogus") == HwdecMode.AUTOMATIC);
+    assert_true (PreviewQuality.from_string ("bogus") == PreviewQuality.FAST);
+    assert_true (PreviewCacheSize.from_string ("bogus") == PreviewCacheSize.SMALL);
+
+    // Small is what the demuxer bound was before it became configurable, and
+    // changing it would quietly change the default memory profile.
+    assert_cmpstr (PreviewCacheSize.SMALL.forward_bytes (),
+                   CompareOperator.EQ, "32MiB");
+    assert_cmpstr (PreviewCacheSize.SMALL.back_bytes (),
+                   CompareOperator.EQ, "16MiB");
+}
+
+/**
+ * The GPU name is scraped out of mpv's log because no property reports it, so
+ * the exact wording of two driver messages is load-bearing. Both strings below
+ * are verbatim from ffmpeg 62 as shipped, captured with --msg-level=all=debug.
+ */
+private void test_gpu_name_parsed_from_decoder_log () {
+    // Vulkan: the device class and PCI id are noise and get dropped.
+    assert_cmpstr (
+        MpvBackend.parse_gpu_from_log (
+            "Vulkan: Device 0 selected: AMD Radeon RX 9070 XT (RADV GFX1201) (discrete) (0x7550)"),
+        CompareOperator.EQ, "AMD Radeon RX 9070 XT (RADV GFX1201)");
+
+    assert_cmpstr (
+        MpvBackend.parse_gpu_from_log (
+            "Vulkan: Device 1 selected: Intel(R) Graphics (ARL) (integrated) (0x7d67)"),
+        CompareOperator.EQ, "Intel(R) Graphics (ARL)");
+
+    // VAAPI: the trailing driver version dates the package, not the hardware.
+    assert_cmpstr (
+        MpvBackend.parse_gpu_from_log (
+            "VAAPI: VAAPI driver: Intel iHD driver for Intel(R) Gen Graphics - 26.1.5 ()."),
+        CompareOperator.EQ, "Intel iHD driver for Intel(R) Gen Graphics");
+
+    // The enumeration lines that precede the selection must not be mistaken
+    // for it — on a hybrid machine they name the GPU that was NOT chosen.
+    assert_null (MpvBackend.parse_gpu_from_log (
+        "Vulkan:     1: Intel(R) Graphics (ARL) (integrated) (0x7d67)"));
+
+    // Unrelated chatter reports nothing rather than guessing.
+    assert_null (MpvBackend.parse_gpu_from_log (
+        "Vulkan: Using device extension VK_KHR_push_descriptor"));
+    assert_null (MpvBackend.parse_gpu_from_log (""));
+}
+
 private void test_render_size_fits_drawn_aspect_without_upscaling () {
     int w, h;
 
@@ -520,6 +609,10 @@ int main (string[] args) {
                    test_rotation_settles_only_once_axes_swap);
     Test.add_func ("/mpv-backend/logic/render-size-fits-without-upscaling",
                    test_render_size_fits_drawn_aspect_without_upscaling);
+    Test.add_func ("/mpv-backend/logic/gpu-name-parsed-from-decoder-log",
+                   test_gpu_name_parsed_from_decoder_log);
+    Test.add_func ("/mpv-backend/logic/preview-enums-round-trip",
+                   test_preview_enums_round_trip_and_stay_valid);
     Test.add_func ("/mpv-backend/logic/frame-geometry-stride-alignment",
                    test_frame_geometry_rounds_stride_to_64_bytes);
     Test.add_func ("/mpv-backend/logic/audio-index-mapping-and-range",

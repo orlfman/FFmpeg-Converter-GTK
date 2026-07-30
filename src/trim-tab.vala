@@ -234,6 +234,10 @@ public class TrimTab : Box, ICodecTab {
     private Adw.ActionRow smart_optimize_row;
     private SmartOptimizer? smart_optimizer = null;
     private FfmpegRuntimeCapabilities? smart_runtime_capabilities = null;
+    // Read by the progress handler, which is connected once but must attribute
+    // each line to whichever segment is being analyzed when it fires.
+    private ConsoleTab? smart_progress_console = null;
+    private string smart_progress_segment = "";
     private Cancellable? smart_cancel = null;
 
     // ── Sections (for visibility toggling) ───────────────────────────────────
@@ -750,6 +754,14 @@ public class TrimTab : Box, ICodecTab {
             // optimizer's own require_vmaf() share one cache entry.
             smart_runtime_capabilities = new FfmpegRuntimeCapabilities ();
             smart_optimizer = new SmartOptimizer (smart_runtime_capabilities);
+            // Inside the guard on purpose — it runs exactly once, so the
+            // handler cannot stack and duplicate lines on later exports.
+            smart_optimizer.progress.connect ((line) => {
+                if (smart_progress_console == null)
+                    return;
+                smart_progress_console.add_line ("[Smart Optimizer] %s: %s".printf (
+                    smart_progress_segment, line));
+            });
         }
 
         // Cancel any previous optimization
@@ -877,6 +889,7 @@ public class TrimTab : Box, ICodecTab {
         }
 
         bool cancelled = false;
+        smart_progress_console = console_tab;
 
         for (int i = 0; i < segs.length; i++) {
             if (cancel.is_cancelled ()) {
@@ -891,6 +904,7 @@ public class TrimTab : Box, ICodecTab {
                 ? "\"%s\"".printf (seg.label)
                 : "Segment %d".printf (i + 1);
 
+            smart_progress_segment = seg_name;
             status_area.set_status (quality_mode
                 ? "Smart Optimizer: measuring the %s quality ceiling for %s (%d/%d)…".printf (
                     quality_intent.to_label (), seg_name, i + 1, segs.length)
@@ -1046,6 +1060,7 @@ public class TrimTab : Box, ICodecTab {
 
         // Clean up temp directory
         DirUtils.remove (tmp_dir);
+        smart_progress_console = null;
         release_smart_cancel (cancel);
 
         if (!can_continue_active_operation (operation_id)) {

@@ -25,9 +25,19 @@ using GLib;
     //                                            4-4-4 PNG collage sidecar)
     //    play_with_ffplay = false                (default: false → use desktop
     //                                            player for Playback menu actions)
-    //    hardware_decoding = true                (default: true → preview players
-    //                                            may offload decoding to the GPU;
-    //                                            false forces software decoding)
+    //    hwdec_mode = auto                       (auto|auto_no_vulkan|vaapi|nvdec|
+    //                                            vulkan|off)
+    //                                           (default: auto → let mpv pick a
+    //                                            decoder it considers reliable)
+    //    preview_cache_size = small              (small|medium|large)
+    //                                           (default: small → 32 MiB of
+    //                                            demuxer read-ahead per preview)
+    //    preview_quality = fast                  (fast|accurate)
+    //                                           (default: fast → cheapest scaling
+    //                                            for the software-rendered preview)
+    //    hardware_decoding = true                (legacy; read only when hwdec_mode
+    //                                            is absent, and kept in sync on save
+    //                                            so a downgrade still behaves)
     //    recently_opened_enabled = true          (default: true → remember and
     //                                            show up to 20 input files)
     //    container_default_mode = default        (default|mkv|codec_specific)
@@ -45,6 +55,8 @@ using GLib;
 //    target_mb = 4                           (default: 4 → 4 MB file size target)
 //    auto_convert = false                    (default: false → don't auto-start conversion)
 //    strip_audio = false                     (default: false → include audio in output)
+//    quality_ceiling = off                   (off|low|medium|high|ultra; default: off →
+//                                             codec tabs start on the size target)
 //
 //  Thread-safe: all reads/writes are mutex-guarded.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -84,7 +96,9 @@ public class AppSettings : Object {
     // video, so overriding it silently would be presumptuous. ffplay is the
     // opt-in for people who want the raw decode rather than their player's.
     private bool   _play_with_ffplay = false;
-    private bool   _hardware_decoding = true;
+    private HwdecMode _hwdec_mode = HwdecMode.AUTOMATIC;
+    private PreviewQuality _preview_quality = PreviewQuality.FAST;
+    private PreviewCacheSize _preview_cache_size = PreviewCacheSize.SMALL;
     private bool   _recently_opened_enabled = true;
     private string[] _recent_input_files = {};
     private bool   _verify_unknown_audio_copy_preflight = true;
@@ -96,6 +110,9 @@ public class AppSettings : Object {
     private bool   _smart_optimizer_auto_convert = true;
     private bool   _smart_optimizer_strip_audio = false;
     private bool   _smart_optimizer_match_source_size = false;
+    // Dropdown index, not a QualityIntent: index 0 is "Off", which the enum
+    // deliberately has no member for. Matches BaseCodecTab.get_quality_intent().
+    private int    _smart_optimizer_quality_ceiling = 0;
 
     // ── File location ─────────────────────────────────────────────────────────
     private string config_dir;
@@ -401,28 +418,87 @@ public class AppSettings : Object {
     }
 
     /**
-     * Whether the preview players may offload decoding to the GPU.
+     * Which decoder the preview players ask mpv for.
      *
-     * On by default: it lowers system memory use and, on machines whose CPU
-     * struggles with 4K AV1, is the difference between a usable preview and a
-     * stuttering one. Turning it off forces software decoding, which is the
-     * remedy if a driver produces corrupt or missing preview frames.
+     * Automatic by default: hardware decoding lowers system memory use and, on
+     * machines whose CPU struggles with 4K AV1, is the difference between a
+     * usable preview and a stuttering one. The forced modes exist because a
+     * driver that decodes incorrectly — or aborts, as in
+     * docs/mpv-hwdec-vulkan-crash.md — should cost the user one decoder rather
+     * than all of them.
      */
-    public bool hardware_decoding {
+    public HwdecMode hwdec_mode {
         get {
-            bool hardware_decoding;
+            HwdecMode hwdec_mode;
             mutex.lock ();
             try {
-                hardware_decoding = _hardware_decoding;
+                hwdec_mode = _hwdec_mode;
             } finally {
                 mutex.unlock ();
             }
-            return hardware_decoding;
+            return hwdec_mode;
         }
         set {
             mutex.lock ();
             try {
-                _hardware_decoding = value;
+                _hwdec_mode = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
+    /**
+     * How much CPU the preview players may spend scaling each frame.
+     *
+     * Fast by default: the preview renders in software on one thread, and the
+     * machines this has to stay usable on are the ones with the least to
+     * spare. Accurate is for judging banding and chroma before committing to
+     * a long encode.
+     */
+    public PreviewQuality preview_quality {
+        get {
+            PreviewQuality preview_quality;
+            mutex.lock ();
+            try {
+                preview_quality = _preview_quality;
+            } finally {
+                mutex.unlock ();
+            }
+            return preview_quality;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _preview_quality = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
+    /**
+     * How much of the input each preview player keeps buffered.
+     *
+     * Small by default, which is the bound the backend has always used. Larger
+     * values buy smoother scrubbing on slow or network storage and cost
+     * exactly that much resident memory per open preview.
+     */
+    public PreviewCacheSize preview_cache_size {
+        get {
+            PreviewCacheSize preview_cache_size;
+            mutex.lock ();
+            try {
+                preview_cache_size = _preview_cache_size;
+            } finally {
+                mutex.unlock ();
+            }
+            return preview_cache_size;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _preview_cache_size = value;
             } finally {
                 mutex.unlock ();
             }
@@ -680,6 +756,28 @@ public class AppSettings : Object {
         }
     }
 
+    public int smart_optimizer_quality_ceiling {
+        get {
+            int quality_ceiling;
+            mutex.lock ();
+            try {
+                quality_ceiling = _smart_optimizer_quality_ceiling;
+            } finally {
+                mutex.unlock ();
+            }
+            return quality_ceiling;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _smart_optimizer_quality_ceiling =
+                    clamp_smart_optimizer_quality_ceiling (value);
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
     public bool smart_optimizer_match_source_size {
         get {
             bool match_source_size;
@@ -739,8 +837,19 @@ public class AppSettings : Object {
             kf, GROUP_GENERAL, "show_bit_depth_warning_dialog", true);
         bool play_with_ffplay = read_bool (
             kf, GROUP_GENERAL, "play_with_ffplay", false);
-        bool hardware_decoding = read_bool (
-            kf, GROUP_GENERAL, "hardware_decoding", true);
+        // Before the mode existed this preference was a bool. An absent
+        // hwdec_mode means a file written by that version, so fall back to it:
+        // "off" is the only intent the default cannot stand in for.
+        string hwdec_token = read_string (kf, GROUP_GENERAL, "hwdec_mode", "");
+        HwdecMode hwdec_mode = hwdec_token == ""
+            ? (read_bool (kf, GROUP_GENERAL, "hardware_decoding", true)
+                ? HwdecMode.AUTOMATIC
+                : HwdecMode.OFF)
+            : HwdecMode.from_string (hwdec_token);
+        PreviewQuality preview_quality = PreviewQuality.from_string (
+            read_string (kf, GROUP_GENERAL, "preview_quality", "fast"));
+        PreviewCacheSize preview_cache_size = PreviewCacheSize.from_string (
+            read_string (kf, GROUP_GENERAL, "preview_cache_size", "small"));
         bool recently_opened_enabled = read_bool (
             kf, GROUP_GENERAL, "recently_opened_enabled", true);
         string[] raw_recent_input_files = read_string_list (
@@ -756,6 +865,8 @@ public class AppSettings : Object {
         bool smart_optimizer_strip_audio = read_bool (kf, GROUP_SMART, "strip_audio", false);
         bool smart_optimizer_match_source_size = read_bool (
             kf, GROUP_SMART, "match_source_size", false);
+        int smart_optimizer_quality_ceiling = quality_ceiling_from_key (
+            read_string (kf, GROUP_SMART, "quality_ceiling", "off"));
 
         mutex.lock ();
         try {
@@ -769,7 +880,9 @@ public class AppSettings : Object {
             _overwrite_enabled = overwrite_enabled;
             _generate_collage_thumbnail = generate_collage_thumbnail;
             _play_with_ffplay = play_with_ffplay;
-            _hardware_decoding = hardware_decoding;
+            _hwdec_mode = hwdec_mode;
+            _preview_quality = preview_quality;
+            _preview_cache_size = preview_cache_size;
             _recently_opened_enabled = recently_opened_enabled;
             _recent_input_files = recent_input_files;
             _verify_unknown_audio_copy_preflight = verify_unknown_audio_copy_preflight;
@@ -778,6 +891,7 @@ public class AppSettings : Object {
             _smart_optimizer_auto_convert = smart_optimizer_auto_convert;
             _smart_optimizer_strip_audio = smart_optimizer_strip_audio;
             _smart_optimizer_match_source_size = smart_optimizer_match_source_size;
+            _smart_optimizer_quality_ceiling = smart_optimizer_quality_ceiling;
         } finally {
             mutex.unlock ();
         }
@@ -812,7 +926,9 @@ public class AppSettings : Object {
         bool overwrite_enabled;
         bool generate_collage_thumbnail;
         bool play_with_ffplay;
-        bool hardware_decoding;
+        HwdecMode hwdec_mode;
+        PreviewQuality preview_quality;
+        PreviewCacheSize preview_cache_size;
         bool recently_opened_enabled;
         string[] recent_input_files;
         bool verify_unknown_audio_copy_preflight;
@@ -821,6 +937,7 @@ public class AppSettings : Object {
         bool smart_optimizer_auto_convert;
         bool smart_optimizer_strip_audio;
         bool smart_optimizer_match_source_size;
+        int smart_optimizer_quality_ceiling;
 
         mutex.lock ();
         try {
@@ -834,7 +951,9 @@ public class AppSettings : Object {
             overwrite_enabled = _overwrite_enabled;
             generate_collage_thumbnail = _generate_collage_thumbnail;
             play_with_ffplay = _play_with_ffplay;
-            hardware_decoding = _hardware_decoding;
+            hwdec_mode = _hwdec_mode;
+            preview_quality = _preview_quality;
+            preview_cache_size = _preview_cache_size;
             recently_opened_enabled = _recently_opened_enabled;
             recent_input_files = new string[_recent_input_files.length];
             for (int i = 0; i < _recent_input_files.length; i++)
@@ -845,6 +964,7 @@ public class AppSettings : Object {
             smart_optimizer_auto_convert = _smart_optimizer_auto_convert;
             smart_optimizer_strip_audio = _smart_optimizer_strip_audio;
             smart_optimizer_match_source_size = _smart_optimizer_match_source_size;
+            smart_optimizer_quality_ceiling = _smart_optimizer_quality_ceiling;
         } finally {
             mutex.unlock ();
         }
@@ -873,7 +993,15 @@ public class AppSettings : Object {
             show_bit_depth_warning_dialog
         );
         kf.set_boolean (GROUP_GENERAL, "play_with_ffplay", play_with_ffplay);
-        kf.set_boolean (GROUP_GENERAL, "hardware_decoding", hardware_decoding);
+        kf.set_string (GROUP_GENERAL, "hwdec_mode", hwdec_mode.to_string ());
+        kf.set_string (GROUP_GENERAL, "preview_quality",
+                       preview_quality.to_string ());
+        kf.set_string (GROUP_GENERAL, "preview_cache_size",
+                       preview_cache_size.to_string ());
+        // Kept in sync purely so downgrading to a version that predates the
+        // mode reads the user's intent rather than silently defaulting back on.
+        kf.set_boolean (GROUP_GENERAL, "hardware_decoding",
+                        hwdec_mode != HwdecMode.OFF);
         kf.set_boolean (
             GROUP_GENERAL,
             "recently_opened_enabled",
@@ -885,6 +1013,8 @@ public class AppSettings : Object {
         kf.set_boolean (GROUP_SMART, "auto_convert", smart_optimizer_auto_convert);
         kf.set_boolean (GROUP_SMART, "strip_audio", smart_optimizer_strip_audio);
         kf.set_boolean (GROUP_SMART, "match_source_size", smart_optimizer_match_source_size);
+        kf.set_string (GROUP_SMART, "quality_ceiling",
+            quality_ceiling_to_key (smart_optimizer_quality_ceiling));
 
         try {
             kf.save_to_file (config_file);
@@ -915,7 +1045,9 @@ public class AppSettings : Object {
             _overwrite_enabled  = false;
             _generate_collage_thumbnail = false;
             _play_with_ffplay = false;
-            _hardware_decoding = true;
+            _hwdec_mode = HwdecMode.AUTOMATIC;
+            _preview_quality = PreviewQuality.FAST;
+            _preview_cache_size = PreviewCacheSize.SMALL;
             _recently_opened_enabled = true;
             _verify_unknown_audio_copy_preflight = true;
             _show_bit_depth_warning_dialog = true;
@@ -923,6 +1055,7 @@ public class AppSettings : Object {
             _smart_optimizer_auto_convert = true;
             _smart_optimizer_strip_audio = false;
             _smart_optimizer_match_source_size = false;
+            _smart_optimizer_quality_ceiling = 0;
         } finally {
             mutex.unlock ();
         }
@@ -987,6 +1120,37 @@ public class AppSettings : Object {
 
     private static int clamp_smart_optimizer_target_mb (int value) {
         return SmartOptimizerLogic.clamp_target_mb (value);
+    }
+
+    // Stored as a name rather than the raw index so the config file stays
+    // readable and survives any future reordering of the dropdown.
+    private const string[] QUALITY_CEILING_KEYS = {
+        "off", "low", "medium", "high", "ultra"
+    };
+
+    public static int clamp_smart_optimizer_quality_ceiling (int value) {
+        // The cast is load-bearing. `.length` on a const array becomes
+        // G_N_ELEMENTS, which is gsize — unsigned. CLAMP then compares the
+        // signed input against an unsigned bound, promoting any negative
+        // value to a huge one, and clamps it UP to Ultra instead of down to
+        // Off. Forcing the bound to int keeps the comparison signed.
+        return value.clamp (0, (int) QUALITY_CEILING_KEYS.length - 1);
+    }
+
+    private static string quality_ceiling_to_key (int value) {
+        return QUALITY_CEILING_KEYS[clamp_smart_optimizer_quality_ceiling (value)];
+    }
+
+    private static int quality_ceiling_from_key (string key) {
+        string needle = key.down ().strip ();
+        for (int i = 0; i < QUALITY_CEILING_KEYS.length; i++) {
+            if (QUALITY_CEILING_KEYS[i] == needle)
+                return i;
+        }
+        // An unrecognised value means a hand-edited or newer config; falling
+        // back to Off keeps the size target as the constraint rather than
+        // silently pinning a quality tier the user never chose.
+        return 0;
     }
 
     private static bool read_bool (KeyFile kf, string group,

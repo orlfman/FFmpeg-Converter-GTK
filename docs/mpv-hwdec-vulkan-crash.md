@@ -1,8 +1,8 @@
 # Crash: AV1 hardware decode via Vulkan aborts the process
 
 Investigation of the core dump from 2026-07-29 22:34:33 (pid 409425), taken on
-first launch after loading a 4K AV1 WebM. **Nothing has been changed** — this is
-a report to pick up from.
+first launch after loading a 4K AV1 WebM. The original report is unchanged below;
+see [Update](#update-2026-07-30) for what has since shipped.
 
 ## Status
 
@@ -11,7 +11,28 @@ a report to pick up from.
 | Cause | Identified with high confidence |
 | Reproduced | **No** — 4 attempts, see [Reproduction](#reproduction) |
 | Is it a regression from the recent port work? | **No** — see [Not a regression](#not-a-regression) |
-| Fix | Identified and its replacement verified working, but **not applied** |
+| Fix | Not applied as a default; a user-selectable escape hatch shipped instead |
+
+## Update 2026-07-30
+
+Preferences → Player now carries a **Hardware Decoding** mode selector, so this
+crash no longer costs a user all hardware decoding — only Vulkan. Relevant to
+the decisions left open below:
+
+- **"Automatic, skip Vulkan"** maps to `vaapi-copy,nvdec-copy,cuda-copy,amf-copy,no`.
+  mpv accepts a comma-separated priority list and skips entries the machine
+  cannot provide, so this stays portable rather than being a one-machine
+  workaround — an NVIDIA box still hardware-decodes under it. Verified against
+  mpv 2.5.0.
+- The default is **unchanged** (`auto-copy-safe`), which on this machine still
+  resolves to `vulkan-copy` for AV1. Item 4 below — whether to exclude Vulkan
+  outright — is still open and still wants a newer Mesa/RADV before deciding.
+- The decoder in use, and the GPU it runs on, are now shown in that same
+  Preferences group rather than only in a debug log. On this machine
+  "Automatic" reports `vulkan-copy on AMD Radeon RX 9070 XT (RADV GFX1201)` and
+  "Automatic, skip Vulkan" reports `vaapi-copy on Intel iHD driver for
+  Intel(R) Gen Graphics` — i.e. skipping Vulkan also moves decoding to the
+  integrated GPU, which is worth knowing before recommending it as a fix.
 
 ## What crashed
 
@@ -172,8 +193,9 @@ explicit list is the available mechanism.
 2. Run the application under valgrind or with `-fsanitize=address` while loading
    this file, to definitively exclude the new frame-buffer path as a source of
    heap corruption.
-3. Decide on the hwdec policy above, and if the list is adopted, note in the
-   Preferences copy that hardware decoding excludes Vulkan.
+3. ~~Decide on the hwdec policy above~~ — partly done: the list is available as
+   an opt-in mode rather than imposed as the default. See
+   [Update](#update-2026-07-30).
 4. Check whether a newer Mesa/RADV fixes it, before permanently excluding a
    decode path over one driver.
 
@@ -181,7 +203,12 @@ explicit list is the available mechanism.
 
 - `src/mpv-backend.vala`, `wanted_hwdec ()` and the `hwdec` block in
   `apply_options ()` — where the policy lives.
-- `report_active_decoder ()` already logs `hwdec-current` at debug level, so the
-  chosen decoder is visible in a debug run without extra instrumentation.
+- `report_active_decoder ()` reads `hwdec-current` and publishes it to
+  `MpvStatus`, so the chosen decoder is visible in Preferences as well as in a
+  debug run. It is driven by an observer on that property, because the value is
+  empty during the reconfigs that follow a decoder change and only settles
+  afterwards.
+- `HwdecMode` in `src/constants.vala` — the modes, and the only place the mpv
+  spelling of each appears.
 - `docs/mpv-port-review-findings.md` — unrelated to this crash, but records the
   rest of the libmpv port review.

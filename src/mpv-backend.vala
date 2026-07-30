@@ -1,6 +1,64 @@
 using Gtk;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  MpvStatus — what the preview player is actually doing, for the UI to observe
+//
+//  Separate from AppSettings on purpose: that stores what the user asked for and
+//  persists it, this reports what mpv did about it and is never written to disk.
+//  mpv accepts any string for "hwdec" and silently decodes in software when it
+//  cannot honour one, so "requested" and "active" genuinely differ and the
+//  Preferences dropdown would otherwise be free to lie.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public class MpvStatus : Object {
+
+    private static MpvStatus? instance = null;
+
+    public static MpvStatus get_default () {
+        if (instance == null) {
+            instance = new MpvStatus ();
+        }
+        return instance;
+    }
+
+    /**
+     * mpv's "hwdec-current" for the most recent video preview: "vaapi-copy"
+     * and similar when a hardware decoder took, "no" when it fell back to
+     * software, null when no preview has loaded and there is nothing to report.
+     */
+    public string? active_hwdec { get; private set; default = null; }
+
+    /**
+     * The GPU that decoder is running on, as the driver names itself: "AMD
+     * Radeon RX 9070 XT (RADV GFX1201)", "Intel iHD driver for Intel(R) Gen
+     * Graphics", and so on. Null when nothing has been decoded yet, when
+     * decoding is in software, or when the driver in use names itself in a
+     * shape MpvBackend.on_log_message does not recognise.
+     *
+     * Worth reporting separately from the decoder because the two do not
+     * imply each other: on a machine with both an integrated and a discrete
+     * GPU, VAAPI and Vulkan routinely pick different ones.
+     */
+    public string? active_gpu { get; private set; default = null; }
+
+    /**
+     * Named to avoid colliding with the property's own generated setter, and
+     * kept as a method rather than a plain assignment because Vala's setter
+     * notifies unconditionally — every reconfig would otherwise wake the
+     * Preferences row to rewrite the same string.
+     */
+    internal void publish_active_hwdec (string? value) {
+        if (active_hwdec == value) return;
+        active_hwdec = value;
+    }
+
+    internal void publish_active_gpu (string? value) {
+        if (active_gpu == value) return;
+        active_gpu = value;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  MpvFramePaintable — GdkPaintable wrapper around the most recent mpv frame
 //
 //  Reports the size of the frame mpv draws as its intrinsic size, independent of
@@ -89,11 +147,11 @@ private class MpvFramePaintable : Object, Gdk.Paintable {
 
 public class MpvBackend : Object {
 
-    // Bound the demuxer so a large input cannot balloon resident memory. These
-    // are well above what preview scrubbing needs and far below the unbounded
-    // growth this backend exists to avoid.
-    private const string DEMUXER_MAX_BYTES      = "32MiB";
-    private const string DEMUXER_MAX_BACK_BYTES = "16MiB";
+    // The demuxer stays bounded whatever is chosen — a bound is the point, and
+    // the unbounded growth this backend exists to avoid is never on the menu.
+    // PreviewCacheSize.SMALL is the pair that used to be hardcoded here, so the
+    // default behaviour is unchanged; the larger sizes trade resident memory
+    // for read-ahead on storage too slow to keep up with scrubbing.
 
     // Software rendering is single-threaded on the CPU, so cap the render target
     // regardless of how large the widget gets. Upscaling the result costs the GPU
@@ -112,6 +170,16 @@ public class MpvBackend : Object {
      * possibly-wrong frame rather than to a preview that stays blank forever.
      */
     private const uint SETTLE_DEADLINE_MS = 400;
+
+    /**
+     * How long to watch mpv's log for the line naming the GPU the decoder
+     * opened, before giving up and turning the log stream back off.
+     *
+     * Generous because it only has to outlast decoder initialisation, and the
+     * cost of overrunning is a few seconds of extra log traffic rather than
+     * anything the user sees.
+     */
+    private const uint LOG_CAPTURE_DEADLINE_S = 5;
 
     // ── Signals ──────────────────────────────────────────────────────────────
 
@@ -281,13 +349,44 @@ public class MpvBackend : Object {
     }
 
     private void on_settings_changed () {
-        if (handle == null || !with_video) return;
+        if (handle == null) return;
+
+        // Ahead of the with_video guard: apply_options bounds the demuxer for
+        // audio-only previews too, so this one is not video's alone. Shrinking
+        // takes effect by the demuxer discarding what no longer fits, growing
+        // by it reading further ahead — neither needs a reload.
+        PreviewCacheSize cache = AppSettings.get_default ().preview_cache_size;
+        if (cache != active_cache_size) {
+            active_cache_size = cache;
+            handle.set_property_string ("demuxer-max-bytes",
+                                        cache.forward_bytes ());
+            handle.set_property_string ("demuxer-max-back-bytes",
+                                        cache.back_bytes ());
+        }
+
+        // Decoding and scaling below are video's only.
+        if (!with_video) return;
 
         string wanted = wanted_hwdec ();
-        if (wanted == active_hwdec) return;
+        if (wanted != active_hwdec) {
+            active_hwdec = wanted;
 
-        active_hwdec = wanted;
-        handle.set_property_string ("hwdec", wanted);
+            // The decoder is about to be reinitialised on a different device,
+            // so the GPU on record is now wrong. Drop it and listen again for
+            // the line naming the new one.
+            MpvStatus.get_default ().publish_active_gpu (null);
+            start_log_capture ();
+
+            handle.set_property_string ("hwdec", wanted);
+        }
+
+        // Scaling is redone for every frame, so unlike the decoder this needs
+        // no reinitialisation — the next frame is simply converted differently.
+        PreviewQuality quality = AppSettings.get_default ().preview_quality;
+        if (quality != active_quality) {
+            active_quality = quality;
+            apply_preview_quality_options (quality, true);
+        }
     }
 
     ~MpvBackend () {
@@ -360,6 +459,17 @@ public class MpvBackend : Object {
             }
         }
 
+        // Before loadfile, because the decoder names its GPU while opening the
+        // file and the line is gone by the time anything else could ask for it.
+        // on_log_message turns this back off the moment it has what it needs.
+        start_log_capture ();
+
+        // The decoder settles after the events that announce it, so the only
+        // reliable moment to read it is when mpv says it changed.
+        if (with_video) {
+            Mpv.observe_property (handle, 0, "hwdec-current", Mpv.FORMAT_NONE);
+        }
+
         err = Mpv.cmd (handle, "loadfile", path);
         if (err < 0) {
             warning ("MpvBackend: loadfile failed: %s", Mpv.error_string (err));
@@ -393,6 +503,23 @@ public class MpvBackend : Object {
         if (paintable != null) {
             paintable.clear_frame ();
         }
+
+        // Stop reporting a decoder for a player that no longer exists. Guarded
+        // so a second preview that has since published its own is left alone;
+        // if both happened to choose the same decoder this clears one that is
+        // still live, and the next reconfig republishes it.
+        if (published_hwdec != null
+            && MpvStatus.get_default ().active_hwdec == published_hwdec) {
+            MpvStatus.get_default ().publish_active_hwdec (null);
+            MpvStatus.get_default ().publish_active_gpu (null);
+        }
+        published_hwdec = null;
+
+        // Not stop_log_capture (): that would call into the handle this is
+        // about to release. Clearing the flag is enough — the core is going.
+        // The deadline still has to go, or it fires into a dead backend.
+        log_capture_active = false;
+        stop_log_deadline ();
 
         // Order matters: the render context must go before the core it was
         // created against, or libmpv's behaviour is undefined.
@@ -503,8 +630,9 @@ public class MpvBackend : Object {
         set_option ("keep-open", "yes");
         set_option ("pause", "yes");
 
-        set_option ("demuxer-max-bytes", DEMUXER_MAX_BYTES);
-        set_option ("demuxer-max-back-bytes", DEMUXER_MAX_BACK_BYTES);
+        active_cache_size = AppSettings.get_default ().preview_cache_size;
+        set_option ("demuxer-max-bytes", active_cache_size.forward_bytes ());
+        set_option ("demuxer-max-back-bytes", active_cache_size.back_bytes ());
 
         if (with_video && target_picture != null) {
             set_option ("vo", "libmpv");
@@ -522,9 +650,12 @@ public class MpvBackend : Object {
             // DevTools/mpv-render-probe.c reproduces both halves.
             set_option ("video-rotate", "no");
             // Software rendering does colour conversion and scaling on one CPU
-            // thread; sw-fast trades filter quality for the throughput a preview
-            // needs.
-            set_option ("profile", "sw-fast");
+            // thread, so filter quality is traded for the throughput a preview
+            // needs — by default the same trade mpv's "sw-fast" profile makes.
+            // Set option by option rather than as a profile so Preferences can
+            // move between the two at runtime; a profile only applies one way.
+            active_quality = AppSettings.get_default ().preview_quality;
+            apply_preview_quality_options (active_quality, false);
             // How far ahead of a frame's display time mpv prepares it, before
             // blocking inside mpv_render_context_render () until that time
             // arrives. That wait is paid by whoever calls render — here the GTK
@@ -575,10 +706,11 @@ public class MpvBackend : Object {
      * The hwdec mode the current preference asks for.
      *
      * "-copy" is not optional — the software renderer needs frames in system
-     * memory, so a plain GPU-surface mode would render nothing.
+     * memory, so a plain GPU-surface mode would render nothing. Every value
+     * HwdecMode can produce satisfies that; see HwdecMode.to_mpv_option.
      */
     private static string wanted_hwdec () {
-        return AppSettings.get_default ().hardware_decoding ? "auto-copy-safe" : "no";
+        return AppSettings.get_default ().hwdec_mode.to_mpv_option ();
     }
 
     private static bool c_numeric_locale_set = false;
@@ -599,6 +731,28 @@ public class MpvBackend : Object {
         c_numeric_locale_set = true;
         Intl.setlocale (LocaleCategory.NUMERIC, "C");
     }
+
+    /**
+     * Push a quality mode's scaler settings into mpv.
+     *
+     * @param live false before mpv_initialize (), when only options can be set;
+     *             true for an open player, where the same names are properties
+     *             and the next converted frame picks them up.
+     */
+    private void apply_preview_quality_options (PreviewQuality quality, bool live) {
+        string[] pairs = quality.to_mpv_options ();
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            if (live) {
+                if (handle != null)
+                    handle.set_property_string (pairs[i], pairs[i + 1]);
+            } else {
+                set_option (pairs[i], pairs[i + 1]);
+            }
+        }
+    }
+
+    private PreviewQuality active_quality = PreviewQuality.FAST;
+    private PreviewCacheSize active_cache_size = PreviewCacheSize.SMALL;
 
     private void set_option (string name, string value) {
         if (handle == null) return;
@@ -789,14 +943,25 @@ public class MpvBackend : Object {
         while (handle != null) {
             int end_file_reason = -1;
             int end_file_error = 0;
+            string? log_prefix;
+            string? log_text;
             int event_id = Mpv.next_event (handle,
                                            out end_file_reason,
-                                           out end_file_error);
+                                           out end_file_error,
+                                           out log_prefix,
+                                           out log_text);
 
             if (event_id == Mpv.EVENT_NONE)
                 return;
 
-            if (event_id == Mpv.EVENT_FILE_LOADED) {
+
+            if (event_id == Mpv.EVENT_LOG_MESSAGE) {
+                on_log_message (log_prefix, log_text);
+            } else if (event_id == Mpv.EVENT_PROPERTY_CHANGE) {
+                // Only "hwdec-current" is observed, so the event needs no
+                // further identification.
+                report_active_decoder ();
+            } else if (event_id == Mpv.EVENT_FILE_LOADED) {
                 on_file_loaded ();
             } else if (event_id == Mpv.EVENT_VIDEO_RECONFIG) {
                 on_video_reconfig ();
@@ -896,6 +1061,17 @@ public class MpvBackend : Object {
 
     private void on_video_reconfig () {
         refresh_video_size ();
+
+        // Deliberately does NOT read the decoder back here. A reconfig is the
+        // announcement that it is being rebuilt, not that it is ready, so
+        // "hwdec-current" is still empty — the observer on that property is
+        // what reports it, once it has settled.
+        //
+        // Deliberately does NOT stop log capture. mpv hands log messages to a
+        // client only while it is already draining real events, so disabling
+        // the buffer from inside that drain throws away everything not yet
+        // read — including the device line, which arrives before this. The
+        // bound lives on a timer instead; see start_log_capture.
 
         if (load_announced) {
             video_size_changed ();
@@ -1054,9 +1230,138 @@ public class MpvBackend : Object {
     private void report_active_decoder () {
         if (handle == null || !with_video) return;
 
-        string current = handle.get_property_string ("hwdec-current") ?? "unknown";
+        // Empty while the decoder is reinitialising, which a live hwdec change
+        // makes it do: mpv fires several reconfigs before "hwdec-current"
+        // settles, and reads taken during them come back null. Publishing that
+        // would replace a correct reading with "unknown" — and since the
+        // settled value arrives without another reconfig, it would stay wrong.
+        // Wait for the property notification instead; it is what tells us the
+        // value is worth reading.
+        string? current = handle.get_property_string ("hwdec-current");
+        if (current == null || current.strip () == "") return;
+
+        if (current == published_hwdec) return;
+
+        published_hwdec = current;
         debug ("MpvBackend: decoding via %s", current);
+        MpvStatus.get_default ().publish_active_hwdec (current);
     }
+
+    /**
+     * Watch mpv's log for the line where the decoder names the GPU it opened.
+     *
+     * This is not available any other way: "hwdec-interop" and
+     * "current-gpu-context" both belong to vo=gpu and read "(unavailable)"
+     * under the software render API, and the decoder never reports the device
+     * as a property. The log is where it appears, so the log is what is read.
+     *
+     * Only two shapes are recognised, both observed directly from ffmpeg:
+     *
+     *   Vulkan: Device 0 selected: AMD Radeon RX 9070 XT (RADV GFX1201) (discrete) (0x7550)
+     *   VAAPI: VAAPI driver: Intel iHD driver for Intel(R) Gen Graphics - 26.1.5 ().
+     *
+     * Anything else — NVDEC, CUDA, AMF, or a driver that words itself
+     * differently — leaves the GPU unreported rather than guessed at. A blank
+     * field is honest; a wrong device name is worse than none, particularly on
+     * the hybrid machines where the question is actually interesting.
+     */
+    private void on_log_message (string? prefix, string? text) {
+        if (text == null || prefix != "ffmpeg") return;
+
+        string? gpu = parse_gpu_from_log (text);
+        if (gpu == null) return;
+
+        MpvStatus.get_default ().publish_active_gpu (gpu);
+        debug ("MpvBackend: decoding on %s", gpu);
+
+        // The device is named once per decoder init, so once it has been read
+        // there is nothing left to watch for and the stream can go quiet. This
+        // matters: the level needed to see these lines is "debug", which mpv
+        // otherwise emits for every frame.
+        stop_log_capture ();
+    }
+
+    internal static string? parse_gpu_from_log (string text) {
+        const string VULKAN_MARK = "Device ";
+        const string VULKAN_SEL  = " selected: ";
+        const string VAAPI_MARK  = "VAAPI driver: ";
+
+        if (text.has_prefix ("Vulkan: ") && VULKAN_MARK in text) {
+            int at = text.index_of (VULKAN_SEL);
+            if (at < 0) return null;
+
+            string name = text.substring (at + VULKAN_SEL.length).strip ();
+            // Trailing "(discrete) (0x7550)" is device class and PCI id, both
+            // noise next to the name itself.
+            int paren = name.index_of (" (discrete)");
+            if (paren < 0) paren = name.index_of (" (integrated)");
+            if (paren > 0) name = name.substring (0, paren);
+            return name.strip () == "" ? null : name.strip ();
+        }
+
+        if (VAAPI_MARK in text) {
+            int at = text.index_of (VAAPI_MARK);
+            string name = text.substring (at + VAAPI_MARK.length).strip ();
+            // Drops the " - 26.1.5 ()." version tail: it dates the driver, not
+            // the hardware, and changes on every package update.
+            int dash = name.index_of (" - ");
+            if (dash > 0) name = name.substring (0, dash);
+            return name.strip () == "" ? null : name.strip ();
+        }
+
+        return null;
+    }
+
+    private void start_log_capture () {
+        if (handle == null || !with_video) return;
+
+        log_capture_active = true;
+        Mpv.request_log_messages (handle, "debug");
+
+        // Bound the cost. "debug" is the only level that carries the device
+        // line, and it is also per-frame chatter, so it must not stay on for
+        // the whole session when nothing is ever recognised — software
+        // decoding, or a driver whose wording is not one of the two known
+        // shapes. A timer rather than an event: every event handler runs
+        // inside drain_events (), and disabling the buffer from there discards
+        // messages not yet read. One shot, so it cannot become a poll.
+        stop_log_deadline ();
+        log_deadline_id = Timeout.add_seconds (LOG_CAPTURE_DEADLINE_S, () => {
+            log_deadline_id = 0;
+            stop_log_capture ();
+            return Source.REMOVE;
+        });
+    }
+
+    private void stop_log_capture () {
+        stop_log_deadline ();
+        if (!log_capture_active) return;
+
+        log_capture_active = false;
+        if (handle != null) {
+            Mpv.request_log_messages (handle, "no");
+        }
+    }
+
+    private void stop_log_deadline () {
+        if (log_deadline_id != 0) {
+            Source.remove (log_deadline_id);
+            log_deadline_id = 0;
+        }
+    }
+
+    private bool log_capture_active = false;
+    private uint log_deadline_id = 0;
+
+    /**
+     * The last value handed to MpvStatus, so a re-read that changed nothing
+     * neither logs nor notifies.
+     *
+     * VIDEO_RECONFIG fires several times over the few milliseconds after a load
+     * or an hwdec change — see the settle logic in refresh_video_size () — and
+     * every one of them re-reads the decoder.
+     */
+    private string? published_hwdec = null;
 
     private void refresh_video_size () {
         if (handle == null || !with_video) return;

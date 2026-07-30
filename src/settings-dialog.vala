@@ -60,7 +60,18 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow generate_collage_thumbnail_switch;
     private Adw.SwitchRow play_with_ffplay_switch;
-    private Adw.SwitchRow hardware_decoding_switch;
+    private Adw.ComboRow hwdec_combo;
+    private Adw.ActionRow hwdec_status_row;
+    private Adw.ComboRow preview_quality_combo;
+    private bool loading_preview_quality = false;
+    private Adw.ComboRow preview_cache_combo;
+    private bool loading_preview_cache = false;
+    // MpvStatus outlives this dialog, so the handler it holds must be released
+    // explicitly or the next status change calls into a destroyed dialog.
+    private ulong hwdec_status_handler = 0;
+    private ulong gpu_status_handler = 0;
+    // set_selected () during load must not be mistaken for the user choosing.
+    private bool loading_hwdec_mode = false;
     private Adw.SwitchRow recently_opened_switch;
     private Adw.SwitchRow verify_unknown_audio_copy_switch;
     private Adw.SwitchRow show_bit_depth_warning_dialog_switch;
@@ -77,10 +88,21 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private string update_release_url = ProjectUrls.RELEASES;
 
     // ── Smart Optimizer ────────────────────────────────────────────────────────
+    // Same order and meaning as BaseCodecTab's QUALITY_INTENT_LABELS — the
+    // stored value is that dropdown's index, so the two must stay aligned.
+    // Worded for the global control: "Target Size" here means every tab's.
+    private const string[] QUALITY_CEILING_LABELS = {
+        "Off — use Target Size",
+        "Low — acceptable (maximum VMAF 88)",
+        "Medium — good (maximum VMAF 92)",
+        "High — visually near-transparent (maximum VMAF 95)",
+        "Ultra — archival (maximum VMAF 97)"
+    };
     private SpinButton target_mb_spin;
     private Adw.SwitchRow auto_convert_switch;
     private Adw.SwitchRow strip_audio_switch;
     private Adw.SwitchRow match_source_size_switch;
+    private Adw.ComboRow quality_ceiling_row;
     private Adw.PreferencesGroup target_size_group;
     private Adw.PreferencesGroup target_presets_group;
 
@@ -106,10 +128,17 @@ public class SettingsDialog : Adw.PreferencesDialog {
         set_title ("Preferences");
         set_search_enabled (false);
 
+        // Five pages no longer fit the header switcher at libadwaita's default
+        // 640px, and it silently falls back to a bottom switcher bar. Widening
+        // keeps the tabs in the header where the other four always were; the
+        // dialog still shrinks below this on small displays.
+        set_content_width (760);
+
         inject_settings_css ();
 
-        // Tab order: General → Output → Binaries → Smart Optimizer
+        // Tab order: General → Player → Output → Binaries → Smart Optimizer
         add (build_general_page ());
+        add (build_player_page ());
         add (build_output_page ());
         add (build_binaries_page ());
         add (build_smart_optimizer_page ());
@@ -122,8 +151,36 @@ public class SettingsDialog : Adw.PreferencesDialog {
             cancel_validation (ffprobe_validation);
             cancel_validation (ffplay_validation);
             cancel_update_check ();
+
+            disconnect_status_handlers ();
             save_to_settings ();
         });
+    }
+
+    /**
+     * Release the handlers MpvStatus holds on this dialog.
+     *
+     * MpvStatus is a process-lifetime singleton, so a handler left connected
+     * calls into a destroyed dialog the next time a preview reports its
+     * decoder. Idempotent, and run from both "closed" and dispose (): closing
+     * covers the ordinary path, and dispose () covers any teardown that never
+     * emits "closed" — the parent window being destroyed with the dialog still
+     * up, say.
+     */
+    private void disconnect_status_handlers () {
+        if (hwdec_status_handler != 0) {
+            MpvStatus.get_default ().disconnect (hwdec_status_handler);
+            hwdec_status_handler = 0;
+        }
+        if (gpu_status_handler != 0) {
+            MpvStatus.get_default ().disconnect (gpu_status_handler);
+            gpu_status_handler = 0;
+        }
+    }
+
+    public override void dispose () {
+        disconnect_status_handlers ();
+        base.dispose ();
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -276,39 +333,6 @@ public class SettingsDialog : Adw.PreferencesDialog {
         );
         generated_outputs_group.add (generate_collage_thumbnail_switch);
         page.add (generated_outputs_group);
-
-        var playback_group = new Adw.PreferencesGroup ();
-        playback_group.set_title ("Playback");
-        playback_group.set_description (
-            "Choose how Playback menu actions open input and output videos."
-        );
-
-        play_with_ffplay_switch = new Adw.SwitchRow ();
-        play_with_ffplay_switch.set_title ("Play with ffplay");
-        play_with_ffplay_switch.set_subtitle (
-            "Off uses your desktop's default video player. On uses the "
-            + "separately configured ffplay executable for input and output"
-        );
-        playback_group.add (play_with_ffplay_switch);
-        page.add (playback_group);
-
-        // Separate from Playback above: that group governs the external player
-        // launched from the Playback menu, this one the embedded preview.
-        var preview_group = new Adw.PreferencesGroup ();
-        preview_group.set_title ("Preview Player");
-        preview_group.set_description (
-            "Settings for the video and audio previews shown in Crop & Trim and the Audio tab."
-        );
-
-        hardware_decoding_switch = new Adw.SwitchRow ();
-        hardware_decoding_switch.set_title ("Hardware Decoding");
-        hardware_decoding_switch.set_subtitle (
-            "Let the GPU decode preview video where it can, falling back to the "
-            + "CPU otherwise. Uses less memory and helps most on slower processors. "
-            + "Turn off if previews show corrupt or missing frames"
-        );
-        preview_group.add (hardware_decoding_switch);
-        page.add (preview_group);
 
         var history_group = new Adw.PreferencesGroup ();
         history_group.set_title ("Recent Files");
@@ -588,7 +612,276 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 2 — FFmpeg Binaries
+    //  PAGE 2 — Player
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private Adw.PreferencesPage build_player_page () {
+        var page = new Adw.PreferencesPage ();
+        page.set_title ("Player");
+        page.set_icon_name ("media-playback-start-symbolic");
+
+        var playback_group = new Adw.PreferencesGroup ();
+        playback_group.set_title ("Playback");
+        playback_group.set_description (
+            "Choose how Playback menu actions open input and output videos."
+        );
+
+        play_with_ffplay_switch = new Adw.SwitchRow ();
+        play_with_ffplay_switch.set_title ("Play with ffplay");
+        play_with_ffplay_switch.set_subtitle (
+            "Off uses your desktop's default video player. On uses the "
+            + "separately configured ffplay executable for input and output"
+        );
+        playback_group.add (play_with_ffplay_switch);
+        page.add (playback_group);
+
+        // Separate from Playback above: that group governs the external player
+        // launched from the Playback menu, this one the embedded preview.
+        var preview_group = new Adw.PreferencesGroup ();
+        preview_group.set_title ("Preview Player");
+        preview_group.set_description (
+            "Settings for the video and audio previews shown in Crop & Trim and the Audio tab."
+        );
+
+        hwdec_combo = new Adw.ComboRow ();
+        hwdec_combo.set_title ("Hardware Decoding");
+
+        // See the note in BaseCodecTab.add_smart_optimizer_rows: a named const
+        // string[] is not NULL-terminated, so gtk_string_list_new () reads past
+        // the end. Building the list by known length avoids that.
+        var hwdec_model = new Gtk.StringList (null);
+        foreach (HwdecMode mode in HwdecMode.all ()) {
+            hwdec_model.append (mode.get_label ());
+        }
+        hwdec_combo.set_model (hwdec_model);
+        hwdec_combo.notify["selected"].connect (on_hwdec_mode_changed);
+        preview_group.add (hwdec_combo);
+
+        // mpv silently decodes in software when it cannot honour the requested
+        // decoder, so this reports what actually happened rather than letting
+        // the selection speak for itself.
+        //
+        // A row of its own rather than more of the combo's subtitle: the row
+        // splits its width between the text and the selected value, and a
+        // two-line subtitle leaves so little for the value that "Automatic
+        // (recommended)" ellipsises to "Automatic (re…". Same shape as the
+        // filename Preview row above.
+        hwdec_status_row = new Adw.ActionRow ();
+        hwdec_status_row.set_title ("Decoder In Use");
+        preview_group.add (hwdec_status_row);
+
+        hwdec_status_handler = MpvStatus.get_default ()
+            .notify["active-hwdec"].connect (update_hwdec_subtitle);
+        gpu_status_handler = MpvStatus.get_default ()
+            .notify["active-gpu"].connect (update_hwdec_subtitle);
+        update_hwdec_subtitle ();
+
+        preview_quality_combo = new Adw.ComboRow ();
+        preview_quality_combo.set_title ("Image Quality");
+
+        var quality_model = new Gtk.StringList (null);
+        foreach (PreviewQuality quality in PreviewQuality.all ()) {
+            quality_model.append (quality.get_label ());
+        }
+        preview_quality_combo.set_model (quality_model);
+        preview_quality_combo.notify["selected"].connect (
+            on_preview_quality_changed);
+        preview_group.add (preview_quality_combo);
+
+        preview_cache_combo = new Adw.ComboRow ();
+        preview_cache_combo.set_title ("Read-Ahead Buffer");
+
+        var cache_model = new Gtk.StringList (null);
+        foreach (PreviewCacheSize size in PreviewCacheSize.all ()) {
+            cache_model.append (size.get_label ());
+        }
+        preview_cache_combo.set_model (cache_model);
+        preview_cache_combo.notify["selected"].connect (
+            on_preview_cache_changed);
+        preview_group.add (preview_cache_combo);
+
+        page.add (preview_group);
+
+        return page;
+    }
+
+    private static PreviewQuality index_to_preview_quality (uint idx) {
+        PreviewQuality[] modes = PreviewQuality.all ();
+        return idx < modes.length ? modes[idx] : PreviewQuality.FAST;
+    }
+
+    private static uint preview_quality_to_index (PreviewQuality quality) {
+        PreviewQuality[] modes = PreviewQuality.all ();
+        for (uint i = 0; i < modes.length; i++) {
+            if (modes[i] == quality) return i;
+        }
+        return 0;
+    }
+
+    /** Applied immediately, for the same reason the decoder mode is. */
+    private void on_preview_quality_changed () {
+        PreviewQuality quality =
+            index_to_preview_quality (preview_quality_combo.get_selected ());
+        preview_quality_combo.set_subtitle (quality.get_description ());
+
+        if (loading_preview_quality) return;
+
+        var s = AppSettings.get_default ();
+        if (s.preview_quality == quality) return;
+
+        s.preview_quality = quality;
+        s.save ();
+    }
+
+    /**
+     * The CPU's own name, for when nothing else is doing the decoding.
+     *
+     * Read once and cached: it cannot change while the process runs, and this
+     * is called again on every status change. "model name" is how x86 spells
+     * it in /proc/cpuinfo — one line per logical CPU, all identical, so the
+     * first is enough. Other architectures word the file differently, and a
+     * miss returns null so the caller can omit the field rather than guess.
+     */
+    private static string? cpu_model = null;
+    private static bool cpu_model_read = false;
+
+    private static string? get_cpu_model () {
+        if (cpu_model_read) return cpu_model;
+        cpu_model_read = true;
+
+        string contents;
+        try {
+            if (!FileUtils.get_contents ("/proc/cpuinfo", out contents))
+                return null;
+        } catch (FileError e) {
+            debug ("SettingsDialog: could not read /proc/cpuinfo: %s", e.message);
+            return null;
+        }
+
+        foreach (string line in contents.split ("\n")) {
+            if (!line.has_prefix ("model name")) continue;
+
+            int colon = line.index_of (":");
+            if (colon < 0) continue;
+
+            string name = line.substring (colon + 1).strip ();
+            if (name != "") cpu_model = name;
+            break;
+        }
+
+        return cpu_model;
+    }
+
+    private static PreviewCacheSize index_to_preview_cache (uint idx) {
+        PreviewCacheSize[] sizes = PreviewCacheSize.all ();
+        return idx < sizes.length ? sizes[idx] : PreviewCacheSize.SMALL;
+    }
+
+    private static uint preview_cache_to_index (PreviewCacheSize size) {
+        PreviewCacheSize[] sizes = PreviewCacheSize.all ();
+        for (uint i = 0; i < sizes.length; i++) {
+            if (sizes[i] == size) return i;
+        }
+        return 0;
+    }
+
+    /** Applied immediately, for the same reason the decoder mode is. */
+    private void on_preview_cache_changed () {
+        PreviewCacheSize size =
+            index_to_preview_cache (preview_cache_combo.get_selected ());
+        preview_cache_combo.set_subtitle (size.get_description ());
+
+        if (loading_preview_cache) return;
+
+        var s = AppSettings.get_default ();
+        if (s.preview_cache_size == size) return;
+
+        s.preview_cache_size = size;
+        s.save ();
+    }
+
+    private static HwdecMode index_to_hwdec_mode (uint idx) {
+        HwdecMode[] modes = HwdecMode.all ();
+        return idx < modes.length ? modes[idx] : HwdecMode.AUTOMATIC;
+    }
+
+    private static uint hwdec_mode_to_index (HwdecMode mode) {
+        HwdecMode[] modes = HwdecMode.all ();
+        for (uint i = 0; i < modes.length; i++) {
+            if (modes[i] == mode) return i;
+        }
+        return 0;
+    }
+
+    /**
+     * Applied immediately rather than when the dialog closes.
+     *
+     * mpv honours a runtime "hwdec" change by reinitialising its decoder, so an
+     * open preview picks the new one up without losing its position — and the
+     * subtitle below can only report what was actually chosen if the choice has
+     * actually been made. Waiting for close would leave the row describing the
+     * previous decoder for as long as the user looks at it.
+     */
+    private void on_hwdec_mode_changed () {
+        update_hwdec_subtitle ();
+
+        if (loading_hwdec_mode) return;
+
+        var s = AppSettings.get_default ();
+        HwdecMode mode = index_to_hwdec_mode (hwdec_combo.get_selected ());
+        if (s.hwdec_mode == mode) return;
+
+        s.hwdec_mode = mode;
+        s.save ();
+    }
+
+    private void update_hwdec_subtitle () {
+        if (hwdec_combo == null || hwdec_status_row == null) return;
+
+        HwdecMode mode = index_to_hwdec_mode (hwdec_combo.get_selected ());
+        hwdec_combo.set_subtitle (mode.get_description ());
+
+        // Adw.ActionRow parses its subtitle as Pango markup, so a bare
+        // ampersand renders the whole line as nothing at all. Keep these free
+        // of markup characters, and escape the one part that comes from mpv.
+        string? active = MpvStatus.get_default ().active_hwdec;
+        string status;
+        if (active == null) {
+            status = "Shown once a preview is open";
+        } else if (active == "unknown") {
+            status = "Could not be read from the player";
+        } else if (active == "no") {
+            // Software decoding still runs somewhere, so name it — the row
+            // reads as a dead end otherwise. Left out entirely when the CPU
+            // cannot be identified, rather than padded with "unknown".
+            string? cpu = get_cpu_model ();
+            string on_cpu = cpu == null ? "" : " on " + Markup.escape_text (cpu);
+
+            // Asking for software and getting it is not a failure worth
+            // reporting as one; asking for a decoder and getting software is.
+            status = mode == HwdecMode.OFF
+                ? "Software decoding" + on_cpu
+                : "Software decoding" + on_cpu
+                  + " — no hardware decoder was available";
+        } else {
+            status = Markup.escape_text (active);
+
+            // Named separately from the decoder because the two do not follow
+            // from each other: on a machine with both an integrated and a
+            // discrete GPU, VAAPI and Vulkan routinely open different ones.
+            // Absent for any driver whose wording MpvBackend cannot parse, so
+            // this appends rather than assuming it is there.
+            string? gpu = MpvStatus.get_default ().active_gpu;
+            if (gpu != null) {
+                status += " on " + Markup.escape_text (gpu);
+            }
+        }
+
+        hwdec_status_row.set_subtitle (status);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  PAGE 3 — FFmpeg Binaries
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_binaries_page () {
@@ -1230,7 +1523,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 3 — Output
+    //  PAGE 4 — Output
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_output_page () {
@@ -1317,7 +1610,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  PAGE 4 — Smart Optimizer
+    //  PAGE 5 — Smart Optimizer
     // ═════════════════════════════════════════════════════════════════════════
 
     private Adw.PreferencesPage build_smart_optimizer_page () {
@@ -1424,6 +1717,22 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var behavior_group = new Adw.PreferencesGroup ();
         behavior_group.set_title ("Behavior");
 
+        // Mirrors the per-tab control exactly, including "Off". Anything
+        // other than Off pins quality and lets size float, so this is the
+        // global form of "enable the quality ceiling".
+        quality_ceiling_row = new Adw.ComboRow ();
+        quality_ceiling_row.set_title ("Quality Ceiling");
+        quality_ceiling_row.set_subtitle (
+            "Sets every codec tab; each tab can still be changed. " +
+            "Anything but Off pins quality and lets file size follow.");
+        // See the note in BaseCodecTab.add_smart_optimizer_rows: a named const
+        // string[] is not NULL-terminated, so gtk_string_list_new() reads past
+        // the end. The helper appends by known length instead.
+        quality_ceiling_row.set_model (
+            CodecUtils.build_dropdown_string_list (QUALITY_CEILING_LABELS));
+        quality_ceiling_row.set_selected (0);
+        behavior_group.add (quality_ceiling_row);
+
         match_source_size_switch = new Adw.SwitchRow ();
         match_source_size_switch.set_title ("Match Source Size");
         match_source_size_switch.set_subtitle (
@@ -1485,7 +1794,23 @@ public class SettingsDialog : Adw.PreferencesDialog {
         overwrite_switch.set_active (s.overwrite_enabled);
         generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
         play_with_ffplay_switch.set_active (s.play_with_ffplay);
-        hardware_decoding_switch.set_active (s.hardware_decoding);
+        loading_hwdec_mode = true;
+        hwdec_combo.set_selected (hwdec_mode_to_index (s.hwdec_mode));
+        loading_hwdec_mode = false;
+
+        loading_preview_quality = true;
+        preview_quality_combo.set_selected (
+            preview_quality_to_index (s.preview_quality));
+        loading_preview_quality = false;
+        // set_selected () is silent when the index is already right, so the
+        // subtitle has to be seeded either way.
+        on_preview_quality_changed ();
+
+        loading_preview_cache = true;
+        preview_cache_combo.set_selected (
+            preview_cache_to_index (s.preview_cache_size));
+        loading_preview_cache = false;
+        on_preview_cache_changed ();
         recently_opened_switch.set_active (s.recently_opened_enabled);
         verify_unknown_audio_copy_switch.set_active (
             s.verify_unknown_audio_copy_preflight
@@ -1506,6 +1831,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         target_mb_spin.set_value (s.smart_optimizer_target_mb);
         match_source_size_switch.set_active (s.smart_optimizer_match_source_size);
+        quality_ceiling_row.set_selected ((uint) s.smart_optimizer_quality_ceiling);
         auto_convert_switch.set_active (s.smart_optimizer_auto_convert);
         strip_audio_switch.set_active (s.smart_optimizer_strip_audio);
 
@@ -1548,7 +1874,13 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
         s.play_with_ffplay = play_with_ffplay_switch.get_active ();
-        s.hardware_decoding = hardware_decoding_switch.get_active ();
+        // Already applied and saved the moment it changed; written again here
+        // only so this function remains a complete picture of the dialog.
+        s.hwdec_mode = index_to_hwdec_mode (hwdec_combo.get_selected ());
+        s.preview_quality =
+            index_to_preview_quality (preview_quality_combo.get_selected ());
+        s.preview_cache_size =
+            index_to_preview_cache (preview_cache_combo.get_selected ());
         s.recently_opened_enabled = recently_opened_switch.get_active ();
         s.verify_unknown_audio_copy_preflight =
             verify_unknown_audio_copy_switch.get_active ();
@@ -1557,6 +1889,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
 
         s.smart_optimizer_target_mb = (int) target_mb_spin.get_value ();
         s.smart_optimizer_match_source_size = match_source_size_switch.get_active ();
+        s.smart_optimizer_quality_ceiling = (int) quality_ceiling_row.get_selected ();
         s.smart_optimizer_auto_convert = auto_convert_switch.get_active ();
         s.smart_optimizer_strip_audio = strip_audio_switch.get_active ();
 

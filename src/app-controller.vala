@@ -135,6 +135,13 @@ public class AppController : Object {
 
         ffmpeg_runtime_capabilities = new FfmpegRuntimeCapabilities ();
         smart_optimizer = new SmartOptimizer (ffmpeg_runtime_capabilities);
+        // Connected here, not per run: this SmartOptimizer outlives every
+        // individual optimization, so connecting inside run_smart_optimizer()
+        // would stack a handler each time and repeat every line N times on
+        // the Nth run.
+        smart_optimizer.progress.connect ((line) => {
+            console_tab.add_line ("[Smart Optimizer] " + line);
+        });
         ffmpeg_runtime_capabilities.svt_crf_two_pass_changed.connect (
             apply_svt_crf_two_pass_capability);
 

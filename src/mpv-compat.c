@@ -228,12 +228,18 @@ fcg_mpv_get_property_string (mpv_handle *h, const char *name)
 int
 fcg_mpv_next_event (mpv_handle *h,
                     int *out_end_file_reason,
-                    int *out_end_file_error)
+                    int *out_end_file_error,
+                    char **out_log_prefix,
+                    char **out_log_text)
 {
   if (out_end_file_reason)
     *out_end_file_reason = -1;
   if (out_end_file_error)
     *out_end_file_error = 0;
+  if (out_log_prefix)
+    *out_log_prefix = NULL;
+  if (out_log_text)
+    *out_log_text = NULL;
 
   /* Timeout 0: return immediately with MPV_EVENT_NONE if nothing is queued. */
   mpv_event *event = mpv_wait_event (h, 0.0);
@@ -247,6 +253,18 @@ fcg_mpv_next_event (mpv_handle *h,
         *out_end_file_reason = (int) end_file->reason;
       if (out_end_file_error)
         *out_end_file_error = end_file->error;
+    }
+  }
+
+  /* The event's strings belong to mpv and are only valid until the next
+     mpv_wait_event () on this handle, so hand back copies the caller owns. */
+  if (event->event_id == MPV_EVENT_LOG_MESSAGE) {
+    mpv_event_log_message *msg = (mpv_event_log_message *) event->data;
+    if (msg) {
+      if (out_log_prefix)
+        *out_log_prefix = g_strdup (msg->prefix ? msg->prefix : "");
+      if (out_log_text)
+        *out_log_text = g_strdup (msg->text ? msg->text : "");
     }
   }
 

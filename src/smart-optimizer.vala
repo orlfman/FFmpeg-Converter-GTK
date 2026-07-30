@@ -293,6 +293,47 @@ public class SmartOptimizer : GLib.Object {
             ?? new FfmpegRuntimeCapabilities ();
     }
 
+    /**
+     * One human-readable analysis line, emitted as the run progresses.
+     *
+     * Quality Mode spends minutes inside a single call while the console shows
+     * nothing, so the probe measurements are streamed as they land. They are
+     * also the only place they appear at all: build_quality_notes() reports
+     * probing in aggregate ("3 point(s) reused"), never the individual points
+     * the curve is fitted from.
+     *
+     * The line carries no prefix. Callers own that, because the trim path
+     * needs to attribute each line to a segment.
+     */
+    public signal void progress (string line);
+
+    /**
+     * Size Mode's probe line. There is no VMAF here — size IS the measurement,
+     * so the projected size is the whole result.
+     */
+    private void emit_size_probe (int crf, double size_kib, bool from_cache,
+                                  double seconds) {
+        if (from_cache) {
+            progress ("CRF %d → %.1f MiB projected  (cached)".printf (
+                crf, size_kib / 1024.0));
+            return;
+        }
+        progress ("CRF %d → %.1f MiB projected  (%.0fs)".printf (
+            crf, size_kib / 1024.0, seconds));
+    }
+
+    /** One measured or reused probe, in the shared format. */
+    private void emit_probe (int crf, double vmaf, double size_kib,
+                             bool from_cache, double seconds) {
+        if (from_cache) {
+            progress ("CRF %d → VMAF %.2f, %.1f MiB projected  (cached)".printf (
+                crf, vmaf, size_kib / 1024.0));
+            return;
+        }
+        progress ("CRF %d → VMAF %.2f, %.1f MiB projected  (%.0fs)".printf (
+            crf, vmaf, size_kib / 1024.0, seconds));
+    }
+
     /** Fail before any video probing or temporary-file work when VMAF is absent. */
     private async void require_vmaf (Cancellable? cancellable) throws Error {
         var probe_cancel = cancellable ?? new Cancellable ();
@@ -670,6 +711,13 @@ public class SmartOptimizer : GLib.Object {
                     + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning),
                 watermark_cache_identity (ctx.image_watermark));
 
+            // Frames the probe lines that follow: what is being solved for,
+            // with which encoder, over how much material.
+            progress (("Solving %s for a %d MB target (%.1f MiB for video) "
+                + "over %.0fs").printf (
+                    preferred_codec.up (), target_mb,
+                    budget.video_target_kib / 1024.0, tw.encode_duration));
+
             // ── 6/7. Calibration, fit, solve, adaptive refinement ───────
             SmartOptimizerLogic.CalibrationModel model;
             try {
@@ -692,6 +740,19 @@ public class SmartOptimizer : GLib.Object {
                 preset_idx, bit_depth.pix_fmt, budget.video_target_kib,
                 extrapolation_weight, cache, intermediate,
                 temp_run_dir, cancellable);
+
+            if (verification.done) {
+                // The correction ratio is what the model got wrong; surfacing
+                // it here explains a final estimate that differs from the
+                // fitted curve above.
+                progress (("Verified CRF %d: %.1f MiB actual vs %.1f MiB "
+                    + "modelled (x%.3f)%s").printf (
+                        verification.verified_crf,
+                        verification.actual_kib / 1024.0,
+                        verification.model_kib / 1024.0,
+                        verification.correction,
+                        verification.reused ? " (reused)" : ""));
+            }
 
             // Persist this run's fresh measurements for future runs.
             if (cache != null)
@@ -747,6 +808,17 @@ public class SmartOptimizer : GLib.Object {
                 conf.confidence, model.crf_at_max, tw.trim_active,
                 conf.source_total_kbps, tw.encode_duration,
                 info.file_size_bytes, conf.sample_coverage, profile);
+            progress (("Fitted CRF %d — estimated %.1f MiB total, "
+                + "confidence %.0f%%").printf (
+                    model.predicted_crf, estimated_total_kib / 1024.0,
+                    conf.confidence * 100.0));
+            if (policy.recommend_two_pass) {
+                // Explains a switch that changes both the command and the
+                // runtime, and which the CRF probes above do not predict.
+                progress (("Switching to two-pass at %d kbps — CRF alone does "
+                    + "not land inside this target").printf (
+                        policy.target_video_kbps));
+            }
             var final_size = SmartOptimizerLogic.assess_final_size (
                 preferred_codec, budget.target_total_kib,
                 policy.target_video_kbps, tw.encode_duration,
@@ -1048,6 +1120,14 @@ public class SmartOptimizer : GLib.Object {
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
                 preferred_codec, intent);
+            // Frames every probe line that follows: what is being solved for,
+            // with which encoder, over how much material.
+            // "starting with": saturation recovery and bracket refinement can
+            // both add probes beyond this ladder.
+            progress (("Solving %s for the %s ceiling (VMAF %.0f) — starting "
+                + "with %d probes over %.0fs").printf (
+                    preferred_codec.up (), intent.to_label (),
+                    target.target_vmaf, crfs.length, tw.encode_duration));
             double[] vmafs = {};
             double[] sizes = {};
             int[] measured_crfs = {};
@@ -1058,6 +1138,7 @@ public class SmartOptimizer : GLib.Object {
                     double c_size = 0.0, c_vmaf = 0.0;
                     if (qcache != null
                             && qcache.lookup_with_vmaf (crf, out c_size, out c_vmaf)) {
+                        emit_probe (crf, c_vmaf, c_size, true, 0.0);
                         measured_crfs += crf;
                         vmafs += c_vmaf;
                         sizes += c_size;
@@ -1138,6 +1219,12 @@ public class SmartOptimizer : GLib.Object {
                             next_crf, m.vmaf, m.size_kib);
                         if (m.from_cache)
                             cached_points++;
+                        if (!refined) {
+                            // Explains a run that suddenly takes far longer
+                            // than its probe count suggested.
+                            progress ("Ladder saturated — searching upward for "
+                                + "an encode at or below the ceiling");
+                        }
                         refined = true;
                         if (m.vmaf <= target.target_vmaf) {
                             below_crf = next_crf;
@@ -1301,11 +1388,14 @@ public class SmartOptimizer : GLib.Object {
                 int[] extra_crfs = SmartOptimizerLogic.pick_adaptive_calibration_crfs (
                     m0.predicted_crf, measured_crfs, crf_min_r, crf_max_r,
                     measured_crfs.length + 1);      // one follow-up probe
+                progress (("Answer CRF %d sits outside the probed bracket — "
+                    + "re-probing closer to it").printf (m0.predicted_crf));
                 try {
                     foreach (int crf in extra_crfs) {
                         double rc_size = 0.0, rc_vmaf = 0.0;
                         if (qcache != null
                                 && qcache.lookup_with_vmaf (crf, out rc_size, out rc_vmaf)) {
+                            emit_probe (crf, rc_vmaf, rc_size, true, 0.0);
                             measured_crfs += crf;
                             vmafs += rc_vmaf;
                             sizes += rc_size;
@@ -1477,16 +1567,28 @@ public class SmartOptimizer : GLib.Object {
                     target, verification.measured_vmaf, final_crf, verify_crf_max);
                 if (ceiling_decision
                         == SmartOptimizerLogic.QualityCeilingDecision.RAISE_CRF) {
+                    // Explains an answer that keeps moving after it looked settled.
+                    progress (("Verified CRF %d: VMAF %.2f is above the %.0f "
+                        + "ceiling — raising to CRF %d").printf (
+                            final_crf, verification.measured_vmaf,
+                            target.target_vmaf, final_crf + 1));
                     final_crf++;
                     verification.ceiling_corrections++;
                     continue;
                 }
+                progress ("Verified CRF %d: VMAF %.2f (predicted %.2f, %+.2f)".printf (
+                    final_crf, verification.measured_vmaf,
+                    verification.predicted_vmaf, verification.delta));
                 if (ceiling_decision
                         == SmartOptimizerLogic.QualityCeilingDecision.CODEC_LIMIT) {
                     verification.ceiling_unreachable = true;
+                    progress (("Codec minimum reached — VMAF %.2f is the closest "
+                        + "this source can get below the %.0f ceiling").printf (
+                            verification.measured_vmaf, target.target_vmaf));
                 } else if (ceiling_decision == SmartOptimizerLogic
                         .QualityCeilingDecision.TEXT_PROTECTION_EXCEPTION) {
                     verification.text_protection_exception = true;
+                    progress ("Kept above the ceiling to protect screen-text legibility");
                 }
                 break;
             }
@@ -2314,6 +2416,7 @@ public class SmartOptimizer : GLib.Object {
             if (cache != null && cache.lookup (base_crfs[ci], out cached_size)
                     && cached_size > 0) {
                 base_sizes[ci] = cached_size;
+                emit_size_probe (base_crfs[ci], cached_size, true, 0.0);
                 model.cached_points++;
             } else {
                 missing_crfs += base_crfs[ci];
@@ -2414,6 +2517,10 @@ public class SmartOptimizer : GLib.Object {
         if (extra_crfs.length > 0) {
             int[] cal_crfs = model.cal_crfs;
             double[] cal_sizes = model.cal_sizes;
+            // Mirrors Quality Mode's bracket-refinement notice: without it the
+            // extra probe lines below look like the ladder simply ran long.
+            progress (("Fitted CRF %d sits outside the probed ladder — "
+                + "re-probing closer to it").printf (model.predicted_crf));
 
             // Cached follow-up points join the fit for free.
             int[] fresh_extra_crfs = {};
@@ -2423,6 +2530,7 @@ public class SmartOptimizer : GLib.Object {
                         && cached_size > 0) {
                     SmartOptimizerLogic.append_calibration_sample (
                         ref cal_crfs, ref cal_sizes, extra_crfs[ci], cached_size);
+                    emit_size_probe (extra_crfs[ci], cached_size, true, 0.0);
                     model.cached_points++;
                     model.adaptive_points_added++;
                 } else {
@@ -3737,6 +3845,9 @@ public class SmartOptimizer : GLib.Object {
             int pending = batch;
             Error? failure = null;
             SourceFunc resume = run_calibration_batch.callback;
+            // Jobs in a batch are launched together, so one start stamp serves
+            // all of them. They finish out of order; each line names its CRF.
+            int64 batch_started_us = get_monotonic_time ();
 
             for (int i = 0; i < batch; i++) {
                 int slot = start + i;
@@ -3749,8 +3860,17 @@ public class SmartOptimizer : GLib.Object {
                     (obj, res) => {
                         try {
                             results[slot] = calibration_encode.end (res);
+                            if (results[slot] > 0) {
+                                emit_size_probe (crf, results[slot], false,
+                                    (get_monotonic_time () - batch_started_us)
+                                        / 1000000.0);
+                            }
                         } catch (Error e) {
                             results[slot] = 0.0;
+                            if (!(e is IOError.CANCELLED)) {
+                                progress ("CRF %d → encode failed, point discarded"
+                                    .printf (crf));
+                            }
                             // Keep the first failure, but cancellation
                             // always takes precedence for propagation.
                             if (failure == null
@@ -4223,6 +4343,7 @@ public class SmartOptimizer : GLib.Object {
         double cached_size = 0.0, cached_vmaf = 0.0;
         if (qcache != null
                 && qcache.lookup_with_vmaf (crf, out cached_size, out cached_vmaf)) {
+            emit_probe (crf, cached_vmaf, cached_size, true, 0.0);
             return new ProbeMeasurement () {
                 size_kib = cached_size,
                 vmaf = cached_vmaf,
@@ -4268,6 +4389,7 @@ public class SmartOptimizer : GLib.Object {
     ) throws Error {
         var m = new ProbeMeasurement ();
         string tmp = tmp_path ("qcal_%d".printf (crf), temp_run_dir);
+        int64 started_us = get_monotonic_time ();
 
         string[] cmd = build_intermediate_probe_cmd (
             intermediate_path, codec, crf, preset_idx, pix_fmt,
@@ -4306,6 +4428,13 @@ public class SmartOptimizer : GLib.Object {
         } catch (IOError.CANCELLED e) {
             cleanup_file (tmp);
             throw e;
+        }
+
+        if (m.vmaf_measured) {
+            emit_probe (crf, m.vmaf, m.size_kib, false,
+                (get_monotonic_time () - started_us) / 1000000.0);
+        } else {
+            progress ("CRF %d → measurement failed, point discarded".printf (crf));
         }
 
         cleanup_file (tmp);

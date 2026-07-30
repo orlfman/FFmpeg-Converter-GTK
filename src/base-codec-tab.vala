@@ -226,6 +226,10 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             owner.handle_auto_convert_settings_changed (auto_convert_row);
         }
 
+        public void on_settings_changed_for_quality_ceiling () {
+            owner.handle_quality_ceiling_settings_changed ();
+        }
+
         public void on_strip_audio_active_notify () {
             owner.handle_strip_audio_active_notify (strip_audio_row);
         }
@@ -295,6 +299,8 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         "Ultra — archival (maximum VMAF 97)"
     };
     private int last_synced_target_mb;
+    private int last_global_quality_ceiling =
+        AppSettings.get_default ().smart_optimizer_quality_ceiling;
     private ContainerDefaultMode last_synced_container_default_mode =
         ContainerDefaultMode.DEFAULT;
 
@@ -600,7 +606,11 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         // named constants are not. The helper appends by known length.
         quality_intent_row.set_model (
             CodecUtils.build_dropdown_string_list (QUALITY_INTENT_LABELS));
-        quality_intent_row.set_selected (0);
+        // Seeded from Preferences rather than hardcoded to Off, so a globally
+        // chosen ceiling survives a restart. The row stays sensitive — this
+        // tab can still disagree.
+        quality_intent_row.set_selected (
+            (uint) AppSettings.get_default ().smart_optimizer_quality_ceiling);
         quality_intent_row.notify["selected"].connect (() => {
             sync_quality_mode_sensitivity ();
         });
@@ -735,13 +745,19 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         AppSettings.get_default ().settings_changed.connect (
             binding.on_settings_changed_for_auto_convert);
 
+        AppSettings.get_default ().settings_changed.connect (
+            binding.on_settings_changed_for_quality_ceiling);
+
         strip_audio_row.notify["active"].connect (binding.on_strip_audio_active_notify);
 
         AppSettings.get_default ().settings_changed.connect (
             binding.on_settings_changed_for_strip_audio);
         group.add (strip_audio_row);
 
-        // Reflect the initial (size-mode) state onto the controls.
+        // Reflect the seeded state onto the controls. Load-bearing rather than
+        // belt-and-braces: the notify handler above is connected after the
+        // row is seeded from Preferences, so a globally pinned ceiling would
+        // otherwise leave the target controls live on the first show.
         sync_quality_mode_sensitivity ();
     }
 
@@ -772,6 +788,21 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         // Adopt the new default so the preference visibly does something,
         // while the row stays sensitive so this tab can disagree again.
         auto_convert_row.set_active (global_on);
+    }
+
+    internal void handle_quality_ceiling_settings_changed () {
+        if (quality_intent_row == null) return;
+        int global_value = AppSettings.get_default ().smart_optimizer_quality_ceiling;
+        // Only act when the DEFAULT itself moved. Any other preference save
+        // also lands here, and adopting the global value on those would wipe
+        // out a per-tab choice the user made deliberately.
+        if (global_value == last_global_quality_ceiling)
+            return;
+        last_global_quality_ceiling = global_value;
+        // Adopt the new default so the preference visibly does something,
+        // while the row stays sensitive so this tab can disagree again.
+        quality_intent_row.set_selected ((uint) global_value);
+        sync_quality_mode_sensitivity ();
     }
 
     internal void handle_match_source_size_active_notify () {

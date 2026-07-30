@@ -85,7 +85,13 @@ char *fcg_mpv_get_property_string (mpv_handle *h, const char *name);
  * *out_end_file_error receives mpv_event_end_file.error; otherwise they are
  * set to -1 and 0 respectively.  The event struct itself never escapes this
  * call, so the caller does not have to reason about its lifetime.
+ *
+ * For MPV_EVENT_LOG_MESSAGE, *out_log_prefix and *out_log_text receive newly
+ * allocated copies the caller owns; otherwise they are set to NULL.  Copies
+ * rather than borrows because mpv's strings die at the next mpv_wait_event ().
  */
 int fcg_mpv_next_event (mpv_handle *h,
                         int *out_end_file_reason,
-                        int *out_end_file_error);
+                        int *out_end_file_error,
+                        char **out_log_prefix,
+                        char **out_log_text);

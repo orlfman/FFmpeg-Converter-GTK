@@ -6318,6 +6318,47 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
     }
 }
 
+private void test_quality_ceiling_preference_persists () {
+    string? config_root = null;
+    try {
+        config_root = DirUtils.make_tmp ("quality-ceiling-setting-XXXXXX");
+
+        var settings = AppSettings.create_for_test (config_root);
+        assert_true (settings.smart_optimizer_quality_ceiling == 0,
+            "quality ceiling defaults to Off");
+
+        // 3 == High. Stored by name, so the on-disk value is "high".
+        settings.smart_optimizer_quality_ceiling = 3;
+        settings.save ();
+
+        var reloaded = AppSettings.create_for_test (config_root);
+        assert_true (reloaded.smart_optimizer_quality_ceiling == 3,
+            "a chosen quality ceiling survives reload");
+
+        // Out-of-range assignments clamp rather than corrupting the config,
+        // which would otherwise index past the dropdown model.
+        reloaded.smart_optimizer_quality_ceiling = 99;
+        assert_true (reloaded.smart_optimizer_quality_ceiling == 4,
+            "an out-of-range quality ceiling clamps to Ultra");
+        reloaded.smart_optimizer_quality_ceiling = -7;
+        assert_true (reloaded.smart_optimizer_quality_ceiling == 0,
+            "a negative quality ceiling clamps to Off");
+
+        reloaded.reset_to_defaults ();
+        var reset = AppSettings.create_for_test (config_root);
+        assert_true (reset.smart_optimizer_quality_ceiling == 0,
+            "reset restores the quality ceiling default");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create settings test directory: %s", e.message);
+    } finally {
+        if (config_root != null) {
+            cleanup_exec_test_dir (Path.build_filename (
+                config_root, "FFmpeg-Converter-GTK"));
+            DirUtils.remove (config_root);
+        }
+    }
+}
+
 private void test_bit_depth_warning_dialog_preference_persists () {
     string? config_root = null;
     try {
@@ -6388,6 +6429,8 @@ void main (string[] args) {
         test_recent_input_history_is_bounded_deduplicated_and_pruned);
     Test.add_func ("/app-settings/bit-depth-warning/dialog-preference-persists",
         test_bit_depth_warning_dialog_preference_persists);
+    Test.add_func ("/app-settings/smart-optimizer/quality-ceiling-persists",
+        test_quality_ceiling_preference_persists);
     Test.add_func ("/hamburger/recent-inputs/full-path-tooltip",
         test_recent_input_menu_item_exposes_full_path_tooltip);
     Test.add_func ("/combine/information/clears-stale-input-when-removed",
