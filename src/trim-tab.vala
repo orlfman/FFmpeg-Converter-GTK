@@ -233,6 +233,7 @@ public class TrimTab : Box, ICodecTab {
     private Switch smart_optimize_switch;
     private Adw.ActionRow smart_optimize_row;
     private SmartOptimizer? smart_optimizer = null;
+    private FfmpegRuntimeCapabilities? smart_runtime_capabilities = null;
     private Cancellable? smart_cancel = null;
 
     // ── Sections (for visibility toggling) ───────────────────────────────────
@@ -745,7 +746,10 @@ public class TrimTab : Box, ICodecTab {
                                                uint64 operation_id,
                                                TrimOutputConflictPolicy output_policy) {
         if (smart_optimizer == null) {
-            smart_optimizer = new SmartOptimizer ();
+            // Own the capability probe so the libvmaf pre-flight below and the
+            // optimizer's own require_vmaf() share one cache entry.
+            smart_runtime_capabilities = new FfmpegRuntimeCapabilities ();
+            smart_optimizer = new SmartOptimizer (smart_runtime_capabilities);
         }
 
         // Cancel any previous optimization
@@ -771,12 +775,71 @@ public class TrimTab : Box, ICodecTab {
             ? selected_codec_tab.get_target_mb ()
             : AppSettings.get_default ().smart_optimizer_target_mb;
 
+        // Quality Ceiling is set on the codec tab and is the same constraint
+        // whether the encode comes from the codec tab or from here — the two
+        // solvers are mutually exclusive, so honour whichever axis the user
+        // pinned instead of silently forcing the size target.
+        bool quality_mode = (selected_codec_tab != null)
+            && selected_codec_tab.get_quality_mode_active ();
+        var quality_intent = (selected_codec_tab != null)
+            ? selected_codec_tab.get_quality_intent ()
+            : SmartOptimizerLogic.QualityIntent.MEDIUM;
+
+        // User assertions about the output rather than size policy, so they
+        // apply to whichever solver runs. Read once, with the other analysis
+        // inputs, so every segment in a run is judged by the same settings.
+        ContentOverride content_override = (selected_codec_tab != null)
+            ? selected_codec_tab.get_content_override ()
+            : ContentOverride.AUTO;
+        bool optimize_for_delivery = (selected_codec_tab != null)
+            && selected_codec_tab.get_optimize_for_delivery ();
+
         // "Match Source Size" targets the whole source file, but each segment
         // only carries part of it — inheriting the whole-file target would
         // impose no constraint at all, so each segment gets its own target
-        // (see segment_match_target_mb).
-        bool match_source_size = (selected_codec_tab != null)
+        // (see segment_match_target_mb).  Meaningless in Quality mode, where
+        // size is the prediction rather than the constraint.
+        bool match_source_size = !quality_mode
+            && (selected_codec_tab != null)
             && selected_codec_tab.match_source_size_active;
+
+        // Quality mode cannot run without libvmaf. The optimizer raises
+        // NOT_SUPPORTED per call, which would otherwise surface as every
+        // segment being skipped for an unrelated-looking reason — check once
+        // and abort with the real cause.
+        if (quality_mode) {
+            VmafCapability vmaf_capability;
+            try {
+                vmaf_capability = yield smart_runtime_capabilities.get_vmaf_capability (
+                    AppSettings.get_default ().ffmpeg_path, cancel);
+            } catch (IOError.CANCELLED e) {
+                status_area.set_status ("Smart Optimizer cancelled.",
+                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                release_smart_cancel (cancel);
+                fail_operation (operation_id);
+                return;
+            } catch (Error e) {
+                status_area.set_status (
+                    "Quality Ceiling could not check FFmpeg for libvmaf: %s".printf (e.message),
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                release_smart_cancel (cancel);
+                fail_operation (operation_id);
+                return;
+            }
+
+            if (vmaf_capability.status != VmafCapabilityStatus.SUPPORTED) {
+                string reason = vmaf_capability.reason
+                    ?? "Quality Ceiling requires FFmpeg with the libvmaf filter. "
+                        + "Target Size remains available.";
+                status_area.set_status (reason,
+                    StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+                console_tab.add_line ("[Smart Optimizer] " + reason);
+                release_smart_cancel (cancel);
+                fail_operation (operation_id);
+                return;
+            }
+        }
+
         int64 source_size_bytes = (selected_codec_tab != null)
             ? selected_codec_tab.get_source_file_size_bytes ()
             : -1;
@@ -828,8 +891,11 @@ public class TrimTab : Box, ICodecTab {
                 ? "\"%s\"".printf (seg.label)
                 : "Segment %d".printf (i + 1);
 
-            status_area.set_status ("Smart Optimizer: analyzing %s (%d/%d)…".printf (
-                seg_name, i + 1, segs.length),
+            status_area.set_status (quality_mode
+                ? "Smart Optimizer: measuring the %s quality ceiling for %s (%d/%d)…".printf (
+                    quality_intent.to_label (), seg_name, i + 1, segs.length)
+                : "Smart Optimizer: analyzing %s (%d/%d)…".printf (
+                    seg_name, i + 1, segs.length),
                 StatusIcon.SMART_ICON, StatusIcon.SMART_CSS);
 
             // ── 1. Stream-copy segment to temp file ────────────────────────
@@ -880,6 +946,8 @@ public class TrimTab : Box, ICodecTab {
 
             // ── 3. Run SmartOptimizer on the temp file ─────────────────────
             var ctx = OptimizationContext ();
+            ctx.content_override = content_override;
+            ctx.optimize_for_delivery = optimize_for_delivery;
             if (shared_video_filter_chain.length > 0) {
                 ctx.video_filter_chain = shared_video_filter_chain;
                 ctx.tone_mapping_active = shared_video_filter_chain.contains ("tonemap=");
@@ -905,8 +973,11 @@ public class TrimTab : Box, ICodecTab {
             // Audio budget is determined by the optimizer based on size tier.
 
             try {
-                var rec = yield smart_optimizer.optimize_for_target_size (
-                    tmp_seg, seg_target_mb, preferred_codec, ctx, cancel);
+                var rec = quality_mode
+                    ? yield smart_optimizer.optimize_for_quality (
+                        tmp_seg, quality_intent, preferred_codec, ctx, cancel)
+                    : yield smart_optimizer.optimize_for_target_size (
+                        tmp_seg, seg_target_mb, preferred_codec, ctx, cancel);
 
                 if (rec.bit_depth_attention_required) {
                     console_tab.add_line (
@@ -914,8 +985,11 @@ public class TrimTab : Box, ICodecTab {
                             seg_name, rec.bit_depth_attention_reason));
                     skipped.add (seg_name);
                 } else if (rec.is_impossible) {
-                    console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — target %d MB is unreachable"
-                        .printf (seg_name, seg_target_mb));
+                    console_tab.add_line (quality_mode
+                        ? "[Smart Optimizer] ⏭️ Skipping %s — could not measure quality for this segment"
+                            .printf (seg_name)
+                        : "[Smart Optimizer] ⏭️ Skipping %s — target %d MB is unreachable"
+                            .printf (seg_name, seg_target_mb));
                     string fail_details = SmartOptimizer.format_recommendation (rec);
                     foreach (unowned string line in fail_details.split ("\n")) {
                         console_tab.add_line ("[Smart Optimizer]   " + line);
@@ -929,10 +1003,18 @@ public class TrimTab : Box, ICodecTab {
                     ok_args.add (new SegmentCodecArgs (
                         smart_args, rec.recommended_pix_fmt));
 
-                    console_tab.add_line ("[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KiB, %s)"
-                        .printf (seg_name, rec.crf, rec.preset,
-                                 rec.estimated_size_kib,
-                                 rec.content_type.to_label ()));
+                    // Quality mode leads with the measured VMAF: it is the
+                    // pinned axis, and size is only the prediction.
+                    console_tab.add_line (rec.vmaf_measured
+                        ? "[Smart Optimizer] ✅ %s → CRF %d / %s (VMAF %.2f, est. %d KiB, %s)"
+                            .printf (seg_name, rec.crf, rec.preset,
+                                     rec.estimated_vmaf,
+                                     rec.estimated_size_kib,
+                                     rec.content_type.to_label ())
+                        : "[Smart Optimizer] ✅ %s → CRF %d / %s (est. %d KiB, %s)"
+                            .printf (seg_name, rec.crf, rec.preset,
+                                     rec.estimated_size_kib,
+                                     rec.content_type.to_label ()));
 
                     // Log full details to console (same as codec tab path)
                     string details = SmartOptimizer.format_recommendation (rec);
@@ -991,10 +1073,19 @@ public class TrimTab : Box, ICodecTab {
 
         // ── Check if anything survived ──────────────────────────────────────
         if (ok_segs.length == 0) {
-            status_area.set_status (match_source_size
-                ? "Smart Optimizer: all segments failed to meet their source-matched target — nothing to export."
-                : "Smart Optimizer: all segments failed to meet the %d MB target — nothing to export."
-                    .printf (target_mb),
+            string none_left;
+            if (quality_mode) {
+                none_left = ("Smart Optimizer: no segment could be solved for the %s "
+                    + "quality ceiling — nothing to export.").printf (
+                        quality_intent.to_label ());
+            } else if (match_source_size) {
+                none_left = "Smart Optimizer: all segments failed to meet their "
+                    + "source-matched target — nothing to export.";
+            } else {
+                none_left = ("Smart Optimizer: all segments failed to meet the %d MB "
+                    + "target — nothing to export.").printf (target_mb);
+            }
+            status_area.set_status (none_left,
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             fail_operation (operation_id);
             return;
@@ -2070,7 +2161,11 @@ public class TrimTab : Box, ICodecTab {
         // ── Smart Optimizer per-segment ──────────────────────────────────────
         smart_optimize_row = new Adw.ActionRow ();
         smart_optimize_row.set_title ("Smart Optimizer");
-        smart_optimize_row.set_subtitle ("Analyze each segment individually for content-aware CRF and preset");
+        // Deliberately names the codec tab as the source of the axis: this row
+        // has no controls of its own, and the solver it runs is whichever one
+        // the codec tab has pinned (Quality Ceiling, else Target Size).
+        smart_optimize_row.set_subtitle (
+            "Analyze each segment individually — uses the Quality Ceiling or Target Size set on the codec tab");
         smart_optimize_row.add_prefix (new Image.from_icon_name ("starred-symbolic"));
 
         smart_optimize_switch = new Switch ();

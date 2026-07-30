@@ -630,18 +630,26 @@ namespace CodecUtils {
             args += "-preset";
             args += rec.preset;
 
-            // Content-aware tune
-            switch (rec.content_type) {
-                case ContentType.ANIME:
-                    args += "-tune";
-                    args += "animation";
-                    break;
-                case ContentType.SCREENCAST:
-                    args += "-tune";
-                    args += "stillimage";
-                    break;
-                default:
-                    break;
+            // Content-aware tune. Precedence mirrors
+            // SmartOptimizerLogic.decide_encoder_tuning: only one -tune is
+            // possible, and an explicit delivery request wins over the
+            // content-derived choice.
+            if (rec.fast_decode) {
+                args += "-tune";
+                args += "fastdecode";
+            } else {
+                switch (rec.content_type) {
+                    case ContentType.ANIME:
+                        args += "-tune";
+                        args += "animation";
+                        break;
+                    case ContentType.SCREENCAST:
+                        args += "-tune";
+                        args += "stillimage";
+                        break;
+                    default:
+                        break;
+                }
             }
 
             if (rec.lookahead_frames > 0) {
@@ -720,8 +728,11 @@ namespace CodecUtils {
             args += "-preset";
             args += rec.preset;
 
-            // Content-aware tune
-            if (rec.content_type == ContentType.ANIME) {
+            // Content-aware tune — same single-slot precedence as x264 above.
+            if (rec.fast_decode) {
+                args += "-tune";
+                args += "fastdecode";
+            } else if (rec.content_type == ContentType.ANIME) {
                 args += "-tune";
                 args += "animation";
             }
@@ -766,6 +777,10 @@ namespace CodecUtils {
                 svt_params += "lookahead=%d".printf (rec.lookahead_frames);
             if (rec.native_sharpness > 0)
                 svt_params += "sharpness=%d".printf (rec.native_sharpness);
+            // AV1 exposes fast-decode separately from tuning, so unlike
+            // x264/x265 it composes rather than displacing anything.
+            if (rec.fast_decode)
+                svt_params += "fast-decode=1";
             if (svt_params.length > 0) {
                 args += "-svtav1-params";
                 args += string.joinv (":", svt_params);
