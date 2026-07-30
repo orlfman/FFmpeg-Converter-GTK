@@ -508,7 +508,9 @@ namespace FfprobeUtils {
                 if (format != null) {
                     string duration_str = format.get_string_member_with_default ("duration", "0");
                     double duration = 0.0;
-                    if (double.try_parse (duration_str, out duration) && duration > 0.0) {
+                    if (double.try_parse (duration_str, out duration)
+                        && duration.is_finite ()
+                        && duration > 0.0) {
                         result.duration_seconds = duration;
                     }
                 }
@@ -536,6 +538,9 @@ namespace FfprobeUtils {
                 info.channels = (int) s.get_int_member_with_default ("channels", 0);
                 info.sample_fmt = s.get_string_member_with_default ("sample_fmt", "").down ();
 
+                double stream_duration = parse_positive_duration (
+                    s.get_string_member_with_default ("duration", ""));
+
                 string bits_str = s.get_string_member_with_default ("bits_per_raw_sample", "");
                 int bits = 0;
                 if (bits_str.strip ().length > 0 && int.try_parse (bits_str, out bits) && bits > 0) {
@@ -551,8 +556,21 @@ namespace FfprobeUtils {
                     var tags = s.get_object_member ("tags");
                     if (tags != null) {
                         info.language = tags.get_string_member_with_default ("language", "");
+                        if (stream_duration <= 0.0) {
+                            stream_duration = parse_positive_duration (
+                                tags.get_string_member_with_default (
+                                    "DURATION",
+                                    tags.get_string_member_with_default ("duration", "")));
+                        }
                     }
                 }
+
+                // Prefer the selected stream's own duration. Some containers do
+                // not expose one, in which case the container duration remains a
+                // useful fallback without making every stream share mutable UI
+                // state in AudioTab.
+                info.duration_seconds = stream_duration > 0.0
+                    ? stream_duration : result.duration_seconds;
 
                 result.streams.add (info);
             }
@@ -564,6 +582,40 @@ namespace FfprobeUtils {
         }
 
         return result;
+    }
+
+    private double parse_positive_duration (string text) {
+        string value = text.strip ();
+        if (value.length == 0)
+            return 0.0;
+
+        double seconds = 0.0;
+        if (double.try_parse (value, out seconds)
+            && seconds.is_finite ()
+            && seconds > 0.0) {
+            return seconds;
+        }
+
+        // Matroska commonly exposes per-stream duration as a DURATION tag in
+        // HH:MM:SS.fraction form rather than as stream.duration.
+        string[] parts = value.split (":");
+        if (parts.length != 3)
+            return 0.0;
+
+        double hours = 0.0;
+        double minutes = 0.0;
+        double clock_seconds = 0.0;
+        if (!double.try_parse (parts[0], out hours)
+            || !double.try_parse (parts[1], out minutes)
+            || !double.try_parse (parts[2], out clock_seconds)
+            || hours < 0.0
+            || minutes < 0.0 || minutes >= 60.0
+            || clock_seconds < 0.0 || clock_seconds >= 60.0) {
+            return 0.0;
+        }
+
+        seconds = hours * 3600.0 + minutes * 60.0 + clock_seconds;
+        return seconds.is_finite () && seconds > 0.0 ? seconds : 0.0;
     }
 
     private TimedStreamTopologyProbeResult parse_timed_stream_topology_output (
@@ -741,26 +793,11 @@ namespace FfprobeUtils {
      * Probe the frame rate of the first video stream in @input_file
      * using ffprobe.  Returns 0.0 on any failure so callers can fall
      * back to a default.
+     *
+     * Synchronous by design: the callers are conversion-planning paths that
+     * need the value before they can build a command line. The preview players
+     * do not probe frame rate at all — mpv steps decoded frames directly.
      */
-    public async double probe_input_fps_async (string input_file,
-                                               Cancellable? cancellable = null) {
-        string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
-            "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=r_frame_rate",
-            "-of", "csv=p=0",
-            input_file
-        };
-        string stdout_text;
-        string stderr_text;
-
-        if (!(yield run_ffprobe_async (cmd, cancellable, out stdout_text, out stderr_text)))
-            return 0.0;
-
-        return parse_ffprobe_fps_output (stdout_text);
-    }
-
     public double probe_input_fps (string input_file) {
         string[] cmd = {
             AppSettings.get_default ().ffprobe_path,
@@ -1155,8 +1192,8 @@ namespace FfprobeUtils {
     /**
      * Probe ALL audio streams in an input file.
      *
-     * Returns a list of AudioStreamInfo objects with codec, channels,
-     * sample rate, and language for each audio stream.
+     * Returns a list of AudioStreamInfo objects with codec, channels, sample
+     * rate, language, and a stream-specific duration for each audio stream.
      * Used by AudioTab for Extract All Tracks and stream info display.
      */
     public async AudioStreamsProbeResult probe_all_audio_streams_async (
@@ -1169,7 +1206,7 @@ namespace FfprobeUtils {
             "-v", "error",
             "-select_streams", "a",
             "-show_entries",
-            "format=duration:stream=codec_name,channels,sample_rate,sample_fmt,bits_per_raw_sample:stream_tags=language",
+            "format=duration:stream=codec_name,channels,sample_rate,sample_fmt,bits_per_raw_sample,duration:stream_tags=language,DURATION",
             "-print_format", "json",
             input_file
         };
@@ -1182,6 +1219,34 @@ namespace FfprobeUtils {
         }
 
         return parse_all_audio_streams_output (stdout_text);
+    }
+
+    /**
+     * Probe the first audio stream's duration, falling back to the container
+     * duration only when the stream itself exposes no duration.
+     *
+     * TrimRunner uses this as a filter-placement hint for through-EOF audio
+     * fade-out. It must not be used as an FFmpeg output limit.
+     */
+    public double probe_primary_audio_duration (string input_file) {
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries",
+            "format=duration:stream=duration:stream_tags=DURATION",
+            "-print_format", "json",
+            input_file
+        };
+        string stdout_text;
+        string stderr_text;
+
+        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+            return 0.0;
+
+        AudioStreamsProbeResult result = parse_all_audio_streams_output (stdout_text);
+        return result.success && result.streams.length > 0
+            ? result.streams[0].duration_seconds : 0.0;
     }
 
     /**

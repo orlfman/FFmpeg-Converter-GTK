@@ -52,13 +52,51 @@ namespace Mpv {
 
     [CCode (cname = "fcg_mpv_render_sw_draw")]
     public int render_sw_draw (RenderContext ctx,
-                               [CCode (array_length = false)] uint8[] buf,
+                               void* buf,
                                int width,
                                int height,
                                int stride);
 
+    // ── Frame buffers ────────────────────────────────────────────────────────
+    //
+    // Raw pointers rather than uint8[]: the buffer's ownership is handed to a
+    // GBytes and from there to GdkMemoryTexture, which is a transfer Vala's
+    // array ownership cannot express. Allocate, render into it, wrap it once,
+    // and never touch it again.
+
+    [CCode (cname = "fcg_frame_buffer_alloc")]
+    public void* frame_buffer_alloc (int stride, int height, int row_bytes);
+
+    [CCode (cname = "fcg_frame_buffer_free")]
+    public void frame_buffer_free (void* buf);
+
+    [CCode (cname = "fcg_frame_buffer_to_bytes")]
+    public GLib.Bytes frame_buffer_to_bytes (void* buf, size_t size);
+
     [CCode (cname = "MPV_RENDER_UPDATE_FRAME")]
     public const uint64 RENDER_UPDATE_FRAME;
+
+    // ── Wakeup notification ──────────────────────────────────────────────────
+    //
+    // Both callbacks below are invoked on mpv's own threads. libmpv forbids
+    // calling any mpv API from inside them, so they may only schedule work back
+    // onto the main loop — see MpvBackend's notify handlers.
+    //
+    // Deliberately has_target = false: the handler must be a plain function
+    // pointer with an explicit user_data, because mpv stores it and Vala has no
+    // way to attach a destroy notify to a closure passed to these. The backend
+    // passes itself and clears both callbacks before teardown.
+
+    [CCode (cname = "mpv_wakeup_callback_fn", has_target = false)]
+    public delegate void NotifyFunc (void* user_data);
+
+    [CCode (cname = "mpv_set_wakeup_callback")]
+    public void set_wakeup_callback (Handle h, NotifyFunc? fn, void* user_data);
+
+    [CCode (cname = "mpv_render_context_set_update_callback")]
+    public void set_render_update_callback (RenderContext ctx,
+                                            NotifyFunc? fn,
+                                            void* user_data);
 
     // ── Commands and properties ──────────────────────────────────────────────
 
@@ -86,7 +124,9 @@ namespace Mpv {
     // ── Events ───────────────────────────────────────────────────────────────
 
     [CCode (cname = "fcg_mpv_next_event")]
-    public int next_event (Handle h, out int end_file_reason);
+    public int next_event (Handle h,
+                           out int end_file_reason,
+                           out int end_file_error);
 
     [CCode (cname = "MPV_EVENT_NONE")]
     public const int EVENT_NONE;
@@ -98,7 +138,18 @@ namespace Mpv {
     public const int EVENT_FILE_LOADED;
     [CCode (cname = "MPV_EVENT_VIDEO_RECONFIG")]
     public const int EVENT_VIDEO_RECONFIG;
+    /** Playback resumed after a seek or a frame step, i.e. the position moved. */
+    [CCode (cname = "MPV_EVENT_PLAYBACK_RESTART")]
+    public const int EVENT_PLAYBACK_RESTART;
 
     [CCode (cname = "MPV_END_FILE_REASON_ERROR")]
     public const int END_FILE_REASON_ERROR;
+
+    /**
+     * mpv found nothing it could decode. Reported when every track is
+     * deselected, which includes an "aid" that names a stream the file does
+     * not have.
+     */
+    [CCode (cname = "MPV_ERROR_NOTHING_TO_PLAY")]
+    public const int ERROR_NOTHING_TO_PLAY;
 }

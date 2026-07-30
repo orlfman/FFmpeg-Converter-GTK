@@ -86,6 +86,7 @@ public class AudioStreamInfo : Object {
     public string sample_fmt { get; set; default = ""; }
     public int bits_per_raw_sample { get; set; default = 0; }
     public string language { get; set; default = ""; }
+    public double duration_seconds { get; set; default = 0.0; }
 
     public string display_label () {
         var parts = new GenericArray<string> ();

@@ -5,13 +5,16 @@
 // Gtk.MediaFile, this drives MpvBackend exactly as VideoPlayer and AudioPlayer
 // do: open a path, wait for file_loaded, optionally play.
 //
-// Build:
-//   valac --pkg gtk4 --vapidir vapi --pkg mpv \
-//         -X -Isrc -X -lmpv -X -lm \
-//         src/mpv-compat.c src/mpv-backend.vala DevTools/mpv-backend-probe.vala \
-//         -o mpv-backend-probe
+// Build:  meson compile -C builddir mpv-backend-probe
 //
-// Run:  ./mpv-backend-probe <file> [video|audio|play|cycle] [seconds]
+// Deliberately not a hand-written valac line. MpvBackend depends on AppSettings,
+// which depends on SmartOptimizerLogic, which depends on the audio probe types,
+// and so on; every such edge used to have to be chased by hand and the
+// documented command silently rotted. The Meson target tracks the real source
+// list instead. `meson compile -C builddir probes` builds this and the two C
+// probes together.
+//
+// Run:  ./builddir/mpv-backend-probe <file> [video|audio|play|cycle] [seconds]
 //
 // Modes:
 //   video   video preview attached to a Gtk.Picture (what VideoPlayer does)
@@ -20,6 +23,16 @@
 //   cycle   open/close once per second, to check teardown returns memory
 
 using Gtk;
+
+// AppSettings shares one clamp with the otherwise unrelated optimizer. Pulling
+// in the real implementation drags most of the application behind it, so the
+// probe supplies the same bounds itself — as tests/mpv-backend-state-test.vala
+// does, for the same reason.
+namespace SmartOptimizerLogic {
+    public int clamp_target_mb (int value) {
+        return value.clamp (1, 16384);
+    }
+}
 
 private int64 rss_kb () {
     string contents;
@@ -106,8 +119,8 @@ public static int main (string[] args) {
             }
         });
 
-        backend.load_failed.connect (() => {
-            stdout.printf ("  LOAD FAILED\n");
+        backend.load_failed.connect ((detail) => {
+            stdout.printf ("  LOAD FAILED    %s\n", detail);
             stdout.flush ();
         });
 

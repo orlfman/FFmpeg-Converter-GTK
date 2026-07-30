@@ -9,6 +9,8 @@ using GLib;
 public class TrimSegment : Object {
     public double start_time  { get; set; }
     public double end_time    { get; set; }
+    /** True when this range intentionally continues until the input reaches EOF. */
+    public bool ends_at_eof   { get; private set; default = false; }
     public string crop_value  { get; set; default = ""; }
     public string label       { get; set; default = ""; }   // optional display name (used for chapter filenames)
 
@@ -17,7 +19,18 @@ public class TrimSegment : Object {
         this.end_time   = end;
     }
 
+    public static TrimSegment through_end_of_file (double start = 0.0) {
+        var segment = new TrimSegment (start, start);
+        segment.ends_at_eof = true;
+        return segment;
+    }
+
+    public bool has_finite_end () {
+        return !ends_at_eof;
+    }
+
     public double get_duration () {
+        if (ends_at_eof) return 0.0;
         return (end_time - start_time).clamp (0.0, double.MAX);
     }
 
@@ -477,8 +490,13 @@ public class TrimTab : Box, ICodecTab {
                     StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
                 return false;
             }
-            // Create one segment spanning the whole file
-            var full_seg = new TrimSegment (0, player.get_duration_seconds ());
+            // An unknown duration is still a valid full-file crop. Preserve
+            // that intent explicitly so TrimRunner can omit FFmpeg's -to
+            // instead of accidentally exporting a zero-length range.
+            double duration = player.get_duration_seconds ();
+            var full_seg = duration > 0.0
+                ? new TrimSegment (0.0, duration)
+                : TrimSegment.through_end_of_file ();
             full_seg.crop_value = global_crop_value;
 
             var segs = new GenericArray<TrimSegment> ();
@@ -2196,10 +2214,16 @@ public class TrimTab : Box, ICodecTab {
     }
 
     private void on_add_at_position () {
-        double pos = player.get_position_seconds ();
-        double dur = player.get_duration_seconds ();
-        double end = (pos + 10.0).clamp (0.0, dur);
-        if (end <= pos) end = dur;
+        double pos;
+        double end;
+        if (!try_get_quick_segment_range (
+                player.get_position_seconds (),
+                player.get_duration_seconds (),
+                out pos,
+                out end)) {
+            mark_out_label.set_text ("Move before the end of the video");
+            return;
+        }
 
         var seg = new TrimSegment (pos, end);
 
@@ -2220,6 +2244,27 @@ public class TrimTab : Box, ICodecTab {
         mark_out = end;
         mark_in_label.set_text (VideoPlayer.format_time (pos));
         mark_out_label.set_text (VideoPlayer.format_time (end));
+    }
+
+    /**
+     * Build the ten-second range used by "Add at Position".
+     *
+     * A finite duration clamps the endpoint to the source. An unknown duration
+     * is not the same as zero seconds, so it produces an ordinary bounded
+     * ten-second segment and lets FFmpeg decide whether EOF arrives sooner.
+     */
+    private static bool try_get_quick_segment_range (double position,
+                                                     double duration,
+                                                     out double start,
+                                                     out double end) {
+        start = double.max (position, 0.0);
+        if (duration > 0.0) {
+            start = start.clamp (0.0, duration);
+            end = double.min (start + 10.0, duration);
+        } else {
+            end = start + 10.0;
+        }
+        return end - start >= 0.001;
     }
 
     private void add_segment_to_list (TrimSegment seg) {
@@ -2717,6 +2762,15 @@ public class TrimTab : Box, ICodecTab {
     internal static bool export_failure_counts_as_cancelled_for_test (bool cancel_pending,
                                                                       bool runner_cancelled) {
         return cancel_pending || runner_cancelled;
+    }
+
+    internal static bool try_get_quick_segment_range_for_test (
+            double position,
+            double duration,
+            out double start,
+            out double end) {
+        return try_get_quick_segment_range (
+            position, duration, out start, out end);
     }
 
     internal bool simulate_segment_drag_drop_for_widget_test (int from, int to) {

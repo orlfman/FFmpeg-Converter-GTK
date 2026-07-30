@@ -39,7 +39,7 @@ class AudioWaveformCacheEntry : Object {
 //
 //  Uses libmpv for playback (audio-only, so no video is ever decoded here) and
 //  FFmpeg showwavespic for waveform generation.  The waveform is displayed as a
-//  Gtk.Picture with an click-to-seek waveform and segment highlight drawing.
+//  Gtk.Picture with a click-to-seek waveform and segment highlight drawing.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 public class AudioPlayer : Box {
@@ -57,6 +57,7 @@ public class AudioPlayer : Box {
     private Gtk.Label duration_label;
     private Gtk.Button play_button;
     private Gtk.ToggleButton mute_button;
+    private Gtk.Label media_status_label;
 
     // ── Playback backend ─────────────────────────────────────────────────────
     // Audio-only libmpv instance: it selects the wanted audio track directly from
@@ -71,6 +72,7 @@ public class AudioPlayer : Box {
     private bool is_playing = false;
     private bool prepared_handled = false;
     private double _duration = 0.0;
+    private double fallback_duration = 0.0;
     private string? waveform_tmp_path = null;
     private Cancellable? waveform_cancellable = null;
     private Subprocess? waveform_proc = null;
@@ -104,6 +106,7 @@ public class AudioPlayer : Box {
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void position_changed (double seconds);
     public signal void media_ready (double duration_seconds);
+    public signal void media_failed (string message);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -118,9 +121,10 @@ public class AudioPlayer : Box {
 
         backend = new MpvBackend (false);
         backend.file_loaded.connect (on_media_prepared);
-        backend.load_failed.connect (() => {
-            warning ("AudioPlayer: mpv could not open the selected audio stream");
-        });
+        backend.load_failed.connect (on_backend_load_failed);
+        // Seeks land asynchronously; read the new position when mpv reports it
+        // has arrived rather than polling for it.
+        backend.playback_restarted.connect (sync_position);
 
         map.connect (() => {
             player_on_screen = true;
@@ -204,6 +208,7 @@ public class AudioPlayer : Box {
         // Segment highlight overlay (drawn on top of waveform)
         segment_overlay = new Gtk.DrawingArea ();
         segment_overlay.set_draw_func (draw_segment_highlights);
+        segment_overlay.set_sensitive (false);
 
         // Spinner for waveform generation (fills entire overlay, content centered)
         spinner_box = new Box (Orientation.VERTICAL, 8);
@@ -227,6 +232,13 @@ public class AudioPlayer : Box {
 
         waveform_frame.set_child (waveform_overlay);
         append (waveform_frame);
+
+        media_status_label = new Gtk.Label ("");
+        media_status_label.set_wrap (true);
+        media_status_label.set_justify (Justification.CENTER);
+        media_status_label.set_margin_top (6);
+        media_status_label.set_visible (false);
+        append (media_status_label);
 
         // ── Waveform click/drag seek (on segment_overlay for matched coords) ─
         segment_overlay.set_cursor_from_name ("pointer");
@@ -330,7 +342,7 @@ public class AudioPlayer : Box {
 
         controls.append (fwd_group);
 
-        // Mute toggle — preserves the stream volume for unmuting
+        // Mute toggle
         mute_button = new Gtk.ToggleButton ();
         mute_button.set_icon_name ("audio-volume-high-symbolic");
         mute_button.set_tooltip_text ("Mute audio");
@@ -365,8 +377,17 @@ public class AudioPlayer : Box {
     //  PUBLIC API
     // ═════════════════════════════════════════════════════════════════════════
 
-    public void load_file (string path, int stream_index = 0) {
+    /**
+     * Load an audio stream for preview.
+     *
+     * @known_duration is a probe-derived fallback used only when mpv can play
+     * the stream but cannot report its duration itself.
+     */
+    public void load_file (string path,
+                           int stream_index = 0,
+                           double known_duration = 0.0) {
         reset_player_state ();
+        fallback_duration = double.max (known_duration, 0.0);
         current_waveform_input_path = path;
         current_waveform_stream_index = stream_index;
 
@@ -383,7 +404,8 @@ public class AudioPlayer : Box {
         // the original file. There is no extraction step, no temporary proxy,
         // and the reported duration stays the source's own.
         if (!backend.open (path, stream_index)) {
-            warning ("AudioPlayer: could not start playback for %s", path);
+            handle_load_failure ("Could not start the audio preview.");
+            return;
         }
 
         backend.set_muted (mute_button.get_active ());
@@ -492,10 +514,7 @@ public class AudioPlayer : Box {
         reset_player_state ();
         current_waveform_input_path = "";
         current_waveform_stream_index = 0;
-        time_label.set_text (VideoPlayer.format_time (0.0));
-        duration_label.set_text (VideoPlayer.format_time (0.0));
         waveform_picture.set_paintable (null);
-        _duration = 0.0;
     }
 
     public double get_position_seconds () {
@@ -524,6 +543,43 @@ public class AudioPlayer : Box {
         cleanup ();
         base.dispose ();
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal void prepare_duration_for_widget_test (double duration_seconds) {
+        complete_media_preparation (duration_seconds);
+    }
+
+    internal void prepare_duration_with_fallback_for_widget_test (
+            double duration_seconds,
+            double known_duration) {
+        fallback_duration = double.max (known_duration, 0.0);
+        complete_media_preparation (duration_seconds);
+    }
+
+    internal void fail_for_widget_test (string message) {
+        handle_load_failure (message);
+    }
+
+    internal string get_duration_text_for_widget_test () {
+        return duration_label.get_text ();
+    }
+
+    internal double get_duration_for_widget_test () {
+        return _duration;
+    }
+
+    internal bool is_waveform_seek_sensitive_for_widget_test () {
+        return segment_overlay.get_sensitive ();
+    }
+
+    internal bool is_media_status_visible_for_widget_test () {
+        return media_status_label.get_visible ();
+    }
+
+    internal string get_media_status_for_widget_test () {
+        return media_status_label.get_text ();
+    }
+#endif
 
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNAL — Waveform generation
@@ -878,7 +934,44 @@ public class AudioPlayer : Box {
         user_scrubbing = false;
         is_playing = false;
         prepared_handled = false;
+        _duration = 0.0;
+        fallback_duration = 0.0;
+        segment_overlay.set_sensitive (false);
         play_button.set_icon_name ("media-playback-start-symbolic");
+        time_label.set_text (VideoPlayer.format_time (0.0));
+        duration_label.set_text (VideoPlayer.format_time (0.0));
+        hide_media_status ();
+    }
+
+    private void on_backend_load_failed (string detail) {
+        handle_load_failure ("Could not load the audio preview (%s).".printf (detail));
+    }
+
+    private void handle_load_failure (string message) {
+        // A bad or unsupported user-selected file is an expected runtime
+        // outcome, already surfaced inline and through media_failed.
+        GLib.message ("AudioPlayer: %s", message);
+        reset_player_state ();
+        current_waveform_input_path = "";
+        current_waveform_stream_index = 0;
+        waveform_picture.set_paintable (null);
+        show_media_status (message, true);
+        media_failed (message);
+    }
+
+    private void show_media_status (string message, bool is_error) {
+        media_status_label.set_text (message);
+        media_status_label.remove_css_class ("error");
+        media_status_label.remove_css_class ("warning");
+        media_status_label.add_css_class (is_error ? "error" : "warning");
+        media_status_label.set_visible (true);
+    }
+
+    private void hide_media_status () {
+        media_status_label.set_visible (false);
+        media_status_label.set_text ("");
+        media_status_label.remove_css_class ("error");
+        media_status_label.remove_css_class ("warning");
     }
 
     private void ensure_paused () {
@@ -890,18 +983,33 @@ public class AudioPlayer : Box {
     }
 
     private void on_media_prepared () {
-        double dur = backend.duration;
-        if (dur <= 0.0) return;
+        complete_media_preparation (backend.duration);
+    }
+
+    private void complete_media_preparation (double dur) {
 
         if (prepared_handled) return;
         prepared_handled = true;
 
-        _duration = dur;
-        duration_label.set_text (VideoPlayer.format_time (dur));
+        double effective_duration = dur > 0.0 ? dur : fallback_duration;
+        _duration = effective_duration;
+        if (effective_duration > 0.0) {
+            segment_overlay.set_sensitive (true);
+            duration_label.set_text (VideoPlayer.format_time (effective_duration));
+            hide_media_status ();
+        } else {
+            segment_overlay.set_sensitive (false);
+            duration_label.set_text ("--:--:--.---");
+            show_media_status (
+                "Duration unavailable — waveform seeking is disabled.",
+                false
+            );
+        }
         time_label.set_text (VideoPlayer.format_time (0.0));
 
-        start_update_timer ();
-        media_ready (dur);
+        // Media opens paused; one reading suffices until playback starts.
+        sync_position ();
+        media_ready (effective_duration);
     }
 
     private void toggle_playback () {
@@ -911,10 +1019,13 @@ public class AudioPlayer : Box {
             backend.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
+            stop_update_timer ();
+            sync_position ();
         } else {
             backend.set_playing (true);
             is_playing = true;
             play_button.set_icon_name ("media-playback-pause-symbolic");
+            start_update_timer ();
         }
     }
 
@@ -972,19 +1083,19 @@ public class AudioPlayer : Box {
     //  INTERNAL — Periodic position update
     // ═════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Run the position timer only while the position can actually change; see
+     * VideoPlayer.start_update_timer for the reasoning. Everything else that
+     * moves the position calls sync_position () directly.
+     */
     private void start_update_timer () {
         stop_update_timer ();
         update_source = Timeout.add (100, () => {
-            if (!user_scrubbing && backend.loaded) {
-                double pos = get_position_seconds ();
-                time_label.set_text (VideoPlayer.format_time (pos));
-                position_changed (pos);
-                segment_overlay.queue_draw ();
+            sync_position ();
 
-                if (is_playing && !backend.get_playing ()) {
-                    is_playing = false;
-                    play_button.set_icon_name ("media-playback-start-symbolic");
-                }
+            if (!is_playing) {
+                update_source = 0;
+                return Source.REMOVE;
             }
             return Source.CONTINUE;
         });
@@ -994,6 +1105,21 @@ public class AudioPlayer : Box {
         if (update_source != 0) {
             Source.remove (update_source);
             update_source = 0;
+        }
+    }
+
+    /** One-shot equivalent of a timer tick, for the paused transitions. */
+    private void sync_position () {
+        if (user_scrubbing || !backend.loaded) return;
+
+        double pos = get_position_seconds ();
+        time_label.set_text (VideoPlayer.format_time (pos));
+        position_changed (pos);
+        segment_overlay.queue_draw ();
+
+        if (is_playing && !backend.get_playing ()) {
+            is_playing = false;
+            play_button.set_icon_name ("media-playback-start-symbolic");
         }
     }
 }

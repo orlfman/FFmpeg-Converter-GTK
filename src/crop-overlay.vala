@@ -4,8 +4,15 @@ using Gdk;
 public class CropOverlay : Gtk.DrawingArea {
 
     // ── Video source dimensions (set by VideoPlayer) ─────────────────────────
+    //
+    // These are in ffmpeg crop space, which is what the crop rectangle below is
+    // expressed in and what get_crop_string () emits. For a source with
+    // non-square pixels that is NOT the shape drawn on screen, so the letterbox
+    // geometry in get_display_rect () uses _display_aspect instead; without it
+    // the crop rectangle would drift away from the video under it.
     private int _video_width  = 0;
     private int _video_height = 0;
+    private double _display_aspect = 0.0;   // 0 = square pixels, derive from size
 
     // ── Crop rectangle in VIDEO coordinates ──────────────────────────────────
     private double _crop_x = 0;
@@ -91,9 +98,17 @@ public class CropOverlay : Gtk.DrawingArea {
     //  PUBLIC API
     // ═════════════════════════════════════════════════════════════════════════
 
-    public void set_video_size (int w, int h) {
+    /**
+     * @param w              width in ffmpeg crop space
+     * @param h              height in ffmpeg crop space
+     * @param display_aspect aspect ratio of the frame as actually drawn, which
+     *                       differs from w/h for non-square pixels. Pass 0 to
+     *                       derive it from w/h, i.e. assume square pixels.
+     */
+    public void set_video_size (int w, int h, double display_aspect = 0.0) {
         _video_width  = w;
         _video_height = h;
+        _display_aspect = (display_aspect > 0.0) ? display_aspect : 0.0;
         queue_draw ();
     }
 
@@ -141,7 +156,14 @@ public class CropOverlay : Gtk.DrawingArea {
         if (_video_width <= 0 || _video_height <= 0 || widget_w <= 0 || widget_h <= 0)
             return r;
 
-        double video_aspect  = (double) _video_width  / _video_height;
+        // The aspect the video is *drawn* at. Using the crop-space aspect here
+        // would letterbox the overlay differently from Gtk.Picture, leaving the
+        // crop rectangle offset from the video it is drawn over. Everything
+        // below maps through this rect, so normalising into crop space stays
+        // correct however the pixels were stretched.
+        double video_aspect  = (_display_aspect > 0.0)
+            ? _display_aspect
+            : (double) _video_width / (double) _video_height;
         double widget_aspect = (double) widget_w / widget_h;
 
         if (widget_aspect > video_aspect) {

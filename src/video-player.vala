@@ -11,6 +11,7 @@ public class VideoPlayer : Box {
     private Gtk.ToggleButton mute_button;
     private Gtk.Button popout_btn;
     private Gtk.Overlay video_overlay;
+    private Gtk.Label media_status_label;
 
     // ── Crop Overlay ─────────────────────────────────────────────────────────
     private CropOverlay _crop_overlay;
@@ -25,12 +26,9 @@ public class VideoPlayer : Box {
     // ── State ────────────────────────────────────────────────────────────────
     private uint update_source = 0;
     private uint scrub_reset_source = 0;
-    private uint fps_probe_generation = 0;
-    private uint load_generation = 0;
     private bool user_scrubbing = false;
     private bool is_playing = false;
     private bool prepared_handled = false;
-    private Cancellable? fps_probe_cancellable = null;
 
     // ── Video intrinsic size ─────────────────────────────────────────────────
     private int _intrinsic_width  = 0;
@@ -38,13 +36,10 @@ public class VideoPlayer : Box {
     public  int intrinsic_width  { get { return _intrinsic_width;  } }
     public  int intrinsic_height { get { return _intrinsic_height; } }
 
-    // ── Video frame rate (probed via ffprobe for accurate frame stepping) ──
-    private double _fps = 0.0;
-    public  double fps { get { return _fps; } }
-
     // ── Signals ──────────────────────────────────────────────────────────────
     public signal void position_changed (double seconds);
     public signal void media_ready (double duration_seconds);
+    public signal void media_failed (string message);
     public signal void popout_requested ();
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -59,9 +54,11 @@ public class VideoPlayer : Box {
         backend = new MpvBackend (true);
         backend.attach_picture (picture);
         backend.file_loaded.connect (on_media_prepared);
-        backend.load_failed.connect (() => {
-            warning ("VideoPlayer: mpv could not open the selected file");
-        });
+        backend.video_size_changed.connect (on_video_size_changed);
+        backend.load_failed.connect (on_backend_load_failed);
+        // Seeks and frame steps land asynchronously, so the transport reads the
+        // new position when mpv says it has arrived rather than polling for it.
+        backend.playback_restarted.connect (sync_position);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -91,11 +88,19 @@ public class VideoPlayer : Box {
         frame.set_child (video_overlay);
         append (frame);
 
+        media_status_label = new Gtk.Label ("");
+        media_status_label.set_wrap (true);
+        media_status_label.set_justify (Justification.CENTER);
+        media_status_label.set_margin_top (6);
+        media_status_label.set_visible (false);
+        append (media_status_label);
+
         // ── Scrubber ─────────────────────────────────────────────────────────
         scrubber = new Gtk.Scale.with_range (Orientation.HORIZONTAL, 0.0, 1.0, 0.001);
         scrubber.set_draw_value (false);
         scrubber.set_hexpand (true);
         scrubber.set_margin_top (4);
+        scrubber.set_sensitive (false);
 
         scrubber.change_value.connect (on_scrubber_changed);
         append (scrubber);
@@ -128,7 +133,7 @@ public class VideoPlayer : Box {
         var frame_back = new Button.from_icon_name (
             "video-seek-backward-frame-symbolic"
         );
-        frame_back.set_tooltip_text ("Step back 1 frame (~33 ms)");
+        frame_back.set_tooltip_text ("Step back exactly 1 frame");
         frame_back.clicked.connect (() => step_frame (-1));
         back_group.append (frame_back);
 
@@ -151,7 +156,7 @@ public class VideoPlayer : Box {
         var frame_fwd = new Button.from_icon_name (
             "video-seek-forward-frame-symbolic"
         );
-        frame_fwd.set_tooltip_text ("Step forward 1 frame (~33 ms)");
+        frame_fwd.set_tooltip_text ("Step forward exactly 1 frame");
         frame_fwd.clicked.connect (() => step_frame (1));
         fwd_group.append (frame_fwd);
 
@@ -171,7 +176,7 @@ public class VideoPlayer : Box {
 
         controls.append (fwd_group);
 
-        // Mute toggle — preserves the stream volume for unmuting
+        // Mute toggle
         mute_button = new Gtk.ToggleButton ();
         mute_button.set_icon_name ("audio-volume-high-symbolic");
         mute_button.set_tooltip_text ("Mute audio");
@@ -219,15 +224,12 @@ public class VideoPlayer : Box {
     public void load_file (string path) {
         reset_player_state ();
 
-        uint generation = ++load_generation;
-
         if (!backend.open (path)) {
-            warning ("VideoPlayer: could not start playback for %s", path);
+            handle_load_failure ("Could not start the video preview.");
             return;
         }
 
         backend.set_muted (mute_button.get_active ());
-        start_fps_probe (path, generation);
     }
 
     /**
@@ -235,10 +237,6 @@ public class VideoPlayer : Box {
      */
     public void clear () {
         reset_player_state ();
-        scrubber.set_range (0.0, 1.0);
-        scrubber.set_value (0.0);
-        time_label.set_text (format_time (0.0));
-        duration_label.set_text (format_time (0.0));
     }
 
     /**
@@ -268,8 +266,19 @@ public class VideoPlayer : Box {
     public void set_crop_active (bool active) {
         _crop_overlay.set_visible (active);
         if (active && _intrinsic_width > 0) {
-            _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
+            push_crop_overlay_size ();
         }
+    }
+
+    /**
+     * Hand the crop overlay its coordinate space. The display aspect has to
+     * travel with the dimensions every time — passing the size alone would
+     * quietly fall back to square pixels and shift the rectangle away from the
+     * video on an anamorphic source.
+     */
+    private void push_crop_overlay_size () {
+        _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height,
+                                      backend.display_aspect);
     }
 
     /**
@@ -306,6 +315,54 @@ public class VideoPlayer : Box {
 #if COMBINE_WINDOW_TEST_BUILD
     internal bool is_popout_visible_for_widget_test () {
         return popout_btn.get_visible ();
+    }
+
+    internal void prepare_duration_for_widget_test (double duration_seconds) {
+        complete_media_preparation (duration_seconds);
+    }
+
+    internal void fail_for_widget_test (string message) {
+        handle_load_failure (message);
+    }
+
+    internal string get_duration_text_for_widget_test () {
+        return duration_label.get_text ();
+    }
+
+    internal double get_scrubber_upper_for_widget_test () {
+        return scrubber.get_adjustment ().get_upper ();
+    }
+
+    internal bool is_scrubber_sensitive_for_widget_test () {
+        return scrubber.get_sensitive ();
+    }
+
+    internal bool is_media_status_visible_for_widget_test () {
+        return media_status_label.get_visible ();
+    }
+
+    internal string get_media_status_for_widget_test () {
+        return media_status_label.get_text ();
+    }
+
+    internal bool is_backend_core_active_for_widget_test () {
+        return backend.has_core_for_test ();
+    }
+
+    internal bool is_backend_render_context_active_for_widget_test () {
+        return backend.has_render_context_for_test ();
+    }
+
+    internal bool is_backend_event_source_active_for_widget_test () {
+        return backend.has_event_source_for_test ();
+    }
+
+    internal bool is_backend_render_tick_active_for_widget_test () {
+        return backend.has_render_tick_for_test ();
+    }
+
+    internal double backend_timing_offset_for_widget_test () {
+        return backend.effective_timing_offset_for_test ();
     }
 #endif
 
@@ -372,13 +429,6 @@ public class VideoPlayer : Box {
     //  INTERNAL — Playback control
     // ═════════════════════════════════════════════════════════════════════════
 
-    private void cancel_fps_probe () {
-        if (fps_probe_cancellable != null) {
-            fps_probe_cancellable.cancel ();
-            fps_probe_cancellable = null;
-        }
-    }
-
     private void cancel_scrub_reset () {
         if (scrub_reset_source != 0) {
             Source.remove (scrub_reset_source);
@@ -388,7 +438,6 @@ public class VideoPlayer : Box {
 
     private void reset_player_state () {
         stop_update_timer ();
-        cancel_fps_probe ();
         cancel_scrub_reset ();
 
         // Tears the mpv core down outright rather than leaving it idle, so the
@@ -399,56 +448,107 @@ public class VideoPlayer : Box {
         is_playing = false;
         _intrinsic_width  = 0;
         _intrinsic_height = 0;
-        _fps = 0.0;
         prepared_handled = false;
         play_button.set_icon_name ("media-playback-start-symbolic");
+        scrubber.set_range (0.0, 1.0);
+        scrubber.set_value (0.0);
+        scrubber.set_sensitive (false);
+        time_label.set_text (format_time (0.0));
+        duration_label.set_text (format_time (0.0));
+        hide_media_status ();
     }
 
-    private void start_fps_probe (string path, uint generation) {
-        var cancellable = new Cancellable ();
-        fps_probe_cancellable = cancellable;
-        uint probe_generation = ++fps_probe_generation;
-        FfprobeUtils.probe_input_fps_async.begin (path, cancellable, (obj, res) => {
-            double probed = FfprobeUtils.probe_input_fps_async.end (res);
+    private void on_backend_load_failed (string detail) {
+        handle_load_failure ("Could not load the video preview (%s).".printf (detail));
+    }
 
-            if (fps_probe_cancellable == cancellable) {
-                fps_probe_cancellable = null;
-            }
+    private void handle_load_failure (string message) {
+        // A bad or unsupported user-selected file is an expected runtime
+        // outcome, already surfaced inline and through media_failed.
+        GLib.message ("VideoPlayer: %s", message);
+        reset_player_state ();
+        show_media_status (message, true);
+        media_failed (message);
+    }
 
-            if (cancellable.is_cancelled ())
-                return;
+    private void show_media_status (string message, bool is_error) {
+        media_status_label.set_text (message);
+        media_status_label.remove_css_class ("error");
+        media_status_label.remove_css_class ("warning");
+        media_status_label.add_css_class (is_error ? "error" : "warning");
+        media_status_label.set_visible (true);
+    }
 
-            // Discard stale results if a newer load replaced the active media.
-            if (probe_generation != fps_probe_generation || generation != load_generation)
-                return;
-
-            _fps = probed;
-        });
+    private void hide_media_status () {
+        media_status_label.set_visible (false);
+        media_status_label.set_text ("");
+        media_status_label.remove_css_class ("error");
+        media_status_label.remove_css_class ("warning");
     }
 
     private void on_media_prepared () {
-        double dur = backend.duration;
-        if (dur <= 0.0) return; // not actually ready yet
+        complete_media_preparation (backend.duration);
+    }
+
+    private void complete_media_preparation (double dur) {
 
         // mpv reports file-loaded once per load, but stay idempotent so a
         // repeated notification cannot restart the update timer.
         if (prepared_handled) return;
         prepared_handled = true;
 
-        scrubber.set_range (0.0, dur);
+        if (dur > 0.0) {
+            scrubber.set_range (0.0, dur);
+            scrubber.set_sensitive (true);
+            duration_label.set_text (format_time (dur));
+            hide_media_status ();
+        } else {
+            scrubber.set_range (0.0, 1.0);
+            scrubber.set_sensitive (false);
+            duration_label.set_text ("--:--:--.---");
+            show_media_status (
+                "Duration unavailable — timeline seeking is disabled.",
+                false
+            );
+        }
         scrubber.set_value (0.0);
-        duration_label.set_text (format_time (dur));
         time_label.set_text (format_time (0.0));
 
-        // Coded video dimensions — the coordinate space the crop filter works in
-        _intrinsic_width  = backend.video_width;
-        _intrinsic_height = backend.video_height;
+        // The coordinate space ffmpeg's crop filter works in: rotation applied,
+        // sample aspect not. TrimRunner reports output sizes in it too, so it
+        // must match what goes into the crop string.
+        _intrinsic_width  = backend.crop_width;
+        _intrinsic_height = backend.crop_height;
 
         // Keep the crop overlay informed of the video size
-        _crop_overlay.set_video_size (_intrinsic_width, _intrinsic_height);
+        push_crop_overlay_size ();
 
-        start_update_timer ();
+        // Media opens paused, so there is nothing to track yet — one reading is
+        // enough until the user starts playback.
+        sync_position ();
         media_ready (dur);
+    }
+
+    /**
+     * Re-latch the video dimensions when mpv corrects them.
+     *
+     * Not redundant with on_media_prepared (): the first size mpv reports can be
+     * the container's claim rather than the decoder's, and containers get it
+     * wrong. Without this the crop coordinate space would stay wrong for the
+     * whole session on such a file.
+     */
+    private void on_video_size_changed () {
+        int w = backend.crop_width;
+        int h = backend.crop_height;
+
+        if (w <= 0 || h <= 0) return;
+
+        _intrinsic_width  = w;
+        _intrinsic_height = h;
+
+        // Always re-push: the display aspect can settle on a later reconfig even
+        // when the crop dimensions themselves did not change.
+        push_crop_overlay_size ();
     }
 
     private void toggle_playback () {
@@ -459,11 +559,16 @@ public class VideoPlayer : Box {
             backend.set_playing (false);
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
+            // Nothing will move the position again until the user does, so take
+            // a final reading and stop waking for it.
+            stop_update_timer ();
+            sync_position ();
         } else {
             // ── Play ─────────────────────────────────────────────────────────
             backend.set_playing (true);
             is_playing = true;
             play_button.set_icon_name ("media-playback-pause-symbolic");
+            start_update_timer ();
         }
     }
 
@@ -491,6 +596,7 @@ public class VideoPlayer : Box {
         if (is_playing) {
             is_playing = false;
             play_button.set_icon_name ("media-playback-start-symbolic");
+            stop_update_timer ();
         }
 
         // mpv steps by decoded frames, so this lands on the true adjacent frame
@@ -536,21 +642,24 @@ public class VideoPlayer : Box {
     //  INTERNAL — Periodic position update
     // ═════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Run the position timer only while the position can actually change.
+     *
+     * A paused preview sat on a trim point was previously still waking ten
+     * times a second to read back a position that could not have moved. Every
+     * other thing that moves the position — seeking, frame stepping, loading —
+     * calls sync_position () directly instead.
+     */
     private void start_update_timer () {
         stop_update_timer ();
         update_source = Timeout.add (100, () => {
-            if (!user_scrubbing && backend.loaded) {
-                double pos = get_position_seconds ();
-                scrubber.set_value (pos);
-                time_label.set_text (format_time (pos));
-                position_changed (pos);
+            sync_position ();
 
-                // Sync the play state if playback stopped on its own
-                // (e.g. reached end of file)
-                if (is_playing && !backend.get_playing ()) {
-                    is_playing = false;
-                    play_button.set_icon_name ("media-playback-start-symbolic");
-                }
+            // Playback can stop on its own at end of file. Once it has, there
+            // is nothing left to track until the user starts it again.
+            if (!is_playing) {
+                update_source = 0;
+                return Source.REMOVE;
             }
             return Source.CONTINUE;
         });
@@ -560,6 +669,23 @@ public class VideoPlayer : Box {
         if (update_source != 0) {
             Source.remove (update_source);
             update_source = 0;
+        }
+    }
+
+    /** One-shot equivalent of a timer tick, for the paused transitions. */
+    private void sync_position () {
+        if (user_scrubbing || !backend.loaded) return;
+
+        double pos = get_position_seconds ();
+        scrubber.set_value (pos);
+        time_label.set_text (format_time (pos));
+        position_changed (pos);
+
+        // Sync the play state if playback stopped on its own
+        // (e.g. reached end of file)
+        if (is_playing && !backend.get_playing ()) {
+            is_playing = false;
+            play_button.set_icon_name ("media-playback-start-symbolic");
         }
     }
 }

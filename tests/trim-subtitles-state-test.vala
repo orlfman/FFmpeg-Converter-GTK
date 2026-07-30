@@ -77,6 +77,18 @@ private void assert_array_not_contains (string[] values, string unexpected, stri
     }
 }
 
+private string get_argv_value_after (string[] values,
+                                     string option,
+                                     string context) {
+    for (int i = 0; i < values.length - 1; i++) {
+        if (values[i] == option)
+            return values[i + 1];
+    }
+
+    Test.fail_printf ("%s expected option '%s'", context, option);
+    return "";
+}
+
 private void assert_double_equal (double actual, double expected, string context) {
     if (Math.fabs (actual - expected) > 0.000001) {
         Test.fail_printf ("%s expected %.6f but got %.6f", context, expected, actual);
@@ -113,7 +125,7 @@ private bool ensure_gtk_widget_tests_available () {
     }
 
     if (!gtk_widget_tests_available) {
-        Test.message ("Skipping widget test: GTK could not initialize");
+        Test.skip ("GTK could not initialize");
         return false;
     }
 
@@ -533,6 +545,37 @@ private void test_trim_segment_edit_move_delete_and_crop_helpers () {
     assert_string_equal (segments[1].label, "A", "trim delete removes middle segment");
 }
 
+private void test_trim_unknown_duration_segment_ranges () {
+    double start;
+    double end;
+
+    assert_true (TrimTab.try_get_quick_segment_range_for_test (
+            25.0, 0.0, out start, out end),
+        "unknown duration accepts a bounded quick segment");
+    assert_double_equal (start, 25.0,
+        "unknown duration quick segment preserves its start");
+    assert_double_equal (end, 35.0,
+        "unknown duration quick segment uses a ten-second endpoint");
+
+    assert_true (TrimTab.try_get_quick_segment_range_for_test (
+            28.0, 30.0, out start, out end),
+        "known duration accepts a shortened final segment");
+    assert_double_equal (end, 30.0,
+        "known duration clamps a quick segment to EOF");
+
+    assert_false (TrimTab.try_get_quick_segment_range_for_test (
+            30.0, 30.0, out start, out end),
+        "known duration rejects a zero-length segment at EOF");
+
+    var through_eof = TrimSegment.through_end_of_file (4.0);
+    assert_false (through_eof.has_finite_end (),
+        "through-EOF segment records its unbounded endpoint");
+    assert_double_equal (through_eof.start_time, 4.0,
+        "through-EOF segment preserves its start");
+    assert_double_equal (through_eof.get_duration (), 0.0,
+        "through-EOF segment does not invent a duration");
+}
+
 private void test_trim_runner_guard_helpers () {
     assert_true (
         TrimTab.runner_callback_matches_active_operation_for_test (true, 42, 42),
@@ -729,6 +772,61 @@ private void test_trim_image_watermark_preserves_segment_duration () {
             "trim image watermark duration probe");
         assert_true (Math.fabs (duration - 2.0) < 0.2,
             "trim image watermark preserves requested segment duration");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+private void test_trim_crop_through_eof_omits_duration_limit () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-through-eof-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+        string output_path = Path.build_filename (tmp_dir, "cropped-through-eof.mkv");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+
+        var segment = TrimSegment.through_end_of_file ();
+        segment.crop_value = "320:240:0:0";
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (segment);
+        runner.set_segments (segments);
+
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        profile.audio_args = { "-c:a", "aac" };
+        profile.audio_processing.fade_out_enabled = true;
+        profile.audio_processing.fade_out_duration = 0.5;
+        runner.reencode_profile = profile;
+
+        int exit_code = runner.run_extract_segment_for_widget_test (0, output_path);
+        assert_true (exit_code == 0,
+            "unknown-duration full-file crop reaches EOF successfully");
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_not_contains (argv,
+            "-to", "unknown-duration full-file crop omits FFmpeg duration limit");
+        assert_array_not_contains (argv,
+            "-t", "unknown-duration full-file crop omits FFmpeg duration option");
+        string audio_filters = get_argv_value_after (
+            argv, "-af", "unknown-duration full-file crop audio filters");
+        assert_contains (audio_filters, "afade=t=out:",
+            "unknown-duration full-file crop preserves requested audio fade-out");
+
+        double input_duration = probe_media_duration_seconds (
+            input_path, "through-EOF input duration probe");
+        double output_duration = probe_media_duration_seconds (
+            output_path, "through-EOF output duration probe");
+        assert_true (Math.fabs (output_duration - input_duration) < 0.3,
+            "unknown-duration full-file crop preserves the complete input");
     } finally {
         cleanup_exec_test_dir (tmp_dir);
     }
@@ -1807,6 +1905,8 @@ void main (string[] args) {
 
     Test.add_func ("/trim/chapters/derive", test_trim_chapter_derivation_preserves_existing_order_and_appends_new);
     Test.add_func ("/trim/segments/edit-move-delete-crop", test_trim_segment_edit_move_delete_and_crop_helpers);
+    Test.add_func ("/trim/segments/unknown-duration-ranges",
+        test_trim_unknown_duration_segment_ranges);
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
     Test.add_func ("/trim/runner/collage-fallback-durations",
         test_trim_collage_fallback_durations_use_segment_context);
@@ -1814,6 +1914,8 @@ void main (string[] args) {
         test_trim_collage_output_results_preserve_primary_outputs);
     Test.add_func ("/trim/runner/image-watermark-preserves-duration",
         test_trim_image_watermark_preserves_segment_duration);
+    Test.add_func ("/trim/runner/crop-through-eof",
+        test_trim_crop_through_eof_omits_duration_limit);
     Test.add_func ("/trim/runner/image-watermark-maps-first-audio",
         test_trim_image_watermark_export_maps_first_audio_only);
     Test.add_func ("/trim/runner/smart-segment-preserves-10bit-overlay",

@@ -39,6 +39,35 @@ private void assert_string_equal (string? actual, string? expected, string conte
     }
 }
 
+private void assert_double_equal (double actual, double expected, string context) {
+    if (Math.fabs (actual - expected) > 0.000001) {
+        Test.fail_printf ("%s: expected %.6f, got %.6f", context, expected, actual);
+    }
+}
+
+private void test_selected_stream_uses_its_own_duration () {
+    var streams = new GenericArray<AudioStreamInfo> ();
+    var first = new AudioStreamInfo ();
+    first.duration_seconds = 7.25;
+    streams.add (first);
+    var second = new AudioStreamInfo ();
+    second.duration_seconds = 19.5;
+    streams.add (second);
+
+    assert_double_equal (
+        AudioTab.selected_audio_stream_duration_for_test (streams, 0),
+        7.25,
+        "first selected stream duration");
+    assert_double_equal (
+        AudioTab.selected_audio_stream_duration_for_test (streams, 1),
+        19.5,
+        "second selected stream duration");
+    assert_double_equal (
+        AudioTab.selected_audio_stream_duration_for_test (streams, 2),
+        0.0,
+        "out-of-range selected stream duration");
+}
+
 // ── reorder problem validation ──────────────────────────────────────────────
 
 private void test_problem_requires_input_file () {
@@ -217,6 +246,8 @@ void main (string[] args) {
         test_problem_requires_changed_order);
     Test.add_func ("/audio-reorder/problem/is-null-when-ready",
         test_problem_is_null_when_ready);
+    Test.add_func ("/audio-reorder/preview/selected-stream-uses-own-duration",
+        test_selected_stream_uses_its_own_duration);
 
     // is_reorder_changed
     Test.add_func ("/audio-reorder/state/natural-order-is-unchanged",

@@ -111,7 +111,7 @@ private void test_primary_audio_probe_parser_uses_ffprobe_csv_order () {
     assert_equal_int (result.bits_per_raw_sample, 24, "primary probe raw bits");
 }
 
-private void test_all_audio_streams_probe_parser_reads_string_bits_field () {
+private void test_all_audio_streams_probe_parser_reads_stream_durations () {
     string json = """
 {
   "format": { "duration": "12.5" },
@@ -122,7 +122,24 @@ private void test_all_audio_streams_probe_parser_reads_string_bits_field () {
       "sample_rate": "48000",
       "sample_fmt": "s32",
       "bits_per_raw_sample": "24",
+      "duration": "10.25",
       "tags": { "language": "eng" }
+    },
+    {
+      "codec_name": "aac",
+      "channels": 2,
+      "sample_rate": "48000",
+      "sample_fmt": "fltp",
+      "bits_per_raw_sample": "",
+      "tags": { "language": "deu", "DURATION": "00:00:11.750000000" }
+    },
+    {
+      "codec_name": "opus",
+      "channels": 2,
+      "sample_rate": "48000",
+      "sample_fmt": "fltp",
+      "bits_per_raw_sample": "",
+      "tags": { "language": "fra" }
     }
   ]
 }
@@ -132,10 +149,16 @@ private void test_all_audio_streams_probe_parser_reads_string_bits_field () {
         FfprobeUtils.parse_all_audio_streams_output_for_test (json);
 
     assert_true (result.success, "all streams probe success");
-    assert_equal_int ((int) result.streams.length, 1, "all streams probe count");
+    assert_equal_int ((int) result.streams.length, 3, "all streams probe count");
     assert_equal_int (result.streams[0].bits_per_raw_sample, 24, "all streams raw bits");
     assert_equal_string (result.streams[0].sample_fmt, "s32", "all streams sample format");
     assert_equal_int (result.streams[0].sample_rate, 48000, "all streams sample rate");
+    assert_near (result.streams[0].duration_seconds, 10.25, 0.000001,
+        "numeric stream duration wins over container duration");
+    assert_near (result.streams[1].duration_seconds, 11.75, 0.000001,
+        "Matroska DURATION tag supplies stream duration");
+    assert_near (result.streams[2].duration_seconds, 12.5, 0.000001,
+        "container duration is used only when stream duration is absent");
 }
 
 private void test_timed_stream_topology_parser_detects_subtitles_and_chapters () {
@@ -406,8 +429,8 @@ void main (string[] args) {
         test_primary_audio_probe_parser_uses_ffprobe_csv_order
     );
     Test.add_func (
-        "/ffprobe-utils/all-audio-streams-parser-reads-string-bits-field",
-        test_all_audio_streams_probe_parser_reads_string_bits_field
+        "/ffprobe-utils/all-audio-streams-parser-reads-stream-durations",
+        test_all_audio_streams_probe_parser_reads_stream_durations
     );
     Test.add_func (
         "/ffprobe-utils/timed-stream-topology-detects-subtitles-and-chapters",

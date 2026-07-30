@@ -1065,7 +1065,12 @@ public class AudioTab : Box {
         player = new AudioPlayer ();
         player.set_visible (false);
         player.media_ready.connect ((dur) => {
-            loaded_duration = dur;
+            // Keep the currently active duration for segment validation, but do
+            // not overwrite AudioStreamInfo.duration_seconds: that is the
+            // stream-specific ffprobe fallback needed if this track is reloaded
+            // and mpv cannot report a duration next time.
+            if (dur > 0.0)
+                loaded_duration = dur;
         });
         append (player);
     }
@@ -2156,12 +2161,10 @@ public class AudioTab : Box {
 
         if (probe_cancellable == cancel)
             probe_cancellable = null;
-        if (result.duration_seconds > 0.0) {
-            loaded_duration = result.duration_seconds;
-        }
-
         has_audio = true;
         selected_stream_index = 0;
+        loaded_duration = selected_audio_stream_duration (
+            all_audio_streams, selected_stream_index);
         primary_audio_source = AudioSourceLogic.from_stream_info (all_audio_streams[0]);
         emit_source_audio_probe (
             MediaStreamPresence.PRESENT,
@@ -2231,7 +2234,7 @@ public class AudioTab : Box {
         }
 
         show_audio_found ();
-        player.load_file (input_file, selected_stream_index);
+        player.load_file (input_file, selected_stream_index, loaded_duration);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2345,6 +2348,8 @@ public class AudioTab : Box {
 
         selected_stream_index = idx;
         var info = all_audio_streams[idx];
+        loaded_duration = selected_audio_stream_duration (
+            all_audio_streams, selected_stream_index);
 
         // Update primary audio source
         primary_audio_source = AudioSourceLogic.from_stream_info (info);
@@ -2371,13 +2376,24 @@ public class AudioTab : Box {
         update_mode_visibility ();
 
         // Reload waveform player with new stream
-        player.load_file (current_input_file, selected_stream_index);
+        player.load_file (
+            current_input_file,
+            selected_stream_index,
+            info.duration_seconds);
     }
 
     private static string icon_for_channels (int channels) {
         if (channels <= 1) return "audio-input-microphone-symbolic";
         if (channels <= 2) return "audio-x-generic-symbolic";
         return "audio-speakers-symbolic";
+    }
+
+    private static double selected_audio_stream_duration (
+            GenericArray<AudioStreamInfo> streams,
+            int stream_index) {
+        if (stream_index < 0 || stream_index >= streams.length)
+            return 0.0;
+        return streams[stream_index].duration_seconds;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2515,6 +2531,12 @@ public class AudioTab : Box {
             audio_stream_count,
             reorder_changed
         );
+    }
+
+    internal static double selected_audio_stream_duration_for_test (
+            GenericArray<AudioStreamInfo> streams,
+            int stream_index) {
+        return selected_audio_stream_duration (streams, stream_index);
     }
 #endif
 }

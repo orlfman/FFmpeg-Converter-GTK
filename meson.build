@@ -1,6 +1,6 @@
 project('ffmpeg-converter-gtk',
   ['vala', 'c'],
-  version : '1.6.4',
+  version : '2.0.0',
   meson_version : '>= 0.62.0',
   default_options : [
     'warning_level=3',
@@ -22,6 +22,9 @@ headless_gtk_test_env.set('DISPLAY', '')
 headless_gtk_test_env.set('WAYLAND_DISPLAY', '')
 headless_gtk_test_env.set('GSETTINGS_BACKEND', 'memory')
 headless_gtk_test_env.set('GIO_USE_VFS', 'local')
+display_gtk_test_env = environment()
+display_gtk_test_env.set('GSETTINGS_BACKEND', 'memory')
+display_gtk_test_env.set('GIO_USE_VFS', 'local')
 dependencies = [
   dependency('glib-2.0'),
   dependency('gobject-2.0'),
@@ -121,6 +124,97 @@ executable('ffmpeg-converter-gtk',
   install : true,
   install_dir : get_option('bindir')
 )
+
+if fs.exists('tests/mpv-backend-state-test.vala')
+  mpv_backend_state_test = executable(
+    'mpv-backend-state-test',
+    files(
+      'src/mpv-compat.c',
+      'src/mpv-backend.vala',
+      'src/constants.vala',
+      'src/app-settings.vala',
+      'tests/mpv-backend-state-test.vala',
+    ),
+    dependencies : dependencies,
+    vala_args : ['--define=MPV_BACKEND_STATE_TEST_BUILD'],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test('mpv-backend-state', mpv_backend_state_test, env : headless_gtk_test_env)
+endif
+
+if fs.exists('tests/mpv-render-timing-test.c')
+  # C only, and the software render API needs no display, so this runs headless
+  # unlike the widget tests. It plays real media, hence the longer timeout.
+  mpv_render_timing_test = executable(
+    'mpv-render-timing-test',
+    files(
+      'src/mpv-compat.c',
+      'tests/mpv-render-timing-test.c',
+    ),
+    dependencies : [dependency('glib-2.0'), dependency('mpv')],
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+
+  test(
+    'mpv-render-timing',
+    mpv_render_timing_test,
+    env : headless_gtk_test_env,
+    is_parallel : false,
+    timeout : 180,
+  )
+endif
+
+# ── DevTools probes ─────────────────────────────────────────────────────────
+#
+# Not tests: they need real media and are read by a human. They are declared
+# here so the documented build commands cannot drift out of date the way
+# mpv-backend-probe.vala's did — that one is Vala and pulls in AppSettings and
+# its supporting types, which a hand-written valac line has to keep chasing.
+#
+# build_by_default : false, so `make build` never compiles them. Build one with
+#   meson compile -C builddir mpv-backend-probe
+probe_targets = []
+
+if fs.exists('DevTools/mpv-backend-probe.vala')
+  probe_targets += executable(
+    'mpv-backend-probe',
+    files(
+      'src/mpv-compat.c',
+      'src/mpv-backend.vala',
+      'src/constants.vala',
+      'src/app-settings.vala',
+      'DevTools/mpv-backend-probe.vala',
+    ),
+    dependencies : dependencies,
+    build_by_default : false,
+    link_args : ['-lm'],
+  )
+endif
+
+# The two C probes need only the compatibility shim, which is why their header
+# build commands still work standalone. Declared anyway so all three are built
+# and kept compiling the same way.
+foreach probe : [
+  ['mpv-render-probe',        'DevTools/mpv-render-probe.c'],
+  ['mpv-render-timing-probe', 'DevTools/mpv-render-timing-probe.c'],
+]
+  if fs.exists(probe[1])
+    probe_targets += executable(
+      probe[0],
+      files('src/mpv-compat.c', probe[1]),
+      dependencies : [dependency('glib-2.0'), dependency('mpv')],
+      build_by_default : false,
+      link_args : ['-lm'],
+    )
+  endif
+endforeach
+
+if probe_targets.length() > 0
+  alias_target('probes', probe_targets)
+endif
 
 if fs.exists('tests/playback-launcher-logic-test.vala')
   playback_launcher_logic_test = executable(
@@ -551,12 +645,30 @@ if fs.exists('tests/combine-window-state-test.vala')
       'tests/combine-window-state-test.vala',
     ),
     dependencies : dependencies,
-    vala_args : ['--define=COMBINE_WINDOW_TEST_BUILD'],
+    vala_args : [
+      '--define=COMBINE_WINDOW_TEST_BUILD',
+      '--define=MPV_BACKEND_STATE_TEST_BUILD',
+    ],
     build_by_default : false,
     link_args : ['-lm'],
   )
 
   test('combine-window-state', combine_window_state_test, env : headless_gtk_test_env)
+  # This path needs a real GTK frame clock, so do not force it through the
+  # headless environment used by the broad widget/state suite. It runs as part
+  # of the normal test set when a display is available and reports an explicit
+  # skip otherwise.
+  test(
+    'mpv-player-display-state',
+    combine_window_state_test,
+    args : [
+      '-p', '/players/video/failed-load-releases-backend-resources',
+      '-p', '/players/video/disables-mpv-timing-lookahead',
+    ],
+    env : display_gtk_test_env,
+    is_parallel : false,
+    timeout : 30,
+  )
 endif
 
 if fs.exists('tests/audio-reorder-state-test.vala')

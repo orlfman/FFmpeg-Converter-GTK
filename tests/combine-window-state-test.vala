@@ -517,7 +517,7 @@ private bool ensure_gtk_widget_tests_available () {
     }
 
     if (!gtk_widget_tests_available) {
-        Test.message ("Skipping widget test: GTK could not initialize");
+        Test.skip ("GTK could not initialize");
         return false;
     }
 
@@ -814,6 +814,236 @@ private void test_combine_preview_hides_popout_button () {
         "combine preview hides the popout button");
 
     harness.window.close ();
+}
+
+private void test_video_player_duration_state_transitions () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var player = new VideoPlayer ();
+    int ready_count = 0;
+    double ready_duration = -1.0;
+    string failure_message = "";
+    player.media_ready.connect ((duration) => {
+        ready_count++;
+        ready_duration = duration;
+    });
+    player.media_failed.connect ((message) => {
+        failure_message = message;
+    });
+
+    player.prepare_duration_for_widget_test (42.0);
+    assert_true (ready_count == 1 && ready_duration == 42.0,
+        "video known duration reaches ready state");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "00:00:42.000", "video known duration is displayed");
+    assert_true (player.get_scrubber_upper_for_widget_test () == 42.0,
+        "video known duration configures scrubber range");
+    assert_true (player.is_scrubber_sensitive_for_widget_test (),
+        "video known duration enables timeline seeking");
+
+    player.clear ();
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "00:00:00.000", "video reset clears stale duration text");
+    assert_true (player.get_scrubber_upper_for_widget_test () == 1.0,
+        "video reset clears stale scrubber range");
+    assert_false (player.is_scrubber_sensitive_for_widget_test (),
+        "video reset disables the empty scrubber");
+
+    player.prepare_duration_for_widget_test (0.0);
+    assert_true (ready_count == 2 && ready_duration == 0.0,
+        "video unknown duration still reaches ready state");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "--:--:--.---", "video unknown duration is explicit");
+    assert_false (player.is_scrubber_sensitive_for_widget_test (),
+        "video unknown duration keeps timeline seeking disabled");
+    assert_true (player.is_media_status_visible_for_widget_test (),
+        "video unknown duration shows an explanation");
+    assert_contains (player.get_media_status_for_widget_test (),
+        "Duration unavailable", "video unknown-duration explanation");
+
+    player.fail_for_widget_test ("Preview failed for test");
+    assert_string_equal (failure_message, "Preview failed for test",
+        "video failure is propagated to its owner");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "00:00:00.000", "video failure clears duration state");
+    assert_contains (player.get_media_status_for_widget_test (),
+        "Preview failed", "video failure is user-visible");
+    player.cleanup ();
+}
+
+private void test_audio_player_duration_state_transitions () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var player = new AudioPlayer ();
+    int ready_count = 0;
+    double ready_duration = -1.0;
+    string failure_message = "";
+    player.media_ready.connect ((duration) => {
+        ready_count++;
+        ready_duration = duration;
+    });
+    player.media_failed.connect ((message) => {
+        failure_message = message;
+    });
+
+    player.prepare_duration_for_widget_test (18.5);
+    assert_true (ready_count == 1 && ready_duration == 18.5,
+        "audio known duration reaches ready state");
+    assert_true (player.get_duration_for_widget_test () == 18.5,
+        "audio known duration is retained for waveform mapping");
+    assert_true (player.is_waveform_seek_sensitive_for_widget_test (),
+        "audio known duration enables waveform seeking");
+
+    player.clear ();
+    assert_true (player.get_duration_for_widget_test () == 0.0,
+        "audio reset clears stale mapping duration");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "00:00:00.000", "audio reset clears stale duration text");
+    assert_false (player.is_waveform_seek_sensitive_for_widget_test (),
+        "audio reset disables waveform seeking");
+
+    player.prepare_duration_for_widget_test (0.0);
+    assert_true (ready_count == 2 && ready_duration == 0.0,
+        "audio unknown duration still reaches ready state");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "--:--:--.---", "audio unknown duration is explicit");
+    assert_false (player.is_waveform_seek_sensitive_for_widget_test (),
+        "audio unknown duration keeps waveform seeking disabled");
+    assert_true (player.is_media_status_visible_for_widget_test (),
+        "audio unknown duration shows an explanation");
+    assert_contains (player.get_media_status_for_widget_test (),
+        "Duration unavailable", "audio unknown-duration explanation");
+
+    player.clear ();
+    player.prepare_duration_with_fallback_for_widget_test (0.0, 73.25);
+    assert_true (ready_count == 3 && ready_duration == 73.25,
+        "audio ffprobe fallback reaches ready state with a finite duration");
+    assert_true (player.get_duration_for_widget_test () == 73.25,
+        "audio ffprobe fallback is retained for waveform mapping");
+    assert_string_equal (player.get_duration_text_for_widget_test (),
+        "00:01:13.250", "audio ffprobe fallback is displayed");
+    assert_true (player.is_waveform_seek_sensitive_for_widget_test (),
+        "audio ffprobe fallback enables waveform seeking");
+
+    player.fail_for_widget_test ("Audio preview failed for test");
+    assert_string_equal (failure_message, "Audio preview failed for test",
+        "audio failure is propagated to its owner");
+    assert_true (player.get_duration_for_widget_test () == 0.0,
+        "audio failure clears mapping duration");
+    assert_contains (player.get_media_status_for_widget_test (),
+        "Audio preview failed", "audio failure is user-visible");
+    player.cleanup ();
+}
+
+/**
+ * A video preview must run with video-timing-offset=0.
+ *
+ * That option is what keeps mpv's software render call from blocking the GTK
+ * main thread for a whole frame interval — see the finding 1 section of
+ * docs/mpv-port-review-findings.md. It is only applied on the video path, so it
+ * needs a real Gtk.Picture and therefore a display; the headless
+ * mpv-render-timing test covers the render parameter that pairs with it, but
+ * cannot reach this half.
+ *
+ * Reading it back from the live core also catches the option being rejected,
+ * which mpv reports only as a debug line.
+ */
+private void test_video_player_disables_mpv_timing_lookahead () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    string? temp_dir = null;
+    try {
+        temp_dir = DirUtils.make_tmp ("video-player-timing-XXXXXX");
+        string path = Path.build_filename (temp_dir, "timing.mkv");
+
+        string[] argv = {
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=s=320x180:rate=24:d=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            path
+        };
+        int status = 0;
+        Process.spawn_sync (null, argv, null,
+                            SpawnFlags.SEARCH_PATH
+                            | SpawnFlags.STDOUT_TO_DEV_NULL
+                            | SpawnFlags.STDERR_TO_DEV_NULL,
+                            null, null, null, out status);
+        if (status != 0 || !FileUtils.test (path, FileTest.EXISTS)) {
+            Test.skip ("ffmpeg unavailable, cannot build a video fixture");
+            return;
+        }
+
+        var player = new VideoPlayer ();
+        bool ready = false;
+        player.media_ready.connect (() => ready = true);
+
+        player.load_file (path);
+        assert_true (spin_main_context_until (() => ready, 5000),
+            "video fixture reaches readiness");
+
+        // Zero exactly: any lookahead at all is paid on the main thread.
+        assert_cmpfloat (player.backend_timing_offset_for_widget_test (),
+            CompareOperator.EQ, 0.0);
+
+        player.cleanup ();
+        FileUtils.remove (path);
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create video timing test directory: %s",
+            e.message);
+    } catch (SpawnError e) {
+        Test.skip ("ffmpeg unavailable, cannot build a video fixture");
+    } finally {
+        if (temp_dir != null)
+            DirUtils.remove (temp_dir);
+    }
+}
+
+private void test_video_player_failed_load_releases_backend_resources () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    string? temp_dir = null;
+    try {
+        temp_dir = DirUtils.make_tmp ("video-player-failure-XXXXXX");
+        string missing_path = Path.build_filename (temp_dir, "missing-video.mkv");
+
+        var player = new VideoPlayer ();
+        bool failed = false;
+        player.media_failed.connect ((message) => {
+            failed = true;
+        });
+
+        player.load_file (missing_path);
+        assert_true (player.is_backend_core_active_for_widget_test (),
+            "video load creates an mpv core before asynchronous failure");
+        assert_true (player.is_backend_render_context_active_for_widget_test (),
+            "video load creates a software render context");
+        assert_true (player.is_backend_event_source_active_for_widget_test (),
+            "video load starts the mpv event source");
+        assert_true (player.is_backend_render_tick_active_for_widget_test (),
+            "video load starts the GTK render tick");
+
+        assert_true (spin_main_context_until (() => failed, 3000),
+            "video missing-file failure reaches the owning player");
+        assert_false (player.is_backend_core_active_for_widget_test (),
+            "video failure releases the mpv core");
+        assert_false (player.is_backend_render_context_active_for_widget_test (),
+            "video failure releases the software render context");
+        assert_false (player.is_backend_event_source_active_for_widget_test (),
+            "video failure removes the mpv event source");
+        assert_false (player.is_backend_render_tick_active_for_widget_test (),
+            "video failure removes the GTK render tick");
+        player.cleanup ();
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create video failure test directory: %s",
+            e.message);
+    } finally {
+        if (temp_dir != null)
+            DirUtils.remove (temp_dir);
+    }
 }
 
 private void test_runner_binding_relays_cancelled_signal () {
@@ -5770,6 +6000,14 @@ void main (string[] args) {
         test_move_up_button_reorders_files);
     Test.add_func ("/combine/widgets/preview-hides-popout-button",
         test_combine_preview_hides_popout_button);
+    Test.add_func ("/players/video/duration-state-transitions",
+        test_video_player_duration_state_transitions);
+    Test.add_func ("/players/audio/duration-state-transitions",
+        test_audio_player_duration_state_transitions);
+    Test.add_func ("/players/video/failed-load-releases-backend-resources",
+        test_video_player_failed_load_releases_backend_resources);
+    Test.add_func ("/players/video/disables-mpv-timing-lookahead",
+        test_video_player_disables_mpv_timing_lookahead);
     Test.add_func ("/combine/file-pickers/combine-lock-clears-and-disables-input",
         test_file_pickers_combine_lock_clears_and_disables_input);
     Test.add_func ("/app-settings/recent-inputs/bounded-deduplicated-pruned",

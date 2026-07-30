@@ -67,6 +67,9 @@ public class TrimRunner : Object {
     private string[]? resolved_reencode_codec_args = null;
     private string timed_topology_input_file = "";
     private TimedStreamTopologyProbeResult? timed_topology_cache = null;
+    private string audio_duration_probe_input = "";
+    private double audio_duration_probe_result = 0.0;
+    private bool warned_unknown_audio_fade_duration = false;
     private Mutex run_mutex = Mutex ();
     private bool run_active = false;
 
@@ -429,8 +432,10 @@ public class TrimRunner : Object {
             var seg = segments[i];
             cmd += "-ss";
             cmd += format_seconds (seg.start_time);
-            cmd += "-t";
-            cmd += format_seconds (seg.end_time - seg.start_time);
+            if (seg.has_finite_end ()) {
+                cmd += "-t";
+                cmd += format_seconds (seg.get_duration ());
+            }
             cmd += "-i";
             cmd += input_file;
         }
@@ -496,7 +501,7 @@ public class TrimRunner : Object {
 
             if (!audio_disabled) {
                 string af = build_audio_filters_for_segment (
-                    seg.end_time - seg.start_time,
+                    seg,
                     i == 0,
                     i == segments.length - 1,
                     !normalize_after_concat
@@ -632,13 +637,15 @@ public class TrimRunner : Object {
 
             input_args += "-ss";
             input_args += start_text;
-            input_args += "-t";
-            input_args += duration_text;
+            if (seg.has_finite_end ()) {
+                input_args += "-t";
+                input_args += duration_text;
+            }
             input_args += "-i";
             input_args += input_file;
 
             string filters = build_audio_filters_for_segment (
-                seg.get_duration (),
+                seg,
                 i == 0,
                 i == segments.length - 1,
                 false
@@ -694,11 +701,14 @@ public class TrimRunner : Object {
         string[] pre_input_args = {
             "-ss", format_seconds (seg.start_time)
         };
-        string[] post_input_args = {
-            "-t", format_seconds (seg.end_time - seg.start_time)
-        };
+        string[] post_input_args = {};
+        if (seg.has_finite_end ()) {
+            post_input_args = {
+                "-t", format_seconds (seg.get_duration ())
+            };
+        }
         string filter_chain = build_audio_filters_for_segment (
-            seg.end_time - seg.start_time,
+            seg,
             apply_fade_in,
             apply_fade_out,
             false
@@ -805,21 +815,25 @@ public class TrimRunner : Object {
         bool input_seeking = !seg_reencode && keyframe_cut;
 
         if (input_seeking) {
-            // Input seeking: -ss before -i, duration-based -to
+            // Input seeking: -ss before -i, duration-based -to when bounded.
             cmd += "-ss";
             cmd += format_seconds (seg.start_time);
             cmd += "-i";
             cmd += input_file;
-            cmd += "-to";
-            cmd += format_seconds (seg.end_time - seg.start_time);
+            if (seg.has_finite_end ()) {
+                cmd += "-to";
+                cmd += format_seconds (seg.get_duration ());
+            }
         } else if (!seg_reencode) {
-            // Copy mode with precise cut: -ss after -i, absolute -to
+            // Copy mode with precise cut: -ss after -i, absolute -to when bounded.
             cmd += "-i";
             cmd += input_file;
             cmd += "-ss";
             cmd += format_seconds (seg.start_time);
-            cmd += "-to";
-            cmd += format_seconds (seg.end_time);
+            if (seg.has_finite_end ()) {
+                cmd += "-to";
+                cmd += format_seconds (seg.end_time);
+            }
         } else {
             // Re-encode: input seeking is fine (will decode anyway)
             cmd += "-ss";
@@ -828,7 +842,9 @@ public class TrimRunner : Object {
             cmd += input_file;
             // Defer -to until after all inputs so it keeps applying to the
             // trimmed video even when image watermarking adds a second -i.
-            deferred_to = format_seconds (seg.end_time - seg.start_time);
+            if (seg.has_finite_end ()) {
+                deferred_to = format_seconds (seg.get_duration ());
+            }
         }
 
         if (!seg_reencode) {
@@ -936,7 +952,7 @@ public class TrimRunner : Object {
                 }
             }
 
-            string af = build_audio_filters_for_segment (seg.end_time - seg.start_time);
+            string af = build_audio_filters_for_segment (seg);
             string[] audio_args = get_audio_args_with_filters (af);
             foreach (string a in audio_args) cmd += a;
 
@@ -1114,13 +1130,16 @@ public class TrimRunner : Object {
         return {};
     }
 
-    private string build_audio_filters_for_segment (double duration,
+    private string build_audio_filters_for_segment (TrimSegment segment,
                                                     bool apply_fade_in = true,
                                                     bool apply_fade_out = true,
                                                     bool include_normalization = true) {
         if (reencode_profile == null) {
             return "";
         }
+
+        double duration = audio_filter_duration_for_segment (
+            segment, apply_fade_out);
 
         return FilterBuilder.merge_profile_audio_filter_chain (
             reencode_profile.audio_filters,
@@ -1130,6 +1149,50 @@ public class TrimRunner : Object {
             apply_fade_in,
             apply_fade_out
         );
+    }
+
+    /**
+     * Resolve the duration needed to place an audio fade at the end of a segment.
+     *
+     * A through-EOF segment deliberately has no FFmpeg -t/-to limit, so its model
+     * duration is zero.  The filter still needs a finite timestamp for afade,
+     * however. Probe the source only when that fade is requested and use the
+     * remaining source duration as a filter hint without turning it into an
+     * export limit. If even ffprobe cannot determine the duration, keep exporting
+     * through EOF but make the omitted effect explicit in the console.
+     */
+    private double audio_filter_duration_for_segment (TrimSegment segment,
+                                                       bool apply_fade_out) {
+        if (segment.has_finite_end ()) {
+            return segment.get_duration ();
+        }
+
+        if (!apply_fade_out
+            || reencode_profile == null
+            || !reencode_profile.audio_processing.fade_out_enabled
+            || reencode_profile.audio_processing.fade_out_duration <= 0.0) {
+            return 0.0;
+        }
+
+        if (audio_duration_probe_input != input_file) {
+            audio_duration_probe_input = input_file;
+            audio_duration_probe_result =
+                FfprobeUtils.probe_primary_audio_duration (input_file);
+            warned_unknown_audio_fade_duration = false;
+        }
+
+        double remaining = audio_duration_probe_result - segment.start_time;
+        if (remaining.is_finite () && remaining > 0.0) {
+            return remaining;
+        }
+
+        if (!warned_unknown_audio_fade_duration) {
+            warned_unknown_audio_fade_duration = true;
+            log_line (
+                "⚠ Audio fade-out requested, but the through-EOF duration " +
+                "could not be determined. Skipping the fade-out filter.");
+        }
+        return 0.0;
     }
 
     private AudioProcessingSettingsSnapshot get_audio_processing_settings () {
