@@ -293,9 +293,14 @@ public class ConversionRunner {
             video_start_time = video_timeline.start_time;
             duration_seconds = video_timeline.get_seek_span ();
         } else if (video_timeline.start_time_known
-                   && config.video_output_duration_seconds > 0.0) {
+                   && config.video_source_span_seconds > 0.0) {
             video_start_time = video_timeline.start_time;
-            duration_seconds = config.video_output_duration_seconds;
+            // Collage frames are seeked in the output file, so this fallback
+            // has to be the output's length rather than the source span it was
+            // read from — otherwise a sped-up encode sends the later seeks
+            // past the final frame.
+            duration_seconds = video_output_duration_seconds (
+                config.video_source_span_seconds);
             converter.log_console_if_active (
                 process_runner,
                 "[Collage] Could not read the tail packet; using the encoded video duration with the measured video start."
@@ -491,6 +496,24 @@ public class ConversionRunner {
             cmd += "-ss";
             cmd += config.seek_timestamp;
         }
+        // Duration selects a stretch of the source, so it has to bound the
+        // input. As an output option it would be measured after the filter
+        // chain, where a speed filter has rewritten the timestamps: the encode
+        // would then cover a different stretch than the one the rest of the app
+        // already assumes it covers. SmartOptimizer samples the source between
+        // trim_start_seconds and trim_end_seconds, and timed logo removal
+        // clamps its enable windows to the same span — both in source time.
+        //
+        // Without a speed filter the two placements are identical, so this only
+        // changes the combination that was inconsistent.
+        //
+        // Placed ahead of the first -i so it binds to the source alone. An
+        // image watermark adds a second -i below, and that one is a single
+        // still frame which must stay unbounded.
+        if (config.time_enabled) {
+            cmd += "-t";
+            cmd += config.time_timestamp;
+        }
 
         cmd += "-i"; cmd += input;
 
@@ -566,16 +589,14 @@ public class ConversionRunner {
     }
 
     /**
-     * Build the shared time-limit and progress-pipe arguments.
+     * Build the progress-pipe arguments.
      * Returns an array that the caller appends to its command.
+     *
+     * The duration limit used to live here. It bounds the input now, so it is
+     * emitted by build_common_prefix ahead of the first -i instead.
      */
-    private string[] build_time_and_progress_args () {
+    private string[] build_progress_args () {
         string[] args = {};
-
-        if (config.time_enabled) {
-            args += "-t";
-            args += config.time_timestamp;
-        }
 
         args += "-progress"; args += "pipe:2";
         return args;
@@ -627,13 +648,10 @@ public class ConversionRunner {
             args += "-ss";
             args += config.seek_timestamp;
         }
-
-        return args;
-    }
-
-    private string[] build_peak_analysis_post_input_args () {
-        string[] args = {};
-
+        // Bound on the input for the same reason the encode does — see
+        // build_common_prefix. The analysis has to measure the same stretch of
+        // source the encode writes, or it normalizes against a peak taken from
+        // somewhere else.
         if (config.time_enabled) {
             args += "-t";
             args += config.time_timestamp;
@@ -673,7 +691,7 @@ public class ConversionRunner {
         cmd += "-passlogfile"; cmd += config.passlog_base;
         cmd += "-an";
 
-        foreach (string a in build_time_and_progress_args ()) cmd += a;
+        foreach (string a in build_progress_args ()) cmd += a;
 
         cmd += "-f"; cmd += "null";
         cmd += "/dev/null";
@@ -687,7 +705,7 @@ public class ConversionRunner {
         cmd += "-passlogfile"; cmd += config.passlog_base;
 
         foreach (string a in build_metadata_args ()) cmd += a;
-        foreach (string a in build_time_and_progress_args ()) cmd += a;
+        foreach (string a in build_progress_args ()) cmd += a;
         foreach (string a in get_audio_args_with_filters ()) cmd += a;
 
         cmd += safe_output;
@@ -698,7 +716,7 @@ public class ConversionRunner {
         string[] cmd = build_common_prefix (input);
 
         foreach (string a in build_metadata_args ()) cmd += a;
-        foreach (string a in build_time_and_progress_args ()) cmd += a;
+        foreach (string a in build_progress_args ()) cmd += a;
         foreach (string a in get_audio_args_with_filters ()) cmd += a;
 
         cmd += safe_output;
@@ -726,17 +744,40 @@ public class ConversionRunner {
     private string build_peak_analysis_audio_filters () {
         if (config.profile.audio_processing.fade_out_enabled
             && config.profile.audio_processing.fade_out_duration > 0.0
-            && config.output_duration_seconds <= 0.0) {
+            && config.source_span_seconds <= 0.0) {
             warning ("ConversionRunner: audio fade-out requested but output duration is unknown; skipping fade-out filter.");
         }
 
         return FilterBuilder.build_peak_analysis_audio_filter_chain (
             config.profile.audio_filters,
             config.profile.audio_processing,
-            config.output_duration_seconds,
+            audio_output_duration_seconds (),
             true,
             true
         );
+    }
+
+    /**
+     * How long the audio actually runs once the chain has been applied.
+     *
+     * merge_profile_audio_filter_chain appends the processing filters after
+     * the profile's own, so afade sits downstream of atempo and places its
+     * fade on the sped-up timeline. Handing it the source span would put a
+     * fade-out past the end of a shortened track, where it never fires.
+     */
+    private double audio_output_duration_seconds () {
+        double speed = config.profile.audio_speed_multiplier;
+        if (!speed.is_finite () || speed <= 0.0) return config.source_span_seconds;
+
+        return config.source_span_seconds / speed;
+    }
+
+    /** The video counterpart, for a span already measured on the source. */
+    private double video_output_duration_seconds (double source_span) {
+        double speed = config.profile.video_speed_multiplier;
+        if (!speed.is_finite () || speed <= 0.0) return source_span;
+
+        return source_span / speed;
     }
 
     private string[] build_peak_detect_cmd (string input) {
@@ -744,7 +785,7 @@ public class ConversionRunner {
             input,
             build_peak_analysis_audio_filters (),
             build_peak_analysis_pre_input_args (),
-            build_peak_analysis_post_input_args (),
+            null,
             FilterBuilder.extract_peak_analysis_output_args (config.profile.audio_args),
             get_explicit_audio_map_spec ()
         );
@@ -824,14 +865,14 @@ public class ConversionRunner {
     private string build_audio_filters () {
         if (config.profile.audio_processing.fade_out_enabled
             && config.profile.audio_processing.fade_out_duration > 0.0
-            && config.output_duration_seconds <= 0.0) {
+            && config.source_span_seconds <= 0.0) {
             warning ("ConversionRunner: audio fade-out requested but output duration is unknown; skipping fade-out filter.");
         }
 
         return FilterBuilder.merge_profile_audio_filter_chain (
             config.profile.audio_filters,
             config.profile.audio_processing,
-            config.output_duration_seconds,
+            audio_output_duration_seconds (),
             true,
             true,
             true

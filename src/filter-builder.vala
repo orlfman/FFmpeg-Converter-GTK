@@ -51,6 +51,21 @@ namespace FilterBuilder {
             ? multiplier : 1.0;
     }
 
+    /**
+     * The audio counterpart. Kept separate rather than folded into the video
+     * one because the two rates are enabled and set independently, so a single
+     * "playback rate" would be a fiction whenever they disagree.
+     */
+    public double get_audio_speed_multiplier (GeneralSettingsSnapshot snapshot) {
+        if (!snapshot.audio_speed_enabled)
+            return 1.0;
+
+        double multiplier;
+        return try_get_speed_multiplier (
+            snapshot.audio_speed_percent, "audio", out multiplier)
+            ? multiplier : 1.0;
+    }
+
     private string[] get_rotation_filters_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
         string rot = snapshot.rotate;

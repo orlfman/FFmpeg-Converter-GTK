@@ -94,6 +94,53 @@ private void assert_array_has_adjacent_pair (string[] values,
     Test.fail_printf ("%s expected pair '%s' '%s'", context, first, second);
 }
 
+/**
+ * Assert that @earlier appears before the first @later.
+ *
+ * FFmpeg reads its command line positionally, so for some options the
+ * difference between input and output semantics is nothing but which side of
+ * -i they land on.
+ */
+private void assert_array_option_precedes (string[] values,
+                                           string earlier,
+                                           string later,
+                                           string context) {
+    int earlier_index = -1;
+    int later_index = -1;
+
+    for (int i = 0; i < values.length; i++) {
+        if (earlier_index < 0 && values[i] == earlier) earlier_index = i;
+        if (later_index < 0 && values[i] == later) later_index = i;
+    }
+
+    if (earlier_index < 0) {
+        Test.fail_printf ("%s expected '%s' to be present", context, earlier);
+        return;
+    }
+    if (later_index < 0) {
+        Test.fail_printf ("%s expected '%s' to be present", context, later);
+        return;
+    }
+    if (earlier_index > later_index) {
+        Test.fail_printf ("%s expected '%s' before '%s'",
+            context, earlier, later);
+    }
+}
+
+/** The argument following @option, or "" when the option is absent. */
+private string get_argv_value_after (string[] values,
+                                     string option,
+                                     string context) {
+    for (int i = 0; i < values.length - 1; i++) {
+        if (values[i] == option) {
+            return values[i + 1];
+        }
+    }
+
+    Test.fail_printf ("%s expected '%s' to carry a value", context, option);
+    return "";
+}
+
 private void assert_array_occurrence_count (string[] values,
                                             string expected,
                                             int expected_count,
@@ -152,13 +199,13 @@ private CombineRunner make_capture_runner (GenericArray<CombineFile> files,
 }
 
 private ConversionRunner make_conversion_runner_for_test (EncodeProfileSnapshot profile,
-                                                          double output_duration_seconds = 1.0,
+                                                          double source_span_seconds = 1.0,
                                                           bool topology_known = true,
                                                           bool has_subtitles = false,
                                                           bool has_chapters = false) {
     var config = new ConversionConfig ();
     config.profile = profile;
-    config.output_duration_seconds = output_duration_seconds;
+    config.source_span_seconds = source_span_seconds;
     config.timed_stream_topology_known = topology_known;
     config.input_has_subtitle_stream = has_subtitles;
     config.input_has_chapters = has_chapters;
@@ -1970,6 +2017,66 @@ private void test_conversion_runner_non_watermark_on_maps_primary_video_and_all_
         "on path maps all audio streams");
 }
 
+/**
+ * The General tab's Duration selects a stretch of the source, so it has to
+ * bound the input.
+ *
+ * As an output option it was measured after the filter chain, where a speed
+ * filter has already rewritten the timestamps — which put it on a different
+ * clock from the rest of the app. SmartOptimizer samples the source between
+ * trim_start_seconds and trim_end_seconds (app-controller), and timed logo
+ * removal clamps its enable windows to the same span (logo-detector-logic);
+ * both read it as source time. At 2x the encode ran on past the requested
+ * span, and logo removal stopped covering the tail of the output.
+ *
+ * Without a speed filter both placements produce identical output, so the
+ * position is the only thing worth asserting here.
+ */
+private void test_conversion_runner_duration_bounds_the_input () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.video_filters = "setpts=0.500000*PTS";
+    profile.video_filters_skip_delogo = profile.video_filters;
+    profile.video_filters_skip_crop_and_delogo = profile.video_filters;
+
+    var config = new ConversionConfig ();
+    config.profile = profile;
+    config.source_span_seconds = 30.0;
+    config.timed_stream_topology_known = true;
+    config.seek_enabled = true;
+    config.seek_timestamp = "00:00:05";
+    config.time_enabled = true;
+    config.time_timestamp = "00:00:30";
+
+    var runner = new ConversionRunner.for_command_test (config);
+
+    string[] single_pass = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv", "/tmp/output.mkv");
+    string[] pass1 = runner.build_pass1_argv_for_test ("/tmp/input.mkv");
+    string[] pass2 = runner.build_pass2_argv_for_test (
+        "/tmp/input.mkv", "/tmp/output.mkv");
+
+    assert_array_option_precedes (single_pass, "-t", "-i",
+        "single-pass duration bounds the input");
+    assert_array_option_precedes (pass1, "-t", "-i",
+        "pass 1 duration bounds the input");
+    assert_array_option_precedes (pass2, "-t", "-i",
+        "pass 2 duration bounds the input");
+
+    // Start and length must stay on the same side of -i, or they describe two
+    // different ranges.
+    assert_array_option_precedes (single_pass, "-ss", "-i",
+        "single-pass start time bounds the input");
+
+    // One limit only — a leftover output-side copy would re-truncate the
+    // already-correct span.
+    assert_array_occurrence_count (single_pass, "-t", 1,
+        "single-pass emits exactly one duration limit");
+
+    // Progress reporting stays where it was.
+    assert_array_has_adjacent_pair (single_pass, "-progress", "pipe:2",
+        "single-pass keeps the progress pipe");
+}
+
 private void test_conversion_runner_video_only_resets_output_timestamps () {
     var profile = make_basic_conversion_profile_for_test ();
     profile.audio_args = { "-an" };
@@ -2472,8 +2579,8 @@ private void test_process_runner_capture_is_cancellable () {
 
 private void test_converter_progress_prefers_real_video_duration () {
     var config = new ConversionConfig ();
-    config.output_duration_seconds = 17.766;
-    config.video_output_duration_seconds = 16.2;
+    config.source_span_seconds = 17.766;
+    config.video_source_span_seconds = 16.2;
 
     assert_uint64_equal (
         (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
@@ -2481,12 +2588,86 @@ private void test_converter_progress_prefers_real_video_duration () {
         "frame progress excludes a container leading timestamp gap"
     );
 
-    config.video_output_duration_seconds = 0.0;
+    config.video_source_span_seconds = 0.0;
     assert_uint64_equal (
         (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
         533,
         "frame progress retains container-duration fallback when video timing is unavailable"
     );
+}
+
+/**
+ * Progress counts output frames, so a speed filter has to be divided out.
+ *
+ * The span it starts from is source time. FFmpeg re-times to the output frame
+ * rate rather than carrying every source frame across, so at 2x roughly half
+ * the counted frames are ever written and the bar stalls near the middle;
+ * at 0.5x it fills long before the encode ends.
+ */
+private void test_conversion_frame_count_accounts_for_video_speed () {
+    var config = new ConversionConfig ();
+    config.source_span_seconds = 20.0;
+    config.video_source_span_seconds = 20.0;
+
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        600, "unmodified speed counts one frame per source frame");
+
+    config.profile.video_speed_multiplier = 2.0;
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        300, "2x writes half as many frames as the source span suggests");
+
+    config.profile.video_speed_multiplier = 0.5;
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        1200, "0.5x writes twice as many");
+
+    // Audio rate is a separate setting and must not move the frame count.
+    config.profile.video_speed_multiplier = 1.0;
+    config.profile.audio_speed_multiplier = 2.0;
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        600, "audio speed leaves the video frame count alone");
+
+    // A nonsense multiplier must not produce an infinite or negative count.
+    config.profile.video_speed_multiplier = 0.0;
+    assert_uint64_equal (
+        (uint64) Converter.compute_expected_frame_count_for_test (config, 30.0),
+        600, "an unusable multiplier falls back to unmodified speed");
+}
+
+/**
+ * The audio fade-out is placed on the post-atempo timeline.
+ *
+ * merge_profile_audio_filter_chain appends the processing filters after the
+ * profile's own, so afade runs downstream of atempo. Offsetting it from the
+ * source span puts the fade past the end of a shortened track, where it never
+ * fires — the export just stops at full volume.
+ */
+private void test_conversion_audio_fade_follows_audio_speed () {
+    var profile = make_basic_conversion_profile_for_test ();
+    profile.audio_filters = "atempo=2.000000";
+    profile.audio_speed_multiplier = 2.0;
+    profile.audio_processing.fade_out_enabled = true;
+    profile.audio_processing.fade_out_duration = 2.0;
+
+    var config = new ConversionConfig ();
+    config.profile = profile;
+    config.source_span_seconds = 20.0;
+    config.timed_stream_topology_known = true;
+
+    var runner = new ConversionRunner.for_command_test (config);
+    string[] argv = runner.build_single_pass_argv_for_test (
+        "/tmp/input.mkv", "/tmp/output.mkv");
+
+    // 20s of source at 2x is 10s of audio, so the 2s fade starts at 8s —
+    // not at 18s, which is past the end of the track entirely.
+    string af = get_argv_value_after (argv, "-af", "audio filter chain");
+    assert_contains (af, "afade=t=out:st=8",
+        "fade-out is offset from the sped-up audio length");
+    assert_false (af.contains ("afade=t=out:st=18"),
+        "fade-out is not offset from the source span");
 }
 
 private void test_conversion_runner_single_frame_collage_integration () {
@@ -6253,6 +6434,12 @@ void main (string[] args) {
         test_conversion_runner_non_watermark_off_keeps_existing_mapping_behavior);
     Test.add_func ("/convert/runner/non-watermark-on-maps-primary-video-and-all-audio",
         test_conversion_runner_non_watermark_on_maps_primary_video_and_all_audio);
+    Test.add_func ("/convert/progress/frame-count-accounts-for-video-speed",
+        test_conversion_frame_count_accounts_for_video_speed);
+    Test.add_func ("/convert/audio/fade-follows-audio-speed",
+        test_conversion_audio_fade_follows_audio_speed);
+    Test.add_func ("/convert/runner/duration-bounds-the-input",
+        test_conversion_runner_duration_bounds_the_input);
     Test.add_func ("/convert/runner/video-only-resets-output-timestamps",
         test_conversion_runner_video_only_resets_output_timestamps);
     Test.add_func ("/convert/runner/video-only-adds-timestamp-filter-to-empty-chain",

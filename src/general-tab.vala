@@ -43,7 +43,7 @@ public class GeneralTab : Box {
     private const string SEEK_SUBTITLE_DEFAULT =
         "Start encoding from a specific timestamp";
     private const string TIME_SUBTITLE_DEFAULT =
-        "Limit the output to a specific length";
+        "Encode only this much of the source, starting from the start time";
     private const string LOCK_REASON_TIMING_TRIM =
         "Disabled while using segment-based modes in the Crop & Trim tab — navigate away or switch to Crop Only mode to unlock";
     private const string LOCK_REASON_TIMING_COMBINE =

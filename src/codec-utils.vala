@@ -103,6 +103,12 @@ public class EncodeProfileSnapshot : Object {
     public string combine_video_filters_per_input = "";
     public string combine_video_filters_post_output = "";
     public string audio_filters = "";
+    // How far the speed filters above stretch or compress the output relative
+    // to the source, so that anything reasoning about output length can undo
+    // them. 1.0 when speed is off. Video and audio are separate because the
+    // two rates are configured independently and routinely differ.
+    public double video_speed_multiplier = 1.0;
+    public double audio_speed_multiplier = 1.0;
     public AudioProcessingSettingsSnapshot audio_processing { get; set; default = new AudioProcessingSettingsSnapshot (); }
     public bool preserve_metadata = false;
     public bool remove_chapters = false;
@@ -557,6 +563,10 @@ namespace CodecUtils {
             snapshot.combine_video_filters_post_output =
                 FilterBuilder.build_combine_post_output_video_filters_from_snapshot (
                     general_settings);
+            snapshot.video_speed_multiplier =
+                FilterBuilder.get_video_speed_multiplier (general_settings);
+            snapshot.audio_speed_multiplier =
+                FilterBuilder.get_audio_speed_multiplier (general_settings);
             snapshot.audio_filters = FilterBuilder.build_audio_filter_chain_from_snapshot (
                 general_settings);
             snapshot.preserve_metadata = general_settings.preserve_metadata;

@@ -698,15 +698,19 @@ public class TrimRunner : Object {
     private string[] build_peak_detect_cmd_for_segment (TrimSegment seg,
                                                         bool apply_fade_in = true,
                                                         bool apply_fade_out = true) {
+        // Bound the span on the input, for the same reason extract_segment
+        // does: an output-side limit lands after the filter chain, so an audio
+        // speed change would have the analysis measure a different span than
+        // the encode writes, and normalize against a peak taken from the wrong
+        // part of the segment.
         string[] pre_input_args = {
             "-ss", format_seconds (seg.start_time)
         };
-        string[] post_input_args = {};
         if (seg.has_finite_end ()) {
-            post_input_args = {
-                "-t", format_seconds (seg.get_duration ())
-            };
+            pre_input_args += "-t";
+            pre_input_args += format_seconds (seg.get_duration ());
         }
+        string[] post_input_args = {};
         string filter_chain = build_audio_filters_for_segment (
             seg,
             apply_fade_in,
@@ -803,7 +807,6 @@ public class TrimRunner : Object {
 
     private int extract_segment (int seg_index, TrimSegment seg, string output) {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
-        string? deferred_to = null;
 
         bool seg_has_crop = seg.has_crop ();
         bool seg_reencode = !copy_mode || seg_has_crop;
@@ -838,13 +841,25 @@ public class TrimRunner : Object {
             // Re-encode: input seeking is fine (will decode anyway)
             cmd += "-ss";
             cmd += format_seconds (seg.start_time);
+            // Bound the span on the input rather than the output. An output
+            // limit is measured after the filter chain has run, so a speed
+            // filter — which rewrites output timestamps — would leave the two
+            // ends of one segment on different clocks: at 0.5x the limit cuts
+            // the segment in half, and at 2x it runs past the end to EOF.
+            //
+            // It is also the only form that can express a segment whose video
+            // and audio speeds differ, because those produce output streams of
+            // unequal length and a single output limit cannot bound both.
+            //
+            // Placed ahead of the first -i so it binds to the source alone.
+            // An image watermark adds a second -i below, and that one is a
+            // single still frame which must stay unbounded.
+            if (seg.has_finite_end ()) {
+                cmd += "-t";
+                cmd += format_seconds (seg.get_duration ());
+            }
             cmd += "-i";
             cmd += input_file;
-            // Defer -to until after all inputs so it keeps applying to the
-            // trimmed video even when image watermarking adds a second -i.
-            if (seg.has_finite_end ()) {
-                deferred_to = format_seconds (seg.get_duration ());
-            }
         }
 
         if (!seg_reencode) {
@@ -922,11 +937,6 @@ public class TrimRunner : Object {
             } else if (vf != "") {
                 cmd += "-vf";
                 cmd += vf;
-            }
-
-            if (deferred_to != null) {
-                cmd += "-to";
-                cmd += deferred_to;
             }
 
             // ── Video codec args: per-segment Smart Optimizer or shared builder ──

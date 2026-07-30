@@ -29,8 +29,8 @@ public class ConversionConfig : Object {
     public string seek_timestamp { get; set; default = "00:00:00"; }
     public bool   time_enabled   { get; set; default = false; }
     public string time_timestamp { get; set; default = "00:00:00"; }
-    public double output_duration_seconds { get; set; default = 0.0; }
-    public double video_output_duration_seconds { get; set; default = 0.0; }
+    public double source_span_seconds { get; set; default = 0.0; }
+    public double video_source_span_seconds { get; set; default = 0.0; }
 
     // Timed input content that FFmpeg may carry into the output implicitly.
     // A failed probe remains "unknown" so timestamp normalization can fail
@@ -360,13 +360,13 @@ public class Converter : Object {
                                     active_runner == runner);
                     if (still_active) {
                         total_duration = dur;
-                        config.output_duration_seconds = compute_output_duration_seconds (
+                        config.source_span_seconds = compute_source_span_seconds (
                             dur, config.seek_enabled ? config.seek_timestamp : "",
                             config.time_enabled ? config.time_timestamp : ""
                         );
                         double video_duration = video_timeline.get_duration ();
-                        config.video_output_duration_seconds = video_duration > 0.0
-                            ? compute_output_duration_seconds (
+                        config.video_source_span_seconds = video_duration > 0.0
+                            ? compute_source_span_seconds (
                                 video_duration,
                                 config.seek_enabled ? config.seek_timestamp : "",
                                 config.time_enabled ? config.time_timestamp : ""
@@ -508,9 +508,19 @@ public class Converter : Object {
         runner.run (input, output, two_pass, operation_id);
     }
 
-    private static double compute_output_duration_seconds (double input_duration,
-                                                           string seek_timestamp,
-                                                           string time_timestamp) {
+    /**
+     * The stretch of source an encode will read: the input duration, less the
+     * seek, capped by the requested length.
+     *
+     * This is source time, not output time. A speed filter makes the two
+     * differ, so anything that needs the output's own length has to divide by
+     * the matching speed multiplier — video and audio separately, since those
+     * rates are set independently. See compute_expected_frame_count and
+     * ConversionRunner's audio fade placement.
+     */
+    private static double compute_source_span_seconds (double input_duration,
+                                                       string seek_timestamp,
+                                                       string time_timestamp) {
         double duration = input_duration;
         if (seek_timestamp.length > 0) {
             duration -= ConversionUtils.parse_ffmpeg_timestamp (seek_timestamp);
@@ -553,14 +563,22 @@ public class Converter : Object {
 
     private static int64 compute_expected_frame_count (ConversionConfig config,
                                                        double output_fps) {
-        double expected_video_duration =
-            config.video_output_duration_seconds > 0.0
-                ? config.video_output_duration_seconds
-                : config.output_duration_seconds;
-        if (output_fps <= 0.0 || expected_video_duration <= 0.0)
+        double source_span =
+            config.video_source_span_seconds > 0.0
+                ? config.video_source_span_seconds
+                : config.source_span_seconds;
+        if (output_fps <= 0.0 || source_span <= 0.0)
             return 0;
 
-        return (int64) Math.round (output_fps * expected_video_duration);
+        // The span is source time; the frames being counted are the output's.
+        // A speed filter compresses or stretches one into the other, and
+        // FFmpeg re-times to the output frame rate rather than carrying every
+        // source frame across — so at 2x this counts twice the frames that
+        // actually get written, and the bar stalls at half.
+        double speed = config.profile.video_speed_multiplier;
+        if (!speed.is_finite () || speed <= 0.0) speed = 1.0;
+
+        return (int64) Math.round (output_fps * (source_span / speed));
     }
 
 #if COMBINE_WINDOW_TEST_BUILD

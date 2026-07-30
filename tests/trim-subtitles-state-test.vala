@@ -777,6 +777,123 @@ private void test_trim_image_watermark_preserves_segment_duration () {
     }
 }
 
+/**
+ * A speed filter must not move the segment's end point.
+ *
+ * The segment's start is selected on the input with -ss, so the limit that
+ * closes it has to be an input option too. As an output option it lands after
+ * the filter chain, where a speed filter has already rewritten the timestamps
+ * it would be compared against — which put the two ends of one segment on
+ * different clocks. A 2s segment at 0.5x came out 2s long instead of 4s, with
+ * the back half of the range silently missing, and at 2x it ran past the end
+ * point to EOF instead of stopping.
+ *
+ * Both directions are checked because they fail in opposite ways, and neither
+ * is visible in the output: the file plays cleanly and stays in sync, it just
+ * is not the range that was asked for.
+ */
+private void test_trim_speed_filter_preserves_segment_range () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-speed-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+
+        // 0.5x — the segment must stretch to twice its source span, not stay
+        // put and lose its tail.
+        string slow_path = Path.build_filename (tmp_dir, "slow.mkv");
+        var slow_runner = new TrimRunner ();
+        slow_runner.input_file = input_path;
+        slow_runner.copy_mode = false;
+
+        var slow_segments = new GenericArray<TrimSegment> ();
+        slow_segments.add (new TrimSegment (1.0, 3.0));
+        slow_runner.set_segments (slow_segments);
+
+        var slow_profile = new EncodeProfileSnapshot ();
+        slow_profile.container = ContainerExt.MKV;
+        slow_profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        slow_profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        slow_profile.video_filters_skip_delogo = "setpts=2.000000*PTS";
+        slow_profile.audio_filters = "atempo=0.500000";
+        slow_runner.reencode_profile = slow_profile;
+
+        int slow_exit = slow_runner.run_extract_segment_for_widget_test (
+            0, slow_path);
+        assert_true (slow_exit == 0, "slowed segment extract exit code");
+
+        string[] slow_argv = slow_runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_not_contains (slow_argv, "-to",
+            "slowed segment bounds the input rather than the output");
+
+        double slow_duration = probe_media_duration_seconds (
+            slow_path, "slowed segment duration probe");
+        assert_true (Math.fabs (slow_duration - 4.0) < 0.3,
+            "0.5x keeps the whole 2s segment and stretches it to 4s");
+
+        // 2x — the segment must compress to half its span and stop at its end
+        // point, rather than running on to EOF.
+        string fast_path = Path.build_filename (tmp_dir, "fast.mkv");
+        var fast_runner = new TrimRunner ();
+        fast_runner.input_file = input_path;
+        fast_runner.copy_mode = false;
+
+        var fast_segments = new GenericArray<TrimSegment> ();
+        fast_segments.add (new TrimSegment (1.0, 3.0));
+        fast_runner.set_segments (fast_segments);
+
+        var fast_profile = new EncodeProfileSnapshot ();
+        fast_profile.container = ContainerExt.MKV;
+        fast_profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        fast_profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        fast_profile.video_filters_skip_delogo = "setpts=0.500000*PTS";
+        fast_profile.audio_filters = "atempo=2.000000";
+        fast_runner.reencode_profile = fast_profile;
+
+        int fast_exit = fast_runner.run_extract_segment_for_widget_test (
+            0, fast_path);
+        assert_true (fast_exit == 0, "sped-up segment extract exit code");
+
+        double fast_duration = probe_media_duration_seconds (
+            fast_path, "sped-up segment duration probe");
+        assert_true (Math.fabs (fast_duration - 1.0) < 0.3,
+            "2x stops at the segment end instead of running to EOF");
+
+        // Without a speed filter the two forms agree, so the ordinary path
+        // must be untouched by the move.
+        string plain_path = Path.build_filename (tmp_dir, "plain.mkv");
+        var plain_runner = new TrimRunner ();
+        plain_runner.input_file = input_path;
+        plain_runner.copy_mode = false;
+
+        var plain_segments = new GenericArray<TrimSegment> ();
+        plain_segments.add (new TrimSegment (1.0, 3.0));
+        plain_runner.set_segments (plain_segments);
+
+        var plain_profile = new EncodeProfileSnapshot ();
+        plain_profile.container = ContainerExt.MKV;
+        plain_profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        plain_profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        plain_runner.reencode_profile = plain_profile;
+
+        int plain_exit = plain_runner.run_extract_segment_for_widget_test (
+            0, plain_path);
+        assert_true (plain_exit == 0, "unmodified segment extract exit code");
+
+        double plain_duration = probe_media_duration_seconds (
+            plain_path, "unmodified segment duration probe");
+        assert_true (Math.fabs (plain_duration - 2.0) < 0.2,
+            "a segment without a speed filter still spans its source range");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
 private void test_trim_crop_through_eof_omits_duration_limit () {
     string tmp_dir;
     try {
@@ -1914,6 +2031,8 @@ void main (string[] args) {
         test_trim_collage_output_results_preserve_primary_outputs);
     Test.add_func ("/trim/runner/image-watermark-preserves-duration",
         test_trim_image_watermark_preserves_segment_duration);
+    Test.add_func ("/trim/runner/speed-preserves-segment-range",
+        test_trim_speed_filter_preserves_segment_range);
     Test.add_func ("/trim/runner/crop-through-eof",
         test_trim_crop_through_eof_omits_duration_limit);
     Test.add_func ("/trim/runner/image-watermark-maps-first-audio",
