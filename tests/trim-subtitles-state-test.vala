@@ -2489,6 +2489,84 @@ private void test_trim_strip_audio_overrides_reencode_profile_audio () {
 }
 
 /**
+ * PATH A — re-encode, several segments, combined into one file. It builds a
+ * -filter_complex by hand rather than going through extract_segment, so its
+ * audio branches have to honour No Audio independently.
+ */
+private void test_trim_strip_audio_drops_track_in_concat_filter () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-strip-audio-concat-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create strip-audio concat directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (tmp_dir, "with-audio.mkv");
+        string output_path = Path.build_filename (tmp_dir, "stripped.mkv");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=6",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+            "-c:v", "ffv1",
+            "-c:a", "flac",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create strip-audio concat input");
+        assert_true (make_status == 0, "strip-audio concat input is created");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+        runner.export_separate = false;
+        runner.strip_audio = true;
+
+        // Two segments and one combined output is what selects PATH A.
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (0.5, 2.0));
+        segments.add (new TrimSegment (3.0, 4.5));
+        runner.set_segments (segments);
+
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = { "-c:v", "ffv1" };
+        profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        runner.reencode_profile = profile;
+
+        int exit_code = runner.run_concat_filter_encode_for_widget_test (
+            output_path);
+        assert_true (exit_code == 0, "strip-audio concat filter encode succeeds");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_true (argv_contains (argv, "-an"),
+            "strip-audio concat filter passes -an");
+        assert_array_not_contains (argv, "-c:a",
+            "strip-audio concat filter discards the profile audio codec");
+        // An [outa] map would re-add the track regardless of -an, since -an
+        // only suppresses automatic stream selection.
+        assert_array_not_contains (argv, "[outa]",
+            "strip-audio concat filter maps no audio output pad");
+
+        string filter_complex = get_adjacent_arg_value (argv, "-filter_complex",
+            "strip-audio concat filter graph");
+        assert_contains (filter_complex, "a=0",
+            "strip-audio concat filter builds a video-only concat");
+
+        assert_int_equal (
+            probe_audio_stream_count (output_path, "strip-audio concat output"), 0,
+            "strip-audio concat output carries no audio stream");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+/**
  * Guard the default: leaving No Audio off must not disturb the audio the
  * export would otherwise have carried.
  */
@@ -2726,6 +2804,8 @@ void main (string[] args) {
         test_trim_strip_audio_drops_track_in_copy_mode);
     Test.add_func ("/trim/runner/strip-audio-overrides-profile",
         test_trim_strip_audio_overrides_reencode_profile_audio);
+    Test.add_func ("/trim/runner/strip-audio-concat-filter",
+        test_trim_strip_audio_drops_track_in_concat_filter);
     Test.add_func ("/trim/runner/keeps-audio-by-default",
         test_trim_without_strip_audio_keeps_track);
     Test.add_func ("/trim/runner/timestamp-normalization-respects-subtitles-and-chapters",

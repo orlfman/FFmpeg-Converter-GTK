@@ -1874,6 +1874,15 @@ public class TrimRunner : Object {
         return build_segment_vf (seg);
     }
 
+    /**
+     * PATH A — the single-pass concat filter encode. Reached only by
+     * re-encode + multi-segment + combined output, which is the one export
+     * shape extract_segment never sees.
+     */
+    internal int run_concat_filter_encode_for_widget_test (string output) {
+        return run_concat_filter_encode (output);
+    }
+
     internal int run_extract_segment_for_widget_test (int seg_index, string output) {
         if (seg_index < 0 || seg_index >= segments.length) {
             return -1;

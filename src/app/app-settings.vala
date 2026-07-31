@@ -38,7 +38,8 @@ using GLib;
     //    hardware_decoding = true                (legacy; read only when hwdec_mode
     //                                            is absent, and kept in sync on save
     //                                            so a downgrade still behaves)
-    //    recently_opened_enabled = true          (default: true → remember and
+    //    recently_opened_enabled = false         (default: false → keep no
+    //                                            history; when on, remember and
     //                                            show up to 20 input files)
     //    container_default_mode = default        (default|mkv|codec_specific)
     //                                           (default: keep current tab defaults when
@@ -99,7 +100,7 @@ public class AppSettings : Object {
     private HwdecMode _hwdec_mode = HwdecMode.AUTOMATIC;
     private PreviewQuality _preview_quality = PreviewQuality.FAST;
     private PreviewCacheSize _preview_cache_size = PreviewCacheSize.SMALL;
-    private bool   _recently_opened_enabled = true;
+    private bool   _recently_opened_enabled = false;
     private string[] _recent_input_files = {};
     private bool   _verify_unknown_audio_copy_preflight = true;
     private bool   _show_bit_depth_warning_dialog = true;
@@ -850,8 +851,11 @@ public class AppSettings : Object {
             read_string (kf, GROUP_GENERAL, "preview_quality", "fast"));
         PreviewCacheSize preview_cache_size = PreviewCacheSize.from_string (
             read_string (kf, GROUP_GENERAL, "preview_cache_size", "small"));
+        // Off unless the config says otherwise. save () always writes this key,
+        // so the fallback only applies to a fresh install or a config predating
+        // the setting — anyone who turned history on keeps it on.
         bool recently_opened_enabled = read_bool (
-            kf, GROUP_GENERAL, "recently_opened_enabled", true);
+            kf, GROUP_GENERAL, "recently_opened_enabled", false);
         string[] raw_recent_input_files = read_string_list (
             kf, GROUP_RECENT, "input_files");
         string[] recent_input_files = sanitize_recent_input_files (
@@ -1048,7 +1052,7 @@ public class AppSettings : Object {
             _hwdec_mode = HwdecMode.AUTOMATIC;
             _preview_quality = PreviewQuality.FAST;
             _preview_cache_size = PreviewCacheSize.SMALL;
-            _recently_opened_enabled = true;
+            _recently_opened_enabled = false;
             _verify_unknown_audio_copy_preflight = true;
             _show_bit_depth_warning_dialog = true;
             _smart_optimizer_target_mb = clamp_smart_optimizer_target_mb (4);
