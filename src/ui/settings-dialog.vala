@@ -236,8 +236,10 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var naming_group = new Adw.PreferencesGroup ();
         naming_group.set_title ("Output Filename");
         naming_group.set_description (
-            "Choose how output files are named during codec conversion. " +
-            "The codec suffix and container extension are always appended automatically."
+            "Choose how output files are named during codec conversion, and by " +
+            "the Trim Only, Crop Only and Crop & Trim exports. " +
+            "Suffixes and the container extension are always appended automatically. " +
+            "Chapter Split names its files after the chapters themselves."
         );
 
         // Mode selector — subtitle doubles as a dynamic description that

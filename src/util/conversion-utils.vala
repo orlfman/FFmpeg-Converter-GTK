@@ -211,21 +211,45 @@ namespace ConversionUtils {
         return (container_ext != "") ? container_ext : ContainerExt.MKV;
     }
 
-    private string build_default_output_stem (string name_no_ext, string codec_suffix) {
-        return @"$name_no_ext-$codec_suffix";
-    }
-
-    private string build_sanitized_named_output_stem (string? raw_name,
-                                                      string codec_suffix,
-                                                      string fallback_stem) {
+    private string build_sanitized_base_name (string? raw_name,
+                                              string fallback_base) {
         if (raw_name == null || raw_name.length == 0)
-            return fallback_stem;
+            return fallback_base;
 
         string safe_name = sanitize_name_component (raw_name);
         if (safe_name.length == 0)
-            return fallback_stem;
+            return fallback_base;
 
-        return @"$safe_name-$codec_suffix";
+        return safe_name;
+    }
+
+    /**
+     * The mode-derived name itself, with nothing appended.
+     *
+     * Callers own whatever follows it — the codec path adds "-<codec>", the
+     * trim path adds its own "-trimmed"/"-segment-NNN" — so the mode only ever
+     * decides the name, never the suffix vocabulary around it.
+     */
+    private string build_output_base_for_mode (OutputNameMode mode,
+                                               string name_no_ext,
+                                               string custom_name,
+                                               string? metadata_title = null) {
+        switch (mode) {
+            case OutputNameMode.CUSTOM:
+                return build_sanitized_base_name (custom_name, name_no_ext);
+
+            case OutputNameMode.RANDOM:
+                return generate_random_name (8);
+
+            case OutputNameMode.DATE:
+                return generate_timestamp_name ();
+
+            case OutputNameMode.METADATA:
+                return build_sanitized_base_name (metadata_title, name_no_ext);
+
+            default:
+                return name_no_ext;
+        }
     }
 
     private string build_output_stem_for_mode (OutputNameMode mode,
@@ -233,26 +257,9 @@ namespace ConversionUtils {
                                                string codec_suffix,
                                                string custom_name,
                                                string? metadata_title = null) {
-        string fallback_stem = build_default_output_stem (name_no_ext, codec_suffix);
-
-        switch (mode) {
-            case OutputNameMode.CUSTOM:
-                return build_sanitized_named_output_stem (
-                    custom_name, codec_suffix, fallback_stem);
-
-            case OutputNameMode.RANDOM:
-                return @"$(generate_random_name (8))-$codec_suffix";
-
-            case OutputNameMode.DATE:
-                return @"$(generate_timestamp_name ())-$codec_suffix";
-
-            case OutputNameMode.METADATA:
-                return build_sanitized_named_output_stem (
-                    metadata_title, codec_suffix, fallback_stem);
-
-            default:
-                return fallback_stem;
-        }
+        string base_name = build_output_base_for_mode (
+            mode, name_no_ext, custom_name, metadata_title);
+        return @"$base_name-$codec_suffix";
     }
 
     private void resolve_output_stem_context (string input_file,
@@ -835,6 +842,32 @@ namespace ConversionUtils {
             custom_name,
             metadata_title
         );
+    }
+
+    /**
+     * Resolve just the output name for the current OutputNameMode, without the
+     * codec suffix the conversion path appends.
+     *
+     * For operations that carry their own suffix vocabulary (the trim tab's
+     * -trimmed / -cropped / -segment-NNN), so they can honour the naming mode
+     * while keeping the rest of the filename intact.
+     *
+     * Resolve this ONCE per export and reuse it: RANDOM mints a new token on
+     * every call and DATE reads the clock, so calling it per segment scatters
+     * the outputs of a single run across different names.
+     */
+    public async string resolve_output_base_name_async (string input_file,
+                                                        Cancellable? cancellable = null) {
+        OutputNameMode mode;
+        string custom_name;
+        string name_no_ext;
+        resolve_output_stem_context (input_file, out mode, out custom_name, out name_no_ext);
+        string? metadata_title = null;
+        if (mode == OutputNameMode.METADATA)
+            metadata_title = yield FfprobeUtils.probe_title_async (input_file, cancellable);
+
+        return build_output_base_for_mode (
+            mode, name_no_ext, custom_name, metadata_title);
     }
 
     public async string resolve_output_stem_async (string input_file,

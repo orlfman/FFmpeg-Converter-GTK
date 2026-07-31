@@ -336,6 +336,12 @@ public class TrimTab : Box, ICodecTab {
     private TrimRunner? active_runner = null;
     private uint64 active_operation_id = 0;
     private bool cancel_pending = false;
+    // Naming-mode name for the export being prepared, resolved once by the
+    // caller. A field rather than another parameter down the launch chain
+    // because start_trim_export refuses to start a second export while one is
+    // pending, so there is only ever one value in flight — same reason
+    // active_operation_id works this way.
+    private string pending_output_base = "";
     private bool speed_locked = false;      // true when speed filters force re-encode
     private bool watermark_locked = false;  // true when watermark forces re-encode
     private bool logo_removal_locked = false;  // true when delogo forces re-encode
@@ -501,7 +507,8 @@ public class TrimTab : Box, ICodecTab {
                                    StatusArea status_area,
                                    ConsoleTab console_tab,
                                    uint64 operation_id,
-                                   TrimOutputConflictPolicy output_policy = TrimOutputConflictPolicy.OVERWRITE) {
+                                   TrimOutputConflictPolicy output_policy = TrimOutputConflictPolicy.OVERWRITE,
+                                   string output_base = "") {
         ProgressBar progress_bar = status_area.progress_bar;
 
         if (has_pending_or_active_export ()) {
@@ -509,6 +516,9 @@ public class TrimTab : Box, ICodecTab {
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
+
+        // Before any path resolution below — every launch route reads this.
+        pending_output_base = output_base;
 
         if (will_reencode_output () && selected_reencode_audio_probe_pending ()) {
             status_area.set_status (
@@ -652,7 +662,7 @@ public class TrimTab : Box, ICodecTab {
         runner.console_tab     = console_tab;
 
         GenericArray<string>? resolved_outputs = resolve_output_paths (
-            input_file, output_folder, segs, output_policy);
+            input_file, output_folder, segs, output_policy, pending_output_base);
         if (resolved_outputs == null) {
             status_area.set_status ("Could not derive unique output path(s).",
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
@@ -1309,12 +1319,17 @@ public class TrimTab : Box, ICodecTab {
         return "-trimmed";
     }
 
-    private string build_separate_output_name (string name_no_ext,
-                                               string out_ext,
-                                               TrimSegment? seg,
-                                               int index,
-                                               HashTable<string, bool> used_names) {
-        if (current_mode == Mode.CHAPTER_SPLIT
+    private static string build_separate_output_name (bool is_chapter_split,
+                                                      string name_no_ext,
+                                                      string output_base,
+                                                      string out_ext,
+                                                      TrimSegment? seg,
+                                                      int index,
+                                                      HashTable<string, bool> used_names) {
+        // Chapter Split names from the chapter itself and stays on the input's
+        // own basename — deliberately independent of the Preferences naming
+        // mode, so a labelled chapter keeps identifying itself.
+        if (is_chapter_split
             && seg != null
             && seg.label != null
             && seg.label.strip ().length > 0) {
@@ -1333,8 +1348,42 @@ public class TrimTab : Box, ICodecTab {
             return @"$candidate$out_ext";
         }
 
+        // Applies the same exemption as the label branch above rather than
+        // trusting the caller to have applied it — an unlabelled chapter
+        // reaches here too, and must not pick up the naming mode on the way
+        // past just because it had no label to use.
+        string base_name = select_output_base (
+            is_chapter_split, name_no_ext, output_base);
         string num = pad_segment_number (index + 1);
-        return @"$name_no_ext-segment-$num$out_ext";
+        return @"$base_name-segment-$num$out_ext";
+    }
+
+    /**
+     * Which name the output is built around.
+     *
+     * Trim Only, Crop Only and Crop & Trim take the caller's naming-mode name;
+     * Chapter Split is deliberately exempt and keeps naming itself from the
+     * source. An empty base means the caller resolved nothing, so fall back to
+     * the source rather than emitting a bare "-segment-001".
+     */
+    /**
+     * Whether outputs are named per segment ("-segment-NNN") or as a single
+     * file (the mode's own "-trimmed"/"-cropped" suffix).
+     *
+     * Crop Only crops the whole video, so it produces exactly one file even
+     * with "export separate" on — naming it "-segment-001" would imply siblings
+     * it does not have.
+     */
+    private static bool uses_per_segment_names (bool export_separate, Mode mode) {
+        return export_separate && mode != Mode.CROP_ONLY;
+    }
+
+    private static string select_output_base (bool is_chapter_split,
+                                              string name_no_ext,
+                                              string output_base) {
+        return (is_chapter_split || output_base.length == 0)
+            ? name_no_ext
+            : output_base;
     }
 
     private string? resolve_output_path_conflict (string path,
@@ -1355,7 +1404,8 @@ public class TrimTab : Box, ICodecTab {
     private GenericArray<string>? resolve_output_paths (string input_file,
                                                         string output_folder,
                                                         GenericArray<TrimSegment> segs,
-                                                        TrimOutputConflictPolicy output_policy) {
+                                                        TrimOutputConflictPolicy output_policy,
+                                                        string output_base) {
         var resolved_paths = new GenericArray<string> ();
 
         string basename = Path.get_basename (input_file);
@@ -1368,13 +1418,13 @@ public class TrimTab : Box, ICodecTab {
 
         var reserved_paths = new HashTable<string, bool> (str_hash, str_equal);
 
-        if (export_separate_switch.active) {
+        if (uses_per_segment_names (export_separate_switch.active, current_mode)) {
             var used_names = new HashTable<string, bool> (str_hash, str_equal);
-            int count = (current_mode == Mode.CROP_ONLY) ? 1 : segs.length;
-            for (int i = 0; i < count; i++) {
-                TrimSegment? seg = (i < segs.length) ? segs[i] : null;
+            for (int i = 0; i < segs.length; i++) {
+                TrimSegment? seg = segs[i];
                 string seg_name = build_separate_output_name (
-                    name_no_ext, out_ext, seg, i, used_names);
+                    current_mode == Mode.CHAPTER_SPLIT,
+                    name_no_ext, output_base, out_ext, seg, i, used_names);
                 string seg_path = Path.build_filename (out_dir, seg_name);
                 string? resolved = resolve_output_path_conflict (
                     seg_path, output_policy, reserved_paths);
@@ -1385,8 +1435,10 @@ public class TrimTab : Box, ICodecTab {
             return resolved_paths;
         }
 
+        string combined_base = select_output_base (
+            current_mode == Mode.CHAPTER_SPLIT, name_no_ext, output_base);
         string combined_path = Path.build_filename (
-            out_dir, @"$name_no_ext$(get_output_suffix ())$out_ext");
+            out_dir, @"$combined_base$(get_output_suffix ())$out_ext");
         string? resolved = resolve_output_path_conflict (
             combined_path, output_policy, reserved_paths);
         if (resolved == null || resolved.length == 0)
@@ -1400,12 +1452,23 @@ public class TrimTab : Box, ICodecTab {
      * Returns the first path that already exists on disk, or "" if none exist.
      * Handles both combined output and export-separate modes.
      */
-    public string get_expected_output_path (string input_file, string output_folder) {
+    public string get_expected_output_path (string input_file,
+                                            string output_folder,
+                                            string output_base = "") {
+        // Chapter Split rebuilds its segment list on the way into the export,
+        // so the live list is still whatever the previous run left behind —
+        // check against the list this export will actually produce.
+        GenericArray<TrimSegment> expected_segments =
+            (current_mode == Mode.CHAPTER_SPLIT)
+                ? derive_chapter_segments (detected_chapters, segments)
+                : segments;
+
         GenericArray<string>? expected_paths = resolve_output_paths (
             input_file,
             output_folder,
-            segments,
-            TrimOutputConflictPolicy.OVERWRITE
+            expected_segments,
+            TrimOutputConflictPolicy.OVERWRITE,
+            output_base
         );
         if (expected_paths == null)
             return "";
@@ -2207,13 +2270,20 @@ public class TrimTab : Box, ICodecTab {
     }
 
     /**
-     * Build TrimSegments from selected chapters and populate the segments list.
+     * Build TrimSegments from selected chapters.
      * Preserves existing order: keeps segments whose chapter is still selected
      * (in their current position), removes deselected ones, and appends newly
      * selected chapters at the end. This way, user reordering survives
      * checkbox toggles.
+     *
+     * Pure, so the overwrite check can ask what WOULD be written before
+     * rebuild_chapter_segments has run — the export path rebuilds the list on
+     * the way in, and a query that mutated the UI to answer would be worse than
+     * the stale answer it replaces.
      */
-    private void rebuild_chapter_segments () {
+    private static GenericArray<TrimSegment> derive_chapter_segments (
+        GenericArray<ChapterInfo> detected_chapters,
+        GenericArray<TrimSegment> existing_segments) {
         // Build a set of currently-selected chapter time ranges for fast lookup
         var selected_set = new HashTable<string, ChapterInfo> (str_hash, str_equal);
         for (int i = 0; i < detected_chapters.length; i++) {
@@ -2227,8 +2297,8 @@ public class TrimTab : Box, ICodecTab {
         // Pass 1: Keep existing segments that are still selected (preserving order)
         var kept = new GenericArray<TrimSegment> ();
         var kept_keys = new HashTable<string, bool> (str_hash, str_equal);
-        for (int i = 0; i < segments.length; i++) {
-            var seg = segments[i];
+        for (int i = 0; i < existing_segments.length; i++) {
+            var seg = existing_segments[i];
             string key = "%.6f:%.6f".printf (seg.start_time, seg.end_time);
             if (selected_set.contains (key)) {
                 kept.add (seg);
@@ -2248,7 +2318,11 @@ public class TrimTab : Box, ICodecTab {
             }
         }
 
-        segments = kept;
+        return kept;
+    }
+
+    private void rebuild_chapter_segments () {
+        segments = derive_chapter_segments (detected_chapters, segments);
         rebuild_segment_rows ();
     }
 
@@ -3152,39 +3226,7 @@ public class TrimTab : Box, ICodecTab {
     internal static GenericArray<TrimSegment> derive_chapter_segments_for_test (
         GenericArray<ChapterInfo> detected_chapters,
         GenericArray<TrimSegment> existing_segments) {
-        var selected_set = new HashTable<string, ChapterInfo> (str_hash, str_equal);
-        for (int i = 0; i < detected_chapters.length; i++) {
-            var ch = detected_chapters[i];
-            if (ch.selected) {
-                string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
-                selected_set.set (key, ch);
-            }
-        }
-
-        var kept = new GenericArray<TrimSegment> ();
-        var kept_keys = new HashTable<string, bool> (str_hash, str_equal);
-        for (int i = 0; i < existing_segments.length; i++) {
-            var seg = existing_segments[i];
-            string key = "%.6f:%.6f".printf (seg.start_time, seg.end_time);
-            if (selected_set.contains (key)) {
-                kept.add (seg);
-                kept_keys.set (key, true);
-            }
-        }
-
-        for (int i = 0; i < detected_chapters.length; i++) {
-            var ch = detected_chapters[i];
-            if (!ch.selected)
-                continue;
-            string key = "%.6f:%.6f".printf (ch.start_time, ch.end_time);
-            if (!kept_keys.contains (key)) {
-                var seg = new TrimSegment (ch.start_time, ch.end_time);
-                seg.label = ch.title;
-                kept.add (seg);
-            }
-        }
-
-        return kept;
+        return derive_chapter_segments (detected_chapters, existing_segments);
     }
 
     internal static void move_segment_up_for_test (GenericArray<TrimSegment> segments, int idx) {
@@ -3237,6 +3279,29 @@ public class TrimTab : Box, ICodecTab {
     internal static bool export_failure_counts_as_cancelled_for_test (bool cancel_pending,
                                                                       bool runner_cancelled) {
         return cancel_pending || runner_cancelled;
+    }
+
+    internal static bool uses_per_segment_names_for_test (bool export_separate,
+                                                          Mode mode) {
+        return uses_per_segment_names (export_separate, mode);
+    }
+
+    internal static string select_output_base_for_test (bool is_chapter_split,
+                                                        string name_no_ext,
+                                                        string output_base) {
+        return select_output_base (is_chapter_split, name_no_ext, output_base);
+    }
+
+    internal static string build_separate_output_name_for_test (
+            bool is_chapter_split,
+            string name_no_ext,
+            string output_base,
+            string out_ext,
+            TrimSegment? seg,
+            int index,
+            HashTable<string, bool> used_names) {
+        return build_separate_output_name (is_chapter_split, name_no_ext,
+            output_base, out_ext, seg, index, used_names);
     }
 
     internal static bool try_get_quick_segment_range_for_test (

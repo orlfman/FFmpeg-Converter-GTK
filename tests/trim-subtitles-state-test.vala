@@ -650,6 +650,94 @@ private void test_trim_runner_guard_helpers () {
         "trim cancellation state stays false otherwise");
 }
 
+private void test_trim_output_base_honours_naming_mode_outside_chapter_split () {
+    // Trim Only / Crop Only / Crop & Trim take the Preferences naming-mode
+    // name; the suffixes that follow it are composed separately.
+    assert_string_equal (
+        TrimTab.select_output_base_for_test (false, "myvideo", "a8a1m6g5"),
+        "a8a1m6g5",
+        "trim export adopts the resolved naming-mode name");
+
+    // Chapter Split is exempt — it names its files after the chapters, so it
+    // stays on the source's own basename no matter what the preference says.
+    assert_string_equal (
+        TrimTab.select_output_base_for_test (true, "myvideo", "a8a1m6g5"),
+        "myvideo",
+        "chapter split ignores the naming mode");
+
+    // Default mode resolves to the source basename, so the two agree and
+    // existing filenames are unchanged.
+    assert_string_equal (
+        TrimTab.select_output_base_for_test (false, "myvideo", "myvideo"),
+        "myvideo",
+        "default naming mode leaves the source name in place");
+
+    // Nothing resolved — fall back to the source rather than emitting a name
+    // that is nothing but a suffix.
+    assert_string_equal (
+        TrimTab.select_output_base_for_test (false, "myvideo", ""),
+        "myvideo",
+        "an unresolved base falls back to the source name");
+}
+
+private void test_trim_separate_segment_names_compose_around_the_base () {
+    var used_names = new HashTable<string, bool> (str_hash, str_equal);
+
+    // The naming-mode name replaces only the name; "-segment-NNN" and the
+    // container extension are composed around it untouched.
+    assert_string_equal (
+        TrimTab.build_separate_output_name_for_test (
+            false, "myvideo", "a8a1m6g5", ".mp4",
+            new TrimSegment (0.0, 5.0), 0, used_names),
+        "a8a1m6g5-segment-001.mp4",
+        "separate segment name is built around the naming-mode name");
+
+    // A labelled chapter keeps the source name AND its label — the naming mode
+    // is passed in but must not reach this branch.
+    var labelled = new TrimSegment (0.0, 5.0);
+    labelled.label = "Chapter 3";
+    assert_string_equal (
+        TrimTab.build_separate_output_name_for_test (
+            true, "myvideo", "a8a1m6g5", ".mkv", labelled, 0, used_names),
+        "myvideo-Chapter 3.mkv",
+        "chapter split keeps naming itself from source and label");
+
+    // An unlabelled chapter falls through to the "-segment-NNN" form, and must
+    // still ignore the naming mode rather than picking it up on the way past.
+    assert_string_equal (
+        TrimTab.build_separate_output_name_for_test (
+            true, "myvideo", "a8a1m6g5", ".mkv",
+            new TrimSegment (0.0, 5.0), 4,
+            new HashTable<string, bool> (str_hash, str_equal)),
+        "myvideo-segment-005.mkv",
+        "unlabelled chapter keeps the source name");
+}
+
+private void test_trim_crop_only_names_a_single_file_not_a_segment () {
+    // Crop Only produces exactly one file whatever the export-separate switch
+    // says, so it must take the single-output "-cropped" name.
+    assert_false (
+        TrimTab.uses_per_segment_names_for_test (true, TrimTab.Mode.CROP_ONLY),
+        "crop only never names per segment");
+    assert_false (
+        TrimTab.uses_per_segment_names_for_test (false, TrimTab.Mode.CROP_ONLY),
+        "crop only stays single-output with export separate off");
+
+    // The modes that really can emit several files still do.
+    assert_true (
+        TrimTab.uses_per_segment_names_for_test (true, TrimTab.Mode.TRIM_ONLY),
+        "trim only names per segment when exporting separately");
+    assert_true (
+        TrimTab.uses_per_segment_names_for_test (true, TrimTab.Mode.TRIM_AND_CROP),
+        "crop & trim names per segment when exporting separately");
+    assert_true (
+        TrimTab.uses_per_segment_names_for_test (true, TrimTab.Mode.CHAPTER_SPLIT),
+        "chapter split names per segment when exporting separately");
+    assert_false (
+        TrimTab.uses_per_segment_names_for_test (false, TrimTab.Mode.TRIM_ONLY),
+        "a combined export never names per segment");
+}
+
 private void test_trim_collage_fallback_durations_use_segment_context () {
     var runner = new TrimRunner ();
 
@@ -2360,6 +2448,12 @@ void main (string[] args) {
     Test.add_func ("/trim/segments/unknown-duration-ranges",
         test_trim_unknown_duration_segment_ranges);
     Test.add_func ("/trim/runner/guards", test_trim_runner_guard_helpers);
+    Test.add_func ("/trim/output/naming-mode-base",
+        test_trim_output_base_honours_naming_mode_outside_chapter_split);
+    Test.add_func ("/trim/output/segment-name-composition",
+        test_trim_separate_segment_names_compose_around_the_base);
+    Test.add_func ("/trim/output/crop-only-single-file-name",
+        test_trim_crop_only_names_a_single_file_not_a_segment);
     Test.add_func ("/trim/runner/collage-fallback-durations",
         test_trim_collage_fallback_durations_use_segment_context);
     Test.add_func ("/trim/runner/collage-output-results",

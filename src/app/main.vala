@@ -1370,14 +1370,29 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             return;
         }
 
+        string out_folder = file_pickers.output_entry.get_text ();
+
+        // Resolve the naming-mode name once for the whole export. Random mints
+        // a new token per call and Date reads the clock, so resolving it per
+        // segment would scatter one run across unrelated names — and the
+        // overwrite check below has to be testing the path that actually gets
+        // written. Inside the preflight window because Metadata mode probes the
+        // source title, which must not block the UI thread.
+        string output_base = yield ConversionUtils.resolve_output_base_name_async (
+            input_file, cancellable);
+
         finish_preflight_probe (cancellable);
+
+        if (cancellable.is_cancelled ()) {
+            return;
+        }
 
         if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
             return;
         }
 
-        string out_folder = file_pickers.output_entry.get_text ();
-        string expected = trim.get_expected_output_path (input_file, out_folder);
+        string expected = trim.get_expected_output_path (
+            input_file, out_folder, output_base);
 
         var settings = AppSettings.get_default ();
 
@@ -1388,7 +1403,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                 input_file,
                 out_folder,
                 operation_id,
-                TrimOutputConflictPolicy.OVERWRITE
+                TrimOutputConflictPolicy.OVERWRITE,
+                output_base
             );
         } else if (expected != "" && FileUtils.test (expected, FileTest.EXISTS)) {
             confirm_overwrite (expected, true,
@@ -1401,7 +1417,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                         input_file,
                         out_folder,
                         operation_id,
-                        TrimOutputConflictPolicy.OVERWRITE
+                        TrimOutputConflictPolicy.OVERWRITE,
+                        output_base
                     );
                 },
                 () => {
@@ -1413,7 +1430,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                         input_file,
                         out_folder,
                         operation_id,
-                        TrimOutputConflictPolicy.AUTO_RENAME
+                        TrimOutputConflictPolicy.AUTO_RENAME,
+                        output_base
                     );
                 },
                 () => {
@@ -1426,7 +1444,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                 input_file,
                 out_folder,
                 operation_id,
-                TrimOutputConflictPolicy.OVERWRITE
+                TrimOutputConflictPolicy.OVERWRITE,
+                output_base
             );
         }
     }
@@ -1758,7 +1777,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                                      string input_file,
                                      string output_folder,
                                      uint64 operation_id,
-                                     TrimOutputConflictPolicy output_policy) {
+                                     TrimOutputConflictPolicy output_policy,
+                                     string output_base = "") {
         if (!is_pending_operation (ActiveOperation.TRIMMING, operation_id)) {
             return;
         }
@@ -1769,7 +1789,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                 status_area,
                 console_tab,
                 operation_id,
-                output_policy)) {
+                output_policy,
+                output_base)) {
             release_pending_operation (ActiveOperation.TRIMMING, operation_id, true);
             return;
         }
