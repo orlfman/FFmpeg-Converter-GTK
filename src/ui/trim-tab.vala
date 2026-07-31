@@ -198,6 +198,8 @@ public class TrimTab : Box, ICodecTab {
     private VideoPlayer player;
     private Box mode_box;
     private Adw.Window? popout_window = null;
+    private Adw.HeaderBar? popout_header = null;
+    private PreviewFullscreenController? popout_fullscreen = null;
     private Gtk.Label? popout_placeholder = null;
 
     // ── Mark In / Out state ──────────────────────────────────────────────────
@@ -1601,6 +1603,11 @@ public class TrimTab : Box, ICodecTab {
 
         // Wire pop-out button
         player.popout_requested.connect (on_popout_requested);
+
+        // A fullscreen request always targets the dedicated preview window. If
+        // the player is still embedded, the handler first uses the existing
+        // pop-out path so the main application window is never fullscreened.
+        player.fullscreen_requested.connect (on_fullscreen_requested);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1635,14 +1642,27 @@ public class TrimTab : Box, ICodecTab {
         }
 
         var toolbar_view = new Adw.ToolbarView ();
-        var header = new Adw.HeaderBar ();
-        toolbar_view.add_top_bar (header);
+        popout_header = new Adw.HeaderBar ();
+        toolbar_view.add_top_bar (popout_header);
         toolbar_view.set_content (player);
         popout_window.set_content (toolbar_view);
 
         player.set_popout_icon (true);
+        popout_fullscreen = new PreviewFullscreenController (
+            popout_window, player, popout_header);
+
         popout_window.close_request.connect (on_popout_close_request);
         popout_window.present ();
+    }
+
+    private void on_fullscreen_requested () {
+        if (popout_window == null) {
+            on_popout_requested ();
+        }
+
+        if (popout_fullscreen != null) {
+            popout_fullscreen.toggle ();
+        }
     }
 
     private bool on_popout_close_request () {
@@ -1666,7 +1686,12 @@ public class TrimTab : Box, ICodecTab {
         }
         insert_child_after (player, mode_box);
         player.set_popout_icon (false);
+        if (popout_fullscreen != null) {
+            popout_fullscreen.detach ();
+            popout_fullscreen = null;
+        }
 
+        popout_header = null;
         popout_window = null;
     }
 
@@ -1681,6 +1706,56 @@ public class TrimTab : Box, ICodecTab {
             window.close ();
         }
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool activate_player_fullscreen_shortcut_for_widget_test () {
+        return player.activate_fullscreen_shortcut_for_widget_test ();
+    }
+
+    internal bool has_popout_window_for_widget_test () {
+        return popout_window != null;
+    }
+
+    internal bool is_popout_window_fullscreen_for_widget_test () {
+        return popout_window != null && popout_window.fullscreened;
+    }
+
+    internal bool is_popout_header_visible_for_widget_test () {
+        return popout_header != null && popout_header.get_visible ();
+    }
+
+    internal bool popout_picture_expands_for_widget_test () {
+        return player.picture_expands_for_widget_test ();
+    }
+
+    internal int popout_picture_height_for_widget_test () {
+        return player.picture_height_for_widget_test ();
+    }
+
+    internal bool is_popout_fullscreen_requested_for_widget_test () {
+        return popout_fullscreen != null
+            && popout_fullscreen.requested_fullscreen_for_widget_test ();
+    }
+
+    internal bool is_popout_fullscreen_transition_pending_for_widget_test () {
+        return popout_fullscreen != null
+            && popout_fullscreen.transition_pending_for_widget_test ();
+    }
+
+    internal bool request_popout_escape_for_widget_test () {
+        return popout_fullscreen != null
+            && popout_fullscreen.handle_escape_for_widget_test ();
+    }
+
+    internal bool popout_escape_uses_capture_for_widget_test () {
+        return popout_fullscreen != null
+            && popout_fullscreen.escape_handler_uses_capture_for_widget_test ();
+    }
+
+    internal void click_player_popout_for_widget_test () {
+        player.click_popout_for_widget_test ();
+    }
+#endif
 
     // ═════════════════════════════════════════════════════════════════════════
     //  UI — Crop Controls

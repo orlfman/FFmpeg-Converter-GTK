@@ -7,5 +7,7 @@
     <file>icons/scalable/actions/video-seek-forward-one-second-symbolic.svg</file>
     <file>icons/scalable/actions/video-seek-backward-five-seconds-symbolic.svg</file>
     <file>icons/scalable/actions/video-seek-forward-five-seconds-symbolic.svg</file>
+    <file>icons/scalable/actions/video-fullscreen-symbolic.svg</file>
+    <file>icons/scalable/actions/video-unfullscreen-symbolic.svg</file>
   </gresource>
 </gresources>

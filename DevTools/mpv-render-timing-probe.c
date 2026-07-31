@@ -35,7 +35,7 @@
  * Only playback is affected.  Paused work — exact seeks and frame stepping — has
  * no target display time to wait for and measures the same either way.
  *
- * This drives the real src/mpv-compat.c helpers with MpvBackend's own option set
+ * This drives the real src/player/mpv-compat.c helpers with MpvBackend's own option set
  * and target-size arithmetic, and mirrors its *current* scheduling: rendering is
  * driven by mpv's render-update callback feeding a coalesced idle on the main
  * loop, not by a GTK frame-clock tick.  That matters for what is being measured
@@ -45,7 +45,7 @@
  *
  * Build:
  *   gcc -O1 -o mpv-render-timing-probe DevTools/mpv-render-timing-probe.c \
- *       src/mpv-compat.c -Isrc $(pkg-config --cflags --libs mpv glib-2.0) -lm
+ *       src/player/mpv-compat.c -Isrc/player $(pkg-config --cflags --libs mpv glib-2.0) -lm
  *
  * Run:  ./mpv-render-timing-probe <file> [options]
  *
@@ -135,7 +135,7 @@ cmp_double (const void *a, const void *b)
 /*
  * fcg_mpv_render_sw_draw () with the block parameter omitted, so libmpv applies
  * its blocking default.  Only used by --legacy-timing; every other path goes
- * through the real helper in src/mpv-compat.c.
+ * through the real helper in src/player/mpv-compat.c.
  */
 static int
 legacy_render_sw_draw (mpv_render_context *ctx, void *buf,

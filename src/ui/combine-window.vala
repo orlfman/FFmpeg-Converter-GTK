@@ -179,6 +179,8 @@ public class CombineWindow : Adw.Window {
     // ── Preview ─────────────────────────────────────────────────────────────
     private Adw.Window? preview_window = null;
     private VideoPlayer? preview_player = null;
+    private Adw.HeaderBar? preview_header = null;
+    private PreviewFullscreenController? preview_fullscreen = null;
 
     // ── Crossfade/fade constraint ──────────────────────────────────────────
     private BaseCodecTab? constrained_codec_tab = null;
@@ -1158,18 +1160,31 @@ public class CombineWindow : Adw.Window {
             preview_window.set_default_size (800, 540);
 
             var toolbar_view = new Adw.ToolbarView ();
-            var header = new Adw.HeaderBar ();
-            toolbar_view.add_top_bar (header);
+            preview_header = new Adw.HeaderBar ();
+            toolbar_view.add_top_bar (preview_header);
             toolbar_view.set_content (preview_player);
             preview_window.set_content (toolbar_view);
 
+            var fullscreen = new PreviewFullscreenController (
+                preview_window, preview_player, preview_header);
+            preview_fullscreen = fullscreen;
+            preview_player.fullscreen_requested.connect (fullscreen.toggle);
+
             preview_window.close_request.connect (() => {
+                release_preview_fullscreen_controller ();
                 preview_player.cleanup ();
+                preview_header = null;
                 preview_window = null;
                 preview_player = null;
                 return false;
             });
         }
+    }
+
+    private void release_preview_fullscreen_controller () {
+        if (preview_fullscreen == null) return;
+        preview_fullscreen.detach ();
+        preview_fullscreen = null;
     }
 
     private void show_preview (int idx) {
@@ -1185,8 +1200,10 @@ public class CombineWindow : Adw.Window {
 
     private void close_preview_window () {
         if (preview_window != null) {
+            release_preview_fullscreen_controller ();
             preview_player.cleanup ();
             preview_window.close ();
+            preview_header = null;
             preview_window = null;
             preview_player = null;
         }
@@ -1916,6 +1933,76 @@ public class CombineWindow : Adw.Window {
     internal bool is_preview_popout_visible_for_widget_test () {
         return preview_player != null
             && preview_player.is_popout_visible_for_widget_test ();
+    }
+
+    internal bool is_preview_fullscreen_visible_for_widget_test () {
+        return preview_player != null
+            && preview_player.is_fullscreen_visible_for_widget_test ();
+    }
+
+    internal void present_preview_for_widget_test () {
+        if (preview_window != null) {
+            preview_window.present ();
+        }
+    }
+
+    internal unowned VideoPlayer? preview_player_for_widget_test () {
+        return preview_player;
+    }
+
+    internal bool has_preview_window_for_widget_test () {
+        return preview_window != null;
+    }
+
+    internal void close_preview_for_widget_test () {
+        if (preview_window != null) {
+            preview_window.close ();
+        }
+    }
+
+    internal void click_preview_fullscreen_for_widget_test () {
+        if (preview_player != null) {
+            preview_player.click_fullscreen_for_widget_test ();
+        }
+    }
+
+    internal bool is_preview_window_fullscreen_for_widget_test () {
+        return preview_window != null && preview_window.fullscreened;
+    }
+
+    internal bool is_preview_header_visible_for_widget_test () {
+        return preview_header != null && preview_header.get_visible ();
+    }
+
+    internal bool preview_picture_expands_for_widget_test () {
+        return preview_player != null
+            && preview_player.picture_expands_for_widget_test ();
+    }
+
+    internal int preview_picture_height_for_widget_test () {
+        return preview_player != null
+            ? preview_player.picture_height_for_widget_test ()
+            : 0;
+    }
+
+    internal bool is_preview_fullscreen_requested_for_widget_test () {
+        return preview_fullscreen != null
+            && preview_fullscreen.requested_fullscreen_for_widget_test ();
+    }
+
+    internal bool is_preview_fullscreen_transition_pending_for_widget_test () {
+        return preview_fullscreen != null
+            && preview_fullscreen.transition_pending_for_widget_test ();
+    }
+
+    internal bool request_preview_escape_for_widget_test () {
+        return preview_fullscreen != null
+            && preview_fullscreen.handle_escape_for_widget_test ();
+    }
+
+    internal bool preview_escape_uses_capture_for_widget_test () {
+        return preview_fullscreen != null
+            && preview_fullscreen.escape_handler_uses_capture_for_widget_test ();
     }
 
     internal string get_file_name_for_widget_test (int idx) {

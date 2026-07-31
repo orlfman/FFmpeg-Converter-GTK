@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <title>Enter video fullscreen</title>
+  <g fill="none" stroke="#2e3436" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 2H2v3"/>
+    <path d="M11 2h3v3"/>
+    <path d="M14 11v3h-3"/>
+    <path d="M5 14H2v-3"/>
+  </g>
+  <path d="m6.25 5.25 4.25 2.75-4.25 2.75z" fill="#2e3436"/>
+</svg>

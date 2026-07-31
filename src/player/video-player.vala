@@ -11,6 +11,8 @@ public class VideoPlayer : Box {
     private Gtk.ToggleButton mute_button;
     private SpeedMenuButton speed_button;
     private Gtk.Button popout_btn;
+    private Gtk.Button fullscreen_btn;
+    private Gtk.ShortcutController fullscreen_shortcuts;
     private Gtk.Overlay video_overlay;
     private Gtk.Label media_status_label;
 
@@ -42,6 +44,7 @@ public class VideoPlayer : Box {
     public signal void media_ready (double duration_seconds);
     public signal void media_failed (string message);
     public signal void popout_requested ();
+    public signal void fullscreen_requested ();
 
     // ═════════════════════════════════════════════════════════════════════════
     //  CONSTRUCTOR
@@ -219,7 +222,42 @@ public class VideoPlayer : Box {
         popout_btn.clicked.connect (() => popout_requested ());
         controls.append (popout_btn);
 
+        // Fullscreen is separate from pop-out. The containing window owns the
+        // actual window-state transition because this widget is also embedded
+        // directly in Crop & Trim, where fullscreening its root would enlarge
+        // the whole application rather than the preview.
+        fullscreen_btn = new Button.from_icon_name (
+            "video-fullscreen-symbolic"
+        );
+        fullscreen_btn.set_tooltip_text ("Enter fullscreen");
+        fullscreen_btn.set_margin_start (6);
+        fullscreen_btn.clicked.connect (() => fullscreen_requested ());
+        controls.append (fullscreen_btn);
+
         append (controls);
+
+        // Global means F11 works anywhere in the window that currently owns a
+        // visible player. When Crop & Trim is embedded this opens its existing
+        // pop-out directly into fullscreen; after reparenting, the same
+        // controller naturally follows the player into the preview window.
+        fullscreen_shortcuts = new Gtk.ShortcutController ();
+        fullscreen_shortcuts.set_scope (Gtk.ShortcutScope.GLOBAL);
+        fullscreen_shortcuts.add_shortcut (new Gtk.Shortcut (
+            new Gtk.KeyvalTrigger (Gdk.Key.F11, (Gdk.ModifierType) 0),
+            new Gtk.CallbackAction (activate_fullscreen_shortcut)
+        ));
+        add_controller (fullscreen_shortcuts);
+    }
+
+    // Keep this callback static. Gtk.CallbackAction retains its callback data,
+    // so capturing `this` here would create a cycle through the shortcut that
+    // prevents a closed VideoPlayer from ever being finalized.
+    private static bool activate_fullscreen_shortcut (Gtk.Widget widget,
+                                                      Variant? args) {
+        var target = widget as VideoPlayer;
+        if (target == null) return false;
+        target.fullscreen_requested ();
+        return true;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -310,6 +348,25 @@ public class VideoPlayer : Box {
     }
 
     /**
+     * Synchronize presentation after the containing preview window actually
+     * enters or leaves fullscreen. Watching the window's state rather than the
+     * button request also handles compositor shortcuts and rejected requests.
+     */
+    public void set_fullscreen_state (bool fullscreen) {
+        fullscreen_btn.set_icon_name (fullscreen
+            ? "video-unfullscreen-symbolic"
+            : "video-fullscreen-symbolic");
+        fullscreen_btn.set_tooltip_text (fullscreen
+            ? "Exit fullscreen"
+            : "Enter fullscreen");
+
+        // The embedded player intentionally stays 340 px high. In a dedicated
+        // fullscreen window, let the picture claim the remaining vertical
+        // space; the backend independently caps CPU rendering at 1920x1080.
+        picture.set_vexpand (fullscreen);
+    }
+
+    /**
      * Stop playback and release timer resources.
      */
     public void cleanup () {
@@ -324,6 +381,56 @@ public class VideoPlayer : Box {
 #if COMBINE_WINDOW_TEST_BUILD
     internal bool is_popout_visible_for_widget_test () {
         return popout_btn.get_visible ();
+    }
+
+    internal bool is_fullscreen_visible_for_widget_test () {
+        return fullscreen_btn.get_visible ();
+    }
+
+    internal string fullscreen_icon_for_widget_test () {
+        return fullscreen_btn.get_icon_name () ?? "";
+    }
+
+    internal string popout_icon_for_widget_test () {
+        return popout_btn.get_icon_name () ?? "";
+    }
+
+    internal string fullscreen_tooltip_for_widget_test () {
+        return fullscreen_btn.get_tooltip_text () ?? "";
+    }
+
+    internal bool picture_expands_for_widget_test () {
+        return picture.get_vexpand ();
+    }
+
+    internal int picture_height_for_widget_test () {
+        return picture.get_height ();
+    }
+
+    internal void click_fullscreen_for_widget_test () {
+        fullscreen_btn.clicked ();
+    }
+
+    internal void click_popout_for_widget_test () {
+        popout_btn.clicked ();
+    }
+
+    internal string fullscreen_shortcut_trigger_for_widget_test () {
+        var shortcut = fullscreen_shortcuts.get_item (0) as Gtk.Shortcut;
+        return shortcut != null && shortcut.get_trigger () != null
+            ? shortcut.get_trigger ().to_string ()
+            : "";
+    }
+
+    internal bool fullscreen_shortcut_is_global_for_widget_test () {
+        return fullscreen_shortcuts.get_scope () == Gtk.ShortcutScope.GLOBAL;
+    }
+
+    internal bool activate_fullscreen_shortcut_for_widget_test () {
+        var shortcut = fullscreen_shortcuts.get_item (0) as Gtk.Shortcut;
+        if (shortcut == null || shortcut.get_action () == null) return false;
+        return shortcut.get_action ().activate (
+            Gtk.ShortcutActionFlags.EXCLUSIVE, this, null);
     }
 
     internal void prepare_duration_for_widget_test (double duration_seconds) {
@@ -716,4 +823,196 @@ public class VideoPlayer : Box {
             play_button.set_icon_name ("media-playback-start-symbolic");
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PreviewFullscreenController — one fullscreen state machine for every video
+//  preview window. Window ownership remains outside VideoPlayer so an embedded
+//  player can never accidentally fullscreen the whole converter UI.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public class PreviewFullscreenController : Object {
+    private Gtk.Window? window;
+    private VideoPlayer? player;
+    private Gtk.Widget? chrome;
+    private Gtk.EventControllerKey? escape_keys;
+    private ulong fullscreen_notify_handler_id = 0;
+    private bool requested_fullscreen = false;
+    private bool transition_pending = false;
+    private uint transition_timeout_id = 0;
+
+    // A compositor normally acknowledges immediately. This deadline is only a
+    // recovery path for a rejected request, and prevents requested state from
+    // remaining stale forever on an unusual window manager.
+    private const uint TRANSITION_TIMEOUT_MS = 1500;
+
+    public PreviewFullscreenController (Gtk.Window target_window,
+                                        VideoPlayer target_player,
+                                        Gtk.Widget? fullscreen_chrome = null) {
+        window = target_window;
+        player = target_player;
+        chrome = fullscreen_chrome;
+        requested_fullscreen = target_window.fullscreened;
+
+        fullscreen_notify_handler_id = target_window.notify["fullscreened"].connect (
+            on_window_fullscreen_changed);
+
+        escape_keys = new Gtk.EventControllerKey ();
+        // CropOverlay also uses Escape. Window capture makes leaving fullscreen
+        // take precedence while preserving the crop selection underneath.
+        escape_keys.set_propagation_phase (PropagationPhase.CAPTURE);
+        escape_keys.key_pressed.connect (on_key_pressed);
+        ((Gtk.Widget) target_window).add_controller (escape_keys);
+
+        sync_actual_state ();
+    }
+
+    public void toggle () {
+        if (window == null) return;
+
+        // During a compositor round-trip, toggle the desired state rather than
+        // the last acknowledged one. Two quick activations therefore cancel
+        // one another instead of issuing the same request twice.
+        bool base_state = transition_pending
+            ? requested_fullscreen
+            : window.fullscreened;
+        request_state (!base_state);
+    }
+
+    public bool request_exit () {
+        if (window == null) return false;
+        if (!window.fullscreened
+            && !(transition_pending && requested_fullscreen)) {
+            return false;
+        }
+
+        request_state (false);
+        return true;
+    }
+
+    public void detach () {
+        stop_transition_timeout ();
+        transition_pending = false;
+        requested_fullscreen = false;
+
+        if (window != null) {
+            if (fullscreen_notify_handler_id != 0) {
+                window.disconnect (fullscreen_notify_handler_id);
+                fullscreen_notify_handler_id = 0;
+            }
+            if (escape_keys != null) {
+                ((Gtk.Widget) window).remove_controller (escape_keys);
+            }
+        }
+        escape_keys = null;
+
+        if (player != null) {
+            player.set_fullscreen_state (false);
+        }
+        if (chrome != null) {
+            chrome.set_visible (true);
+        }
+
+        window = null;
+        player = null;
+        chrome = null;
+    }
+
+    private void request_state (bool fullscreen) {
+        if (window == null) return;
+
+        requested_fullscreen = fullscreen;
+        transition_pending = true;
+        start_transition_timeout ();
+
+        if (fullscreen) {
+            window.fullscreen ();
+        } else {
+            window.unfullscreen ();
+        }
+    }
+
+    private void on_window_fullscreen_changed () {
+        if (window == null) return;
+
+        bool actual = window.fullscreened;
+        if (transition_pending) {
+            if (actual == requested_fullscreen) {
+                transition_pending = false;
+                stop_transition_timeout ();
+            } else {
+                // The compositor acknowledged an earlier request after the
+                // user had already toggled again. Reassert the latest desired
+                // state now that the intermediate transition has landed.
+                start_transition_timeout ();
+                if (requested_fullscreen) {
+                    window.fullscreen ();
+                } else {
+                    window.unfullscreen ();
+                }
+            }
+        } else {
+            // Covers compositor-initiated transitions outside this controller.
+            requested_fullscreen = actual;
+        }
+
+        sync_actual_state ();
+    }
+
+    private void sync_actual_state () {
+        bool actual = window != null && window.fullscreened;
+        if (player != null) {
+            player.set_fullscreen_state (actual);
+        }
+        if (chrome != null) {
+            chrome.set_visible (!actual);
+        }
+    }
+
+    private bool on_key_pressed (uint keyval, uint keycode,
+                                 Gdk.ModifierType state) {
+        if (keyval == Gdk.Key.Escape) {
+            return request_exit ();
+        }
+        return false;
+    }
+
+    private void start_transition_timeout () {
+        stop_transition_timeout ();
+        transition_timeout_id = Timeout.add (TRANSITION_TIMEOUT_MS, () => {
+            transition_timeout_id = 0;
+            transition_pending = false;
+            if (window != null) {
+                requested_fullscreen = window.fullscreened;
+            }
+            sync_actual_state ();
+            return Source.REMOVE;
+        });
+    }
+
+    private void stop_transition_timeout () {
+        if (transition_timeout_id != 0) {
+            Source.remove (transition_timeout_id);
+            transition_timeout_id = 0;
+        }
+    }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    internal bool requested_fullscreen_for_widget_test () {
+        return requested_fullscreen;
+    }
+
+    internal bool transition_pending_for_widget_test () {
+        return transition_pending;
+    }
+
+    internal bool handle_escape_for_widget_test () {
+        return on_key_pressed (Gdk.Key.Escape, 0, (Gdk.ModifierType) 0);
+    }
+
+    internal bool escape_handler_uses_capture_for_widget_test () {
+        return escape_keys != null
+            && escape_keys.get_propagation_phase () == PropagationPhase.CAPTURE;
+    }
+#endif
 }

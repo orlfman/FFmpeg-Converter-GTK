@@ -2,8 +2,8 @@
  * mpv.vapi — Vala bindings for the subset of libmpv this project uses.
  *
  * Plain client.h calls are bound directly.  The render API and the void*-based
- * property API go through the helpers in src/mpv-compat.c, which is why some
- * symbols here carry a different cheader_filename.
+ * property API go through the helpers in src/player/mpv-compat.c, which is
+ * why some symbols here carry a different cheader_filename.
  */
 
 [CCode (cheader_filename = "mpv/client.h,mpv/render.h,mpv-compat.h")]

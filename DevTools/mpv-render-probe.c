@@ -1,7 +1,7 @@
 /*
  * mpv-render-probe.c — verify what libmpv's software renderer actually draws.
  *
- * Drives the real src/mpv-compat.c helpers with MpvBackend's own option set and
+ * Drives the real src/player/mpv-compat.c helpers with MpvBackend's own option set and
  * target-size arithmetic, then measures where the video content landed inside
  * the target buffer.  Two defects live here and neither is visible from the
  * Vala side:
@@ -25,8 +25,8 @@
  * when it does not, so it can be run over a corpus.
  *
  * Build:
- *   gcc -O1 -o mpv-render-probe DevTools/mpv-render-probe.c src/mpv-compat.c \
- *       -Isrc $(pkg-config --cflags --libs mpv glib-2.0) -lm
+ *   gcc -O1 -o mpv-render-probe DevTools/mpv-render-probe.c src/player/mpv-compat.c \
+ *       -Isrc/player $(pkg-config --cflags --libs mpv glib-2.0) -lm
  *
  * Run:  ./mpv-render-probe <file> [widget_w] [widget_h] [--legacy-size] [--legacy-rotate]
  *

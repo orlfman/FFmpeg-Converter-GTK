@@ -62,6 +62,30 @@ private bool spin_main_context_until (owned SourceFunc done, int max_spins = 50)
     return done ();
 }
 
+// Compositor transitions are wall-clock operations. The broad state-test
+// helper above deliberately counts main-loop turns, which can complete much
+// faster than its numeric argument when a frame clock is active.
+private bool spin_main_context_until_deadline (owned SourceFunc done,
+                                               int timeout_ms) {
+    MainContext context = MainContext.default ();
+    int64 deadline = get_monotonic_time () + (timeout_ms * TimeSpan.MILLISECOND);
+
+    while (get_monotonic_time () < deadline) {
+        while (context.pending ()) {
+            context.iteration (false);
+        }
+        if (done ()) {
+            return true;
+        }
+        Thread.usleep (1000);
+    }
+
+    while (context.pending ()) {
+        context.iteration (false);
+    }
+    return done ();
+}
+
 private void assert_array_contains (string[] values, string expected, string context) {
     foreach (string value in values) {
         if (value == expected) {
@@ -859,8 +883,230 @@ private void test_combine_preview_hides_popout_button () {
     assert_false (
         harness.window.is_preview_popout_visible_for_widget_test (),
         "combine preview hides the popout button");
+    assert_true (
+        harness.window.is_preview_fullscreen_visible_for_widget_test (),
+        "combine preview keeps the independent fullscreen button visible");
 
     harness.window.close ();
+}
+
+private void test_video_player_fullscreen_control_state () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var player = new VideoPlayer ();
+    int request_count = 0;
+    player.fullscreen_requested.connect (() => {
+        request_count++;
+    });
+
+    var icon_theme = Gtk.IconTheme.get_for_display (Gdk.Display.get_default ());
+    assert_true (icon_theme.has_icon ("video-fullscreen-symbolic"),
+        "custom fullscreen enter icon is registered");
+    assert_true (icon_theme.has_icon ("video-unfullscreen-symbolic"),
+        "custom fullscreen exit icon is registered");
+
+    assert_true (player.is_fullscreen_visible_for_widget_test (),
+        "video player exposes a dedicated fullscreen control");
+    assert_string_equal (player.fullscreen_icon_for_widget_test (),
+        "video-fullscreen-symbolic", "fullscreen starts with the custom enter icon");
+    assert_string_equal (player.fullscreen_tooltip_for_widget_test (),
+        "Enter fullscreen", "fullscreen starts with its enter tooltip");
+    assert_false (player.picture_expands_for_widget_test (),
+        "embedded video keeps its compact layout");
+    assert_string_equal (player.popout_icon_for_widget_test (),
+        "view-fullscreen-symbolic", "fullscreen does not replace the popout icon");
+    assert_string_equal (player.fullscreen_shortcut_trigger_for_widget_test (),
+        "F11", "fullscreen exposes the expected keyboard shortcut");
+    assert_true (player.fullscreen_shortcut_is_global_for_widget_test (),
+        "fullscreen shortcut works throughout the player window");
+
+    player.click_fullscreen_for_widget_test ();
+    assert_cmpint (request_count, CompareOperator.EQ, 1);
+    assert_true (player.activate_fullscreen_shortcut_for_widget_test (),
+        "fullscreen shortcut action activates");
+    assert_cmpint (request_count, CompareOperator.EQ, 2);
+
+    player.set_fullscreen_state (true);
+    assert_string_equal (player.fullscreen_icon_for_widget_test (),
+        "video-unfullscreen-symbolic", "fullscreen uses the custom exit icon");
+    assert_string_equal (player.fullscreen_tooltip_for_widget_test (),
+        "Exit fullscreen", "fullscreen exposes its exit action");
+    assert_true (player.picture_expands_for_widget_test (),
+        "fullscreen video expands into the available height");
+    assert_string_equal (player.popout_icon_for_widget_test (),
+        "view-fullscreen-symbolic", "fullscreen leaves the popout control unchanged");
+
+    player.set_fullscreen_state (false);
+    assert_string_equal (player.fullscreen_icon_for_widget_test (),
+        "video-fullscreen-symbolic", "leaving fullscreen restores the enter icon");
+    assert_false (player.picture_expands_for_widget_test (),
+        "leaving fullscreen restores the compact layout");
+
+    player.cleanup ();
+}
+
+private void test_video_player_fullscreen_shortcut_releases_player () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    VideoPlayer? player = new VideoPlayer ();
+    var player_ref = WeakRef (player);
+    player = null;
+
+    assert_true (spin_main_context_until_deadline (() => {
+        return player_ref.get () == null;
+    }, 1000), "fullscreen shortcut does not retain its VideoPlayer");
+}
+
+private void test_combine_preview_player_releases_on_close () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var harness = new CombineWindowHarness ();
+    for (int cycle = 0; cycle < 8; cycle++) {
+        harness.window.create_preview_player_for_widget_test ();
+        harness.window.present_preview_for_widget_test ();
+        assert_true (spin_main_context_until_deadline (() => {
+            return harness.window.preview_picture_height_for_widget_test () > 0;
+        }, 2000), "combine preview maps before lifecycle close");
+
+        var player_ref = WeakRef (
+            harness.window.preview_player_for_widget_test ());
+        harness.window.close_preview_for_widget_test ();
+        assert_true (spin_main_context_until_deadline (() => {
+            return !harness.window.has_preview_window_for_widget_test ()
+                && player_ref.get () == null;
+        }, 2000), "closed combine preview releases its VideoPlayer");
+    }
+
+    harness.window.close ();
+}
+
+private void test_combine_preview_fullscreen_window_state () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var harness = new CombineWindowHarness ();
+    harness.window.create_preview_player_for_widget_test ();
+    harness.window.present_preview_for_widget_test ();
+    assert_true (spin_main_context_until_deadline (() => {
+        return harness.window.preview_picture_height_for_widget_test () > 0;
+    }, 2000), "combine preview receives an initial allocation");
+    int normal_height = harness.window.preview_picture_height_for_widget_test ();
+
+    harness.window.click_preview_fullscreen_for_widget_test ();
+    assert_true (harness.window.is_preview_fullscreen_requested_for_widget_test (),
+        "combine preview forwards the fullscreen request to its controller");
+    if (!spin_main_context_until_deadline (() => {
+        return harness.window.is_preview_window_fullscreen_for_widget_test ();
+    }, 2000)) {
+        Test.skip ("Compositor did not acknowledge the fullscreen request");
+        harness.window.close ();
+        return;
+    }
+    assert_false (harness.window.is_preview_header_visible_for_widget_test (),
+        "combine preview hides window chrome in fullscreen");
+    assert_true (harness.window.preview_picture_expands_for_widget_test (),
+        "combine preview expands the picture after fullscreen is acknowledged");
+    assert_true (spin_main_context_until_deadline (() => {
+        return harness.window.preview_picture_height_for_widget_test () > normal_height;
+    }, 2000), "fullscreen allocates more than the normal picture height");
+    int fullscreen_height = harness.window.preview_picture_height_for_widget_test ();
+
+    assert_true (harness.window.preview_escape_uses_capture_for_widget_test (),
+        "combine Escape handler runs before crop-overlay key handling");
+    assert_true (harness.window.request_preview_escape_for_widget_test (),
+        "Escape is handled while the combine preview is fullscreen");
+    assert_true (spin_main_context_until_deadline (() => {
+        return !harness.window.is_preview_window_fullscreen_for_widget_test ()
+            && !harness.window.is_preview_fullscreen_transition_pending_for_widget_test ();
+    }, 2000), "combine preview leaves compositor fullscreen state");
+    assert_true (harness.window.is_preview_header_visible_for_widget_test (),
+        "combine preview restores window chrome after fullscreen");
+    assert_false (harness.window.preview_picture_expands_for_widget_test (),
+        "combine preview restores the compact picture layout");
+    assert_true (spin_main_context_until_deadline (() => {
+        int height = harness.window.preview_picture_height_for_widget_test ();
+        return height > 0 && height < fullscreen_height;
+    }, 2000), "leaving fullscreen restores a compact picture allocation");
+
+    // Exercise the pending-state path: a second request made before the first
+    // compositor response must target the desired state, not stale window state.
+    harness.window.click_preview_fullscreen_for_widget_test ();
+    harness.window.click_preview_fullscreen_for_widget_test ();
+    assert_false (harness.window.is_preview_fullscreen_requested_for_widget_test (),
+        "two rapid fullscreen requests cancel each other");
+    bool rapid_toggle_settled = spin_main_context_until_deadline (() => {
+        return !harness.window.is_preview_fullscreen_transition_pending_for_widget_test ()
+            && !harness.window.is_preview_window_fullscreen_for_widget_test ();
+    }, 2500);
+    assert_true (rapid_toggle_settled,
+        "rapid fullscreen toggles settle in normal window state");
+
+    harness.window.close ();
+}
+
+private void test_trim_preview_fullscreen_window_state () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var host = new Adw.Window ();
+    var tab = new TrimTab ();
+    host.set_content (tab);
+    host.present ();
+    assert_true (spin_main_context_until_deadline (() => {
+        return tab.popout_picture_height_for_widget_test () > 0;
+    }, 2000), "embedded Crop & Trim player receives an initial allocation");
+    int normal_height = tab.popout_picture_height_for_widget_test ();
+
+    assert_true (tab.activate_player_fullscreen_shortcut_for_widget_test (),
+        "F11 activates from the embedded Crop & Trim player");
+    assert_true (tab.has_popout_window_for_widget_test (),
+        "embedded F11 opens the existing Crop & Trim pop-out");
+    assert_true (tab.is_popout_fullscreen_requested_for_widget_test (),
+        "Crop & Trim forwards F11 to the pop-out fullscreen controller");
+
+    if (!spin_main_context_until_deadline (() => {
+        return tab.is_popout_window_fullscreen_for_widget_test ();
+    }, 2000)) {
+        Test.skip ("Compositor did not acknowledge the Crop & Trim fullscreen request");
+        tab.close_popout ();
+        host.close ();
+        return;
+    }
+
+    assert_false (tab.is_popout_header_visible_for_widget_test (),
+        "Crop & Trim hides pop-out chrome in fullscreen");
+    assert_true (tab.popout_picture_expands_for_widget_test (),
+        "Crop & Trim expands the fullscreen picture");
+    assert_true (spin_main_context_until_deadline (() => {
+        return tab.popout_picture_height_for_widget_test () > normal_height;
+    }, 2000), "Crop & Trim fullscreen increases the picture allocation");
+    int fullscreen_height = tab.popout_picture_height_for_widget_test ();
+
+    assert_true (tab.popout_escape_uses_capture_for_widget_test (),
+        "Crop & Trim Escape handler runs before crop-overlay key handling");
+    assert_true (tab.request_popout_escape_for_widget_test (),
+        "Escape is handled while Crop & Trim is fullscreen");
+    assert_true (spin_main_context_until_deadline (() => {
+        return !tab.is_popout_window_fullscreen_for_widget_test ()
+            && !tab.is_popout_fullscreen_transition_pending_for_widget_test ();
+    }, 2000), "Escape leaves Crop & Trim fullscreen");
+    assert_true (tab.is_popout_header_visible_for_widget_test (),
+        "Crop & Trim restores pop-out chrome after Escape");
+    assert_false (tab.popout_picture_expands_for_widget_test (),
+        "Crop & Trim restores the compact picture layout");
+    assert_true (spin_main_context_until_deadline (() => {
+        int height = tab.popout_picture_height_for_widget_test ();
+        return height > 0 && height < fullscreen_height;
+    }, 2000), "Crop & Trim restores a compact picture allocation");
+
+    tab.click_player_popout_for_widget_test ();
+    assert_false (tab.has_popout_window_for_widget_test (),
+        "the original pop-out control still reattaches the player");
+
+    host.close ();
 }
 
 private void test_video_player_duration_state_transitions () {
@@ -6594,6 +6840,16 @@ void main (string[] args) {
         test_move_up_button_reorders_files);
     Test.add_func ("/combine/widgets/preview-hides-popout-button",
         test_combine_preview_hides_popout_button);
+    Test.add_func ("/players/video/fullscreen-control-state",
+        test_video_player_fullscreen_control_state);
+    Test.add_func ("/players/video/fullscreen-shortcut-releases-player",
+        test_video_player_fullscreen_shortcut_releases_player);
+    Test.add_func ("/combine/widgets/preview-player-releases-on-close",
+        test_combine_preview_player_releases_on_close);
+    Test.add_func ("/combine/widgets/preview-fullscreen-window-state",
+        test_combine_preview_fullscreen_window_state);
+    Test.add_func ("/trim/widgets/preview-fullscreen-window-state",
+        test_trim_preview_fullscreen_window_state);
     Test.add_func ("/players/video/duration-state-transitions",
         test_video_player_duration_state_transitions);
     Test.add_func ("/players/audio/duration-state-transitions",

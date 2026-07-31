@@ -98,7 +98,7 @@ echo
 
 # --- Version bump prompt ---
 MESON_FILE="$PROJECT_DIR/meson.build"
-CONSTANTS_FILE="$PROJECT_DIR/src/constants.vala"
+CONSTANTS_FILE="$PROJECT_DIR/src/util/constants.vala"
 
 CURRENT_VERSION=$(grep -oP "^\s*version\s*:\s*'\K[^']+" "$MESON_FILE")
 echo "Current version: $CURRENT_VERSION"
