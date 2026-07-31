@@ -25,6 +25,11 @@ headless_gtk_test_env.set('GIO_USE_VFS', 'local')
 display_gtk_test_env = environment()
 display_gtk_test_env.set('GSETTINGS_BACKEND', 'memory')
 display_gtk_test_env.set('GIO_USE_VFS', 'local')
+hamburger_rebuild_test_env = environment()
+hamburger_rebuild_test_env.set('GSETTINGS_BACKEND', 'memory')
+hamburger_rebuild_test_env.set('GIO_USE_VFS', 'local')
+hamburger_rebuild_test_env.set('G_DEBUG', 'fatal-warnings')
+hamburger_rebuild_test_env.set('HAMBURGER_REBUILD_TEST', '1')
 dependencies = [
   dependency('glib-2.0'),
   dependency('gobject-2.0'),
@@ -685,6 +690,16 @@ if fs.exists('tests/combine-window-state-test.vala')
     env : display_gtk_test_env,
     is_parallel : false,
     timeout : 60,
+  )
+  test(
+    'hamburger-recent-menu-rebuild',
+    combine_window_state_test,
+    args : [
+      '-p', '/hamburger/recent-inputs/repeated-refresh-is-stable',
+    ],
+    env : hamburger_rebuild_test_env,
+    is_parallel : false,
+    timeout : 30,
   )
 endif
 

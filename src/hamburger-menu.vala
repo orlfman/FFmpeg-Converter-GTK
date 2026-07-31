@@ -8,9 +8,7 @@ public class HamburgerMenu {
     private GLib.SimpleAction view_input_action;
     private GLib.SimpleAction view_output_action;
     private GLib.SimpleAction open_output_folder_action;
-    private GLib.SimpleAction open_recent_input_action;
     private GLib.SimpleAction clear_recent_inputs_action;
-    private GLib.SimpleAction recent_inputs_empty_action;
     private FilePickers file_pickers;
     private GLib.Menu menu_model;
     private GLib.Menu playback_menu;
@@ -18,8 +16,10 @@ public class HamburgerMenu {
     private GLib.Menu quit_section;
     private GenericArray<GLib.FileMonitor> recent_input_monitors =
         new GenericArray<GLib.FileMonitor> ();
-    private GenericArray<Gtk.Widget> recent_input_menu_widgets =
-        new GenericArray<Gtk.Widget> ();
+    private GenericArray<Gtk.Button> recent_input_menu_buttons =
+        new GenericArray<Gtk.Button> ();
+    private string[] recent_input_paths = {};
+    private bool recent_submenu_enabled = false;
     private uint recent_refresh_idle_id = 0;
     private string last_output_file = "";
     private string last_output_folder = "";
@@ -38,13 +38,13 @@ public class HamburgerMenu {
         quit_section = new GLib.Menu ();
         quit_section.append ("Quit", "app.quit");
 
-        recent_inputs_menu = new GLib.Menu ();
         menu_model = new GLib.Menu ();
+        recent_inputs_menu = new GLib.Menu ();
+        initialize_recent_inputs_menu_model ();
 
         // Create the menu button with the hamburger icon
         menu_button = new Gtk.MenuButton ();
         menu_button.set_icon_name ("open-menu-symbolic");
-        menu_button.set_menu_model (menu_model);
         menu_button.set_tooltip_text ("Menu");
 
         // ── Register actions ─────────────────────────────────────────────────
@@ -71,19 +71,6 @@ public class HamburgerMenu {
             app.add_action (prefs_action);
         }
 
-        // Recently Opened — a single string-parameter action avoids creating
-        // and leaking one application action for every historical path.
-        if (app.lookup_action ("open-recent-input") == null) {
-            open_recent_input_action = new GLib.SimpleAction (
-                "open-recent-input", GLib.VariantType.STRING);
-            open_recent_input_action.activate.connect (
-                on_open_recent_input_action_activate);
-            app.add_action (open_recent_input_action);
-        } else {
-            open_recent_input_action = (GLib.SimpleAction)
-                app.lookup_action ("open-recent-input");
-        }
-
         if (app.lookup_action ("clear-recent-inputs") == null) {
             clear_recent_inputs_action = new GLib.SimpleAction (
                 "clear-recent-inputs", null);
@@ -93,16 +80,6 @@ public class HamburgerMenu {
         } else {
             clear_recent_inputs_action = (GLib.SimpleAction)
                 app.lookup_action ("clear-recent-inputs");
-        }
-
-        if (app.lookup_action ("recent-inputs-empty") == null) {
-            recent_inputs_empty_action = new GLib.SimpleAction (
-                "recent-inputs-empty", null);
-            recent_inputs_empty_action.set_enabled (false);
-            app.add_action (recent_inputs_empty_action);
-        } else {
-            recent_inputs_empty_action = (GLib.SimpleAction)
-                app.lookup_action ("recent-inputs-empty");
         }
 
         // View Input Video
@@ -139,14 +116,17 @@ public class HamburgerMenu {
         file_pickers.input_entry.changed.connect (on_input_entry_changed);
 
         // Prune files deleted since the last opening immediately before the
-        // menu is shown, then rebuild the dynamic submenu.
+        // menu is shown, then update the stable recent-file button slots.
         menu_button.notify["active"].connect (() => {
             if (menu_button.get_active ())
                 refresh_recent_inputs_menu ();
         });
 
         AppSettings.get_default ().settings_changed.connect (() => {
-            rebuild_top_level_menu ();
+            if (recent_submenu_enabled
+                    != AppSettings.get_default ().recently_opened_enabled) {
+                rebuild_top_level_menu ();
+            }
             refresh_recent_inputs_menu ();
         });
 
@@ -173,92 +153,133 @@ public class HamburgerMenu {
         return menu_button;
     }
 
+#if COMBINE_WINDOW_TEST_BUILD
+    internal Gtk.Button? get_recent_input_button_for_widget_test (int slot) {
+        if (slot < 0 || slot >= recent_input_menu_buttons.length)
+            return null;
+        return recent_input_menu_buttons[slot];
+    }
+#endif
+
     // ═════════════════════════════════════════════════════════════════════════
     //  HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
+    private void initialize_recent_inputs_menu_model () {
+        var files_section = new GLib.Menu ();
+        for (int i = 0; i < AppSettings.MAX_RECENT_INPUT_FILES; i++) {
+            var item = new GLib.MenuItem (null, null);
+            item.set_attribute_value (
+                "custom",
+                new GLib.Variant.string ("recent-input-%d".printf (i))
+            );
+            files_section.append_item (item);
+        }
+        recent_inputs_menu.append_section (null, files_section);
+
+        var clear_section = new GLib.Menu ();
+        clear_section.append ("Clear History", "app.clear-recent-inputs");
+        recent_inputs_menu.append_section (null, clear_section);
+    }
+
     private void rebuild_top_level_menu () {
+        // GTK 4.22 retains destroyed custom-slot pointers when a live menu
+        // model removes and recreates custom items. Keep the recent model
+        // immutable, and discard the whole popover before changing whether
+        // that submenu is attached to the top-level model.
+        menu_button.set_menu_model (null);
+        recent_input_menu_buttons = new GenericArray<Gtk.Button> ();
         menu_model.remove_all ();
         menu_model.append_submenu ("Playback", playback_menu);
-        if (AppSettings.get_default ().recently_opened_enabled) {
+        recent_submenu_enabled =
+            AppSettings.get_default ().recently_opened_enabled;
+        if (recent_submenu_enabled) {
             menu_model.append_submenu ("Recently Opened", recent_inputs_menu);
         }
         menu_model.append ("Combine Videos\u2026", "app.combine-videos");
         menu_model.append ("Preferences", "app.preferences");
         menu_model.append ("About FFmpeg Converter GTK", "app.about");
         menu_model.append_section (null, quit_section);
+        menu_button.set_menu_model (menu_model);
+
+        if (recent_submenu_enabled)
+            bind_recent_input_menu_buttons ();
     }
 
     private void refresh_recent_inputs_menu () {
         var settings = AppSettings.get_default ();
-        reset_recent_input_menu_widgets ();
-        recent_inputs_menu.remove_all ();
         reset_recent_input_monitors ();
 
         bool enabled = settings.recently_opened_enabled;
-        open_recent_input_action.set_enabled (enabled);
         if (!enabled) {
+            recent_input_paths = {};
             clear_recent_inputs_action.set_enabled (false);
             return;
         }
 
+        // Keep this guard so a future popover replacement cannot leave its
+        // fixed custom slots unbound before the next refresh.
+        if (recent_input_menu_buttons.length == 0)
+            bind_recent_input_menu_buttons ();
+
         settings.prune_recent_input_files ();
         string[] files = settings.recent_input_files;
-        var files_section = new GLib.Menu ();
-        // Attach the section before registering custom children. GtkPopoverMenu
-        // can only resolve a custom child ID after its placeholder is reachable
-        // through the active menu model.
-        recent_inputs_menu.append_section (null, files_section);
+        recent_input_paths = files;
 
-        if (files.length == 0) {
-            files_section.append ("No Recent Files", "app.recent-inputs-empty");
-        } else {
-            for (int i = 0; i < files.length; i++) {
+        for (uint i = 0; i < recent_input_menu_buttons.length; i++) {
+            var button = recent_input_menu_buttons[i];
+            if (i < files.length) {
                 string path = files[i];
-                string custom_id = "recent-input-%d".printf (i);
-                var item = new GLib.MenuItem (null, null);
-                item.set_attribute_value (
-                    "custom", new GLib.Variant.string (custom_id));
-                files_section.append_item (item);
-
-                var button = create_recent_input_button (path);
-                button.clicked.connect (() => {
-                    menu_button.set_active (false);
-                    open_recent_input_path (path);
-                });
-
-                var popover = menu_button.get_popover () as Gtk.PopoverMenu;
-                if (popover != null
-                        && popover.add_child (button, custom_id)) {
-                    recent_input_menu_widgets.add (button);
-                } else {
-                    // Keep history functional on GTK builds that cannot bind
-                    // a custom child in a nested menu. Only the tooltip is
-                    // lost; the ordinary menu item remains actionable.
-                    files_section.remove (files_section.get_n_items () - 1);
-                    var fallback = new GLib.MenuItem (
-                        Path.get_basename (path), null);
-                    fallback.set_action_and_target_value (
-                        "app.open-recent-input",
-                        new GLib.Variant.string (path));
-                    files_section.append_item (fallback);
-                }
+                button.set_label (Path.get_basename (path));
+                button.set_tooltip_text (path);
+                button.set_sensitive (true);
+                button.set_visible (true);
+            } else if (files.length == 0 && i == 0) {
+                button.set_label ("No Recent Files");
+                button.set_tooltip_text (null);
+                button.set_sensitive (false);
+                button.set_visible (true);
+            } else {
+                button.set_label ("");
+                button.set_tooltip_text (null);
+                button.set_sensitive (false);
+                button.set_visible (false);
             }
         }
-        var clear_section = new GLib.Menu ();
-        clear_section.append ("Clear History", "app.clear-recent-inputs");
-        recent_inputs_menu.append_section (null, clear_section);
+
         clear_recent_inputs_action.set_enabled (files.length > 0);
         monitor_recent_inputs (files);
     }
 
-    private void reset_recent_input_menu_widgets () {
+    private void bind_recent_input_menu_buttons () {
         var popover = menu_button.get_popover () as Gtk.PopoverMenu;
-        if (popover != null) {
-            for (uint i = 0; i < recent_input_menu_widgets.length; i++)
-                popover.remove_child (recent_input_menu_widgets[i]);
+        if (popover == null)
+            return;
+
+        for (int i = 0; i < AppSettings.MAX_RECENT_INPUT_FILES; i++) {
+            int slot = i;
+            var button = create_recent_input_button ("");
+            button.set_sensitive (false);
+            button.set_visible (false);
+            button.clicked.connect (() => {
+                activate_recent_input_slot (slot);
+            });
+
+            string custom_id = "recent-input-%d".printf (i);
+            if (!popover.add_child (button, custom_id)) {
+                warning ("Failed to bind recent input menu slot %s", custom_id);
+            }
+            recent_input_menu_buttons.add (button);
         }
-        recent_input_menu_widgets = new GenericArray<Gtk.Widget> ();
+    }
+
+    private void activate_recent_input_slot (int slot) {
+        if (slot < 0 || slot >= recent_input_paths.length)
+            return;
+
+        string path = recent_input_paths[slot];
+        menu_button.set_active (false);
+        open_recent_input_path (path);
     }
 
     internal static Gtk.Button create_recent_input_button (string path) {
@@ -407,15 +428,6 @@ public class HamburgerMenu {
         open_in_file_manager (last_output_folder);
     }
 
-    private void on_open_recent_input_action_activate (GLib.Variant? parameter) {
-        if (parameter == null
-                || !AppSettings.get_default ().recently_opened_enabled) {
-            return;
-        }
-
-        open_recent_input_path (parameter.get_string ());
-    }
-
     private void open_recent_input_path (string path) {
         if (!AppSettings.get_default ().recently_opened_enabled)
             return;
@@ -430,7 +442,6 @@ public class HamburgerMenu {
 
     private void on_clear_recent_inputs_action_activate (GLib.Variant? parameter) {
         AppSettings.get_default ().clear_recent_input_files ();
-        refresh_recent_inputs_menu ();
     }
 
     private void on_input_entry_changed () {

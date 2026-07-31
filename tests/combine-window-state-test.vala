@@ -6402,6 +6402,191 @@ private void test_recent_input_menu_item_exposes_full_path_tooltip () {
         "recent item tooltip exposes its complete path");
 }
 
+private void test_recent_input_menu_repeated_refresh_is_stable () {
+    if (Environment.get_variable ("HAMBURGER_REBUILD_TEST") != "1") {
+        Test.skip ("runs in the dedicated fatal-warning GTK test");
+        return;
+    }
+
+    string? temp_root = null;
+    string[] files = {};
+    AppSettings? settings = null;
+    Adw.ApplicationWindow? window = null;
+
+    try {
+        temp_root = DirUtils.make_tmp ("hamburger-rebuild-XXXXXX");
+        Environment.set_variable ("XDG_CONFIG_HOME", temp_root, true);
+        if (!ensure_gtk_widget_tests_available ())
+            return;
+
+        settings = AppSettings.get_default ();
+        settings.recently_opened_enabled = true;
+        for (int i = 0; i < AppSettings.MAX_RECENT_INPUT_FILES; i++) {
+            string path = Path.build_filename (
+                temp_root, "recent-%02d.mkv".printf (i));
+            FileUtils.set_contents (path, "test");
+            files += path;
+            settings.record_recent_input_file (path);
+        }
+
+        var app = new Adw.Application (
+            "com.github.pieman.FFmpegConverterGTK.HamburgerRebuildTest",
+            ApplicationFlags.NON_UNIQUE
+        );
+        app.register (null);
+
+        window = new Adw.ApplicationWindow (app);
+        var file_pickers = new FilePickers ();
+        var hamburger = new HamburgerMenu (window, file_pickers);
+        var menu_button = hamburger.get_button ();
+        window.set_content (menu_button);
+        window.present ();
+
+        assert_true (spin_main_context_until (() => {
+            return window.get_mapped ();
+        }), "hamburger rebuild test window maps");
+
+        menu_button.set_active (true);
+        spin_main_context_until (() => { return true; }, 2);
+        menu_button.set_active (false);
+        spin_main_context_until (() => { return true; }, 2);
+
+        var second_recent =
+            hamburger.get_recent_input_button_for_widget_test (1);
+        assert_true (second_recent != null,
+            "recent-file custom buttons bind to the popover");
+        if (second_recent != null) {
+            assert_true (second_recent.get_parent () != null,
+                "recent-file button is parented into its custom GTK slot");
+            assert_string_equal (second_recent.get_label (),
+                Path.get_basename (
+                    files[AppSettings.MAX_RECENT_INPUT_FILES - 2]),
+                "recent-file button shows its current basename");
+            assert_string_equal (second_recent.get_tooltip_text () ?? "",
+                files[AppSettings.MAX_RECENT_INPUT_FILES - 2],
+                "recent-file button retains its current complete path");
+            second_recent.clicked ();
+            assert_string_equal (file_pickers.input_entry.get_text (),
+                files[AppSettings.MAX_RECENT_INPUT_FILES - 2],
+                "clicking a recent-file slot selects its current path");
+            assert_string_equal (settings.recent_input_files[0],
+                files[AppSettings.MAX_RECENT_INPUT_FILES - 2],
+                "clicking a recent-file slot promotes it in history");
+        }
+
+        var last_recent = hamburger.get_recent_input_button_for_widget_test (
+            AppSettings.MAX_RECENT_INPUT_FILES - 1);
+        assert_true (last_recent != null,
+            "all recent-file custom slots bind to the popover");
+        if (last_recent != null) {
+            assert_true (last_recent.get_parent () != null,
+                "last recent-file button is parented into its GTK slot");
+            assert_string_equal (last_recent.get_label (),
+                Path.get_basename (files[0]),
+                "the final history entry reaches the final custom slot");
+        }
+
+        for (int i = 0; i < 6; i++) {
+            menu_button.set_active (true);
+            spin_main_context_until (() => { return true; }, 2);
+            menu_button.set_active (false);
+            spin_main_context_until (() => { return true; }, 2);
+        }
+
+        var clear_action =
+            app.lookup_action ("clear-recent-inputs") as GLib.SimpleAction;
+        assert_true (clear_action != null,
+            "hamburger registers its clear-history action");
+        if (clear_action != null) {
+            clear_action.activate (null);
+            assert_true (settings.recent_input_files.length == 0,
+                "clear-history action empties persisted recent files");
+            var cleared_first =
+                hamburger.get_recent_input_button_for_widget_test (0);
+            assert_true (cleared_first != null,
+                "clear-history keeps the first custom slot bound");
+            if (cleared_first != null) {
+                assert_string_equal (cleared_first.get_label (),
+                    "No Recent Files",
+                    "settings signal refreshes the cleared menu once");
+                assert_false (cleared_first.get_sensitive (),
+                    "cleared-history placeholder is disabled");
+            }
+        }
+
+        foreach (unowned string path in files)
+            settings.record_recent_input_file (path);
+
+        // Exercise the same settings_changed route as the third recorded
+        // coredump, then replace the entire popover by hiding and restoring
+        // the recent submenu.
+        settings.save ();
+        menu_button.set_active (true);
+        spin_main_context_until (() => { return true; }, 2);
+        settings.recently_opened_enabled = false;
+        settings.save ();
+        assert_false (menu_button.get_active (),
+            "rebuilding the model closes an active hamburger popover");
+        settings.recently_opened_enabled = true;
+        settings.save ();
+
+        var empty_recent =
+            hamburger.get_recent_input_button_for_widget_test (0);
+        assert_true (empty_recent != null,
+            "empty-history slot binds after popover replacement");
+        if (empty_recent != null) {
+            assert_string_equal (empty_recent.get_label (), "No Recent Files",
+                "rebuilt empty history exposes its placeholder");
+            assert_false (empty_recent.get_sensitive (),
+                "rebuilt empty-history placeholder is disabled");
+        }
+
+        // Disabling history intentionally clears it. Refill every slot so the
+        // replacement popover is also tested with a full, changing history.
+        foreach (unowned string path in files)
+            settings.record_recent_input_file (path);
+        settings.save ();
+
+        var rebuilt_first =
+            hamburger.get_recent_input_button_for_widget_test (0);
+        assert_true (rebuilt_first != null,
+            "populated slot binds after popover replacement");
+        if (rebuilt_first != null) {
+            assert_true (rebuilt_first.get_parent () != null,
+                "rebuilt recent-file button is parented into its GTK slot");
+            assert_string_equal (rebuilt_first.get_tooltip_text () ?? "",
+                files[AppSettings.MAX_RECENT_INPUT_FILES - 1],
+                "rebuilt recent-file slot carries its refreshed path");
+        }
+
+        for (int i = 0; i < 4; i++) {
+            menu_button.set_active (true);
+            spin_main_context_until (() => { return true; }, 2);
+            menu_button.set_active (false);
+            spin_main_context_until (() => { return true; }, 2);
+        }
+
+        assert_true (menu_button.get_menu_model () != null,
+            "hamburger retains a live menu model after repeated refreshes");
+
+        // Cancel recent-file monitors before removing their temporary files.
+        settings.recently_opened_enabled = false;
+        settings.save ();
+        window.close ();
+        spin_main_context_until (() => { return true; }, 2);
+    } catch (Error e) {
+        Test.fail_printf ("hamburger rebuild test setup failed: %s", e.message);
+    } finally {
+        foreach (unowned string path in files)
+            FileUtils.remove (path);
+        if (temp_root != null) {
+            cleanup_exec_test_dir (Path.build_filename (
+                temp_root, "FFmpeg-Converter-GTK"));
+            DirUtils.remove (temp_root);
+        }
+    }
+}
+
 void main (string[] args) {
     Test.init (ref args);
 
@@ -6433,6 +6618,8 @@ void main (string[] args) {
         test_quality_ceiling_preference_persists);
     Test.add_func ("/hamburger/recent-inputs/full-path-tooltip",
         test_recent_input_menu_item_exposes_full_path_tooltip);
+    Test.add_func ("/hamburger/recent-inputs/repeated-refresh-is-stable",
+        test_recent_input_menu_repeated_refresh_is_stable);
     Test.add_func ("/combine/information/clears-stale-input-when-removed",
         test_information_tab_clears_stale_input_when_input_removed);
     Test.add_func ("/combine/information/output-hides-input-and-shows-summary",
