@@ -13,6 +13,16 @@ public class TrimSegment : Object {
     public bool ends_at_eof   { get; private set; default = false; }
     public string crop_value  { get; set; default = ""; }
     public string label       { get; set; default = ""; }   // optional display name (used for chapter filenames)
+    /**
+     * Playback speed change for this segment, as a percentage in the same
+     * −99…+100 form the General tab uses. 0 leaves the segment at source speed.
+     *
+     * One value drives both streams — video through setpts, audio through
+     * atempo — so the two are synchronised by construction and cannot be set
+     * against each other. Stacks with the General tab's speed rather than
+     * replacing it.
+     */
+    public double speed_percent { get; set; default = 0.0; }
 
     public TrimSegment (double start, double end) {
         this.start_time = start;
@@ -23,6 +33,23 @@ public class TrimSegment : Object {
         var segment = new TrimSegment (start, start);
         segment.ends_at_eof = true;
         return segment;
+    }
+
+    /**
+     * A full duplicate, for the callers that need to stamp a value onto a
+     * segment without disturbing the one the user is still editing.
+     *
+     * Every field belongs here. Reconstructing a segment by hand drops whatever
+     * the call site forgot, and `ends_at_eof` in particular turns a through-EOF
+     * range into a zero-length one.
+     */
+    public TrimSegment copy () {
+        var clone = new TrimSegment (start_time, end_time);
+        clone.ends_at_eof   = ends_at_eof;
+        clone.crop_value    = crop_value;
+        clone.label         = label;
+        clone.speed_percent = speed_percent;
+        return clone;
     }
 
     public bool has_finite_end () {
@@ -36,6 +63,24 @@ public class TrimSegment : Object {
 
     public bool has_crop () {
         return crop_value != null && crop_value.strip ().length > 0;
+    }
+
+    /** Playback rate this segment runs at, ignoring the General tab. 1.0 = source. */
+    public double get_speed_multiplier () {
+        return FilterBuilder.resolve_speed_multiplier (speed_percent);
+    }
+
+    public bool has_speed_change () {
+        return FilterBuilder.speed_percent_is_active (speed_percent);
+    }
+
+    /** How long this segment runs once its own speed has been applied. */
+    public double get_output_duration () {
+        double multiplier = get_speed_multiplier ();
+        if (!multiplier.is_finite () || multiplier <= 0.0) {
+            return get_duration ();
+        }
+        return get_duration () / multiplier;
     }
 }
 
@@ -121,9 +166,15 @@ public class TrimTab : Box, ICodecTab {
         public Adw.ActionRow row;
         public Entry start_entry;
         public Entry end_entry;
+        public SpinButton? speed_spin;
         public Button? move_up_button;
         public Button? move_down_button;
         public int idx;
+
+        public void on_speed_changed () {
+            if (speed_spin == null) return;
+            owner.apply_segment_speed (idx, speed_spin.get_value ());
+        }
 
         public void on_move_up_clicked () {
             owner.move_segment_up (idx);
@@ -185,6 +236,14 @@ public class TrimTab : Box, ICodecTab {
             owner.delete_segment_row (idx);
         }
     }
+
+    // ── Per-segment speed ────────────────────────────────────────────────────
+    // Same range and step as the General tab's speed controls, so a value means
+    // the same thing wherever the user types it.
+    private const double SEGMENT_SPEED_MIN_PERCENT  = -99.0;
+    private const double SEGMENT_SPEED_MAX_PERCENT  = 100.0;
+    private const double SEGMENT_SPEED_STEP_PERCENT = 1.0;
+    private const double SEGMENT_SPEED_EPSILON      = 1e-9;
 
     // ── Mode ─────────────────────────────────────────────────────────────────
     public enum Mode { TRIM_ONLY, CROP_ONLY, TRIM_AND_CROP, CHAPTER_SPLIT }
@@ -280,6 +339,7 @@ public class TrimTab : Box, ICodecTab {
     private bool speed_locked = false;      // true when speed filters force re-encode
     private bool watermark_locked = false;  // true when watermark forces re-encode
     private bool logo_removal_locked = false;  // true when delogo forces re-encode
+    private bool segment_speed_locked = false; // true when a segment's own speed forces re-encode
     private RunnerBinding? active_runner_binding = null;
     private GenericArray<ChapterRowBinding> chapter_row_bindings =
         new GenericArray<ChapterRowBinding> ();
@@ -539,8 +599,7 @@ public class TrimTab : Box, ICodecTab {
 
         for (int i = 0; i < segments.length; i++) {
             if (stamp_global_crop && !segments[i].has_crop ()) {
-                var clone = new TrimSegment (segments[i].start_time, segments[i].end_time);
-                clone.label = segments[i].label;
+                var clone = segments[i].copy ();
                 clone.crop_value = global_crop_value;
                 segs.add (clone);
             } else {
@@ -548,16 +607,19 @@ public class TrimTab : Box, ICodecTab {
             }
         }
 
-        // Determine if any segment has a crop (forces re-encode)
-        bool any_crop = false;
+        // Determine if any segment has a crop or a speed change (forces re-encode)
+        bool force_reencode = false;
         for (int i = 0; i < segs.length; i++) {
-            if (segs[i].has_crop ()) { any_crop = true; break; }
+            if (segs[i].has_crop () || segs[i].has_speed_change ()) {
+                force_reencode = true;
+                break;
+            }
         }
 
         active_operation_id = operation_id;
         cancel_pending = false;
         maybe_smart_optimize_then_launch (input_file, output_folder, status_area,
-                       progress_bar, console_tab, segs, any_crop, operation_id,
+                       progress_bar, console_tab, segs, force_reencode, operation_id,
                        output_policy);
         return true;
     }
@@ -978,6 +1040,18 @@ public class TrimTab : Box, ICodecTab {
                 ctx.video_speed_multiplier =
                     FilterBuilder.get_video_speed_multiplier (general_settings_snapshot);
             }
+            // The temp file being analyzed is a stream copy at source speed, so
+            // the segment's own speed reaches the optimizer as a multiplier —
+            // it is the difference between the estimate and the output length.
+            //
+            // Folded in against an explicit 1.0 rather than multiplied straight
+            // into the field: OptimizationContext is a struct, so an untouched
+            // video_speed_multiplier is 0, its documented "unset" sentinel, and
+            // multiplying that by anything keeps it 0 and drops the segment.
+            double general_speed = (ctx.video_speed_multiplier.is_finite ()
+                    && ctx.video_speed_multiplier > 0.0)
+                ? ctx.video_speed_multiplier : 1.0;
+            ctx.video_speed_multiplier = general_speed * seg.get_speed_multiplier ();
             if (selected_codec_tab != null
                 && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
                 ctx.strip_audio = true;
@@ -1562,6 +1636,10 @@ public class TrimTab : Box, ICodecTab {
             segments_group.set_title ("Segments");
             segments_group.set_description ("Segments will be exported in the order listed below");
         }
+
+        // Whether a leftover segment speed still counts depends on the mode, so
+        // re-evaluate it here as well as on every segment-list change.
+        refresh_segment_speed_lock ();
 
         // ── Update General tab locks when mode changes ────────────────────────
         if (general_tab != null) {
@@ -2293,7 +2371,8 @@ public class TrimTab : Box, ICodecTab {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void update_copy_mode_constraints () {
-        bool forced_reencode = speed_locked || watermark_locked || logo_removal_locked;
+        bool forced_reencode = speed_locked || watermark_locked
+            || logo_removal_locked || segment_speed_locked;
         if (forced_reencode) {
             copy_mode_switch.set_active (false);
             copy_mode_switch.set_sensitive (false);
@@ -2305,6 +2384,7 @@ public class TrimTab : Box, ICodecTab {
     public void update_for_speed (bool video_speed_on, bool audio_speed_on) {
         speed_locked = video_speed_on || audio_speed_on;
         update_copy_mode_constraints ();
+        refresh_segment_speed_display ();
     }
 
     public void update_for_watermark (bool watermark_on) {
@@ -2476,31 +2556,219 @@ public class TrimTab : Box, ICodecTab {
             segment_listbox.append (row);
         }
 
+        update_segment_count_label ();
+        refresh_segment_speed_lock ();
+
+        // Update audio copy constraint — PATH A (concat filter) can't do
+        // audio copy, so disable it when that path would be active
+        update_concat_audio_constraint ();
+    }
+
+    private void update_segment_count_label () {
         if (segments.length == 0) {
             if (current_mode == Mode.CHAPTER_SPLIT) {
                 segment_count_label.set_text ("No chapters selected");
             } else {
                 segment_count_label.set_text ("No segments defined");
             }
-        } else {
-            double total = 0.0;
-            for (int i = 0; i < segments.length; i++) {
-                total += segments[i].get_duration ();
-            }
-            string unit = (current_mode == Mode.CHAPTER_SPLIT) ? "chapter" : "segment";
-            segment_count_label.set_text (
-                "%d %s%s — total duration %s".printf (
-                    segments.length,
-                    unit,
-                    segments.length == 1 ? "" : "s",
-                    VideoPlayer.format_time (total)
-                )
-            );
+            return;
         }
 
-        // Update audio copy constraint — PATH A (concat filter) can't do
-        // audio copy, so disable it when that path would be active
-        update_concat_audio_constraint ();
+        double total = 0.0;
+        double output_total = 0.0;
+        for (int i = 0; i < segments.length; i++) {
+            total += segments[i].get_duration ();
+            output_total += output_duration_for_segment (segments[i]);
+        }
+
+        string unit = (current_mode == Mode.CHAPTER_SPLIT) ? "chapter" : "segment";
+        string duration_text = durations_differ (total, output_total)
+            ? "%s → %s output".printf (
+                VideoPlayer.format_time (total),
+                VideoPlayer.format_time (output_total))
+            : VideoPlayer.format_time (total);
+
+        segment_count_label.set_text (
+            "%d %s%s — total duration %s".printf (
+                segments.length,
+                unit,
+                segments.length == 1 ? "" : "s",
+                duration_text
+            )
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  SEGMENT MANAGEMENT — Per-segment speed
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private SpinButton create_segment_speed_spin () {
+        var spin = new SpinButton.with_range (SEGMENT_SPEED_MIN_PERCENT,
+                                              SEGMENT_SPEED_MAX_PERCENT,
+                                              SEGMENT_SPEED_STEP_PERCENT);
+        spin.set_digits (0);
+        spin.set_numeric (true);
+        spin.set_snap_to_ticks (true);
+        spin.set_update_policy (SpinButtonUpdatePolicy.IF_VALID);
+        spin.set_width_chars (4);
+        spin.set_valign (Align.CENTER);
+        return spin;
+    }
+
+    private double sanitize_segment_speed_percent (double value) {
+        if (!value.is_finite ()) {
+            warning ("TrimTab: Resetting segment speed percent because it is not finite: %g",
+                     value);
+            return 0.0;
+        }
+        return Math.round (value).clamp (SEGMENT_SPEED_MIN_PERCENT,
+                                         SEGMENT_SPEED_MAX_PERCENT);
+    }
+
+    /**
+     * Commit a speed change to the model.
+     *
+     * The row is refreshed in place rather than through rebuild_segment_rows,
+     * because that would destroy the spin button the user is still holding.
+     */
+    internal void apply_segment_speed (int idx, double percent) {
+        if (idx < 0 || idx >= segments.length) return;
+
+        double sanitized = sanitize_segment_speed_percent (percent);
+        if (Math.fabs (segments[idx].speed_percent - sanitized) < SEGMENT_SPEED_EPSILON) {
+            return;
+        }
+
+        segments[idx].speed_percent = sanitized;
+
+        if (idx < segment_row_bindings.length) {
+            var binding = segment_row_bindings[idx];
+            if (binding.row != null) {
+                binding.row.set_subtitle (build_segment_summary (segments[idx]));
+            }
+        }
+
+        update_segment_count_label ();
+        refresh_segment_speed_lock ();
+    }
+
+    /**
+     * Playback rate a segment's video ends up at, counting both the General
+     * tab's speed and the segment's own — they stack rather than override.
+     */
+    private double effective_video_speed (TrimSegment seg) {
+        double global = 1.0;
+        if (general_tab != null) {
+            var speeds = general_tab.snapshot_speeds_only ();
+            if (speeds.video_speed_enabled) {
+                global = FilterBuilder.resolve_speed_multiplier (
+                    speeds.video_speed_percent);
+            }
+        }
+        return global * seg.get_speed_multiplier ();
+    }
+
+    private double output_duration_for_segment (TrimSegment seg) {
+        double multiplier = effective_video_speed (seg);
+        if (!multiplier.is_finite () || multiplier <= 0.0) {
+            return seg.get_duration ();
+        }
+        return seg.get_duration () / multiplier;
+    }
+
+    /** Below this the two spans round to the same displayed time. */
+    private bool durations_differ (double a, double b) {
+        return Math.fabs (a - b) >= 0.5;
+    }
+
+    /** The row's one-line description: range, duration, speed, crop. */
+    private string build_segment_summary (TrimSegment seg) {
+        double source_span = seg.get_duration ();
+        double output_span = output_duration_for_segment (seg);
+
+        string span_text = durations_differ (source_span, output_span)
+            ? "%s → %s".printf (format_duration (source_span),
+                                format_duration (output_span))
+            : format_duration (source_span);
+
+        string summary = "%s → %s  (%s)".printf (
+            VideoPlayer.format_time (seg.start_time),
+            VideoPlayer.format_time (seg.end_time),
+            span_text
+        );
+
+        if (seg.has_speed_change ()) {
+            double own = seg.get_speed_multiplier ();
+            double effective = effective_video_speed (seg);
+            summary += Math.fabs (effective - own) > SEGMENT_SPEED_EPSILON
+                ? "  [speed: %.2f× → %.2f× effective]".printf (own, effective)
+                : "  [speed: %.2f×]".printf (own);
+        }
+
+        if (seg.has_crop ()) {
+            summary += "  [crop: " + seg.crop_value + "]";
+        }
+
+        return summary;
+    }
+
+    /**
+     * Re-render every row's summary without rebuilding the list.
+     *
+     * Called when something outside a row changes what those rows say — the
+     * General tab's speed, which each row folds into its effective figure.
+     */
+    public void refresh_segment_speed_display () {
+        for (int i = 0; i < segment_row_bindings.length && i < segments.length; i++) {
+            var binding = segment_row_bindings[i];
+            if (binding.row != null) {
+                binding.row.set_subtitle (build_segment_summary (segments[i]));
+            }
+        }
+        update_segment_count_label ();
+    }
+
+    /**
+     * A segment running at anything but source speed has to be decoded, so it
+     * joins the other conditions that take stream copy off the table.
+     */
+    private void refresh_segment_speed_lock () {
+        // Only the two modes that expose the control export the segment list
+        // those speeds were set on. Crop Only builds a single full-file segment
+        // and Chapter Split regenerates its own, so a value left behind in the
+        // list is not part of what either of them exports — and a lock held for
+        // it would block audio stream-copy while naming a cause the user cannot
+        // see from that mode.
+        bool mode_uses_segment_speed = current_mode == Mode.TRIM_ONLY
+            || current_mode == Mode.TRIM_AND_CROP;
+
+        bool locked = false;
+        for (int i = 0; mode_uses_segment_speed && i < segments.length; i++) {
+            if (segments[i].has_speed_change ()) {
+                locked = true;
+                break;
+            }
+        }
+
+        if (locked == segment_speed_locked) return;
+
+        segment_speed_locked = locked;
+        update_copy_mode_constraints ();
+        update_segment_speed_audio_constraint (locked);
+    }
+
+    /**
+     * A segment speed resamples audio with atempo, which cannot be applied to a
+     * copied stream — the filter is silently dropped and the audio comes out at
+     * its original length against retimed video. Take "Copy" out of the audio
+     * codec lists so that pairing cannot be selected, the same way the concat
+     * filter constraint does above.
+     */
+    private void update_segment_speed_audio_constraint (bool active) {
+        if (svt_tab != null)  svt_tab.audio_settings.update_for_segment_speed (active);
+        if (x265_tab != null) x265_tab.audio_settings.update_for_segment_speed (active);
+        if (x264_tab != null) x264_tab.audio_settings.update_for_segment_speed (active);
+        if (vp9_tab != null)  vp9_tab.audio_settings.update_for_segment_speed (active);
     }
 
     private Gtk.Widget build_segment_row (int index) {
@@ -2519,16 +2787,7 @@ public class TrimTab : Box, ICodecTab {
             row.set_title ("#%d".printf (index + 1));
         }
 
-        // Build subtitle with optional crop indicator
-        string time_str = "%s → %s  (%s)".printf (
-            VideoPlayer.format_time (seg.start_time),
-            VideoPlayer.format_time (seg.end_time),
-            format_duration (seg.get_duration ())
-        );
-        if (seg.has_crop ()) {
-            time_str += "  [crop: " + seg.crop_value + "]";
-        }
-        row.set_subtitle (time_str);
+        row.set_subtitle (build_segment_summary (seg));
 
         // ── Drag-and-drop reorder ────────────────────────────────────────────
         var drag_source = new DragSource ();
@@ -2611,6 +2870,37 @@ public class TrimTab : Box, ICodecTab {
         // Fix #6: Only commit the value if validation passes
         end_entry.activate.connect (binding.on_end_activate);
         row.add_suffix (end_entry);
+
+        // ── Speed control (Trim Only and Crop & Trim) ────────────────────────
+        // One value for both streams: video is retimed with setpts and audio
+        // with atempo from the same number, so they cannot drift apart.
+        if (current_mode == Mode.TRIM_ONLY || current_mode == Mode.TRIM_AND_CROP) {
+            var speed_spin = create_segment_speed_spin ();
+            speed_spin.set_value (seg.speed_percent);
+            binding.speed_spin = speed_spin;
+            speed_spin.value_changed.connect (binding.on_speed_changed);
+
+            // Named and given its unit inline: at rest the control reads 0, and
+            // a bare 0 among the row's icon buttons says nothing about what it
+            // does or what the number means.
+            var speed_box = new Box (Orientation.HORIZONTAL, 4);
+            speed_box.set_valign (Align.CENTER);
+
+            var speed_label = new Label ("Speed");
+            speed_label.add_css_class ("dim-label");
+            speed_box.append (speed_label);
+            speed_box.append (speed_spin);
+
+            var percent_label = new Label ("%");
+            percent_label.add_css_class ("dim-label");
+            speed_box.append (percent_label);
+
+            speed_box.set_tooltip_text (
+                "Playback speed change in percent (−99 to +100).\n"
+                + "Applies to video and audio together, and stacks with the "
+                + "General tab's speed.");
+            row.add_suffix (speed_box);
+        }
 
         // ── Crop button (Crop & Trim per-segment mode) ──────────────────────
         if (current_mode == Mode.TRIM_AND_CROP && crop_scope_switch.active) {

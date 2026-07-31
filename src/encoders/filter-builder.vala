@@ -66,6 +66,46 @@ namespace FilterBuilder {
             ? multiplier : 1.0;
     }
 
+    /**
+     * Effective playback rate for a bare speed percentage, in the −99…+100 form
+     * every speed control in the app uses. 1.0 when the value changes nothing.
+     *
+     * The snapshot-taking variants above answer for a whole settings object;
+     * this one answers for a single number, which is what the per-segment
+     * controls hold. Both route through the same validator, so a non-finite or
+     * non-positive value is rejected identically wherever it was entered.
+     */
+    public double resolve_speed_multiplier (double percent) {
+        double multiplier;
+        return try_get_speed_multiplier (percent, "segment", out multiplier)
+            ? multiplier : 1.0;
+    }
+
+    /** True when a speed percentage actually changes playback rate. */
+    public bool speed_percent_is_active (double percent) {
+        return !fp_equal (resolve_speed_multiplier (percent), 1.0);
+    }
+
+    /**
+     * The setpts fragment that plays a video stream at `multiplier`× rate.
+     * Empty at 1.0, so callers can concatenate unconditionally.
+     *
+     * Shares its formatting with the General tab's speed emitter, so a segment
+     * at −50% and a global −50% produce byte-identical filter text.
+     */
+    public string build_setpts_speed_filter (double multiplier) {
+        if (!multiplier.is_finite () || multiplier <= 0.0) {
+            warning ("FilterBuilder: Ignoring invalid setpts multiplier %.6f", multiplier);
+            return "";
+        }
+
+        if (fp_equal (multiplier, 1.0)) return "";
+
+        return "setpts="
+            + ConversionUtils.format_ffmpeg_double (1.0 / multiplier, "%.6f")
+            + "*PTS";
+    }
+
     private string[] get_rotation_filters_from_snapshot (GeneralSettingsSnapshot snapshot) {
         string[] filters = {};
         string rot = snapshot.rotate;
@@ -289,8 +329,8 @@ namespace FilterBuilder {
         if (snapshot.video_speed_enabled) {
             double mult;
             if (try_get_speed_multiplier (snapshot.video_speed_percent, "video", out mult)) {
-                double factor = 1.0 / mult;
-                filters += "setpts=" + ConversionUtils.format_ffmpeg_double (factor, "%.6f") + "*PTS";
+                string setpts = build_setpts_speed_filter (mult);
+                if (setpts.length > 0) filters += setpts;
             }
         }
 

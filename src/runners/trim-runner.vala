@@ -470,6 +470,30 @@ public class TrimRunner : Object {
             log_line ("📐 Normalizing all segments to %d×%d (first segment's dimensions)".printf (target_w, target_h));
         }
 
+        // ── Determine target frame rate for concat normalization ─────────────
+        // A per-segment speed rewrites that branch's timestamps, so segments at
+        // different speeds arrive at the concat filter running at different
+        // frame rates. concat takes its parameters from the first input, which
+        // leaves every other branch timed against a rate it was never encoded
+        // at. Pin them all to one rate, the same way mismatched resolutions are
+        // pinned above.
+        double target_fps = 0.0;
+        bool needs_fps_normalize = segments_have_mixed_speeds ();
+        if (needs_fps_normalize) {
+            target_fps = FfprobeUtils.probe_input_fps (input_file);
+            if (is_plausible_display_fps (target_fps)) {
+                log_line ("🎞️ Normalizing all segments to %s fps (segment speeds differ)"
+                    .printf (ConversionUtils.format_ffmpeg_double (target_fps, "%.3f")));
+            } else {
+                needs_fps_normalize = false;
+                log_line ("⚠️ Segments run at different speeds but the source frame rate "
+                    + "is unusable (%s) — leaving the concat frame rate to FFmpeg."
+                    .printf (target_fps > 0.0
+                        ? ConversionUtils.format_ffmpeg_double (target_fps, "%.3f")
+                        : "unknown"));
+            }
+        }
+
         // ── Build filter_complex ─────────────────────────────────────────────
         var fc = new StringBuilder ();
 
@@ -489,6 +513,14 @@ public class TrimRunner : Object {
                 } else {
                     vf = scale_filter;
                 }
+            }
+
+            // After the segment's own speed filter, which is what made the
+            // rates disagree in the first place.
+            if (needs_fps_normalize) {
+                string fps_filter = "fps="
+                    + ConversionUtils.format_ffmpeg_double (target_fps, "%.6f");
+                vf = vf.length > 0 ? vf + "," + fps_filter : fps_filter;
             }
 
             if (vf.length > 0) {
@@ -603,6 +635,38 @@ public class TrimRunner : Object {
 
         log_line (@"🎬 Using concat filter for $(segments.length) segments (single-pass encode)");
         return execute_ffmpeg (cmd);
+    }
+
+    /**
+     * Whether a probed rate is safe to pin every concat branch to.
+     *
+     * ffprobe's r_frame_rate is a timebase, not always a display rate: variable
+     * frame rate sources routinely report something like 1000/1, and pinning
+     * the branches to that would ask the encoder for a thousand frames a
+     * second. Outside a plausible band the value is treated as unusable and
+     * normalization is skipped, which is no worse than the behaviour before
+     * mixed speeds were possible at all.
+     */
+    private bool is_plausible_display_fps (double fps) {
+        return fps.is_finite () && fps >= 1.0 && fps <= 240.0;
+    }
+
+    /**
+     * True when the segments do not all run at the same speed.
+     *
+     * Only the per-segment values matter: the General tab's speed applies to
+     * every branch equally, so it cannot make them disagree.
+     */
+    private bool segments_have_mixed_speeds () {
+        if (segments.length < 2) return false;
+
+        double first = segments[0].get_speed_multiplier ();
+        for (int i = 1; i < segments.length; i++) {
+            if (Math.fabs (segments[i].get_speed_multiplier () - first) > 1e-9) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private bool needs_peak_analysis () {
@@ -809,7 +873,10 @@ public class TrimRunner : Object {
         string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
 
         bool seg_has_crop = seg.has_crop ();
-        bool seg_reencode = !copy_mode || seg_has_crop;
+        // A speed change rewrites timestamps and resamples audio, so the
+        // segment has to be decoded. Per-segment rather than global because
+        // separate-file export lets each segment decide on its own.
+        bool seg_reencode = !copy_mode || seg_has_crop || seg.has_speed_change ();
 
         // When copy mode with keyframe cut enabled (default), place -ss before
         // -i for fast input-level seeking (snaps to nearest keyframe).
@@ -996,15 +1063,40 @@ public class TrimRunner : Object {
      * source timeline, so it is shifted back by the segment's start.
      */
     private string build_segment_vf (TrimSegment seg) {
+        string chain;
+
         if (reencode_profile == null) {
-            return seg.has_crop () ? "crop=" + strip_crop_prefix (seg.crop_value) : "";
+            chain = seg.has_crop () ? "crop=" + strip_crop_prefix (seg.crop_value) : "";
+        } else {
+            chain = FilterBuilder.build_video_filter_chain_for_segment (
+                reencode_profile,
+                seg.start_time,
+                seg.has_crop () ? seg.crop_value : null,
+                seg.get_duration ());
         }
 
-        return FilterBuilder.build_video_filter_chain_for_segment (
-            reencode_profile,
-            seg.start_time,
-            seg.has_crop () ? seg.crop_value : null,
-            seg.get_duration ());
+        return append_segment_speed_filter (chain, seg);
+    }
+
+    /**
+     * Put the segment's own speed at the very end of its video chain.
+     *
+     * It cannot go earlier. Logo removal leads the chain and its timed regions
+     * match on `enable='between(t,…)'` against the segment-local clock, so a
+     * setpts ahead of delogo would rewrite the timestamps those intervals are
+     * tested against and move the blur off the logo. Nothing after this point
+     * reads timestamps, so the tail is both correct and free of compensation
+     * anywhere else.
+     *
+     * The `setpts=PTS-STARTPTS` both export paths append afterwards still does
+     * its job: subtracting the first frame's already-scaled timestamp.
+     */
+    private string append_segment_speed_filter (string chain, TrimSegment seg) {
+        string speed = FilterBuilder.build_setpts_speed_filter (
+            seg.get_speed_multiplier ());
+        if (speed.length == 0) return chain;
+
+        return chain.length > 0 ? chain + "," + speed : speed;
     }
 
     private string strip_crop_prefix (string crop_value) {
@@ -1152,13 +1244,43 @@ public class TrimRunner : Object {
             segment, apply_fade_out);
 
         return FilterBuilder.merge_profile_audio_filter_chain (
-            reencode_profile.audio_filters,
+            prepend_segment_audio_speed (reencode_profile.audio_filters, segment),
             reencode_profile.audio_processing,
             duration,
             include_normalization,
             apply_fade_in,
             apply_fade_out
         );
+    }
+
+    /**
+     * Put the segment's own speed at the head of its audio chain, alongside the
+     * General tab's.
+     *
+     * Keeping every speed filter in one place is what lets the fade compensation
+     * below be a single rule instead of a per-filter accounting exercise: afade
+     * runs downstream of all of them, so it is handed a duration measured on the
+     * post-speed timeline.
+     */
+    private string prepend_segment_audio_speed (string base_filters,
+                                                TrimSegment segment) {
+        string tempo = FilterBuilder.build_atempo_chain (
+            segment.get_speed_multiplier ());
+        if (tempo.length == 0) return base_filters;
+
+        return base_filters.length > 0 ? tempo + "," + base_filters : tempo;
+    }
+
+    /**
+     * How fast this segment's audio runs relative to the source, counting both
+     * the General tab's speed and the segment's own — they stack.
+     */
+    private double effective_audio_speed_for_segment (TrimSegment segment) {
+        double global = (reencode_profile != null)
+            ? reencode_profile.audio_speed_multiplier : 1.0;
+        if (!global.is_finite () || global <= 0.0) global = 1.0;
+
+        return global * segment.get_speed_multiplier ();
     }
 
     /**
@@ -1170,11 +1292,19 @@ public class TrimRunner : Object {
      * remaining source duration as a filter hint without turning it into an
      * export limit. If even ffprobe cannot determine the duration, keep exporting
      * through EOF but make the omitted effect explicit in the console.
+     *
+     * Every span here is a source span, and the answer is an output one:
+     * merge_profile_audio_filter_chain appends the processing filters after the
+     * speed ones, so afade places its fade on the sped-up timeline. Handing it
+     * the source span would put a fade-out past the end of a shortened track,
+     * where it never fires — the same correction conversion-runner.vala makes
+     * in audio_output_duration_seconds.
      */
     private double audio_filter_duration_for_segment (TrimSegment segment,
                                                        bool apply_fade_out) {
         if (segment.has_finite_end ()) {
-            return segment.get_duration ();
+            return segment.get_duration ()
+                / effective_audio_speed_for_segment (segment);
         }
 
         if (!apply_fade_out
@@ -1193,7 +1323,7 @@ public class TrimRunner : Object {
 
         double remaining = audio_duration_probe_result - segment.start_time;
         if (remaining.is_finite () && remaining > 0.0) {
-            return remaining;
+            return remaining / effective_audio_speed_for_segment (segment);
         }
 
         if (!warned_unknown_audio_fade_duration) {

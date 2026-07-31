@@ -23,6 +23,7 @@ public enum AudioCopyBlockerReason {
     COMBINE_REENCODE,
     TRIM_CONCAT_FILTER,
     AUDIO_SPEED,
+    SEGMENT_SPEED,
     AUDIO_PROCESSING,
     SOURCE_CONTAINER_INCOMPATIBLE
 }
@@ -75,6 +76,7 @@ public class AudioSettings : Object {
     // State for codec list constraints
     private string current_container = ContainerExt.MKV;
     private bool   speed_active = false;
+    private bool   segment_speed_active = false;
     private bool   processing_active = false;
     private bool   concat_filter_active = false;
     private bool   combine_reencode_active = false;
@@ -617,6 +619,23 @@ public class AudioSettings : Object {
     }
 
     /**
+     * A Crop & Trim segment with its own speed change resamples audio with
+     * atempo, so stream-copy is off the table for the same reason the General
+     * tab's speed takes it off.
+     *
+     * Tracked separately from that one: the two are set by different controls
+     * and either can be on while the other is off, so a single flag would have
+     * one clearing the other's lock.
+     */
+    public void update_for_segment_speed (bool active) {
+        if (segment_speed_active == active) {
+            return;
+        }
+        segment_speed_active = active;
+        rebuild_codec_list ();
+    }
+
+    /**
      * When shared audio processing is enabled, stream-copy must be disabled
      * because output filters require re-encoding.
      */
@@ -696,6 +715,7 @@ public class AudioSettings : Object {
      */
     public bool requires_audio_reencode () {
         return speed_active
+            || segment_speed_active
             || processing_active
             || concat_filter_active
             || combine_reencode_active;
@@ -1362,6 +1382,9 @@ public class AudioSettings : Object {
         if (speed_active) {
             blockers += AudioCopyBlockerReason.AUDIO_SPEED;
         }
+        if (segment_speed_active) {
+            blockers += AudioCopyBlockerReason.SEGMENT_SPEED;
+        }
         if (processing_active) {
             blockers += AudioCopyBlockerReason.AUDIO_PROCESSING;
         }
@@ -1406,6 +1429,11 @@ public class AudioSettings : Object {
                 "Copy disabled by audio speed changes because filtered audio must be re-encoded"
             );
             return;
+        case AudioCopyBlockerReason.SEGMENT_SPEED:
+            codec_row.set_subtitle (
+                "Copy disabled by a Crop & Trim segment speed change because resampled audio must be re-encoded"
+            );
+            return;
         case AudioCopyBlockerReason.AUDIO_PROCESSING:
             codec_row.set_subtitle (
                 "Copy disabled by audio processing filters because filtered audio must be re-encoded"
@@ -1436,6 +1464,8 @@ public class AudioSettings : Object {
             return 10;
         case AudioCopyBlockerReason.AUDIO_SPEED:
             return 20;
+        case AudioCopyBlockerReason.SEGMENT_SPEED:
+            return 25;
         case AudioCopyBlockerReason.AUDIO_PROCESSING:
             return 30;
         case AudioCopyBlockerReason.SOURCE_CONTAINER_INCOMPATIBLE:

@@ -169,6 +169,59 @@ private double probe_media_duration_seconds (string path, string context) {
     return double.parse (stdout_buf.strip ());
 }
 
+private double parse_duration_field_for_test (string text) {
+    string trimmed = text.strip ();
+    if (trimmed.length == 0 || trimmed == "N/A") return -1.0;
+
+    if (!trimmed.contains (":")) {
+        double plain = double.parse (trimmed);
+        return plain > 0.0 ? plain : -1.0;
+    }
+
+    string[] parts = trimmed.split (":");
+    if (parts.length != 3) return -1.0;
+
+    return double.parse (parts[0]) * 3600.0
+         + double.parse (parts[1]) * 60.0
+         + double.parse (parts[2]);
+}
+
+/**
+ * Per-stream duration, which is what a synced speed change has to be judged on:
+ * a container duration is a single number covering both streams and would hide
+ * a drift between them. Matroska carries it as a DURATION tag rather than a
+ * stream field, so both forms are accepted.
+ */
+private double probe_stream_duration_seconds (string path,
+                                              string stream_spec,
+                                              string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffprobe_path,
+        "-v", "error",
+        "-select_streams", stream_spec,
+        "-show_entries", "stream=duration:stream_tags=DURATION",
+        "-of", "default=nw=1:nk=1",
+        path
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s failed to probe stream '%s' in '%s': %s",
+            context, stream_spec, path, stderr_buf.strip ());
+        return 0.0;
+    }
+
+    foreach (unowned string line in stdout_buf.split ("\n")) {
+        double parsed = parse_duration_field_for_test (line);
+        if (parsed > 0.0) return parsed;
+    }
+
+    Test.fail_printf ("%s found no duration for stream '%s' in '%s'",
+        context, stream_spec, path);
+    return 0.0;
+}
+
 private string probe_video_pixel_format (string path, string context) {
     string[] cmd = {
         AppSettings.get_default ().ffprobe_path,
@@ -892,6 +945,288 @@ private void test_trim_speed_filter_preserves_segment_range () {
     } finally {
         cleanup_exec_test_dir (tmp_dir);
     }
+}
+
+private TrimRunner make_segment_speed_runner_for_test (string input_path,
+                                                       TrimSegment segment,
+                                                       string global_setpts = "",
+                                                       string global_atempo = "") {
+    var runner = new TrimRunner ();
+    runner.input_file = input_path;
+    runner.copy_mode = true;   // the segment's own speed must override this
+
+    var segs = new GenericArray<TrimSegment> ();
+    segs.add (segment);
+    runner.set_segments (segs);
+
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    profile.video_filters_skip_delogo = global_setpts;
+    profile.audio_filters = global_atempo;
+    runner.reencode_profile = profile;
+
+    return runner;
+}
+
+/**
+ * A segment's own speed stretches or compresses it, and both streams land on
+ * the same length — that shared length is the entire point of driving video and
+ * audio from one control.
+ */
+private void test_trim_segment_speed_scales_both_streams () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-segment-speed-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+
+        // −50% — a 2s segment becomes 4s.
+        var slow_segment = new TrimSegment (1.0, 3.0);
+        slow_segment.speed_percent = -50.0;
+        assert_true (slow_segment.has_speed_change (),
+            "−50% counts as a speed change");
+
+        string slow_path = Path.build_filename (tmp_dir, "slow.mkv");
+        var slow_runner = make_segment_speed_runner_for_test (
+            input_path, slow_segment);
+
+        int slow_exit = slow_runner.run_extract_segment_for_widget_test (
+            0, slow_path);
+        assert_true (slow_exit == 0, "slowed segment extract exit code");
+
+        string[] slow_argv = slow_runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_has_adjacent_pair (slow_argv, "-c:v", "libx264",
+            "a segment speed forces a re-encode even in copy mode");
+        assert_array_not_contains (slow_argv, "-to",
+            "a sped segment bounds the input rather than the output");
+
+        double slow_video = probe_stream_duration_seconds (
+            slow_path, "v:0", "slowed segment video duration");
+        double slow_audio = probe_stream_duration_seconds (
+            slow_path, "a:0", "slowed segment audio duration");
+        assert_true (Math.fabs (slow_video - 4.0) < 0.3,
+            "−50% stretches the 2s segment to 4s of video");
+        assert_true (Math.fabs (slow_audio - 4.0) < 0.3,
+            "−50% stretches the 2s segment to 4s of audio");
+        assert_true (Math.fabs (slow_video - slow_audio) < 0.2,
+            "video and audio stay the same length at −50%");
+
+        // +100% — the same segment becomes 1s, and stops there rather than
+        // running on to EOF.
+        var fast_segment = new TrimSegment (1.0, 3.0);
+        fast_segment.speed_percent = 100.0;
+
+        string fast_path = Path.build_filename (tmp_dir, "fast.mkv");
+        var fast_runner = make_segment_speed_runner_for_test (
+            input_path, fast_segment);
+
+        int fast_exit = fast_runner.run_extract_segment_for_widget_test (
+            0, fast_path);
+        assert_true (fast_exit == 0, "sped-up segment extract exit code");
+
+        double fast_video = probe_stream_duration_seconds (
+            fast_path, "v:0", "sped-up segment video duration");
+        double fast_audio = probe_stream_duration_seconds (
+            fast_path, "a:0", "sped-up segment audio duration");
+        assert_true (Math.fabs (fast_video - 1.0) < 0.3,
+            "+100% compresses the 2s segment to 1s of video");
+        assert_true (Math.fabs (fast_audio - 1.0) < 0.3,
+            "+100% compresses the 2s segment to 1s of audio");
+        assert_true (Math.fabs (fast_video - fast_audio) < 0.2,
+            "video and audio stay the same length at +100%");
+
+        // 0% leaves the segment alone. Asserted on the decision rather than on
+        // an export, because stream-copying this asset into Matroska fails on
+        // its unset timestamps for reasons that have nothing to do with speed.
+        var plain_segment = new TrimSegment (1.0, 3.0);
+        assert_false (plain_segment.has_speed_change (),
+            "0% is not a speed change");
+        assert_double_equal (plain_segment.get_speed_multiplier (), 1.0,
+            "0% resolves to source speed");
+        assert_double_equal (plain_segment.get_output_duration (), 2.0,
+            "a segment at source speed keeps its span");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+/**
+ * A segment speed stacks with the General tab's rather than replacing it, so a
+ * 0.5x segment under a 2x global comes back out at source speed.
+ */
+private void test_trim_segment_speed_stacks_with_general_tab () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-speed-stack-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create temp directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = resolve_test_asset_path ("test_dvd.vob");
+
+        var segment = new TrimSegment (1.0, 3.0);
+        segment.speed_percent = -50.0;
+
+        string output_path = Path.build_filename (tmp_dir, "stacked.mkv");
+        var runner = make_segment_speed_runner_for_test (
+            input_path, segment, "setpts=0.500000*PTS", "atempo=2.000000");
+
+        int exit = runner.run_extract_segment_for_widget_test (0, output_path);
+        assert_true (exit == 0, "stacked speed extract exit code");
+
+        double video = probe_stream_duration_seconds (
+            output_path, "v:0", "stacked video duration");
+        double audio = probe_stream_duration_seconds (
+            output_path, "a:0", "stacked audio duration");
+        assert_true (Math.fabs (video - 2.0) < 0.3,
+            "0.5x segment under a 2x global comes out at source speed");
+        assert_true (Math.fabs (video - audio) < 0.2,
+            "stacking keeps video and audio on the same length");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+/**
+ * The speed setpts has to sit behind logo removal. delogo's timed regions match
+ * on the segment-local clock, so a setpts ahead of them would rewrite the very
+ * timestamps their intervals are tested against.
+ */
+private void test_trim_segment_speed_follows_logo_removal () {
+    var runner = new TrimRunner ();
+    runner.reencode_profile = make_logo_removal_profile_for_test ();
+
+    var seg = new TrimSegment (1.0, 3.0);
+    seg.speed_percent = -50.0;
+
+    string vf = runner.build_segment_vf_for_test (seg);
+    assert_string_equal (vf,
+        "delogo=x=1:y=1:w=170:h=218,crop=640:480:0:0,"
+        + "scale=1280:-2:flags=lanczos,setpts=2.000000*PTS",
+        "segment speed is appended to the tail of the chain");
+
+    int delogo_pos = vf.index_of ("delogo=");
+    int setpts_pos = vf.index_of ("setpts=");
+    assert_true (delogo_pos >= 0, "segment chain keeps logo removal");
+    assert_true (setpts_pos > delogo_pos,
+        "segment speed never precedes logo removal");
+
+    // No profile at all — the copy-mode-with-crop path still has to carry the
+    // speed, because a speed alone is enough to force a re-encode.
+    var bare_runner = new TrimRunner ();
+    var bare_seg = new TrimSegment (1.0, 3.0);
+    bare_seg.speed_percent = 100.0;
+    assert_string_equal (bare_runner.build_segment_vf_for_test (bare_seg),
+        "setpts=0.500000*PTS",
+        "a speed change survives a missing re-encode profile");
+
+    var unchanged = new TrimSegment (1.0, 3.0);
+    assert_string_equal (bare_runner.build_segment_vf_for_test (unchanged), "",
+        "a segment at source speed adds no filter");
+}
+
+/**
+ * afade runs downstream of every speed filter, so its start has to be measured
+ * on the post-speed timeline. Handed the source span instead, a fade-out on a
+ * shortened track lands past the end and never fires.
+ */
+private void test_trim_segment_fade_out_follows_output_timeline () {
+    string input_path = resolve_test_asset_path ("test_dvd.vob");
+
+    var runner = new TrimRunner ();
+    runner.input_file = input_path;
+
+    var profile = new EncodeProfileSnapshot ();
+    profile.container = ContainerExt.MKV;
+    profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    profile.audio_processing.fade_out_enabled = true;
+    profile.audio_processing.fade_out_duration = 1.0;
+    runner.reencode_profile = profile;
+
+    // Baseline: no speed anywhere, so the fade sits one second before the end
+    // of a ten-second segment.
+    var plain_segs = new GenericArray<TrimSegment> ();
+    plain_segs.add (new TrimSegment (0.0, 10.0));
+    runner.set_segments (plain_segs);
+
+    string[] plain_cmd = runner.build_peak_detect_command_for_widget_test (0);
+    assert_contains (get_argv_value_after (plain_cmd, "-af", "plain fade chain"),
+        "afade=t=out:st=9.00", "fade-out sits one second before a 10s segment");
+
+    // The General tab's speed alone: the track is 5s of output, so the fade
+    // belongs at 4s. This is the case that was silently broken.
+    var global_runner = new TrimRunner ();
+    global_runner.input_file = input_path;
+    var global_profile = new EncodeProfileSnapshot ();
+    global_profile.container = ContainerExt.MKV;
+    global_profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+    global_profile.audio_filters = "atempo=2.000000";
+    global_profile.audio_speed_multiplier = 2.0;
+    global_profile.audio_processing.fade_out_enabled = true;
+    global_profile.audio_processing.fade_out_duration = 1.0;
+    global_runner.reencode_profile = global_profile;
+
+    var global_segs = new GenericArray<TrimSegment> ();
+    global_segs.add (new TrimSegment (0.0, 10.0));
+    global_runner.set_segments (global_segs);
+
+    string global_chain = get_argv_value_after (
+        global_runner.build_peak_detect_command_for_widget_test (0),
+        "-af", "global speed fade chain");
+    assert_contains (global_chain, "afade=t=out:st=4.00",
+        "a 2x global speed puts the fade at 4s, not past the end of a 5s track");
+
+    // A segment speed has to be counted the same way, and stack with it: 2x
+    // global on top of 2x segment is a 2.5s track, so the fade starts at 1.5s.
+    var segment_runner = new TrimRunner ();
+    segment_runner.input_file = input_path;
+    segment_runner.reencode_profile = global_profile;
+
+    var sped = new TrimSegment (0.0, 10.0);
+    sped.speed_percent = 100.0;
+    var sped_segs = new GenericArray<TrimSegment> ();
+    sped_segs.add (sped);
+    segment_runner.set_segments (sped_segs);
+
+    string sped_chain = get_argv_value_after (
+        segment_runner.build_peak_detect_command_for_widget_test (0),
+        "-af", "stacked speed fade chain");
+    assert_contains (sped_chain, "afade=t=out:st=1.50",
+        "segment and global speed stack when the fade is placed");
+    assert_contains (sped_chain, "atempo=2.000000,atempo=2.000000",
+        "the segment's atempo joins the General tab's at the head of the chain");
+}
+
+/** Cloning a segment carries every field, not just the ones a call site recalls. */
+private void test_trim_segment_copy_preserves_all_fields () {
+    var finite = new TrimSegment (2.0, 8.0);
+    finite.crop_value = "640:480:0:0";
+    finite.label = "Chapter 3";
+    finite.speed_percent = -25.0;
+
+    var finite_copy = finite.copy ();
+    assert_double_equal (finite_copy.start_time, 2.0, "copied start time");
+    assert_double_equal (finite_copy.end_time, 8.0, "copied end time");
+    assert_string_equal (finite_copy.crop_value, "640:480:0:0", "copied crop");
+    assert_string_equal (finite_copy.label, "Chapter 3", "copied label");
+    assert_double_equal (finite_copy.speed_percent, -25.0, "copied speed");
+    assert_true (finite_copy.has_finite_end (), "copied finite end");
+
+    // The one that used to be dropped: a through-EOF range reconstructed by
+    // hand becomes a zero-length export.
+    var through_eof = TrimSegment.through_end_of_file (5.0);
+    var eof_copy = through_eof.copy ();
+    assert_false (eof_copy.has_finite_end (),
+        "copying preserves a through-EOF range");
 }
 
 private void test_trim_crop_through_eof_omits_duration_limit () {
@@ -2033,6 +2368,16 @@ void main (string[] args) {
         test_trim_image_watermark_preserves_segment_duration);
     Test.add_func ("/trim/runner/speed-preserves-segment-range",
         test_trim_speed_filter_preserves_segment_range);
+    Test.add_func ("/trim/runner/segment-speed-scales-both-streams",
+        test_trim_segment_speed_scales_both_streams);
+    Test.add_func ("/trim/runner/segment-speed-stacks-with-general-tab",
+        test_trim_segment_speed_stacks_with_general_tab);
+    Test.add_func ("/trim/runner/segment-speed-follows-logo-removal",
+        test_trim_segment_speed_follows_logo_removal);
+    Test.add_func ("/trim/runner/segment-fade-out-follows-output-timeline",
+        test_trim_segment_fade_out_follows_output_timeline);
+    Test.add_func ("/trim/segments/copy-preserves-all-fields",
+        test_trim_segment_copy_preserves_all_fields);
     Test.add_func ("/trim/runner/crop-through-eof",
         test_trim_crop_through_eof_omits_duration_limit);
     Test.add_func ("/trim/runner/image-watermark-maps-first-audio",

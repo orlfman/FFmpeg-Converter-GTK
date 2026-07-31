@@ -902,6 +902,11 @@ public class AppController : Object {
         if (page == "trim") {
             // Trim tab is in focus — lock based on its current mode
             general_tab.notify_trim_tab_mode (trim_tab.get_current_mode ());
+            // Segment rows quote an effective speed that folds in the General
+            // tab's, and the General tab has no signal for a percentage change
+            // that stays enabled. Re-reading it on the way in is what keeps the
+            // quoted figure from going stale.
+            trim_tab.refresh_segment_speed_display ();
         } else {
             // Any other tab — unlock everything in the General tab
             general_tab.notify_trim_tab_mode (-1);
