@@ -35,6 +35,15 @@ public class TrimRunner : Object {
     public bool copy_mode { get; set; default = true; }
     public bool keyframe_cut { get; set; default = true; }
     public bool export_separate { get; set; default = false; }
+    /**
+     * Drop the audio track from every segment.
+     *
+     * Independent of copy_mode: a stream copy can leave audio out just as
+     * cheaply as it can carry it, so this never forces a re-encode. When set,
+     * get_audio_args () answers "-an" and every encoding path picks it up from
+     * there; the copy path in extract_segment () handles it directly.
+     */
+    public bool strip_audio { get; set; default = false; }
     public string output_suffix { get; set; default = "-trimmed"; }
     public string primary_output_path { get; set; default = ""; }
     public string operation_label { get; set; default = "Trim export"; }
@@ -932,8 +941,15 @@ public class TrimRunner : Object {
         if (!seg_reencode) {
             cmd += "-c:v";
             cmd += "copy";
-            cmd += "-c:a";
-            cmd += "copy";
+            if (strip_audio) {
+                // Dropping the stream is as cheap as copying it, so No Audio
+                // costs this path nothing — the demuxer concat that may follow
+                // is "-c copy" and simply joins video-only parts.
+                cmd += "-an";
+            } else {
+                cmd += "-c:a";
+                cmd += "copy";
+            }
         } else {
             if (!prepare_peak_normalization_for_segment (seg)) {
                 return runner.is_cancelled () ? 1 : PEAK_ANALYSIS_FAILED_EXIT;
@@ -1199,6 +1215,12 @@ public class TrimRunner : Object {
     }
 
     private string[] get_audio_args () {
+        // Checked ahead of the profile so the Trim tab's own No Audio switch
+        // wins over whatever the selected codec tab asked for. It can only ever
+        // take audio away, never put it back.
+        if (strip_audio) {
+            return { "-an" };
+        }
         if (reencode_profile != null && reencode_profile.audio_args.length > 0) {
             return reencode_profile.audio_args;
         }

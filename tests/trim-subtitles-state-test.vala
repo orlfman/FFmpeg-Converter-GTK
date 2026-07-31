@@ -68,6 +68,13 @@ private void assert_array_has_adjacent_pair (string[] values,
         context, expected_left, expected_right);
 }
 
+private bool argv_contains (string[] values, string expected) {
+    foreach (string value in values) {
+        if (value == expected) return true;
+    }
+    return false;
+}
+
 private void assert_array_not_contains (string[] values, string unexpected, string context) {
     foreach (string value in values) {
         if (value == unexpected) {
@@ -2320,6 +2327,225 @@ private void test_trim_video_only_reencode_normalizes_nonzero_pts () {
     }
 }
 
+/** Count the audio streams a file actually carries. */
+private int probe_audio_stream_count (string path, string context) {
+    string[] cmd = {
+        AppSettings.get_default ().ffprobe_path,
+        "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=index",
+        "-of", "csv=p=0",
+        path
+    };
+
+    string stdout_buf, stderr_buf;
+    int status = run_command_for_test (cmd, out stdout_buf, out stderr_buf, context);
+    if (status != 0) {
+        Test.fail_printf ("%s failed to probe audio streams for '%s': %s",
+            context, path, stderr_buf.strip ());
+        return -1;
+    }
+
+    int count = 0;
+    foreach (unowned string line in stdout_buf.split ("\n")) {
+        if (line.strip ().length > 0) count++;
+    }
+    return count;
+}
+
+/**
+ * No Audio has to hold on the copy path, which never consults a codec tab
+ * and so has nothing else that could drop the track for it.
+ */
+private void test_trim_strip_audio_drops_track_in_copy_mode () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-strip-audio-copy-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create strip-audio copy directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (tmp_dir, "with-audio.mkv");
+        string output_path = Path.build_filename (tmp_dir, "stripped.mkv");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+            "-c:v", "ffv1",
+            "-c:a", "flac",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create strip-audio trim input");
+        assert_true (make_status == 0, "strip-audio trim input is created");
+        assert_int_equal (
+            probe_audio_stream_count (input_path, "strip-audio source"), 1,
+            "strip-audio source starts with one audio stream");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = true;
+        runner.strip_audio = true;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 3.0));
+        runner.set_segments (segments);
+
+        int exit_code = runner.run_extract_segment_for_widget_test (
+            0, output_path);
+        assert_true (exit_code == 0, "strip-audio copy-mode extract succeeds");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_has_adjacent_pair (argv, "-c:v", "copy",
+            "strip-audio copy mode still stream-copies video");
+        assert_true (argv_contains (argv, "-an"),
+            "strip-audio copy mode passes -an");
+        // The pair it replaced — leaving both in would keep the track.
+        assert_array_not_contains (argv, "-c:a",
+            "strip-audio copy mode drops the audio codec argument");
+
+        assert_int_equal (
+            probe_audio_stream_count (output_path, "strip-audio copy output"), 0,
+            "strip-audio copy output carries no audio stream");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+/**
+ * The Trim tab's No Audio switch outranks the codec tab's audio settings:
+ * it can only ever strip, so a profile asking for a real audio codec still
+ * loses to it.
+ */
+private void test_trim_strip_audio_overrides_reencode_profile_audio () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-strip-audio-encode-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create strip-audio re-encode directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (tmp_dir, "with-audio.mkv");
+        string output_path = Path.build_filename (tmp_dir, "stripped.mkv");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+            "-c:v", "ffv1",
+            "-c:a", "flac",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create strip-audio re-encode input");
+        assert_true (make_status == 0,
+            "strip-audio re-encode input is created");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = false;
+        runner.strip_audio = true;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 3.0));
+        runner.set_segments (segments);
+
+        var profile = new EncodeProfileSnapshot ();
+        profile.container = ContainerExt.MKV;
+        profile.codec_args = { "-c:v", "ffv1" };
+        // The codec tab wants audio; the Trim tab says no. No wins.
+        profile.audio_args = { "-c:a", "aac", "-b:a", "128k" };
+        runner.reencode_profile = profile;
+
+        int exit_code = runner.run_extract_segment_for_widget_test (
+            0, output_path);
+        assert_true (exit_code == 0, "strip-audio re-encode extract succeeds");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_true (argv_contains (argv, "-an"),
+            "strip-audio re-encode passes -an");
+        assert_array_not_contains (argv, "-c:a",
+            "strip-audio re-encode discards the profile audio codec");
+        assert_array_not_contains (argv, "-b:a",
+            "strip-audio re-encode discards the profile audio bitrate");
+
+        assert_int_equal (
+            probe_audio_stream_count (output_path, "strip-audio encode output"), 0,
+            "strip-audio re-encode output carries no audio stream");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
+/**
+ * Guard the default: leaving No Audio off must not disturb the audio the
+ * export would otherwise have carried.
+ */
+private void test_trim_without_strip_audio_keeps_track () {
+    string tmp_dir;
+    try {
+        tmp_dir = DirUtils.make_tmp ("ffmpeg-trim-keep-audio-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create keep-audio directory: %s", e.message);
+        return;
+    }
+
+    try {
+        string input_path = Path.build_filename (tmp_dir, "with-audio.mkv");
+        string output_path = Path.build_filename (tmp_dir, "kept.mkv");
+        string stdout_buf, stderr_buf;
+        string[] make_input = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+            "-c:v", "ffv1",
+            "-c:a", "flac",
+            input_path
+        };
+        int make_status = run_command_for_test (
+            make_input, out stdout_buf, out stderr_buf,
+            "create keep-audio input");
+        assert_true (make_status == 0, "keep-audio input is created");
+
+        var runner = new TrimRunner ();
+        runner.input_file = input_path;
+        runner.copy_mode = true;
+        runner.strip_audio = false;
+
+        var segments = new GenericArray<TrimSegment> ();
+        segments.add (new TrimSegment (1.0, 3.0));
+        runner.set_segments (segments);
+
+        int exit_code = runner.run_extract_segment_for_widget_test (
+            0, output_path);
+        assert_true (exit_code == 0, "keep-audio copy-mode extract succeeds");
+
+        string[] argv = runner.get_last_ffmpeg_argv_for_widget_test ();
+        assert_array_has_adjacent_pair (argv, "-c:a", "copy",
+            "keep-audio copy mode stream-copies audio");
+        assert_array_not_contains (argv, "-an",
+            "keep-audio copy mode does not pass -an");
+
+        assert_int_equal (
+            probe_audio_stream_count (output_path, "keep-audio output"), 1,
+            "keep-audio output retains its audio stream");
+    } finally {
+        cleanup_exec_test_dir (tmp_dir);
+    }
+}
+
 private void test_trim_timestamp_normalization_respects_subtitles_and_chapters () {
     string tmp_dir;
     try {
@@ -2496,6 +2722,12 @@ void main (string[] args) {
         test_trim_segment_crop_export_keeps_logo_removal_in_source_frame);
     Test.add_func ("/trim/runner/video-only-reencode-normalizes-nonzero-pts",
         test_trim_video_only_reencode_normalizes_nonzero_pts);
+    Test.add_func ("/trim/runner/strip-audio-copy-mode",
+        test_trim_strip_audio_drops_track_in_copy_mode);
+    Test.add_func ("/trim/runner/strip-audio-overrides-profile",
+        test_trim_strip_audio_overrides_reencode_profile_audio);
+    Test.add_func ("/trim/runner/keeps-audio-by-default",
+        test_trim_without_strip_audio_keeps_track);
     Test.add_func ("/trim/runner/timestamp-normalization-respects-subtitles-and-chapters",
         test_trim_timestamp_normalization_respects_subtitles_and_chapters);
     Test.add_func ("/subtitles/burn-in/peak-detect-toggle-off-maps-first-audio",

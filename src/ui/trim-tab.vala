@@ -289,6 +289,7 @@ public class TrimTab : Box, ICodecTab {
     private Adw.ActionRow reencode_codec_row;
     private DropDown codec_choice;
     private Switch export_separate_switch;
+    private Switch no_audio_switch;
 
     // ── Smart Optimizer (per-segment) ──────────────────────────────────────
     private Switch smart_optimize_switch;
@@ -420,7 +421,10 @@ public class TrimTab : Box, ICodecTab {
         GeneralSettingsSnapshot? general_settings) {
         return new KeyframeSettingsSnapshot ();
     }
-    public string[] get_audio_args () { return { "-c:a", "copy" }; }
+    public string[] get_audio_args () {
+        return no_audio_switch.active ? new string[] { "-an" }
+                                      : new string[] { "-c:a", "copy" };
+    }
 
     /** Returns the current operation mode as an int (0=Trim Only, 1=Crop Only, 2=Crop & Trim). */
     public int get_current_mode () { return (int) current_mode; }
@@ -520,7 +524,13 @@ public class TrimTab : Box, ICodecTab {
         // Before any path resolution below — every launch route reads this.
         pending_output_base = output_base;
 
-        if (will_reencode_output () && selected_reencode_audio_probe_pending ()) {
+        // No Audio short-circuits the probe: it exists to settle what the
+        // source audio stream is so the codec tab can decide how to encode it,
+        // and there is nothing to decide about a track being discarded.
+        // Without this the user waits on a probe of audio that never ships.
+        if (will_reencode_output ()
+            && !no_audio_switch.active
+            && selected_reencode_audio_probe_pending ()) {
             status_area.set_status (
                 "Checking source audio stream. Please wait a moment and try again.",
                 StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
@@ -655,6 +665,7 @@ public class TrimTab : Box, ICodecTab {
         runner.copy_mode       = copy_mode_switch.active && !global_force;
         runner.keyframe_cut    = keyframe_cut_switch.active;
         runner.export_separate = export_separate_switch.active;
+        runner.strip_audio     = no_audio_switch.active;
         runner.video_width     = player.intrinsic_width;
         runner.video_height    = player.intrinsic_height;
         runner.status_area     = status_area;
@@ -1062,8 +1073,9 @@ public class TrimTab : Box, ICodecTab {
                     && ctx.video_speed_multiplier > 0.0)
                 ? ctx.video_speed_multiplier : 1.0;
             ctx.video_speed_multiplier = general_speed * seg.get_speed_multiplier ();
-            if (selected_codec_tab != null
-                && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ()) {
+            if (no_audio_switch.active
+                || (selected_codec_tab != null
+                    && !selected_codec_tab.audio_settings.is_audio_enabled_for_output ())) {
                 ctx.strip_audio = true;
             }
             if (selected_codec_tab != null) {
@@ -2384,6 +2396,25 @@ public class TrimTab : Box, ICodecTab {
             keyframe_cut_row.set_visible (copy_mode_switch.active);
         });
 
+        // ── No Audio ─────────────────────────────────────────────────────────
+        // Deliberately independent of both Copy Streams and the codec tabs'
+        // own No Audio rows. Copy mode never consults a codec tab at all, so
+        // there is nothing for this to defer to; and it only ever strips, so a
+        // codec tab that has already dropped audio still gets its way.
+        var no_audio_row = new Adw.ActionRow ();
+        no_audio_row.set_title ("No Audio");
+        no_audio_row.set_subtitle ("Drop the audio track from the export — works with copy and re-encode");
+
+        no_audio_switch = new Switch ();
+        no_audio_switch.set_valign (Align.CENTER);
+        no_audio_switch.set_active (false);
+        // Toggling this lifts or re-imposes the codec tabs' audio-copy
+        // constraint, so it has to re-run in both directions.
+        no_audio_switch.notify["active"].connect (update_concat_audio_constraint);
+        no_audio_row.add_suffix (no_audio_switch);
+        no_audio_row.set_activatable_widget (no_audio_switch);
+        output_group.add (no_audio_row);
+
         // ── Export as separate files ─────────────────────────────────────────
         var separate_row = new Adw.ActionRow ();
         separate_row.set_title ("Export as Separate Files");
@@ -2481,11 +2512,19 @@ public class TrimTab : Box, ICodecTab {
     //
     //  PATH A conditions: re-encode + multi-segment + combined output
     //   → !copy_mode && !export_separate && segments.length > 1
+    //
+    //  No Audio exempts the codec tabs from all of this. PATH A still runs,
+    //  but with no audio branches in the filter graph, so nothing is being
+    //  decoded and "Copy" is not a claim this export can contradict. Leaving
+    //  the constraint on would grey out a control on four other tabs — and it
+    //  stays greyed out after the user navigates away — to describe a
+    //  restriction that no longer applies to anything.
     // ═════════════════════════════════════════════════════════════════════════
 
     private void update_concat_audio_constraint () {
         bool would_use_concat_filter = !copy_mode_switch.active
                                        && !export_separate_switch.active
+                                       && !no_audio_switch.active
                                        && segments.length > 1;
 
         if (svt_tab != null)  svt_tab.audio_settings.update_for_concat_filter (would_use_concat_filter);
