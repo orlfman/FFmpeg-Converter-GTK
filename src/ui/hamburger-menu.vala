@@ -197,6 +197,7 @@ public class HamburgerMenu {
             menu_model.append_submenu ("Recently Opened", recent_inputs_menu);
         }
         menu_model.append ("Combine Videos\u2026", "app.combine-videos");
+        menu_model.append ("Generate Collage\u2026", "app.generate-collage");
         menu_model.append ("Preferences", "app.preferences");
         menu_model.append ("About FFmpeg Converter GTK", "app.about");
         menu_model.append_section (null, quit_section);

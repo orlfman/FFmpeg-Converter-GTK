@@ -59,6 +59,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
     private Adw.EntryRow custom_name_entry;
     private Adw.SwitchRow overwrite_switch;
     private Adw.SwitchRow generate_collage_thumbnail_switch;
+    private Adw.ComboRow collage_size_combo;
     private Adw.SwitchRow play_with_ffplay_switch;
     private Adw.ComboRow hwdec_combo;
     private Adw.ActionRow hwdec_status_row;
@@ -237,7 +238,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         naming_group.set_title ("Output Filename");
         naming_group.set_description (
             "Choose how output files are named during codec conversion, and by " +
-            "the Trim Only, Crop Only and Crop & Trim exports. " +
+            "the Trim Only, Crop Only and Crop &amp; Trim exports. " +
             "Suffixes and the container extension are always appended automatically. " +
             "Chapter Split names its files after the chapters themselves."
         );
@@ -323,7 +324,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var generated_outputs_group = new Adw.PreferencesGroup ();
         generated_outputs_group.set_title ("Generated Outputs");
         generated_outputs_group.set_description (
-            "Optionally create a PNG collage sidecar from each newly encoded video."
+            "Optionally create a PNG collage sidecar from each newly encoded video. The size below also applies to Generate Collage in the main menu."
         );
 
         generate_collage_thumbnail_switch = new Adw.SwitchRow ();
@@ -333,7 +334,31 @@ public class SettingsDialog : Adw.PreferencesDialog {
         generate_collage_thumbnail_switch.set_subtitle (
             "Creates output-name-collage.png using frames from 8%, 16%, 24%, 32%, 40%, 48%, 56%, 64%, 72%, 80%, 88%, and 96% of the finished video"
         );
+        // Only meaningful while the sidecar is switched on, so it follows the
+        // switch rather than sitting there greyed out. Same show/hide approach
+        // as the overwrite warning above.
+        collage_size_combo = new Adw.ComboRow ();
+        collage_size_combo.set_title ("Collage Size");
+
+        var collage_size_model = new Gtk.StringList (null);
+        foreach (CollageSize size in CollageSize.all ()) {
+            collage_size_model.append (size.get_label ());
+        }
+        collage_size_combo.set_model (collage_size_model);
+        collage_size_combo.set_visible (false);
+        collage_size_combo.notify["selected"].connect (on_collage_size_changed);
+        // set_model () happens to emit notify::selected, which would fill the
+        // subtitle in. Called explicitly so the row is never left blank if that
+        // implementation detail changes.
+        on_collage_size_changed ();
+
+        generate_collage_thumbnail_switch.notify["active"].connect (() => {
+            collage_size_combo.set_visible (
+                generate_collage_thumbnail_switch.get_active ());
+        });
+
         generated_outputs_group.add (generate_collage_thumbnail_switch);
+        generated_outputs_group.add (collage_size_combo);
         page.add (generated_outputs_group);
 
         var history_group = new Adw.PreferencesGroup ();
@@ -642,7 +667,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         var preview_group = new Adw.PreferencesGroup ();
         preview_group.set_title ("Preview Player");
         preview_group.set_description (
-            "Settings for the video and audio previews shown in Crop & Trim and the Audio tab."
+            "Settings for the video and audio previews shown in Crop &amp; Trim and the Audio tab."
         );
 
         hwdec_combo = new Adw.ComboRow ();
@@ -705,6 +730,30 @@ public class SettingsDialog : Adw.PreferencesDialog {
         page.add (preview_group);
 
         return page;
+    }
+
+    private static CollageSize index_to_collage_size (uint idx) {
+        CollageSize[] sizes = CollageSize.all ();
+        return idx < sizes.length ? sizes[idx] : CollageSize.FHD_1080;
+    }
+
+    private static uint collage_size_to_index (CollageSize size) {
+        CollageSize[] sizes = CollageSize.all ();
+        for (uint i = 0; i < sizes.length; i++) {
+            if (sizes[i] == size) return i;
+        }
+        return 0;
+    }
+
+    /**
+     * Only refreshes the subtitle. Unlike the player settings, this is applied
+     * with the rest of the page so it lands together with the switch it
+     * belongs to, rather than persisting while that switch is still pending.
+     */
+    private void on_collage_size_changed () {
+        collage_size_combo.set_subtitle (
+            index_to_collage_size (collage_size_combo.get_selected ())
+                .get_description ());
     }
 
     private static PreviewQuality index_to_preview_quality (uint idx) {
@@ -1795,6 +1844,8 @@ public class SettingsDialog : Adw.PreferencesDialog {
         custom_name_entry.set_visible (s.output_name_mode == OutputNameMode.CUSTOM);
         overwrite_switch.set_active (s.overwrite_enabled);
         generate_collage_thumbnail_switch.set_active (s.generate_collage_thumbnail);
+        collage_size_combo.set_selected (collage_size_to_index (s.collage_size));
+        collage_size_combo.set_visible (s.generate_collage_thumbnail);
         play_with_ffplay_switch.set_active (s.play_with_ffplay);
         loading_hwdec_mode = true;
         hwdec_combo.set_selected (hwdec_mode_to_index (s.hwdec_mode));
@@ -1875,6 +1926,7 @@ public class SettingsDialog : Adw.PreferencesDialog {
         s.output_custom_name = custom_name_entry.get_text ().strip ();
         s.overwrite_enabled = overwrite_switch.get_active ();
         s.generate_collage_thumbnail = generate_collage_thumbnail_switch.get_active ();
+        s.collage_size = index_to_collage_size (collage_size_combo.get_selected ());
         s.play_with_ffplay = play_with_ffplay_switch.get_active ();
         // Already applied and saved the moment it changed; written again here
         // only so this function remains a complete picture of the dialog.
@@ -1917,4 +1969,25 @@ public class SettingsDialog : Adw.PreferencesDialog {
         saved_output_dir = staged;
         update_output_dir_apply_state ();
     }
+
+#if COMBINE_WINDOW_TEST_BUILD
+    // Note for anyone adding to these: this dialog writes the real settings
+    // file from its "closed" handler, so a test must construct it and let it
+    // go out of scope — never present or close it.
+    internal void set_collage_enabled_for_widget_test (bool enabled) {
+        generate_collage_thumbnail_switch.set_active (enabled);
+    }
+
+    internal bool is_collage_size_visible_for_widget_test () {
+        return collage_size_combo.get_visible ();
+    }
+
+    internal string get_collage_size_subtitle_for_widget_test () {
+        return collage_size_combo.get_subtitle () ?? "";
+    }
+
+    internal void select_collage_size_for_widget_test (CollageSize size) {
+        collage_size_combo.set_selected (collage_size_to_index (size));
+    }
+#endif
 }

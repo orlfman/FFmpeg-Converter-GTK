@@ -3,10 +3,57 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$PROJECT_DIR/builddir"
-BINARY_NAME="ffmpeg-converter-gtk"
-PREFIX="/usr"
 RUN_TESTS=0
+DEV_BUILD=0
+CLEAN_BUILD=-1   # -1 = use the per-mode default chosen below
+
+usage() {
+    cat <<'EOF'
+Usage: build.sh [--dev] [--clean] [--help]
+
+  (no flags)  Release build into builddir, installed to /usr (skipped when the
+              package manager already owns the installed binary). Always starts
+              from a clean build directory.
+
+  --dev       Development build into builddir-dev, installed to ~/.local.
+              Uses its own application ID, config directory, binary name and
+              desktop entry, so it runs alongside an installed release build
+              instead of replacing it. Never needs sudo and never touches /usr.
+
+              Rebuilds incrementally, because the point of this mode is a
+              short edit-build-run loop. Pass --clean to start fresh.
+
+              Binary:   ffmpeg-converter-gtk-devel
+              Settings: ~/.config/FFmpeg-Converter-GTK-Devel
+
+  --clean     Force a from-scratch build directory (the default without --dev).
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --dev)   DEV_BUILD=1 ;;
+        --clean) CLEAN_BUILD=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "❌ Unknown option: $arg"; echo; usage; exit 1 ;;
+    esac
+done
+
+if [ "$DEV_BUILD" -eq 1 ]; then
+    BUILD_DIR="$PROJECT_DIR/builddir-dev"
+    BINARY_NAME="ffmpeg-converter-gtk-devel"
+    PREFIX="$HOME/.local"
+    MESON_PROFILE="development"
+    # A dev build that recompiles every file on every run is not a loop
+    # anyone will use. Release builds keep their clean-room guarantee.
+    [ "$CLEAN_BUILD" -eq -1 ] && CLEAN_BUILD=0
+else
+    BUILD_DIR="$PROJECT_DIR/builddir"
+    BINARY_NAME="ffmpeg-converter-gtk"
+    PREFIX="/usr"
+    MESON_PROFILE="default"
+    [ "$CLEAN_BUILD" -eq -1 ] && CLEAN_BUILD=1
+fi
 
 check_dependency() {
     if ! command -v "$1" &> /dev/null; then
@@ -25,24 +72,14 @@ check_pkg_config_dependency() {
     fi
 }
 
-check_gstreamer_element() {
-    local label="$1"
-    shift
-
-    local element
-    for element in "$@"; do
-        if gst-inspect-1.0 "$element" &> /dev/null; then
-            return
-        fi
-    done
-
-    echo "❌ Error: GStreamer is missing $label support."
-    echo "   Install the appropriate base/good/bad/libav plugin package and try again."
-    exit 1
-}
-
-echo "=== FFmpeg Converter GTK - Clean Fresh Build & Install ==="
+if [ "$DEV_BUILD" -eq 1 ]; then
+    echo "=== FFmpeg Converter GTK - Development Build (alongside release) ==="
+else
+    echo "=== FFmpeg Converter GTK - Clean Fresh Build & Install ==="
+fi
 echo "Detected project directory: $PROJECT_DIR"
+echo "Build directory:            $BUILD_DIR"
+echo "Prefix:                     $PREFIX"
 echo
 
 # --- Dependency checks ---
@@ -61,19 +98,12 @@ check_pkg_config_dependency pango Pango
 check_pkg_config_dependency libadwaita-1 libadwaita
 check_pkg_config_dependency json-glib-1.0 json-glib
 check_pkg_config_dependency libsoup-3.0 "libsoup 3"
+check_pkg_config_dependency mpv libmpv
 check_dependency ffmpeg
 check_dependency ffprobe
-check_dependency gst-inspect-1.0
-check_gstreamer_element "playback" playbin playbin3
-check_gstreamer_element "Matroska/WebM container" matroskademux
-check_gstreamer_element "MP4/QuickTime container" qtdemux
-check_gstreamer_element "Opus audio" opusdec
-check_gstreamer_element "Vorbis audio" vorbisdec
-check_gstreamer_element "AAC audio" avdec_aac faad
-check_gstreamer_element "H.264 video" avdec_h264 openh264dec
-check_gstreamer_element "H.265/HEVC video" avdec_h265 libde265dec
-check_gstreamer_element "VP9 video" vp9dec avdec_vp9
-check_gstreamer_element "AV1 video" av1dec dav1ddec avdec_av1
+# Preview playback is libmpv, not GStreamer. The old per-codec gst-inspect
+# probes are gone: they would now reject a working install, since mpv decodes
+# through the FFmpeg libraries it links rather than through GStreamer plugins.
 echo "✅ All dependencies found"
 
 if ! ffmpeg -hide_banner -filters 2>/dev/null \
@@ -97,12 +127,20 @@ fi
 echo
 
 # --- Version bump prompt ---
+# Skipped for dev builds: bumping the release version is a step towards
+# cutting a release, not something a throwaway test build should edit into
+# tracked files.
 MESON_FILE="$PROJECT_DIR/meson.build"
 CONSTANTS_FILE="$PROJECT_DIR/src/util/constants.vala"
 
 CURRENT_VERSION=$(grep -oP "^\s*version\s*:\s*'\K[^']+" "$MESON_FILE")
-echo "Current version: $CURRENT_VERSION"
-read -p "Enter new version (or press Enter to keep $CURRENT_VERSION): " NEW_VERSION
+if [ "$DEV_BUILD" -eq 1 ]; then
+    echo "→ Building version $CURRENT_VERSION (dev builds do not bump the version)"
+    NEW_VERSION=""
+else
+    echo "Current version: $CURRENT_VERSION"
+    read -p "Enter new version (or press Enter to keep $CURRENT_VERSION): " NEW_VERSION
+fi
 
 if [ -n "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
     # Update meson.build
@@ -115,14 +153,26 @@ else
 fi
 echo
 
-# --- Clean build ---
-if [ -d "$BUILD_DIR" ]; then
+# --- Build directory ---
+if [ "$CLEAN_BUILD" -eq 1 ] && [ -d "$BUILD_DIR" ]; then
     echo "🧹 Removing old build directory..."
     rm -rf "$BUILD_DIR"
 fi
 
+# --reconfigure is required on an existing directory, and rejected on a new
+# one. The profile and prefix are passed either way so a reused directory can
+# never keep stale values from a previous invocation.
 echo "🔧 Running meson setup..."
-if ! meson setup "$BUILD_DIR" "$PROJECT_DIR" --prefix="$PREFIX"; then
+if [ -d "$BUILD_DIR" ]; then
+    echo "   (reusing $BUILD_DIR — pass --clean to rebuild from scratch)"
+    MESON_SETUP_MODE="--reconfigure"
+else
+    MESON_SETUP_MODE=""
+fi
+
+if ! meson setup "$BUILD_DIR" "$PROJECT_DIR" ${MESON_SETUP_MODE:+"$MESON_SETUP_MODE"} \
+        --prefix="$PREFIX" \
+        -Dprofile="$MESON_PROFILE"; then
     echo "❌ Meson setup failed"
     exit 1
 fi
@@ -151,6 +201,46 @@ if [ "$RUN_TESTS" -eq 1 ]; then
     echo
 fi
 
+# --- Development installation ---
+# Nothing here can collide with a packaged release: different prefix, binary
+# name, application ID, config directory and desktop entry. So it skips both
+# the pacman guard and sudo entirely.
+if [ "$DEV_BUILD" -eq 1 ]; then
+    echo "Installing to $PREFIX (no sudo needed)..."
+    if ! meson install -C "$BUILD_DIR"; then
+        echo "❌ Installation failed"
+        exit 1
+    fi
+
+    gtk-update-icon-cache "$PREFIX/share/icons/hicolor" -q 2>/dev/null || true
+    update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
+
+    echo
+    echo "========================================"
+    echo "✅ Development build installed to $PREFIX"
+    echo
+    echo "Search for 'FFmpeg Converter GTK (Development)' in your menu,"
+    echo "or run: $PREFIX/bin/$BINARY_NAME"
+    echo
+    echo "It runs alongside the release build — separate process, separate"
+    echo "settings in ~/.config/FFmpeg-Converter-GTK-Devel."
+    # The desktop entry uses an absolute Exec=, so the menu always works. This
+    # only reports whether the short command is usable from this shell.
+    case ":$PATH:" in
+        *":$PREFIX/bin:"*)
+           echo
+           echo "'$BINARY_NAME' also works from this shell ($PREFIX/bin is on your PATH)." ;;
+        *) echo
+           echo "Note: $PREFIX/bin is not on this shell's PATH, so use the full"
+           echo "path above. The menu entry is unaffected." ;;
+    esac
+    echo
+    echo "To remove it:"
+    echo "    ./DevTools/uninstall.sh --dev"
+    echo "========================================"
+    exit 0
+fi
+
 # --- Pacman ownership guard ---
 # Never overwrite package-manager-owned files: a dev install into /usr
 # would corrupt the AUR package (pacman -Qkk failures, the next upgrade
@@ -160,9 +250,13 @@ if command -v pacman &> /dev/null \
     echo "⚠️  $(pacman -Qo "$PREFIX/bin/$BINARY_NAME")"
     echo "   Skipping installation — dev builds must not overwrite package-managed files."
     echo
+    echo "   Install alongside it instead: ./DevTools/build.sh --dev"
     echo "   Run this build directly:      $BUILD_DIR/$BINARY_NAME"
     echo "   Release installs/updates:     yay -S ffmpeg-converter-gtk"
     echo "   To install manually instead:  sudo pacman -R ffmpeg-converter-gtk  (then re-run this script)"
+    echo
+    echo "   Note: run directly and it shares the release app's ID and settings —"
+    echo "   if the release app is already open, launching this one just raises it."
     echo
     echo "========================================"
     echo "✅ Build complete (not installed)"

@@ -99,13 +99,16 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     // Combine window (lazy-created from hamburger menu action)
     private CombineWindow? combine_window = null;
 
+    // Collage window (lazy-created from hamburger menu action)
+    private CollageWindow? collage_window = null;
+
     // Guard against re-entrant close_request during the confirmation dialog
     private bool close_dialog_open = false;
 
     public MainWindow (Adw.Application app) {
         Object (application: app);
 
-        set_title ("FFmpeg Converter GTK");
+        set_title (AppIdentity.WINDOW_TITLE);
         set_default_size (1280, 720);
         set_size_request (640, 520);
 
@@ -213,6 +216,13 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             var combine_action = new GLib.SimpleAction ("combine-videos", null);
             combine_action.activate.connect (on_combine_videos_action);
             app.add_action (combine_action);
+        }
+
+        // ── Generate Collage action ──────────────────────────────────────────
+        if (app.lookup_action ("generate-collage") == null) {
+            var collage_action = new GLib.SimpleAction ("generate-collage", null);
+            collage_action.activate.connect (on_generate_collage_action);
+            app.add_action (collage_action);
         }
 
         subtitles_tab.subtitle_extract_requested.connect ((input_file, stream, output_path) => {
@@ -1940,7 +1950,19 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         }
 
         close_after_cancellation = false;
+        cancel_collage_for_close ();
         destroy ();
+    }
+
+    /**
+     * A collage runs outside the single-operation model, so it never blocks
+     * this window from closing. Nothing reaps the FFmpeg child once this
+     * process is gone, so stop it on the way out rather than orphaning it.
+     */
+    private void cancel_collage_for_close () {
+        if (collage_window != null && collage_window.is_generating ()) {
+            collage_window.cancel_active_collage ();
+        }
     }
 
     private void update_cancel_button_state () {
@@ -2134,6 +2156,25 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  GENERATE COLLAGE — Lazy-create CollageWindow from hamburger menu action
+    //
+    //  Deliberately outside the single-operation model the other windows join:
+    //  a collage only reads its source and writes a PNG beside it, so there is
+    //  nothing for it to contend with in a running encode.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private void on_generate_collage_action (GLib.Variant? parameter) {
+        if (collage_window == null) {
+            collage_window = new CollageWindow (console_tab, this);
+            collage_window.window_closing.connect (() => {
+                collage_window = null;
+            });
+        }
+
+        collage_window.present ();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  CLOSE REQUEST — Prevent orphaned FFmpeg processes
     //
     //  If an operation is running, intercept the window close, present a
@@ -2149,6 +2190,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
             trim_tab.close_popout ();
             audio_tab.cleanup_player ();
+            cancel_collage_for_close ();
             return false;  // No operation running — allow close
         }
 
@@ -2268,7 +2310,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 int main (string[] args) {
-    var app = new Adw.Application ("com.github.pieman.FFmpegConverterGTK", ApplicationFlags.DEFAULT_FLAGS);
+    var app = new Adw.Application (AppIdentity.APP_ID, ApplicationFlags.DEFAULT_FLAGS);
 
     app.activate.connect (on_application_activate);
 

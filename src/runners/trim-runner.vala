@@ -1649,7 +1649,8 @@ public class TrimRunner : Object {
                 collage_output_path,
                 duration_seconds,
                 video_start_time,
-                single_frame_video
+                single_frame_video,
+                AppSettings.get_default ().collage_size
             );
             log_line ("Collage command: "
                 + ConversionUtils.format_command_for_display (collage_cmd));

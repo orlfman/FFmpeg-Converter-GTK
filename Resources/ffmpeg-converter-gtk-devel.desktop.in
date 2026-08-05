@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=@APP_NAME@
+GenericName=Video Converter
+Comment=Development build — runs alongside the installed release version
+Exec=@BINDIR@/@BINARY_NAME@ %U
+Icon=@BINARY_NAME@
+Terminal=false
+StartupWMClass=@APP_ID@
+Categories=AudioVideo;Video;
+MimeType=video/*;audio/*;
+Keywords=ffmpeg;av1;x265;svt-av1;hevc;video;converter;encoder;color correction;crop;hdr;development;

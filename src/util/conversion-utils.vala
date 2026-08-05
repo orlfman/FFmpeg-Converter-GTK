@@ -1041,7 +1041,8 @@ namespace ConversionUtils {
                                         string collage_output_path,
                                         double duration_seconds,
                                         double video_start_time = 0.0,
-                                        bool single_frame_video = false) {
+                                        bool single_frame_video = false,
+                                        CollageSize collage_size = CollageSize.FHD_1080) {
         string[] cmd = { ffmpeg_path, "-y" };
 
         foreach (double fraction in get_collage_capture_fractions ()) {
@@ -1059,7 +1060,7 @@ namespace ConversionUtils {
         }
 
         cmd += "-filter_complex";
-        cmd += build_collage_filter_complex ();
+        cmd += build_collage_filter_complex (collage_size);
         cmd += "-map";
         cmd += "[outv]";
         cmd += "-frames:v";
@@ -1074,11 +1075,12 @@ namespace ConversionUtils {
         return cmd;
     }
 
-    public string build_collage_filter_complex () {
-        int tile_width = 480;
-        int tile_height = 270;
-        int columns = 4;
-        int rows = 3;
+    public string build_collage_filter_complex (
+            CollageSize collage_size = CollageSize.FHD_1080) {
+        int tile_width = collage_size.tile_width ();
+        int tile_height = collage_size.tile_height ();
+        int columns = CollageSize.COLUMNS;
+        int rows = CollageSize.ROWS;
         int input_count = columns * rows;
 
         var filter = new StringBuilder ();

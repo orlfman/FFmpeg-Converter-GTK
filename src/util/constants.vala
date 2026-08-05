@@ -8,6 +8,29 @@ namespace AppVersion {
     public const string VERSION = "2.0.0";
 }
 
+// ── Application Identity ────────────────────────────────────────────────────
+//
+// Everything that has to differ between a release build and a development
+// build installed beside it. Set by meson's `profile` option — see the
+// DEVELOPMENT_PROFILE block in meson.build.
+//
+// APP_ID matters most: GApplication is single-instance per ID, so a devel
+// build sharing the release ID would not start its own process at all. It
+// would hand off to the running release app, and you would be looking at the
+// installed version while believing you were testing your build.
+
+namespace AppIdentity {
+#if DEVELOPMENT_PROFILE
+    public const string APP_ID = "com.github.pieman.FFmpegConverterGTKDevel";
+    public const string CONFIG_DIR = "FFmpeg-Converter-GTK-Devel";
+    public const string WINDOW_TITLE = "FFmpeg Converter GTK (Development)";
+#else
+    public const string APP_ID = "com.github.pieman.FFmpegConverterGTK";
+    public const string CONFIG_DIR = "FFmpeg-Converter-GTK";
+    public const string WINDOW_TITLE = "FFmpeg Converter GTK";
+#endif
+}
+
 namespace ProjectUrls {
     public const string REPOSITORY = "https://github.com/orlfman/FFmpeg-Converter-GTK";
     public const string RELEASES = REPOSITORY + "/releases";
@@ -129,6 +152,98 @@ namespace StringArrayUtils {
 
 namespace AudioNormalization {
     public const string EBU_R128_FILTER = "loudnorm=I=-23:TP=-1.5:LRA=11";
+}
+
+// ── Collage Thumbnail Size ───────────────────────────────────────────────────
+
+/**
+ * How large the 4-4-4 collage sidecar is rendered.
+ *
+ * The names are the familiar width ladder — 1280, 1920, 2560, 3840 — and each
+ * one divides evenly by the four columns, so every tile stays exactly 16:9 with
+ * no rounding. The finished image is NOT that resolution's usual height: twelve
+ * 16:9 tiles in a 4×3 grid make a 64:27 picture, so 1080p here means 1920×810
+ * rather than 1920×1080. get_description () spells out both numbers because
+ * "2K" in particular means different things to different people.
+ *
+ * FHD_1080 is the default and reproduces the fixed 480×270 tiles this feature
+ * shipped with, so an upgrade changes nobody's output.
+ */
+public enum CollageSize {
+    HD_720,
+    FHD_1080,
+    QHD_2K,
+    UHD_4K;
+
+    // Four columns by three rows — see ConversionUtils.build_collage_argv.
+    public const int COLUMNS = 4;
+    public const int ROWS = 3;
+
+    public string to_string () {
+        switch (this) {
+            case HD_720: return "720p";
+            case QHD_2K: return "2k";
+            case UHD_4K: return "4k";
+            default:     return "1080p";
+        }
+    }
+
+    public static CollageSize from_string (string val) {
+        switch (val.down ().strip ()) {
+            case "720p": return HD_720;
+            case "2k":   return QHD_2K;
+            case "4k":   return UHD_4K;
+            default:     return FHD_1080;
+        }
+    }
+
+    /** Width of one captured frame in the grid. */
+    public int tile_width () {
+        switch (this) {
+            case HD_720: return 320;
+            case QHD_2K: return 640;
+            case UHD_4K: return 960;
+            default:     return 480;
+        }
+    }
+
+    /** Height of one captured frame, always 16:9 against tile_width (). */
+    public int tile_height () {
+        switch (this) {
+            case HD_720: return 180;
+            case QHD_2K: return 360;
+            case UHD_4K: return 540;
+            default:     return 270;
+        }
+    }
+
+    public int image_width () {
+        return tile_width () * COLUMNS;
+    }
+
+    public int image_height () {
+        return tile_height () * ROWS;
+    }
+
+    public string get_label () {
+        switch (this) {
+            case HD_720: return "720p";
+            case QHD_2K: return "2K";
+            case UHD_4K: return "4K";
+            default:     return "1080p";
+        }
+    }
+
+    /** Both numbers, because the grid is 64:27 and surprises people. */
+    public string get_description () {
+        return "%d × %d image, from twelve %d × %d frames".printf (
+            image_width (), image_height (), tile_width (), tile_height ());
+    }
+
+    /** Every size, in the order the Preferences dropdown lists them. */
+    public static CollageSize[] all () {
+        return { HD_720, FHD_1080, QHD_2K, UHD_4K };
+    }
 }
 
 // ── Container Extensions ─────────────────────────────────────────────────────

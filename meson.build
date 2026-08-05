@@ -9,6 +9,30 @@ project('ffmpeg-converter-gtk',
 )
 gnome = import('gnome')
 fs = import('fs')
+
+# ── Build profile ────────────────────────────────────────────────────────────
+#
+# The development profile exists so a working copy can be installed and run
+# beside a release install (the AUR package, typically) instead of replacing
+# it. Everything that would otherwise collide is renamed: the application ID
+# (GApplication is single-instance, so a shared ID makes a second launch just
+# raise the first app's window), the config directory, the binary and the
+# desktop entry.
+#
+# The default profile is left byte-identical to what it built before this
+# option existed — downstream packaging depends on those names.
+profile = get_option('profile')
+if profile == 'development'
+  app_id      = 'com.github.pieman.FFmpegConverterGTKDevel'
+  binary_name = 'ffmpeg-converter-gtk-devel'
+  app_name    = 'FFmpeg Converter GTK (Development)'
+  add_project_arguments('--define=DEVELOPMENT_PROFILE', language : 'vala')
+else
+  app_id      = 'com.github.pieman.FFmpegConverterGTK'
+  binary_name = 'ffmpeg-converter-gtk'
+  app_name    = 'FFmpeg Converter GTK'
+endif
+
 add_project_arguments('--target-glib=2.0', '--pkg=posix', language : 'vala')
 # libmpv bindings live in-tree (no VAPI ships with mpv); mpv-compat.h sits in src/player/.
 add_project_arguments(
@@ -112,7 +136,9 @@ sources = files(
   'src/runners/audio-runner.vala',
   'src/util/video-file-constants.vala',
   'src/ui/combine-window.vala',
-  'src/runners/combine-runner.vala'
+  'src/runners/combine-runner.vala',
+  'src/ui/collage-window.vala',
+  'src/runners/collage-runner.vala'
 )
 
 player_icon_resources = gnome.compile_resources(
@@ -123,7 +149,7 @@ player_icon_resources = gnome.compile_resources(
 )
 sources += player_icon_resources
 
-executable('ffmpeg-converter-gtk',
+executable(binary_name,
   sources,
   dependencies : dependencies,
   link_args : ['-lm'],
@@ -259,15 +285,46 @@ if fs.exists('tests/update-checker-test.vala')
   test('update-checker', update_checker_test)
 endif
 
-install_data(
-  'Resources/ffmpeg-converter-gtk.desktop',
-  install_dir : get_option('datadir') / 'applications'
-)
+if profile == 'development'
+  # Generated rather than checked in, so the devel entry can never drift from
+  # the ID and binary name chosen above.
+  desktop_conf = configuration_data()
+  desktop_conf.set('APP_NAME', app_name)
+  desktop_conf.set('BINARY_NAME', binary_name)
+  desktop_conf.set('APP_ID', app_id)
+  # Absolute, because a dev build installs to a user prefix that the desktop
+  # session's PATH does not include. The session launches Exec= with the PATH
+  # the session started with — typically /usr/bin and friends only — not the
+  # PATH your shell has from .bashrc. A bare binary name here fails to launch
+  # with "Could not find the program".
+  desktop_conf.set('BINDIR', get_option('prefix') / get_option('bindir'))
 
-install_data(
-  'Resources/ffmpeg-converter-gtk.svg',
-  install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps'
-)
+  configure_file(
+    input : 'Resources/ffmpeg-converter-gtk-devel.desktop.in',
+    output : binary_name + '.desktop',
+    configuration : desktop_conf,
+    install : true,
+    install_dir : get_option('datadir') / 'applications'
+  )
+
+  # Same artwork, renamed to match Icon= so the two entries stay distinct
+  # entries rather than one overwriting the other's icon file.
+  install_data(
+    'Resources/ffmpeg-converter-gtk.svg',
+    rename : binary_name + '.svg',
+    install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps'
+  )
+else
+  install_data(
+    'Resources/ffmpeg-converter-gtk.desktop',
+    install_dir : get_option('datadir') / 'applications'
+  )
+
+  install_data(
+    'Resources/ffmpeg-converter-gtk.svg',
+    install_dir : get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps'
+  )
+endif
 
 if fs.exists('tests/subtitle-language-guesser-test.vala')
   subtitle_language_guesser_test = executable(
@@ -650,6 +707,8 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/util/video-file-constants.vala',
       'src/ui/combine-window.vala',
       'src/runners/combine-runner.vala',
+      'src/ui/collage-window.vala',
+      'src/runners/collage-runner.vala',
       'tests/combine-window-state-test.vala',
     ),
     player_icon_resources,

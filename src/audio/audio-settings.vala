@@ -1431,7 +1431,7 @@ public class AudioSettings : Object {
             return;
         case AudioCopyBlockerReason.SEGMENT_SPEED:
             codec_row.set_subtitle (
-                "Copy disabled by a Crop & Trim segment speed change because resampled audio must be re-encoded"
+                "Copy disabled by a Crop &amp; Trim segment speed change because resampled audio must be re-encoded"
             );
             return;
         case AudioCopyBlockerReason.AUDIO_PROCESSING:

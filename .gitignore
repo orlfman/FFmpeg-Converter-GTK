@@ -57,6 +57,7 @@ dkms.conf
 # Meson build directories
 builddir/
 builddir-debug/
+builddir-dev/
 
 # Release archives
 releases/

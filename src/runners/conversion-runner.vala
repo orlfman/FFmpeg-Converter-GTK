@@ -334,7 +334,8 @@ public class ConversionRunner {
             final_collage_path,
             duration_seconds,
             video_start_time,
-            single_frame_video
+            single_frame_video,
+            AppSettings.get_default ().collage_size
         );
         string display_cmd = ConversionUtils.format_command_for_display (collage_cmd);
         converter.log_console_if_active (process_runner, "Collage command: " + display_cmd);
@@ -904,14 +905,17 @@ public class ConversionRunner {
                                                    string collage_output_path,
                                                    double duration_seconds,
                                                    double video_start_time = 0.0,
-                                                   bool single_frame_video = false) {
+                                                   bool single_frame_video = false,
+                                                   CollageSize collage_size
+                                                       = CollageSize.FHD_1080) {
         return ConversionUtils.build_collage_argv (
             AppSettings.get_default ().ffmpeg_path,
             output_path,
             collage_output_path,
             duration_seconds,
             video_start_time,
-            single_frame_video
+            single_frame_video,
+            collage_size
         );
     }
 #endif

@@ -1,0 +1,9 @@
+# Named meson_options.txt rather than meson.options because the project still
+# targets meson >= 0.62, and the newer filename only works from meson 1.1.
+option(
+  'profile',
+  type : 'combo',
+  choices : ['default', 'development'],
+  value : 'default',
+  description : 'default builds the release app. development builds a parallel-installable copy with its own application ID, config directory, binary name and desktop entry, so it can run beside an installed release build.'
+)

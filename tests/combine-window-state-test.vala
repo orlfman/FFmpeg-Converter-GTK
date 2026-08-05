@@ -2792,6 +2792,382 @@ private void test_conversion_runner_nonzero_pts_media_and_collage_integration ()
     }
 }
 
+// The standalone collage window drives real ffmpeg over a file the user picked
+// rather than one the app just wrote, so the interesting part is the glue:
+// probe the source, place the twelve captures, and land the PNG beside it.
+private void test_collage_runner_writes_png_beside_source () {
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("collage-runner-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create collage runner directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string source_path = Path.build_filename (temp_dir, "clip.mkv");
+        string expected_collage = Path.build_filename (temp_dir, "clip-collage.png");
+        string stdout_buf, stderr_buf;
+
+        string[] make_source = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:d=6",
+            "-c:v", "ffv1",
+            "-an",
+            source_path
+        };
+        assert_true (
+            run_command_for_test (make_source, out stdout_buf, out stderr_buf,
+                "create collage runner source") == 0,
+            "collage runner source clip is created");
+
+        var runner = new CollageRunner ();
+        string finished_path = "";
+        string failure = "";
+        runner.collage_done.connect ((result) => {
+            finished_path = result.primary_file_path;
+        });
+        runner.collage_failed.connect ((message) => {
+            failure = message;
+        });
+        runner.collage_cancelled.connect ((message) => {
+            failure = "cancelled: " + message;
+        });
+
+        runner.run (source_path);
+        spin_main_context_until_deadline (() => {
+            return finished_path.length > 0 || failure.length > 0;
+        }, 30000);
+
+        if (failure.length > 0) {
+            Test.fail_printf ("collage runner failed: %s", failure);
+            return;
+        }
+
+        assert_string_equal (finished_path, expected_collage,
+            "collage lands beside the source file");
+        assert_true (FileUtils.test (expected_collage, FileTest.EXISTS),
+            "collage runner writes its PNG");
+
+        // 4 columns × 480 by 3 rows × 270 — proves the tiles were composed
+        // rather than a single frame being written straight out.
+        string[] probe_size = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            expected_collage
+        };
+        assert_true (
+            run_command_for_test (probe_size, out stdout_buf, out stderr_buf,
+                "probe generated collage") == 0,
+            "generated collage is a readable image");
+        assert_string_equal (stdout_buf.strip (), "1920,810",
+            "generated collage is a 4-by-3 grid of 480x270 tiles");
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
+}
+
+// The size row is only meaningful while the sidecar is on, so it follows the
+// switch. Never presented or closed: SettingsDialog writes the real settings
+// file from its "closed" handler.
+private void test_collage_size_row_follows_the_switch () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var dialog = new SettingsDialog ();
+
+    // Driven from a known state rather than asserting the initial one, which
+    // reflects whatever the running user's config says.
+    dialog.set_collage_enabled_for_widget_test (true);
+    assert_true (dialog.is_collage_size_visible_for_widget_test (),
+        "collage size appears once the sidecar is enabled");
+
+    dialog.set_collage_enabled_for_widget_test (false);
+    assert_false (dialog.is_collage_size_visible_for_widget_test (),
+        "collage size hides again when the sidecar is switched off");
+
+    dialog.set_collage_enabled_for_widget_test (true);
+    assert_true (dialog.is_collage_size_visible_for_widget_test (),
+        "collage size comes back when the sidecar is re-enabled");
+
+    // The subtitle carries the real pixel dimensions, since a 4x3 grid of 16:9
+    // tiles is 64:27 and "4K" alone would imply a height of 2160.
+    dialog.select_collage_size_for_widget_test (CollageSize.UHD_4K);
+    assert_contains (dialog.get_collage_size_subtitle_for_widget_test (),
+        "3840 × 1620", "the size row spells out the resulting dimensions");
+}
+
+// Runs a collage and reports either the finished image's dimensions or the
+// message the user would see. Used to pin down how odd inputs are handled.
+private string run_collage_for_test (string path, out string failure) {
+    string o, er;
+    var runner = new CollageRunner ();
+    string done = ""; string fail = "";
+    runner.collage_done.connect ((r) => { done = r.primary_file_path; });
+    runner.collage_failed.connect ((m) => { fail = m; });
+    runner.collage_cancelled.connect ((m) => { fail = "cancelled: " + m; });
+    runner.run (path);
+    spin_main_context_until_deadline (() => {
+        return done.length > 0 || fail.length > 0;
+    }, 30000);
+
+    failure = fail;
+    if (done.length == 0) return "";
+
+    run_command_for_test ({ AppSettings.get_default ().ffprobe_path, "-v", "error",
+        "-show_entries", "stream=width,height", "-of", "csv=p=0", done },
+        out o, out er, "probe generated collage");
+    return o.strip ();
+}
+
+// Unlike the post-encode sidecar, which only ever sees a file this app just
+// wrote, the standalone window takes whatever the user points it at. Twelve
+// capture points spread across a clip with fewer than twelve frames must still
+// come out as a whole image, and a file with no video has to be refused with
+// something a person can act on rather than an ffmpeg error.
+private void test_collage_handles_degenerate_sources () {
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("collage-degenerate-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create degenerate source directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string o, er, failure;
+        string ff = AppSettings.get_default ().ffmpeg_path;
+        CollageSize configured = AppSettings.get_default ().collage_size;
+        string expected = "%d,%d".printf (
+            configured.image_width (), configured.image_height ());
+
+        string[] names = { "one-frame.mkv", "three-frame.mkv", "half-second.mkv" };
+        string[] specs = {
+            "testsrc2=size=320x180:rate=10:d=0.1",
+            "testsrc2=size=320x180:rate=10:d=0.3",
+            "testsrc2=size=320x180:rate=30:d=0.5"
+        };
+        for (int i = 0; i < names.length; i++) {
+            string path = Path.build_filename (temp_dir, names[i]);
+            assert_true (
+                run_command_for_test ({ ff, "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", specs[i], "-c:v", "ffv1", "-an", path },
+                    out o, out er, "create " + names[i]) == 0,
+                @"$(names[i]) fixture is created");
+
+            assert_string_equal (run_collage_for_test (path, out failure), expected,
+                @"$(names[i]) still produces a full collage");
+        }
+
+        // No video stream at all.
+        string audio = Path.build_filename (temp_dir, "audio-only.mka");
+        assert_true (
+            run_command_for_test ({ ff, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-c:a", "flac", audio }, out o, out er, "create audio-only") == 0,
+            "audio-only fixture is created");
+        assert_string_equal (run_collage_for_test (audio, out failure), "",
+            "an audio-only file produces no collage");
+        assert_contains (failure, "no video stream",
+            "an audio-only file is refused in the user's terms");
+
+        // A video extension over content that is not media at all.
+        string junk = Path.build_filename (temp_dir, "not-a-video.mkv");
+        FileUtils.set_contents (junk, "this is not a video file at all");
+        assert_string_equal (run_collage_for_test (junk, out failure), "",
+            "a non-media file produces no collage");
+        assert_true (failure.length > 0,
+            "a non-media file is refused with a message rather than silence");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to write degenerate fixture: %s", e.message);
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
+}
+
+// Every size has to divide evenly by the 4x3 grid, or ffmpeg's xstack gets
+// tiles whose scaled size does not match the layout offsets it was given.
+private void test_collage_sizes_tile_the_grid_exactly () {
+    foreach (CollageSize size in CollageSize.all ()) {
+        string label = size.get_label ();
+
+        assert_true (size.tile_width () * 9 == size.tile_height () * 16,
+            @"$label tile stays 16:9");
+        assert_true (size.image_width () == size.tile_width () * 4,
+            @"$label image spans four columns");
+        assert_true (size.image_height () == size.tile_height () * 3,
+            @"$label image spans three rows");
+        assert_string_equal (CollageSize.from_string (size.to_string ()).get_label (),
+            label, @"$label survives a settings round trip");
+    }
+
+    // The size this feature shipped with, before it was configurable. An
+    // upgrade must not silently change anyone's collage.
+    assert_true (CollageSize.FHD_1080.image_width () == 1920
+            && CollageSize.FHD_1080.image_height () == 810,
+        "1080p still produces the original 1920x810 collage");
+    assert_string_equal (CollageSize.from_string ("nonsense").get_label (), "1080p",
+        "an unreadable stored size falls back to the shipped default");
+}
+
+private void test_collage_size_reaches_the_ffmpeg_command () {
+    var runner = make_conversion_runner_for_test (
+        make_basic_conversion_profile_for_test (), 60.0, true, false, false);
+
+    foreach (CollageSize size in CollageSize.all ()) {
+        string[] argv = runner.build_collage_argv_for_test (
+            "/tmp/in.mkv", "/tmp/out-collage.png", 60.0, 0.0, false, size);
+
+        string filter_complex = "";
+        for (int i = 0; i < argv.length - 1; i++) {
+            if (argv[i] == "-filter_complex") {
+                filter_complex = argv[i + 1];
+                break;
+            }
+        }
+
+        string expected_scale = "scale=%d:%d".printf (
+            size.tile_width (), size.tile_height ());
+        assert_contains (filter_complex, expected_scale,
+            @"$(size.get_label ()) scales tiles to its own size");
+
+        // The layout offsets are pixel positions, so they move with the tile
+        // size. A mismatch here is the failure that produces a black collage.
+        string expected_last_offset = "%d_%d".printf (
+            size.tile_width () * 3, size.tile_height () * 2);
+        assert_contains (filter_complex, expected_last_offset,
+            @"$(size.get_label ()) places the final tile at its own offset");
+        assert_contains (filter_complex, "xstack=inputs=12",
+            @"$(size.get_label ()) still stacks twelve frames");
+    }
+}
+
+// A per-run runner strands itself if the ProcessRunner keeps holding the event
+// logger, because that callback owns a reference straight back to the runner.
+private void test_collage_runner_does_not_strand_itself () {
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("collage-lifetime-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create collage lifetime directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        string source_path = Path.build_filename (temp_dir, "clip.mkv");
+        string stdout_buf, stderr_buf;
+
+        string[] make_source = {
+            AppSettings.get_default ().ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10:d=3",
+            "-c:v", "ffv1", "-an",
+            source_path
+        };
+        assert_true (
+            run_command_for_test (make_source, out stdout_buf, out stderr_buf,
+                "create collage lifetime source") == 0,
+            "collage lifetime source clip is created");
+
+        bool finished = false;
+        bool finalized = false;
+
+        // Scoped so the only strong reference is dropped before the assert.
+        {
+            var runner = new CollageRunner ();
+            runner.collage_done.connect (() => { finished = true; });
+            runner.collage_failed.connect (() => { finished = true; });
+            runner.collage_cancelled.connect (() => { finished = true; });
+            runner.weak_ref (() => { finalized = true; });
+
+            runner.run (source_path);
+            spin_main_context_until_deadline (() => {
+                return finished;
+            }, 30000);
+        }
+
+        assert_true (finished, "collage lifetime run reaches a terminal signal");
+        spin_main_context_until_deadline (() => {
+            return finalized;
+        }, 2000);
+        assert_true (finalized,
+            "collage runner is released once its run is over");
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
+}
+
+// The source picker has to be locked while a run is in flight: the run holds
+// its own copy of the path, so a change mid-run leaves the window describing
+// one file while the result names another.
+private void test_collage_window_locks_the_source_while_running () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    var window = new CollageWindow (null);
+
+    assert_true (window.is_browse_enabled_for_widget_test (),
+        "the source picker is available while idle");
+
+    window.set_generating_for_widget_test (true);
+    assert_false (window.is_browse_enabled_for_widget_test (),
+        "the source picker is locked while a collage runs");
+    assert_false (window.is_generate_enabled_for_widget_test (),
+        "Generate cannot be re-triggered while a collage runs");
+
+    window.set_generating_for_widget_test (false);
+    assert_true (window.is_browse_enabled_for_widget_test (),
+        "the source picker unlocks once the run is over");
+}
+
+private void test_collage_window_gates_generate_on_a_real_source () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    string temp_dir;
+    try {
+        temp_dir = DirUtils.make_tmp ("collage-window-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("failed to create collage window directory: %s",
+            e.message);
+        return;
+    }
+
+    try {
+        var window = new CollageWindow (null);
+
+        assert_false (window.is_generate_enabled_for_widget_test (),
+            "collage window starts with Generate disabled");
+
+        string missing_path = Path.build_filename (temp_dir, "absent.mkv");
+        window.set_source_path_for_widget_test (missing_path);
+        assert_false (window.is_generate_enabled_for_widget_test (),
+            "collage window keeps Generate disabled for a missing source");
+
+        string present_path = Path.build_filename (temp_dir, "present.mkv");
+        FileUtils.set_contents (present_path, "not really a video");
+        window.set_source_path_for_widget_test (present_path);
+        assert_true (window.is_generate_enabled_for_widget_test (),
+            "collage window enables Generate once the source exists");
+        assert_string_equal (
+            window.get_output_preview_for_widget_test (),
+            Path.build_filename (temp_dir, "present-collage.png"),
+            "collage window previews the sidecar path beside the source");
+
+        window.close ();
+    } catch (FileError e) {
+        Test.fail_printf ("failed to write collage window source: %s", e.message);
+    } finally {
+        cleanup_exec_test_dir (temp_dir);
+    }
+}
+
 private void test_process_runner_capture_is_cancellable () {
     var runner = new ProcessRunner ();
     runner.prepare_for_new_execution ();
@@ -6564,6 +6940,38 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
     }
 }
 
+private void test_collage_size_preference_persists () {
+    string? config_root = null;
+    try {
+        config_root = DirUtils.make_tmp ("collage-size-setting-XXXXXX");
+
+        var settings = AppSettings.create_for_test (config_root);
+        assert_string_equal (settings.collage_size.get_label (), "1080p",
+            "collage size defaults to the size this feature shipped with");
+
+        settings.collage_size = CollageSize.UHD_4K;
+        settings.save ();
+
+        var reloaded = AppSettings.create_for_test (config_root);
+        assert_string_equal (reloaded.collage_size.get_label (), "4K",
+            "a chosen collage size survives reload");
+
+        reloaded.reset_to_defaults ();
+        var reset = AppSettings.create_for_test (config_root);
+        assert_string_equal (reset.collage_size.get_label (), "1080p",
+            "reset restores the collage size default");
+    } catch (FileError e) {
+        Test.fail_printf ("failed to create collage size test directory: %s",
+            e.message);
+    } finally {
+        if (config_root != null) {
+            cleanup_exec_test_dir (Path.build_filename (
+                config_root, "FFmpeg-Converter-GTK"));
+            DirUtils.remove (config_root);
+        }
+    }
+}
+
 private void test_quality_ceiling_preference_persists () {
     string? config_root = null;
     try {
@@ -6872,6 +7280,8 @@ void main (string[] args) {
         test_bit_depth_warning_dialog_preference_persists);
     Test.add_func ("/app-settings/smart-optimizer/quality-ceiling-persists",
         test_quality_ceiling_preference_persists);
+    Test.add_func ("/app-settings/collage/size-persists",
+        test_collage_size_preference_persists);
     Test.add_func ("/hamburger/recent-inputs/full-path-tooltip",
         test_recent_input_menu_item_exposes_full_path_tooltip);
     Test.add_func ("/hamburger/recent-inputs/repeated-refresh-is-stable",
@@ -6916,6 +7326,22 @@ void main (string[] args) {
         test_pending_overwrite_freezes_launch_file_list);
     Test.add_func ("/combine/output-path/sanitizes-before-overwrite-check",
         test_converter_output_path_is_sanitized_before_overwrite_check);
+    Test.add_func ("/collage/runner/handles-degenerate-sources",
+        test_collage_handles_degenerate_sources);
+    Test.add_func ("/collage/size/row-follows-the-switch",
+        test_collage_size_row_follows_the_switch);
+    Test.add_func ("/collage/size/tiles-the-grid-exactly",
+        test_collage_sizes_tile_the_grid_exactly);
+    Test.add_func ("/collage/size/reaches-the-ffmpeg-command",
+        test_collage_size_reaches_the_ffmpeg_command);
+    Test.add_func ("/collage/runner/writes-png-beside-source",
+        test_collage_runner_writes_png_beside_source);
+    Test.add_func ("/collage/runner/releases-itself-after-a-run",
+        test_collage_runner_does_not_strand_itself);
+    Test.add_func ("/collage/window/locks-source-while-running",
+        test_collage_window_locks_the_source_while_running);
+    Test.add_func ("/collage/window/generate-gated-on-real-source",
+        test_collage_window_gates_generate_on_a_real_source);
     Test.add_func ("/convert/runner/non-watermark-off-keeps-existing-mapping",
         test_conversion_runner_non_watermark_off_keeps_existing_mapping_behavior);
     Test.add_func ("/convert/runner/non-watermark-on-maps-primary-video-and-all-audio",

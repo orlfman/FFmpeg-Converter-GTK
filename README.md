@@ -66,6 +66,7 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 - Moving watermark detection — for logos that jump around. Most of them don't move constantly; they park in one corner for a while, then hop somewhere else. **Detect Moving** scans the whole video in short chunks and stitches the hits into timed regions (`start-end:x:y:w:h`, in that same editable box), so the removal follows the logo as it moves. Each hit is double-checked over its full stretch first, so ordinary scenery that happens to hold still doesn't get painted over. It reads the entire file instead of sampling it, so it's the slow one and stays opt-in.
 - Neither of these is magic. Both work by spotting the parts of the picture that hold still, so a watermark that moves every single frame can't be pinned down, and one pressed right up against the edge of the frame gets found but cleaned up badly — `delogo` patches a box by reading inwards from its sides, and at the edge some of those sides aren't there. It'll tell you when that happens. Expect to nudge a box by hand now and then, and expect the occasional miss.
 - Combine Videos — join multiple video files with copy mode (lossless, requires matching formats) or full re-encode mode with normalization. Supports crossfade transitions, chapter markers, drag-and-drop reordering, and metadata preservation.
+- Generate Collage — pick any video and get a contact sheet out of it: twelve frames from 8% to 96% of the runtime, tiled into one 4×3 PNG saved next to the source file. Same image Preferences can write automatically after an encode, except this one works on files you already have and doesn't re-encode anything. Size is selectable in Preferences → General at 720p, 1080p, 2K or 4K — note that a 4×3 grid of 16:9 frames is a 64:27 picture, so 1080p means 1920×810 rather than 1920×1080.
 - Audio codec support for AAC, FLAC, MP3, Opus, WAV, and Vorbis, with an option to keep all audio tracks or only the default track
 - Live console output for debugging, and detailed information tab for video metadata
 - Extensive color and light correction and alteration. Full RGB manipulation.
@@ -192,6 +193,33 @@ or
 
 cd FFmpeg-Converter-GTK/DevTools
 ./build.sh
+```
+
+### Side-by-side development build
+
+To test changes without disturbing an installed copy (the AUR package, for
+example), build the development profile:
+
+```bash
+./DevTools/build.sh --dev
+```
+
+This installs to `~/.local` — no sudo, and it cannot touch `/usr`. It gets its
+own application ID, binary (`ffmpeg-converter-gtk-devel`), desktop entry
+("FFmpeg Converter GTK (Development)") and settings directory
+(`~/.config/FFmpeg-Converter-GTK-Devel`), so both versions run at the same time
+with independent preferences.
+
+The distinct application ID is the part that matters: GTK applications are
+single-instance per ID, so a development build sharing the release ID would not
+start at all — it would just raise the installed app's window while you assumed
+you were testing your build.
+
+Dev builds rebuild incrementally; pass `--clean` to start from scratch. To
+remove it again:
+
+```bash
+./DevTools/uninstall.sh --dev
 ```
 
 ### Uninstall

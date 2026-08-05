@@ -23,6 +23,9 @@ using GLib;
     //    overwrite_enabled = false               (default: false → prompt before overwriting)
     //    generate_collage_thumbnail = false      (default: false → no automatic
     //                                            4-4-4 PNG collage sidecar)
+    //    collage_size = 1080p                    (720p|1080p|2k|4k)
+    //                                           (default: 1080p → 1920x810, the
+    //                                            fixed size this shipped with)
     //    play_with_ffplay = false                (default: false → use desktop
     //                                            player for Playback menu actions)
     //    hwdec_mode = auto                       (auto|auto_no_vulkan|vaapi|nvdec|
@@ -93,6 +96,7 @@ public class AppSettings : Object {
     private string _output_custom_name = "";
     private bool   _overwrite_enabled = false;
     private bool   _generate_collage_thumbnail = false;
+    private CollageSize _collage_size = CollageSize.FHD_1080;
     // Off by default: the XDG handler is whatever the user already chose for
     // video, so overriding it silently would be presumptuous. ffplay is the
     // opt-in for people who want the raw decode rather than their player's.
@@ -137,7 +141,7 @@ public class AppSettings : Object {
     private AppSettings (string? config_root = null) {
         string resolved_config_root = config_root ?? Environment.get_user_config_dir ();
         config_dir  = Path.build_filename (
-            resolved_config_root, "FFmpeg-Converter-GTK");
+            resolved_config_root, AppIdentity.CONFIG_DIR);
         config_file = Path.build_filename (config_dir, "settings.ini");
 
         bool normalized_path_settings = load ();
@@ -391,6 +395,33 @@ public class AppSettings : Object {
             mutex.lock ();
             try {
                 _generate_collage_thumbnail = value;
+            } finally {
+                mutex.unlock ();
+            }
+        }
+    }
+
+    /**
+     * How large the collage sidecar is rendered.
+     *
+     * Applies to the automatic sidecar above and to the standalone Generate
+     * Collage window alike — one collage, one size, wherever it is asked for.
+     */
+    public CollageSize collage_size {
+        get {
+            CollageSize collage_size;
+            mutex.lock ();
+            try {
+                collage_size = _collage_size;
+            } finally {
+                mutex.unlock ();
+            }
+            return collage_size;
+        }
+        set {
+            mutex.lock ();
+            try {
+                _collage_size = value;
             } finally {
                 mutex.unlock ();
             }
@@ -832,6 +863,8 @@ public class AppSettings : Object {
         bool overwrite_enabled = read_bool (kf, GROUP_GENERAL, "overwrite_enabled", false);
         bool generate_collage_thumbnail = read_bool (
             kf, GROUP_GENERAL, "generate_collage_thumbnail", false);
+        CollageSize collage_size = CollageSize.from_string (
+            read_string (kf, GROUP_GENERAL, "collage_size", "1080p"));
         bool verify_unknown_audio_copy_preflight = read_bool (
             kf, GROUP_GENERAL, "verify_unknown_audio_copy_preflight", true);
         bool show_bit_depth_warning_dialog = read_bool (
@@ -883,6 +916,7 @@ public class AppSettings : Object {
             _output_custom_name = output_custom_name;
             _overwrite_enabled = overwrite_enabled;
             _generate_collage_thumbnail = generate_collage_thumbnail;
+            _collage_size = collage_size;
             _play_with_ffplay = play_with_ffplay;
             _hwdec_mode = hwdec_mode;
             _preview_quality = preview_quality;
@@ -929,6 +963,7 @@ public class AppSettings : Object {
         string output_custom_name;
         bool overwrite_enabled;
         bool generate_collage_thumbnail;
+        CollageSize collage_size;
         bool play_with_ffplay;
         HwdecMode hwdec_mode;
         PreviewQuality preview_quality;
@@ -954,6 +989,7 @@ public class AppSettings : Object {
             output_custom_name = _output_custom_name;
             overwrite_enabled = _overwrite_enabled;
             generate_collage_thumbnail = _generate_collage_thumbnail;
+            collage_size = _collage_size;
             play_with_ffplay = _play_with_ffplay;
             hwdec_mode = _hwdec_mode;
             preview_quality = _preview_quality;
@@ -986,6 +1022,7 @@ public class AppSettings : Object {
             "generate_collage_thumbnail",
             generate_collage_thumbnail
         );
+        kf.set_string (GROUP_GENERAL, "collage_size", collage_size.to_string ());
         kf.set_boolean (
             GROUP_GENERAL,
             "verify_unknown_audio_copy_preflight",
@@ -1048,6 +1085,7 @@ public class AppSettings : Object {
             _output_custom_name = "";
             _overwrite_enabled  = false;
             _generate_collage_thumbnail = false;
+            _collage_size = CollageSize.FHD_1080;
             _play_with_ffplay = false;
             _hwdec_mode = HwdecMode.AUTOMATIC;
             _preview_quality = PreviewQuality.FAST;
