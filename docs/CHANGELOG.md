@@ -8,8 +8,8 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-No active implementation tasks. The publication audit and fixes are complete;
-see TASK-20261102-bulk-publish below and Git history for the resulting commit.
+No active implementation tasks. Installed-app findings and their publication review
+are complete; the technical report is included in the commit containing this record.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -25,6 +25,52 @@ Dependencies / blockers / next action:
 ```
 
 ## History
+
+### TASK-20261102-findings-report — Technical findings report
+
+- **Agent/date/base:** Codex primary; 2026-11-02 19:57 America/Phoenix (UTC-07:00); main at `6426fa2`.
+- **Status:** Complete; user authorized this documentation commit.
+- **Changes:** Added [installed-development-bulk-check.md](installed-development-bulk-check.md)
+  and linked the installed-app audit/handoff records. Report contains test setup,
+  results and validation limits, with no media content descriptions, media files,
+  screenshots or input/output filenames.
+- **Validation:** Documentation content review, links and whitespace checks.
+  Existing technical results are unchanged; no additional conversion or code tests needed.
+- **Scope:** Documentation only. Existing DevTools mode edits and empty docs/README.md
+  remain excluded. Commit revision is available in Git history; no source changes.
+
+### TASK-20261102-installed-bulk-check — Installed app with authorized local media
+
+- **Agent/date/base:** Codex primary; 2026-11-02 19:55 America/Phoenix (UTC-07:00); main at `6426fa2`.
+- **Status:** Completed. Source/binary unchanged; technical findings are recorded in
+  [installed-development-bulk-check.md](installed-development-bulk-check.md). User reported successful bulk conversion and normal playback,
+  then authorized testing with local test inputs.
+- **Method:** Launched `~/.local/bin/ffmpeg-converter-gtk-devel` on the actual
+  Wayland desktop with isolated XDG/TMPDIR preferences. SHA-256 matches the local
+  development build. Desktop accessibility supplied anonymous UI state checks;
+  unreliable accessibility click activation required a local debugger driver of
+  the installed app's existing GTK/MainWindow handlers. No replacement binary or
+  separate conversion pipeline was used. Native chooser interaction is not covered.
+- **Results:** Two full runs of six real local videos completed: twelve outputs,
+  zero item failures. x264 size target 4 MB, General half-size scaling and 24 fps.
+  All twelve have expected H.264 video/AAC audio, source-matching duration and
+  selected General transformations; full FFmpeg audio/video decode reports no errors.
+- **Lifecycle/safety:** Convert again skipped completed rows without new files.
+  Explicit rescan created distinct names; all six first-run SHA-256 checksums
+  remained unchanged. A subsequent run was stopped through the Cancel control;
+  no additional outputs, active jobs, staging directories or passlogs remained.
+  Input/settings/Rescan were locked during processing and restored afterward;
+  Crop & Trim/Audio/Subtitles page content was insensitive and programmatic
+  navigation to those pages redirected to General.
+- **Preservation:** All six originals retain size, timestamp, device/inode.
+  Twelve outputs remain in the user's external output directory for review.
+  Temporary preferences isolated the normal installed configuration. No
+  images, audio, video, screenshots or filenames were included in project records
+  or uploaded. Detailed local command logs stay outside the repository.
+- **Handoff:** No functional defects found in the tested bulk workflow. Other
+  codecs/objectives retain prior synthetic coverage; this real-media run used x264
+  size mode. The independent mpv automated timeout and historical VMAF investigation
+  are not resolved by this check. The test instance exited normally.
 
 ### TASK-20261102-bulk-publish — Audit, fixes and authorized GitHub publication
 

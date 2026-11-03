@@ -32,6 +32,38 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261102-installed-bulk-check — Actual installed development app
+
+- **Task/date/agent:** `TASK-20261102-installed-bulk-check`; 2026-11-02 19:55 America/Phoenix (UTC-07:00); Codex primary.
+- **Authorization/base:** User authorized local test media for this check; only
+  technical findings are recorded here. Installed development binary matches
+  the current local development build; project HEAD is `6426fa2`.
+- **Findings:** No functional defects observed in the tested bulk workflow.
+  Six actual videos with audio (mixed portrait/landscape, roughly 8–27 seconds)
+  completed twice with zero failures. Full decode and FFprobe checks pass on all
+  twelve outputs; General half-size scaling and 24 fps are applied, audio remains,
+  and durations match their sources within a quarter second.
+- **Verified lifecycle:** Sequential work observed; controls locked during the batch
+  and restored to idle. Completed-item retry produces no additional outputs. Rescan
+  safely suffixes duplicate names. Cancel stops a new run and preserves completed
+  outputs. First-run output hashes are unchanged; sources retain original size,
+  modification timestamp and device/inode. No staging directories/passlogs remain.
+  Disabled page content and guarded navigation were checked on the installed window.
+- **Method/limits:** Actual Wayland desktop and installed executable; isolated
+  preferences/cache/temp files. Local debugger automation invoked existing GUI
+  handlers after desktop accessibility activation proved unreliable; accessible
+  labels/states confirmed visible results. This does not establish native mouse/file
+  chooser behavior or exhaustive visual coverage. No media/screenshot uploaded or
+  copied into the repository. Real-media objective was x264 size mode; prior synthetic
+  tests cover all four codecs in size and quality. Normal user settings were isolated.
+- **Other evidence:** User independently reported working bulk conversion and video
+  playback. That supports the mpv timeout being specific to automated runtime access,
+  but its root cause and test status remain unchanged. No player fix was attempted.
+- **Disposition:** Test instance exited normally. Twelve converted files are retained
+  in the external test output folder. The technical
+  [findings report](installed-development-bulk-check.md) accompanies this record;
+  detailed local logs are excluded from the commit.
+
 ### AUD-20261102-bulk-publish — Pre-publication source audit and fixes
 
 - **Task / agent / date:** `TASK-20261102-bulk-publish`; Codex primary; 2026-11-02 19:07 America/Phoenix (UTC-07:00).
