@@ -4,6 +4,33 @@
 
 My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for FFmpeg. Currently supports encoding with SVT-AV1, x265, x264, and VP9. Slowly but surely adding more supported codecs, features and refinement.
 
+## Folder conversion
+
+Use the folder button beside **Input**, or drop a folder into the input area.
+The queue includes supported videos directly inside that folder, in stable filename
+order; subfolders are excluded. Choose a codec tab, configure General and Smart
+Optimizer, then click **Convert Folder**. Each file is analyzed, optimized and
+converted completely before the next one starts. All four codecs, size targets,
+per-file Match Source Size, quality ceilings, content/delivery options and
+Smart Optimizer audio handling use the existing optimizer. Quality mode requires
+an FFmpeg build with libvmaf.
+
+Crop & Trim, Audio and Subtitles tabs are disabled in folder mode. General settings
+still apply to every file, including manual crop, timing and filters; source-specific
+Detect actions require a single file. Input, output and settings controls are locked
+while a queue runs.
+
+Select an Output Folder, or leave it blank to use **Converted** inside the input
+folder. Existing files and all source videos are preserved: colliding output names
+receive a numeric suffix, even if ordinary single-file overwrite is enabled.
+Publication requires a destination filesystem supporting hard links; unsupported
+filesystems fail safely. Cancel stops further dispatch and keeps completed outputs.
+
+With Auto-Convert off, **Optimize** analyzes the queue and leaves recommendations
+Ready. **Convert Folder** revalidates and reanalyzes unfinished files using the
+optimizer cache, and skips completed items. **Rescan** explicitly starts a new
+queue, including previously completed inputs. Queue state lasts for this session.
+
 ![Screenshot](Screenshots/Screenshot.png)
 
 <details>

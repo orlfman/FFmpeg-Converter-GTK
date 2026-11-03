@@ -9,6 +9,7 @@ public class ConversionRunner {
     private Converter converter;
     private ProcessRunner process_runner;
     private ConversionConfig config;
+    private ConversionRuntimeOptions runtime_options;
     private string[]? resolved_codec_args = null;
 
     public ConversionRunner (Converter converter,
@@ -17,6 +18,7 @@ public class ConversionRunner {
         this.converter      = converter;
         this.process_runner = process_runner;
         this.config         = config;
+        capture_runtime_options ();
     }
 
 #if COMBINE_WINDOW_TEST_BUILD
@@ -24,8 +26,15 @@ public class ConversionRunner {
         this.converter = null;
         this.process_runner = null;
         this.config = config;
+        capture_runtime_options ();
     }
 #endif
+
+    private void capture_runtime_options () {
+        ConversionRuntimeOptions? captured = config.runtime_options;
+        runtime_options = captured != null
+            ? captured.copy () : ConversionRuntimeOptions.capture_current ();
+    }
 
     public void run (string input, string output, bool two_pass, uint64 operation_id) {
         string safe_output = ConversionUtils.sanitize_filename (output);
@@ -97,9 +106,14 @@ public class ConversionRunner {
             // When a filter chain yields no frames ffmpeg still exits 0 and
             // leaves a header-only file behind, and without this the user is
             // told the conversion succeeded and handed an unplayable file.
+            if (converter.is_cancelled (process_runner)) return;
             string output_problem;
-            if (!FfprobeUtils.output_file_is_usable (safe_output, out output_problem)) {
-                if (!converter.is_cancelled (process_runner))
+            bool output_usable = FfprobeUtils.output_file_is_usable (
+                safe_output, out output_problem,
+                process_runner.execute_capture, runtime_options.ffprobe_path);
+            bool validation_cancelled = converter.is_cancelled (process_runner);
+            if (!output_usable) {
+                if (!validation_cancelled)
                     converter.report_error_if_active (process_runner, output_problem);
                 return;
             }
@@ -108,13 +122,13 @@ public class ConversionRunner {
 
             succeeded = true;
 
-            if (AppSettings.get_default ().generate_collage_thumbnail) {
+            if (runtime_options.generate_collage_thumbnail) {
                 converter.set_optional_phase_if_active (
                     process_runner,
                     ConversionPhase.COLLAGE
                 );
 
-                if (converter.is_cancelled (process_runner)) {
+                if (validation_cancelled || converter.is_cancelled (process_runner)) {
                     collage_attempted = true;
                     collage_cancelled = true;
                     converter.consume_optional_cancellation_if_active (process_runner);
@@ -128,7 +142,7 @@ public class ConversionRunner {
                         converter.consume_optional_cancellation_if_active (process_runner);
                     }
                 }
-            } else if (converter.is_cancelled (process_runner)) {
+            } else if (validation_cancelled || converter.is_cancelled (process_runner)) {
                 converter.consume_optional_cancellation_if_active (process_runner);
             }
 
@@ -253,7 +267,17 @@ public class ConversionRunner {
         collage_attempted = false;
         collage_cancelled = false;
 
-        if (!FfprobeUtils.has_video_stream (output_path)) {
+        if (converter.is_cancelled (process_runner)) {
+            collage_cancelled = true;
+            return null;
+        }
+        bool has_video = FfprobeUtils.has_video_stream (
+            output_path, process_runner.execute_capture, runtime_options.ffprobe_path);
+        if (converter.is_cancelled (process_runner)) {
+            collage_cancelled = true;
+            return null;
+        }
+        if (!has_video) {
             converter.log_console_if_active (
                 process_runner,
                 "[Collage] Output has no video stream; skipping collage generation."
@@ -274,9 +298,13 @@ public class ConversionRunner {
 
         double video_start_time = 0.0;
         bool single_frame_video = false;
+        if (converter.is_cancelled (process_runner)) {
+            collage_cancelled = true;
+            return null;
+        }
         VideoTimelineProbeResult video_timeline =
             FfprobeUtils.probe_video_timeline (
-                output_path, process_runner.execute_capture);
+                output_path, process_runner.execute_capture, runtime_options.ffprobe_path);
         if (converter.is_cancelled (process_runner)) {
             collage_cancelled = true;
             return null;
@@ -329,13 +357,13 @@ public class ConversionRunner {
         );
 
         string[] collage_cmd = ConversionUtils.build_collage_argv (
-            AppSettings.get_default ().ffmpeg_path,
+            runtime_options.ffmpeg_path,
             output_path,
             final_collage_path,
             duration_seconds,
             video_start_time,
             single_frame_video,
-            AppSettings.get_default ().collage_size
+            runtime_options.collage_size
         );
         string display_cmd = ConversionUtils.format_command_for_display (collage_cmd);
         converter.log_console_if_active (process_runner, "Collage command: " + display_cmd);
@@ -378,7 +406,8 @@ public class ConversionRunner {
     }
 
     private string? resolve_collage_output_path (string output_path) {
-        return ConversionUtils.resolve_collage_output_path (output_path);
+        return ConversionUtils.resolve_collage_output_path (
+            output_path, runtime_options.overwrite_enabled);
     }
 
     private bool validate_svt_av1_constant_quality_two_pass_compatibility (bool two_pass) {
@@ -491,7 +520,7 @@ public class ConversionRunner {
      *                    paths.  Pass false for pass-1 which always adds -an.
      */
     private string[] build_common_prefix (string input, bool map_audio = true) {
-        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-y" };
+        string[] cmd = { runtime_options.ffmpeg_path, "-y" };
 
         if (config.seek_enabled) {
             cmd += "-ss";
@@ -583,8 +612,11 @@ public class ConversionRunner {
 
     private string[] get_codec_args (string input) {
         if (resolved_codec_args == null) {
+            FfprobeCaptureRunner? capture = null;
+            if (process_runner != null)
+                capture = process_runner.execute_capture;
             resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
-                config.profile, input);
+                config.profile, input, capture, runtime_options.ffprobe_path);
         }
         return resolved_codec_args;
     }
@@ -788,7 +820,8 @@ public class ConversionRunner {
             build_peak_analysis_pre_input_args (),
             null,
             FilterBuilder.extract_peak_analysis_output_args (config.profile.audio_args),
-            get_explicit_audio_map_spec ()
+            get_explicit_audio_map_spec (),
+            runtime_options.ffmpeg_path
         );
     }
 
@@ -909,7 +942,7 @@ public class ConversionRunner {
                                                    CollageSize collage_size
                                                        = CollageSize.FHD_1080) {
         return ConversionUtils.build_collage_argv (
-            AppSettings.get_default ().ffmpeg_path,
+            runtime_options.ffmpeg_path,
             output_path,
             collage_output_path,
             duration_seconds,

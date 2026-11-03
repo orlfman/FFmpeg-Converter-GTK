@@ -25,7 +25,7 @@ using Json;
 
 public class SmartOptimizerCache : GLib.Object {
 
-    private const int    CACHE_FORMAT_VERSION = 2;
+    private const int    CACHE_FORMAT_VERSION = 3;
     private const int    MAX_ENTRIES = 32;
     private const string FIELD_SEP = "\x1f";
 

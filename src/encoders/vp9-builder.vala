@@ -90,7 +90,7 @@ public class Vp9Builder : Object, ICodecBuilder {
         return build_codec_args_from_snapshot (snapshot_settings ());
     }
 
-    private static string[] build_args_from_snapshot (Vp9BuilderSnapshot snapshot) {
+    public static string[] build_args_from_snapshot (Vp9BuilderSnapshot snapshot) {
         string[] args = {};
 
         // ── Codec ──────────────────────────────────────────────────────────

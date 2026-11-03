@@ -100,7 +100,7 @@ public class X264Builder : Object, ICodecBuilder {
         return build_codec_args_from_snapshot (snapshot_settings ());
     }
 
-    private static string[] build_args_from_snapshot (X264BuilderSnapshot snapshot) {
+    public static string[] build_args_from_snapshot (X264BuilderSnapshot snapshot) {
         string[] args = {};
 
         // ── Codec + Preset ─────────────────────────────────────────────────

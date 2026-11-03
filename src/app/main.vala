@@ -13,6 +13,7 @@ using GLib;
 private enum ActiveOperation {
     IDLE,
     CONVERTING,
+    BULK_CONVERTING,
     TRIMMING,
     COMBINING,
     SUBTITLE_EXTRACT,
@@ -57,6 +58,14 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     private InformationTab info_tab;
     private StatusArea status_area;
     private Converter converter;
+    private BulkConversionController bulk_controller;
+    private Box bulk_box;
+    private Label bulk_summary;
+    private ListBox bulk_list;
+    private Button bulk_rescan;
+    private Label bulk_destination;
+    private Cancellable? bulk_preview_cancel = null;
+    private uint bulk_preview_generation = 0;
     private Button cancel_button;
     private Button convert_button;
     private ConsoleTab console_tab;
@@ -124,6 +133,33 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             cancel_button, status_area,
             view_stack
         );
+
+        bulk_controller = new BulkConversionController (status_area, console_tab, general_tab);
+        file_pickers.set_input_admission (() => {
+            return is_effectively_idle () && combine_window == null && collage_window == null
+                && !general_tab.is_source_detection_active ();
+        });
+        controller.set_optimizer_admission (() => {
+            return can_start_primary_operation () && combine_window == null;
+        });
+        general_tab.source_detection_activity_changed.connect (update_convert_sensitivity);
+        file_pickers.input_selection_changed.connect (on_input_source_changed);
+        file_pickers.output_entry.changed.connect (() => {
+            if (file_pickers.kind == InputSourceKind.FOLDER && is_effectively_idle ())
+                preview_bulk_folder.begin ();
+        });
+        controller.folder_optimizer_requested.connect ((codec, auto_convert) => {
+            start_bulk (codec, auto_convert);
+        });
+        bulk_controller.changed.connect (() => { render_bulk_items (bulk_controller.items); });
+        bulk_controller.output_ready.connect ((result) => { controller.apply_operation_output (result); });
+        bulk_controller.finished.connect ((operation_id) => {
+            if (complete_tracked_operation (ActiveOperation.BULK_CONVERTING, operation_id, false)) {
+                set_bulk_controls_locked (false);
+                render_bulk_items (bulk_controller.items);
+                maybe_finish_close_after_cancellation ();
+            }
+        });
 
         // Smart Optimizer lifecycle: enable cancel button while running.
         // Tracked separately from ActiveOperation, but it still blocks
@@ -341,6 +377,153 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         close_request.connect (on_close_request);
     }
 
+    private static bool is_single_file_page (string? page) {
+        return page == "trim" || page == "audio" || page == "subtitles";
+    }
+
+    private BaseCodecTab? bulk_codec_tab (string codec) {
+        switch (codec) {
+        case "svt-av1": return svt_tab;
+        case "x265": return x265_tab;
+        case "x264": return x264_tab;
+        case "vp9": return vp9_tab;
+        default: return null;
+        }
+    }
+
+    private string bulk_output_folder () {
+        string output = file_pickers.output_entry.get_text ().strip ();
+        return output.length > 0 ? output
+            : Path.build_filename (file_pickers.source_path, "Converted");
+    }
+
+    private void on_input_source_changed () {
+        bool folder = file_pickers.kind == InputSourceKind.FOLDER;
+        bulk_controller.reset_queue ();
+        bulk_box.set_visible (folder);
+        foreach (string page in new string[] { "trim", "audio", "subtitles" }) {
+            Widget? child = view_stack.get_child_by_name (page);
+            if (child != null)
+                child.set_sensitive (!folder);
+        }
+        if (folder && is_single_file_page (view_stack.visible_child_name))
+            view_stack.set_visible_child_name ("general");
+        if (bulk_preview_cancel != null)
+            bulk_preview_cancel.cancel ();
+        bulk_preview_generation++;
+        if (folder)
+            preview_bulk_folder.begin ();
+        update_convert_sensitivity ();
+    }
+
+    private async void preview_bulk_folder () {
+        if (bulk_preview_cancel != null)
+            bulk_preview_cancel.cancel ();
+        var cancellable = new Cancellable ();
+        bulk_preview_cancel = cancellable;
+        uint generation = ++bulk_preview_generation;
+        string folder = file_pickers.source_path;
+        bulk_destination.set_label ("Output: " + bulk_output_folder ());
+        bulk_destination.set_tooltip_text (bulk_output_folder ());
+        bulk_summary.set_label ("Scanning folder…");
+        try {
+            var items = yield BulkConversionController.scan_folder (folder, bulk_output_folder (), cancellable);
+            if (!cancellable.is_cancelled () && generation == bulk_preview_generation
+                    && file_pickers.kind == InputSourceKind.FOLDER && is_effectively_idle ())
+                render_bulk_items (items);
+        } catch (Error e) {
+            if (!cancellable.is_cancelled () && generation == bulk_preview_generation)
+                bulk_summary.set_label ("Could not scan folder: " + e.message);
+        }
+        if (bulk_preview_cancel == cancellable)
+            bulk_preview_cancel = null;
+    }
+
+    private void render_bulk_items (GenericArray<BulkItem> items) {
+        Widget? child;
+        while ((child = bulk_list.get_first_child ()) != null)
+            bulk_list.remove (child);
+        uint completed = 0, ready = 0, failed = 0;
+        for (int i = 0; i < items.length; i++) {
+            var item = items[i];
+            if (item.state == "completed") completed++;
+            if (item.state == "ready") ready++;
+            if (item.state == "failed") failed++;
+            var row = new Box (Orientation.VERTICAL, 2);
+            row.set_margin_top (6);
+            row.set_margin_bottom (6);
+            row.set_margin_start (12);
+            row.set_margin_end (12);
+            var name = new Label (Path.get_basename (item.path));
+            name.set_xalign (0);
+            name.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
+            row.append (name);
+            var detail = new Label (item.status);
+            detail.set_xalign (0);
+            detail.set_wrap (true);
+            detail.add_css_class ("dim-label");
+            row.append (detail);
+            if (item.output_path.length > 0) {
+                var output = new Label ("Output: " + item.output_path);
+                output.set_xalign (0);
+                output.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
+                output.set_tooltip_text (item.output_path);
+                row.append (output);
+            }
+            bulk_list.append (row);
+        }
+        bulk_summary.set_label (items.length == 0 ? "No supported videos in this folder. Subfolders are excluded."
+            : "%u videos · %u completed · %u ready · %u failed. Processed one at a time with Smart Optimizer.".printf (
+                items.length, completed, ready, failed));
+    }
+
+    private void set_bulk_controls_locked (bool locked) {
+        file_pickers.set_operation_locked (locked);
+        bulk_rescan.set_sensitive (!locked);
+        general_tab.set_sensitive (!locked);
+        svt_tab.set_sensitive (!locked);
+        x265_tab.set_sensitive (!locked);
+        x264_tab.set_sensitive (!locked);
+        vp9_tab.set_sensitive (!locked);
+    }
+
+    private void start_bulk (string codec, bool convert) {
+        BaseCodecTab? tab = bulk_codec_tab (codec);
+        if (file_pickers.kind != InputSourceKind.FOLDER || tab == null
+                || !can_start_primary_operation () || combine_window != null || collage_window != null) {
+            status_area.set_status ("Choose a codec tab and finish the current operation before processing a folder.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
+        var settings = new BulkConversionSettings ();
+        settings.codec = codec;
+        settings.general_settings = general_tab.snapshot_settings (tab.snapshot_pixel_format_settings ());
+        settings.codec_settings = tab.snapshot_settings (settings.general_settings);
+        settings.codec_settings.audio_settings.preserve_all_audio_tracks = tab.audio_settings.get_keep_all_audio_requested ();
+        settings.timing = general_tab.snapshot_timing_only ();
+        settings.runtime_options = ConversionRuntimeOptions.capture_current ();
+        settings.naming = OutputNamingSettingsSnapshot.capture_current ();
+        settings.target_mb = tab.get_target_mb ();
+        settings.match_source_size = tab.match_source_size_active;
+        settings.quality_mode = tab.get_quality_mode_active ();
+        settings.quality_intent = tab.get_quality_intent ();
+        settings.content_override = tab.get_content_override ();
+        settings.optimize_for_delivery = tab.get_optimize_for_delivery ();
+        settings.strip_audio = tab.get_strip_audio_active ()
+            || !tab.audio_settings.is_audio_enabled_for_output ();
+        uint64 operation_id;
+        if (!reserve_pending_operation (ActiveOperation.BULK_CONVERTING, out operation_id))
+            return;
+        if (bulk_preview_cancel != null)
+            bulk_preview_cancel.cancel ();
+        bulk_preview_generation++;
+        activate_cancel (ActiveOperation.BULK_CONVERTING, operation_id);
+        set_bulk_controls_locked (true);
+        bulk_destination.set_label ("%s · Output: %s · Settings apply to every file; each file is optimized separately.".printf (
+            codec.up (), bulk_output_folder ()));
+        bulk_controller.run.begin (file_pickers.source_path, bulk_output_folder (), settings, convert, operation_id);
+    }
+
     private bool complete_tracked_operation_with_close (ActiveOperation operation,
                                                         uint64 operation_id,
                                                         bool drain_auto_convert_queue) {
@@ -437,6 +620,37 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         content_box.set_margin_end (32);
 
         content_box.append (file_pickers);
+        bulk_box = new Box (Orientation.VERTICAL, 6);
+        bulk_box.set_visible (false);
+        bulk_summary = new Label ("Folder conversion");
+        bulk_summary.set_xalign (0);
+        bulk_summary.set_wrap (true);
+        var bulk_header = new Box (Orientation.HORIZONTAL, 12);
+        bulk_summary.set_hexpand (true);
+        bulk_header.append (bulk_summary);
+        bulk_rescan = new Button.with_label ("Rescan");
+        bulk_rescan.set_tooltip_text ("Start a new queue from the folder, including previously completed files");
+        bulk_rescan.clicked.connect (() => {
+            if (!is_effectively_idle ()) return;
+            bulk_controller.reset_queue ();
+            preview_bulk_folder.begin ();
+        });
+        bulk_header.append (bulk_rescan);
+        bulk_box.append (bulk_header);
+        bulk_destination = new Label ("");
+        bulk_destination.set_xalign (0);
+        bulk_destination.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
+        bulk_box.append (bulk_destination);
+        bulk_list = new ListBox ();
+        bulk_list.set_selection_mode (SelectionMode.NONE);
+        bulk_list.add_css_class ("boxed-list");
+        var bulk_scroll = new ScrolledWindow ();
+        bulk_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
+        bulk_scroll.set_max_content_height (150);
+        bulk_scroll.set_propagate_natural_height (true);
+        bulk_scroll.set_child (bulk_list);
+        bulk_box.append (bulk_scroll);
+        content_box.append (bulk_box);
         content_box.append (view_stack);
         content_box.append (build_button_bar ());
         content_box.append (status_area);
@@ -479,6 +693,11 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
         // Disable the Convert button on tabs where it has no function
         view_stack.notify["visible-child-name"].connect (() => {
+            if (file_pickers.kind == InputSourceKind.FOLDER
+                    && is_single_file_page (view_stack.visible_child_name)) {
+                view_stack.set_visible_child_name ("general");
+                return;
+            }
             update_convert_sensitivity ();
             clear_keep_all_audio_on_trim_tab ();
         });
@@ -496,7 +715,12 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         bool active = page == "svt-av1" || page == "x265" || page == "x264"
                    || page == "vp9"     || page == "trim" || page == "audio"
                    || page == "subtitles";
-        convert_button.set_sensitive (active && can_start_primary_operation ());
+        bool folder = file_pickers.kind == InputSourceKind.FOLDER;
+        if (folder && is_single_file_page (page))
+            active = false;
+        bool resolved = folder || file_pickers.kind == InputSourceKind.FILE;
+        convert_button.set_label (folder ? "Convert Folder" : "Convert");
+        convert_button.set_sensitive (active && resolved && can_start_primary_operation ());
     }
 
     /**
@@ -505,7 +729,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
      * so leaving the toggle on would silently ignore the user's choice.
      */
     private void clear_keep_all_audio_on_trim_tab () {
-        if (view_stack.visible_child_name != "trim") return;
+        if (file_pickers.kind == InputSourceKind.FOLDER
+                || view_stack.visible_child_name != "trim") return;
         if (svt_tab != null)  svt_tab.audio_settings.clear_keep_all_audio ();
         if (x265_tab != null) x265_tab.audio_settings.clear_keep_all_audio ();
         if (x264_tab != null) x264_tab.audio_settings.clear_keep_all_audio ();
@@ -517,13 +742,14 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     private bool can_start_primary_operation () {
-        return is_effectively_idle ();
+        return is_effectively_idle () && !general_tab.is_source_detection_active ();
     }
 
     private string get_operation_label (ActiveOperation operation,
                                         string idle_fallback = "operation") {
         switch (operation) {
         case ActiveOperation.CONVERTING:     return "conversion";
+        case ActiveOperation.BULK_CONVERTING: return "folder conversion";
         case ActiveOperation.TRIMMING:       return "export";
         case ActiveOperation.COMBINING:      return "combine";
         case ActiveOperation.SUBTITLE_EXTRACT: return "subtitle extraction";
@@ -610,6 +836,13 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         }
 
         string? page = view_stack.visible_child_name;
+
+        if (file_pickers.kind == InputSourceKind.FOLDER) {
+            start_bulk (page ?? "", true);
+            return;
+        }
+        if (file_pickers.kind != InputSourceKind.FILE)
+            return;
 
         // ── Audio has extraction, removal, and add paths ──────────────────
         if (page == "audio") {
@@ -1867,7 +2100,9 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                                             out uint64 operation_id) {
         operation_id = 0;
 
-        if (!is_effectively_idle ()) {
+        if (!can_start_primary_operation ()
+                || (file_pickers.kind == InputSourceKind.FOLDER
+                    && operation != ActiveOperation.BULK_CONVERTING)) {
             return false;
         }
 
@@ -2038,6 +2273,12 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                     should_release_operation = false;
                     break;
 
+                case ActiveOperation.BULK_CONVERTING:
+                    bulk_controller.cancel ();
+                    message = "Stopping folder conversion and cleaning up…";
+                    should_release_operation = false;
+                    break;
+
                 case ActiveOperation.CONVERTING:
                     converter.cancel ();
                     should_release_operation = false;
@@ -2100,6 +2341,11 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_combine_videos_action (GLib.Variant? parameter) {
+        if (file_pickers.kind == InputSourceKind.FOLDER || !can_start_primary_operation ()) {
+            status_area.set_status ("Choose a single file and finish the current operation before combining videos.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
         if (combine_window == null) {
             combine_window = new CombineWindow (
                 svt_tab, x265_tab, x264_tab, vp9_tab,
@@ -2164,6 +2410,12 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_generate_collage_action (GLib.Variant? parameter) {
+        if (file_pickers.kind == InputSourceKind.FOLDER
+                || current_operation == ActiveOperation.BULK_CONVERTING) {
+            status_area.set_status ("Choose a single file before opening the collage tool.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
         if (collage_window == null) {
             collage_window = new CollageWindow (console_tab, this);
             collage_window.window_closing.connect (() => {

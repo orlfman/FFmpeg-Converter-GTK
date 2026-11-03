@@ -114,6 +114,10 @@ public class ConsoleTab : Box {
 
     public override void dispose () {
         disconnect_style_manager ();
+        // This popover is manually parented, outside TextView's own children.
+        // Detach it while the view is alive, before recursive widget disposal.
+        if (error_popover != null && error_popover.get_parent () != null)
+            error_popover.unparent ();
 
         if (font_css != null) {
             var display = Gdk.Display.get_default ();

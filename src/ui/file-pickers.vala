@@ -1,15 +1,39 @@
 using Gtk;
 using Adw;
 
+public enum InputSourceKind {
+    NONE,
+    RESOLVING,
+    FILE,
+    FOLDER,
+    INVALID
+}
+
+public delegate bool InputSelectionAdmission ();
+
 public class FilePickers : Box {
     public PathBreadcrumb input_entry { get; private set; }
     public PathBreadcrumb output_entry { get; private set; }
+    public InputSourceKind kind { get; private set; default = InputSourceKind.NONE; }
+    public string source_path { get; private set; default = ""; }
+    public signal void input_selection_changed ();
+
+    private InputSelectionAdmission? input_admission = null;
+    private Cancellable? input_resolution = null;
+    private uint input_generation = 0;
+    private string accepted_input_path = "";
+    private InputSourceKind accepted_input_kind = InputSourceKind.NONE;
+    private bool changing_input_internally = false;
+    private bool changing_output_internally = false;
+    private string accepted_output_path = "";
+    private bool operation_locked = false;
 
     private Adw.PreferencesGroup file_group;
     private Box input_row;
     private Box output_row;
     private SizeGroup label_size_group;
     private Button input_browse;
+    private Button folder_browse;
     private bool input_locked_for_combine = false;
 
     // Video file extensions are in VideoFileConstants.VIDEO_EXTENSIONS
@@ -22,7 +46,10 @@ public class FilePickers : Box {
         label_size_group = new SizeGroup (SizeGroupMode.HORIZONTAL);
 
         // ── Input File row ───────────────────────────────────────────────────
-        input_entry = new PathBreadcrumb ("No file selected", true);
+        input_entry = new PathBreadcrumb ("Select a file or folder", true);
+        // Intercept legacy programmatic writes before outside listeners run.
+        // Media consumers use input_selection_changed after type resolution.
+        input_entry.changed.connect (on_raw_input_changed);
 
         input_browse = new Button.from_icon_name ("document-open-symbolic");
         input_browse.set_tooltip_text ("Select a file");
@@ -30,17 +57,34 @@ public class FilePickers : Box {
         input_browse.set_valign (Align.CENTER);
         input_browse.clicked.connect (on_input_browse_clicked);
 
+        folder_browse = new Button.from_icon_name ("folder-open-symbolic");
+        folder_browse.set_tooltip_text ("Select a folder for bulk conversion");
+        folder_browse.add_css_class ("flat");
+        folder_browse.clicked.connect (on_folder_browse_clicked);
+        var input_controls = new Box (Orientation.HORIZONTAL, 2);
+        input_controls.append (input_browse);
+        input_controls.append (folder_browse);
         input_row = build_file_row (
             "video-x-generic-symbolic",
-            "Input File",
+            "Input",
             input_entry,
-            input_browse
+            input_controls
         );
 
         file_group.add (input_row);
 
         // ── Output Folder row ────────────────────────────────────────────────
         output_entry = new PathBreadcrumb ("Same as input");
+        output_entry.changed.connect (() => {
+            if (changing_output_internally) return;
+            if (operation_locked) {
+                changing_output_internally = true;
+                output_entry.set_text (accepted_output_path);
+                changing_output_internally = false;
+            } else {
+                accepted_output_path = output_entry.get_text ();
+            }
+        });
 
         var output_browse = new Button.from_icon_name ("folder-open-symbolic");
         output_browse.set_tooltip_text ("Output location");
@@ -107,7 +151,7 @@ public class FilePickers : Box {
         file_drop.drop.connect ((val, x, y) => {
             hide_drop_highlight ();
 
-            if (input_locked_for_combine) return false;
+            if (!can_change_input ()) return false;
 
             var file = val.get_object () as File;
             if (file == null) return false;
@@ -115,12 +159,8 @@ public class FilePickers : Box {
             string? path = file.get_path ();
             if (path == null) return false;
 
-            if (is_video_file (path)) {
-                input_entry.set_text (path);
-                return true;
-            }
-
-            return false;
+            request_input (path);
+            return true;
         });
 
         add_controller (file_drop);
@@ -140,18 +180,15 @@ public class FilePickers : Box {
         text_drop.drop.connect ((val, x, y) => {
             hide_drop_highlight ();
 
-            if (input_locked_for_combine) return false;
+            if (!can_change_input ()) return false;
 
             string? text = val.get_string ();
             if (text == null) return false;
 
             string path = resolve_dropped_text (text);
-            if (path.length > 0 && is_video_file (path)) {
-                input_entry.set_text (path);
-                return true;
-            }
-
-            return false;
+            if (path.length == 0) return false;
+            request_input (path);
+            return true;
         });
 
         add_controller (text_drop);
@@ -211,17 +248,128 @@ public class FilePickers : Box {
         input_entry.remove_css_class ("drop-highlight");
     }
 
+    public void set_input_admission (owned InputSelectionAdmission admission) {
+        input_admission = (owned) admission;
+    }
+
+    public void request_input (string path) {
+        if (!can_change_input ()) return;
+        if (input_entry.get_text () == path) return;
+        input_entry.set_text (path);
+    }
+
+    private bool can_change_input () {
+        return !input_locked_for_combine && !operation_locked
+            && (input_admission == null || input_admission ());
+    }
+
+    private void restore_accepted_input () {
+        changing_input_internally = true;
+        input_entry.set_text (accepted_input_path);
+        changing_input_internally = false;
+    }
+
+    private void on_raw_input_changed () {
+        if (changing_input_internally) return;
+        if (!can_change_input ()) {
+            bool was_resolving = kind == InputSourceKind.RESOLVING;
+            cancel_input_resolution ();
+            source_path = accepted_input_path;
+            kind = accepted_input_kind;
+            restore_accepted_input ();
+            if (was_resolving) input_selection_changed ();
+            return;
+        }
+        cancel_input_resolution ();
+        string path = input_entry.get_text ();
+        if (path.length == 0) {
+            accept_input ("", InputSourceKind.NONE);
+            return;
+        }
+        source_path = path;
+        kind = InputSourceKind.RESOLVING;
+        input_selection_changed ();
+        var token = new Cancellable ();
+        input_resolution = token;
+        resolve_input.begin (path, input_generation, token);
+    }
+
+    private void cancel_input_resolution () {
+        input_generation++;
+        if (input_resolution != null) {
+            input_resolution.cancel ();
+            input_resolution = null;
+        }
+    }
+
+    private async void resolve_input (string path, uint generation, Cancellable token) {
+        InputSourceKind resolved = InputSourceKind.INVALID;
+        try {
+            var info = yield File.new_for_path (path).query_info_async (
+                FileAttribute.STANDARD_TYPE, FileQueryInfoFlags.NONE,
+                Priority.DEFAULT, token);
+            // Classify filesystem type before extension checks: a directory
+            // named example.mp4 is still a folder, never a media-file input.
+            if (info.get_file_type () == FileType.DIRECTORY)
+                resolved = InputSourceKind.FOLDER;
+            else if (info.get_file_type () == FileType.REGULAR)
+                resolved = InputSourceKind.FILE;
+        } catch (Error e) {
+            // Invalid/unreadable paths remain visible and cannot start work.
+        }
+        if (generation != input_generation || token.is_cancelled ()) return;
+        input_resolution = null;
+        if (!can_change_input ()) {
+            source_path = accepted_input_path;
+            kind = accepted_input_kind;
+            restore_accepted_input ();
+            input_selection_changed ();
+            return;
+        }
+        accept_input (path, resolved);
+    }
+
+    private void accept_input (string path, InputSourceKind resolved) {
+        source_path = path;
+        kind = resolved;
+        accepted_input_path = path;
+        accepted_input_kind = resolved;
+        output_entry.set_placeholder_text (resolved == InputSourceKind.FOLDER
+            ? "Converted subfolder of input" : "Same as input");
+        input_selection_changed ();
+    }
+
+    public void set_operation_locked (bool locked) {
+        operation_locked = locked;
+        update_input_lock ();
+        output_row.set_sensitive (!locked);
+    }
+
     public void set_input_locked_for_combine (bool locked) {
         input_locked_for_combine = locked;
-
         if (locked) {
+            cancel_input_resolution ();
+            changing_input_internally = true;
             input_entry.set_text ("");
+            changing_input_internally = false;
+            accept_input ("", InputSourceKind.NONE);
             hide_drop_highlight ();
         }
+        update_input_lock ();
+    }
 
-        input_row.set_sensitive (!locked);
-        input_entry.set_sensitive (!locked);
-        input_browse.set_sensitive (!locked);
+    private void update_input_lock () {
+        bool sensitive = !input_locked_for_combine && !operation_locked;
+        input_row.set_sensitive (sensitive);
+        input_entry.set_sensitive (sensitive);
+        input_browse.set_sensitive (sensitive);
+        folder_browse.set_sensitive (sensitive);
+    }
+
+    public override void dispose () {
+        cancel_input_resolution ();
+        input_admission = null;
+        base.dispose ();
     }
 
     /**
@@ -378,9 +526,7 @@ public class FilePickers : Box {
     // ═════════════════════════════════════════════════════════════════════════
 
     private void on_input_browse_clicked () {
-        if (input_locked_for_combine) {
-            return;
-        }
+        if (!can_change_input ()) return;
 
         var dialog = new FileDialog ();
         dialog.title = "Select Input Video";
@@ -393,7 +539,7 @@ public class FilePickers : Box {
         dialog.open.begin ((Gtk.Window) get_root (), null, (obj, res) => {
             try {
                 var file = dialog.open.end (res);
-                if (file != null) input_entry.set_text (file.get_path () ?? "");
+                if (file != null) request_input (file.get_path () ?? "");
             } catch (Error e) {
                 if (!(e is Gtk.DialogError.DISMISSED)) {
                     warning ("Input file dialog error: %s", e.message);
@@ -402,14 +548,30 @@ public class FilePickers : Box {
         });
     }
 
+    private void on_folder_browse_clicked () {
+        if (!can_change_input ()) return;
+        var dialog = new FileDialog ();
+        dialog.title = "Select Input Folder";
+        dialog.select_folder.begin ((Gtk.Window) get_root (), null, (obj, res) => {
+            try {
+                var folder = dialog.select_folder.end (res);
+                if (folder != null) request_input (folder.get_path () ?? "");
+            } catch (Error e) {
+                if (!(e is Gtk.DialogError.DISMISSED))
+                    warning ("Input folder dialog error: %s", e.message);
+            }
+        });
+    }
+
     private void on_output_browse_clicked () {
+        if (operation_locked) return;
         var dialog = new FileDialog ();
         dialog.title = "Select Output Folder";
 
         dialog.select_folder.begin ((Gtk.Window) get_root (), null, (obj, res) => {
             try {
                 var folder = dialog.select_folder.end (res);
-                if (folder != null) output_entry.set_text (folder.get_path () ?? "");
+                if (folder != null && !operation_locked) output_entry.set_text (folder.get_path () ?? "");
             } catch (Error e) {
                 if (!(e is Gtk.DialogError.DISMISSED)) {
                     warning ("Output folder dialog error: %s", e.message);

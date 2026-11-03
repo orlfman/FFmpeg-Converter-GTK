@@ -1,6 +1,26 @@
 using Gtk;
 using GLib;
 
+public class OutputNamingSettingsSnapshot : Object {
+    public OutputNameMode mode = OutputNameMode.DEFAULT;
+    public string custom_name = "";
+
+    public static OutputNamingSettingsSnapshot capture_current () {
+        var snapshot = new OutputNamingSettingsSnapshot ();
+        var settings = AppSettings.get_default ();
+        snapshot.mode = settings.output_name_mode;
+        snapshot.custom_name = settings.output_custom_name;
+        return snapshot;
+    }
+
+    public OutputNamingSettingsSnapshot copy () {
+        var snapshot = new OutputNamingSettingsSnapshot ();
+        snapshot.mode = mode;
+        snapshot.custom_name = custom_name;
+        return snapshot;
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ConversionUtils — Pure utility functions for the conversion pipeline
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -815,6 +835,34 @@ namespace ConversionUtils {
         return sanitize_filename (@"$out_folder/$name_stem.$container_ext");
     }
 
+    /** Resolve one job's name from captured settings, without creating folders. */
+    public async string compute_output_path_from_profile_async (
+        string input_file,
+        string output_folder,
+        EncodeProfileSnapshot profile,
+        OutputNamingSettingsSnapshot naming_settings,
+        Cancellable? cancellable = null,
+        string? ffprobe_path = null) throws Error {
+        var naming = naming_settings.copy ();
+        string codec_name = profile.codec_name.down ();
+        string codec_suffix = codec_name.contains ("av1") ? "av1" : codec_name;
+        string container = profile.container.length > 0 ? profile.container : ContainerExt.MKV;
+        string out_folder = output_folder.length > 0 ? output_folder : Path.get_dirname (input_file);
+        string basename = Path.get_basename (input_file);
+        int dot_pos = basename.last_index_of_char ('.');
+        string name_no_ext = dot_pos > 0 ? basename.substring (0, dot_pos) : basename;
+        if (cancellable != null && cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("Output naming cancelled.");
+        string? title = null;
+        if (naming.mode == OutputNameMode.METADATA)
+            title = yield FfprobeUtils.probe_title_async (input_file, cancellable, ffprobe_path);
+        if (cancellable != null && cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("Output naming cancelled.");
+        string stem = build_output_stem_for_mode (
+            naming.mode, name_no_ext, codec_suffix, naming.custom_name, title);
+        return sanitize_filename (Path.build_filename (out_folder, @"$stem.$container"));
+    }
+
     /**
      * Resolve the output filename stem (without extension) based on the
      * current OutputNameMode setting.
@@ -1008,9 +1056,10 @@ namespace ConversionUtils {
         );
     }
 
-    public string? resolve_collage_output_path (string output_path) {
+    public string? resolve_collage_output_path (string output_path,
+                                               bool? overwrite_enabled = null) {
         string collage_path = build_collage_output_path (output_path);
-        if (AppSettings.get_default ().overwrite_enabled
+        if ((overwrite_enabled ?? AppSettings.get_default ().overwrite_enabled)
             || !FileUtils.test (collage_path, FileTest.EXISTS)) {
             return collage_path;
         }
@@ -1019,11 +1068,12 @@ namespace ConversionUtils {
 
     public string? resolve_collage_output_path_with_reserved (
             string output_path,
-            HashTable<string, bool>? reserved_paths) {
+            HashTable<string, bool>? reserved_paths,
+            bool? overwrite_enabled = null) {
         string collage_path = build_collage_output_path (output_path);
         bool collides = FileUtils.test (collage_path, FileTest.EXISTS)
             || (reserved_paths != null && reserved_paths.contains (collage_path));
-        if (AppSettings.get_default ().overwrite_enabled || !collides) {
+        if ((overwrite_enabled ?? AppSettings.get_default ().overwrite_enabled) || !collides) {
             if (reserved_paths != null) {
                 reserved_paths.replace (collage_path, true);
             }

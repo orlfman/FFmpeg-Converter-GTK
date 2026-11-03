@@ -113,7 +113,7 @@ public class HamburgerMenu {
         }
 
         // ── Track input file changes to enable/disable action ────────────────
-        file_pickers.input_entry.changed.connect (on_input_entry_changed);
+        file_pickers.input_selection_changed.connect (on_input_entry_changed);
 
         // Prune files deleted since the last opening immediately before the
         // menu is shown, then update the stable recent-file button slots.
@@ -418,7 +418,8 @@ public class HamburgerMenu {
     }
 
     private void on_view_input_action_activate (GLib.Variant? parameter) {
-        open_with_default_player (file_pickers.input_entry.get_text ());
+        if (file_pickers.kind == InputSourceKind.FILE)
+            open_with_default_player (file_pickers.source_path);
     }
 
     private void on_view_output_action_activate (GLib.Variant? parameter) {
@@ -434,7 +435,7 @@ public class HamburgerMenu {
             return;
 
         if (FileUtils.test (path, FileTest.IS_REGULAR)) {
-            file_pickers.input_entry.set_text (path);
+            file_pickers.request_input (path);
         } else {
             AppSettings.get_default ().prune_recent_input_files ();
             refresh_recent_inputs_menu ();
@@ -446,8 +447,8 @@ public class HamburgerMenu {
     }
 
     private void on_input_entry_changed () {
-        string path = file_pickers.input_entry.get_text ();
-        bool exists = path.length > 0
+        string path = file_pickers.source_path;
+        bool exists = file_pickers.kind == InputSourceKind.FILE && path.length > 0
             && FileUtils.test (path, FileTest.IS_REGULAR);
         view_input_action.set_enabled (exists);
         if (exists)

@@ -115,12 +115,15 @@ public class FfmpegRuntimeCapabilities : Object {
         string       binary_path,
         Cancellable cancellable
     ) throws Error {
+        throw_if_cancelled (cancellable);
         string cache_key = build_binary_cache_key (binary_path);
+        throw_if_cancelled (cancellable);
         VmafCapability? cached = vmaf_cache.lookup (cache_key);
         if (cached != null)
             return cached.copy ();
 
         VmafCapability capability = yield probe_vmaf (binary_path, cancellable);
+        throw_if_cancelled (cancellable);
         // A launch failure can be transient (permissions, resource pressure,
         // etc.), so only cache authoritative filter-table results.
         if (capability.status != VmafCapabilityStatus.ERROR)
@@ -139,8 +142,10 @@ public class FfmpegRuntimeCapabilities : Object {
         string       pixel_format,
         Cancellable cancellable
     ) throws Error {
+        throw_if_cancelled (cancellable);
         string cache_key = build_binary_cache_key (binary_path)
             + "|" + encoder_name + "|" + pixel_format;
+        throw_if_cancelled (cancellable);
         EncoderPixelFormatCapability? cached =
             encoder_pixel_format_cache.lookup (cache_key);
         if (cached != null)
@@ -149,6 +154,7 @@ public class FfmpegRuntimeCapabilities : Object {
         EncoderPixelFormatCapability capability =
             yield probe_encoder_pixel_format (
                 binary_path, encoder_name, pixel_format, cancellable);
+        throw_if_cancelled (cancellable);
         // Launch failures can be transient. Only cache an authoritative
         // encoder-help result.
         if (capability.status != EncoderPixelFormatCapabilityStatus.ERROR)
@@ -301,6 +307,7 @@ public class FfmpegRuntimeCapabilities : Object {
     public static async SvtAv1CrfTwoPassCapability probe_svt_av1_crf_two_pass (
         string binary_path,
         Cancellable cancellable) throws Error {
+        throw_if_cancelled (cancellable);
         string? run_dir = null;
         string passlog_base = "";
 
@@ -381,8 +388,14 @@ public class FfmpegRuntimeCapabilities : Object {
         }
     }
 
+    private static void throw_if_cancelled (Cancellable cancellable) throws IOError {
+        if (cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("FFmpeg capability probe cancelled");
+    }
+
     private static async string run_subprocess_capture (string[] cmd,
                                                         Cancellable cancellable) throws Error {
+        throw_if_cancelled (cancellable);
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
         var proc = SubprocessCompat.spawnv (launcher, cmd);
@@ -402,33 +415,42 @@ public class FfmpegRuntimeCapabilities : Object {
         string stderr_buf;
         try {
             yield proc.communicate_utf8_async (null, local_cancel, out stdout_buf, out stderr_buf);
+            // Cancellation may land after communication completed but before
+            // its continuation resumes. Do not turn that run into cached data.
+            throw_if_cancelled (cancellable);
+            if (!proc.get_successful ()) {
+                string combined_output = build_combined_output (stderr_buf, stdout_buf);
+                if (combined_output.length == 0) {
+                    combined_output = "FFmpeg capability probe exited with status %d"
+                        .printf (proc.get_exit_status ());
+                }
+                throw new IOError.FAILED (combined_output);
+            }
+            return build_combined_output (stderr_buf, stdout_buf);
         } catch (Error e) {
-            proc.force_exit ();
+            // Retire the timeout before waiting so cleanup time cannot change
+            // an ordinary failure into a misleading timeout diagnosis.
             if (timeout_id != 0) {
                 Source.remove (timeout_id);
+                timeout_id = 0;
             }
-            cancellable.disconnect (parent_id);
-            if (timed_out) {
+            proc.force_exit ();
+            try {
+                // Cleanup must not use the cancelled token. Returning before
+                // this child is reaped would let the next batch item overlap it.
+                yield proc.wait_async (null);
+            } catch (Error wait_error) {
+                debug ("FFmpeg capability child cleanup failed: %s", wait_error.message);
+            }
+            if (timed_out)
                 throw new IOError.TIMED_OUT ("FFmpeg capability probe timed out");
-            }
+            throw_if_cancelled (cancellable);
             throw e;
+        } finally {
+            if (timeout_id != 0)
+                Source.remove (timeout_id);
+            cancellable.disconnect (parent_id);
         }
-
-        if (timeout_id != 0) {
-            Source.remove (timeout_id);
-        }
-        cancellable.disconnect (parent_id);
-
-        if (!proc.get_successful ()) {
-            string combined_output = build_combined_output (stderr_buf, stdout_buf);
-            if (combined_output.length == 0) {
-                combined_output = "FFmpeg capability probe exited with status %d"
-                    .printf (proc.get_exit_status ());
-            }
-            throw new IOError.FAILED (combined_output);
-        }
-
-        return build_combined_output (stderr_buf, stdout_buf);
     }
 
     private static string describe_probe_error (string message) {

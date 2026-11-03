@@ -80,6 +80,7 @@ sources = files(
   'src/encoders/svt-av1-tab.vala',
   'src/ui/general-tab.vala',
   'src/app/converter.vala',
+  'src/app/bulk-conversion.vala',
   'src/ui/file-pickers.vala',
   'src/ui/path-breadcrumb.vala',
   'src/ui/status-area.vala',
@@ -118,6 +119,7 @@ sources = files(
   'src/encoders/vp9-tab.vala',
   'src/encoders/vp9-builder.vala',
   'src/encoders/codec-presets.vala',
+  'src/encoders/smart-codec-resolver.vala',
   'src/app/app-settings.vala',
   'src/ui/settings-dialog.vala',
   'src/util/subtitle-language-guesser.vala',
@@ -568,6 +570,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/encoders/svt-av1-tab.vala',
       'src/ui/general-tab.vala',
       'src/app/converter.vala',
+      'src/app/bulk-conversion.vala',
       'src/ui/file-pickers.vala',
       'src/ui/path-breadcrumb.vala',
       'src/ui/status-area.vala',
@@ -606,6 +609,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/encoders/vp9-tab.vala',
       'src/encoders/vp9-builder.vala',
       'src/encoders/codec-presets.vala',
+      'src/encoders/smart-codec-resolver.vala',
       'src/app/app-settings.vala',
       'src/ui/settings-dialog.vala',
       'src/util/subtitle-language-guesser.vala',
@@ -650,6 +654,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/encoders/svt-av1-tab.vala',
       'src/ui/general-tab.vala',
       'src/app/converter.vala',
+      'src/app/bulk-conversion.vala',
       'src/ui/file-pickers.vala',
       'src/ui/path-breadcrumb.vala',
       'src/ui/status-area.vala',
@@ -688,6 +693,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/encoders/vp9-tab.vala',
       'src/encoders/vp9-builder.vala',
       'src/encoders/codec-presets.vala',
+      'src/encoders/smart-codec-resolver.vala',
       'src/app/app-settings.vala',
       'src/ui/settings-dialog.vala',
       'src/util/subtitle-language-guesser.vala',
@@ -722,6 +728,44 @@ if fs.exists('tests/combine-window-state-test.vala')
   )
 
   test('combine-window-state', combine_window_state_test, env : headless_gtk_test_env)
+  test(
+    'smart-codec-resolver',
+    combine_window_state_test,
+    args : ['-r', '/smart-codec'],
+    env : headless_gtk_test_env,
+  )
+  test(
+    'prepared-conversion',
+    combine_window_state_test,
+    args : ['-r', '/prepared-conversion'],
+    env : headless_gtk_test_env,
+  )
+  test(
+    'smart-codec-widgets',
+    combine_window_state_test,
+    args : ['-r', '/smart-codec/widgets'],
+    env : display_gtk_test_env,
+    is_parallel : false,
+  )
+  test(
+    'prepared-conversion-widgets',
+    combine_window_state_test,
+    args : ['-r', '/prepared-conversion/widgets'],
+    env : display_gtk_test_env,
+    is_parallel : false,
+  )
+  test('bulk-conversion', combine_window_state_test,
+    args : ['-r', '/bulk-conversion'], env : headless_gtk_test_env, timeout : 180)
+  test('bulk-conversion-widgets', combine_window_state_test,
+    args : ['-r', '/bulk-conversion/widgets'], env : display_gtk_test_env,
+    is_parallel : false, timeout : 180)
+  # Plain-data profile composition must remain usable without a GTK display.
+  test(
+    'encode-profile-snapshot',
+    combine_window_state_test,
+    args : ['-r', '/encode-profile'],
+    env : headless_gtk_test_env,
+  )
   # This path needs a real GTK frame clock, so do not force it through the
   # headless environment used by the broad widget/state suite. It runs as part
   # of the normal test set when a display is available and reports an explicit
@@ -793,6 +837,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/encoders/svt-av1-tab.vala',
       'src/ui/general-tab.vala',
       'src/app/converter.vala',
+      'src/app/bulk-conversion.vala',
       'src/ui/file-pickers.vala',
       'src/ui/path-breadcrumb.vala',
       'src/ui/status-area.vala',
@@ -831,6 +876,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/encoders/vp9-tab.vala',
       'src/encoders/vp9-builder.vala',
       'src/encoders/codec-presets.vala',
+      'src/encoders/smart-codec-resolver.vala',
       'src/app/app-settings.vala',
       'src/ui/settings-dialog.vala',
       'src/util/subtitle-language-guesser.vala',

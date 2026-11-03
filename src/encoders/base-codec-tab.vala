@@ -310,6 +310,7 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
     private string current_file_size_css_class = "source-file-size-none";
     private uint   file_size_generation = 0;
     private int64  source_file_size_bytes = -1;
+    private bool folder_input_mode = false;
 
     private uint pixel_format_sync_idle_id = 0;
 
@@ -843,6 +844,12 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
             return;
         }
 
+        if (folder_input_mode) {
+            target_row.set_subtitle ("Matched separately for each file in the folder");
+            sync_target_mb_css ();
+            return;
+        }
+
         if (source_file_size_bytes <= 0) {
             // Nothing to match — hold the stored default rather than leaving a
             // locked box showing the size of a file that is no longer loaded.
@@ -1000,8 +1007,24 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
      * with a formatted value or a placeholder when no file is selected.
      * Generation tracking discards stale results from superseded queries.
      */
+    public void set_folder_input_mode (bool enabled) {
+        if (folder_input_mode == enabled) return;
+        folder_input_mode = enabled;
+        file_size_generation++;
+        source_file_size_bytes = -1;
+        apply_file_size_display (enabled ? "Source size checked per file" : "No file selected",
+            "source-file-size-none");
+        apply_match_source_size ();
+    }
+
     public void update_source_file_size (string file_path) {
         file_size_generation++;
+        if (folder_input_mode) {
+            source_file_size_bytes = -1;
+            apply_file_size_display ("Source size checked per file", "source-file-size-none");
+            apply_match_source_size ();
+            return;
+        }
 
         if (file_path.strip ().length == 0) {
             source_file_size_bytes = -1;
@@ -1018,11 +1041,17 @@ public abstract class BaseCodecTab : Box, ICodecTab, ISmartCodecTab {
         try {
             var f = GLib.File.new_for_path (file_path);
             var fi = yield f.query_info_async (
-                "standard::size", GLib.FileQueryInfoFlags.NONE,
+                "standard::type,standard::size", GLib.FileQueryInfoFlags.NONE,
                 Priority.DEFAULT, null);
 
             if (generation != file_size_generation) return;
 
+            if (fi.get_file_type () != FileType.REGULAR) {
+                source_file_size_bytes = -1;
+                apply_file_size_display ("Source size checked per file", "source-file-size-none");
+                apply_match_source_size ();
+                return;
+            }
             int64 bytes = fi.get_size ();
             source_file_size_bytes = bytes;
             string formatted = "Source: %s".printf (

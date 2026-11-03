@@ -285,12 +285,25 @@ public class SmartOptimizer : GLib.Object {
     private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
     private SmartOptimizerLogic.TemporalTuning? active_temporal_tuning = null;
     private FfmpegRuntimeCapabilities runtime_capabilities;
+    private ConversionRuntimeOptions? captured_runtime_options;
 
     public SmartOptimizer (
-        FfmpegRuntimeCapabilities? runtime_capabilities = null
+        FfmpegRuntimeCapabilities? runtime_capabilities = null,
+        ConversionRuntimeOptions? runtime_options = null
     ) {
         this.runtime_capabilities = runtime_capabilities
             ?? new FfmpegRuntimeCapabilities ();
+        captured_runtime_options = runtime_options != null ? runtime_options.copy () : null;
+    }
+
+    private string get_ffmpeg_path () {
+        return captured_runtime_options != null
+            ? captured_runtime_options.ffmpeg_path : AppSettings.get_default ().ffmpeg_path;
+    }
+
+    private string get_ffprobe_path () {
+        return captured_runtime_options != null
+            ? captured_runtime_options.ffprobe_path : AppSettings.get_default ().ffprobe_path;
     }
 
     /**
@@ -339,7 +352,7 @@ public class SmartOptimizer : GLib.Object {
         var probe_cancel = cancellable ?? new Cancellable ();
         VmafCapability capability =
             yield runtime_capabilities.get_vmaf_capability (
-                AppSettings.get_default ().ffmpeg_path, probe_cancel);
+                get_ffmpeg_path (), probe_cancel);
 
         if (capability.status != VmafCapabilityStatus.SUPPORTED) {
             throw new IOError.NOT_SUPPORTED (
@@ -353,7 +366,7 @@ public class SmartOptimizer : GLib.Object {
     ) throws Error {
         var probe_cancel = cancellable ?? new Cancellable ();
         return yield runtime_capabilities.get_encoder_pixel_format_capability (
-            AppSettings.get_default ().ffmpeg_path,
+            get_ffmpeg_path (),
             "libx264", PixelFormat.YUV420P10LE, probe_cancel);
     }
 
@@ -2272,7 +2285,7 @@ public class SmartOptimizer : GLib.Object {
         if (claimed <= TAIL_SEEK_TOLERANCE_SECONDS)
             return claimed;                     // too short to discriminate
 
-        string ffprobe = AppSettings.get_default ().ffprobe_path;
+        string ffprobe = get_ffprobe_path ();
         double probe_at = double.max (0.0, claimed - 1.0);
         string[] cmd = {
             ffprobe, "-v", "error", "-select_streams", "v:0",
@@ -2309,7 +2322,7 @@ public class SmartOptimizer : GLib.Object {
 
     /** True when at least one video frame decodes out of @path. */
     private async bool can_decode_a_frame (string path, Cancellable? cancellable) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         string[] cmd = {
             ffmpeg, "-hide_banner", "-v", "error", "-nostdin",
             "-i", path, "-frames:v", "1", "-f", "null", "-"
@@ -2335,7 +2348,7 @@ public class SmartOptimizer : GLib.Object {
      * and the decode is cheap.
      */
     private async double measure_real_duration (string path, Cancellable? cancellable) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         string[] cmd = {
             ffmpeg, "-hide_banner", "-v", "error", "-stats", "-nostdin",
             "-i", path, "-map", "0:v:0", "-f", "null", "-"
@@ -3216,7 +3229,7 @@ public class SmartOptimizer : GLib.Object {
     // ════════════════════════════════════════════════════════════════════════
 
     private async SmartOptimizerVideoInfo probe_video (string path, Cancellable? cancellable = null) throws Error {
-        string ffprobe = AppSettings.get_default ().ffprobe_path;
+        string ffprobe = get_ffprobe_path ();
         string[] cmd = {
             ffprobe, "-v", "quiet", "-print_format", "json",
             "-show_format", "-show_streams", path
@@ -3381,7 +3394,10 @@ public class SmartOptimizer : GLib.Object {
         // which sometimes succeeds when JSON parsing doesn't (e.g. when
         // the JSON field contains "N/A" or is absent).
         if (info.duration <= 0) {
-            info.duration = FfprobeUtils.probe_duration (path);
+            info.duration = yield FfprobeUtils.probe_duration_async (
+                path, cancellable, get_ffprobe_path ());
+            if (cancellable != null && cancellable.is_cancelled ())
+                throw new IOError.CANCELLED ("Smart Optimizer probe cancelled.");
         }
 
         return info;
@@ -3408,7 +3424,7 @@ public class SmartOptimizer : GLib.Object {
 
         string output;
         try {
-            string ffprobe = AppSettings.get_default ().ffprobe_path;
+            string ffprobe = get_ffprobe_path ();
             string[] cmd = {
                 ffprobe, "-v", "error",
                 "-select_streams", "v:0",
@@ -3713,7 +3729,7 @@ public class SmartOptimizer : GLib.Object {
         Cancellable?  cancellable = null,
         string?       temp_run_dir = null
     ) throws Error {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         string tmp = tmp_path ("audio_measure", temp_run_dir);
 
         // Up to three spread sample positions: first / middle / last.
@@ -4270,7 +4286,7 @@ public class SmartOptimizer : GLib.Object {
         filter.append ("n_threads=%d:log_fmt=json:log_path=%s".printf (
             int.max (1, threads), log));
 
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         string[] cmd = {
             ffmpeg, "-hide_banner", "-v", "error", "-nostdin",
             "-i", distorted, "-i", reference,
@@ -4461,7 +4477,7 @@ public class SmartOptimizer : GLib.Object {
         string   filter,
         string   video_filter_chain = ""
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-v");
@@ -4487,7 +4503,7 @@ public class SmartOptimizer : GLib.Object {
         // Dividing afterwards reproduces the conversion's answer for motion
         // and saturation while leaving the grain measurement intact.
         cmd.add ("-filter_complex");
-        cmd.add (concat_filter_spec (positions.length, video_filter_chain)
+        cmd.add (concat_filter_spec (positions.length, video_filter_chain, null, "", positions, seg_dur)
             + ";[v]%s".printf (filter));
         cmd.add ("-f");              cmd.add ("null");
         cmd.add ("-");
@@ -4508,7 +4524,7 @@ public class SmartOptimizer : GLib.Object {
         string   filter,
         string   video_filter_chain = ""
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-v");
@@ -4517,8 +4533,11 @@ public class SmartOptimizer : GLib.Object {
         add_segment_inputs (cmd, path, positions, seg_dur);
 
         cmd.add ("-filter_complex");
+        string[] sample_chains = {};
+        foreach (double position in positions)
+            sample_chains += sample_filter_chain (video_filter_chain, position, seg_dur);
         cmd.add (SmartOptimizerLogic.independent_analysis_filter_spec (
-            positions.length, video_filter_chain, filter));
+            positions.length, video_filter_chain, filter, sample_chains));
         for (int i = 0; i < positions.length; i++) {
             cmd.add ("-map");
             cmd.add ("[analysis%d]".printf (i));
@@ -4545,13 +4564,13 @@ public class SmartOptimizer : GLib.Object {
         double   sampling_fps,
         string   output
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-v"); cmd.add ("warning");
         add_segment_inputs (cmd, path, positions, seg_dur);
 
-        string graph = concat_filter_spec (positions.length, video_filter_chain)
+        string graph = concat_filter_spec (positions.length, video_filter_chain, null, "", positions, seg_dur)
             + ";[v]fps=%s:eof_action=pass,scale=%d:%d:flags=area:out_range=full,"
                 .printf (
                          ConversionUtils.format_ffmpeg_double (sampling_fps, "%.6f"),
@@ -4586,11 +4605,20 @@ public class SmartOptimizer : GLib.Object {
      * Filter-complex spec that optionally pre-filters each segment, then
      * concats them into [v].
      */
+    private static string sample_filter_chain (string chain, double position, double span) {
+        // Match the actual precision of add_segment_inputs' input seek.
+        double seek = double.parse (ConversionUtils.format_ffmpeg_double (position, "%.2f"));
+        double duration = double.parse (ConversionUtils.format_ffmpeg_double (span, "%.3f"));
+        return FilterBuilder.retarget_timed_delogo_filters (chain, seek, duration);
+    }
+
     private string concat_filter_spec (
         int n,
         string video_filter_chain,
         SmartOptimizerImageWatermark? watermark = null,
-        string pix_fmt = ""
+        string pix_fmt = "",
+        double[]? positions = null,
+        double span = 0.0
     ) {
         var fc = new StringBuilder ();
         bool has_vf = (video_filter_chain.length > 0);
@@ -4598,8 +4626,12 @@ public class SmartOptimizer : GLib.Object {
 
         if (has_vf) {
             // Pre-filter each segment, then concat
-            for (int i = 0; i < n; i++)
-                fc.append ("[%d:v]%s[s%d];".printf (i, video_filter_chain, i));
+            for (int i = 0; i < n; i++) {
+                string chain = positions != null && i < positions.length
+                    ? sample_filter_chain (video_filter_chain, positions[i], span)
+                    : video_filter_chain;
+                fc.append ("[%d:v]%s[s%d];".printf (i, chain.length > 0 ? chain : "null", i));
+            }
             for (int i = 0; i < n; i++)
                 fc.append ("[s%d]".printf (i));
         } else {
@@ -4749,7 +4781,7 @@ public class SmartOptimizer : GLib.Object {
         string   output,
         SmartOptimizerImageWatermark? watermark = null
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-y");
@@ -4778,7 +4810,7 @@ public class SmartOptimizer : GLib.Object {
 
         cmd.add ("-filter_complex");
         cmd.add (concat_filter_spec (
-            positions.length, even_chain, watermark, pix_fmt));
+            positions.length, even_chain, watermark, pix_fmt, positions, seg_dur));
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");
 
@@ -4814,7 +4846,7 @@ public class SmartOptimizer : GLib.Object {
         int    encoder_threads,
         string output
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-y");
@@ -4862,7 +4894,7 @@ public class SmartOptimizer : GLib.Object {
         int      encoder_threads = 0,
         SmartOptimizerImageWatermark? watermark = null
     ) {
-        string ffmpeg = AppSettings.get_default ().ffmpeg_path;
+        string ffmpeg = get_ffmpeg_path ();
         var cmd = new GenericArray<string> ();
         cmd.add (ffmpeg);
         cmd.add ("-y");
@@ -4873,7 +4905,7 @@ public class SmartOptimizer : GLib.Object {
 
         cmd.add ("-filter_complex");
         cmd.add (concat_filter_spec (
-            positions.length, video_filter_chain, watermark, pix_fmt));
+            positions.length, video_filter_chain, watermark, pix_fmt, positions, seg_dur));
         cmd.add ("-map");            cmd.add ("[v]");
         cmd.add ("-an");             // no audio for calibration
 
@@ -4895,6 +4927,10 @@ public class SmartOptimizer : GLib.Object {
     }
 
 #if COMBINE_WINDOW_TEST_BUILD || TRIM_SUBTITLES_STATE_TEST_BUILD
+    internal string sampled_filter_graph_for_test (string chain, double[] positions, double span) {
+        return concat_filter_spec (positions.length, chain, null, "", positions, span);
+    }
+
     /** Exact direct-calibration command used when no intermediate is available. */
     internal string[] build_watermarked_calibration_cmd_for_test (
         string input,
@@ -5222,6 +5258,8 @@ public class SmartOptimizer : GLib.Object {
 
     /** Run a command, return its stdout as a string. */
     private async string run_subprocess_stdout (string[] cmd, Cancellable? cancellable = null) throws Error {
+        if (cancellable != null && cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("Smart Optimizer cancelled.");
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
         var proc = SubprocessCompat.spawnv (launcher, cmd);
@@ -5231,6 +5269,11 @@ public class SmartOptimizer : GLib.Object {
             yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
         } catch (Error e) {
             proc.force_exit ();
+            try {
+                yield proc.wait_async (null);
+            } catch (Error wait_error) {
+                debug ("Smart Optimizer child cleanup: %s", wait_error.message);
+            }
             throw e;
         }
         ensure_subprocess_success (proc, cmd, stdout_buf, stderr_buf);
@@ -5239,6 +5282,8 @@ public class SmartOptimizer : GLib.Object {
 
     /** Run a command, return its stderr as a string (for ffmpeg stats parsing). */
     private async string run_subprocess_stderr (string[] cmd, Cancellable? cancellable = null) throws Error {
+        if (cancellable != null && cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("Smart Optimizer cancelled.");
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_PIPE);
         var proc = SubprocessCompat.spawnv (launcher, cmd);
@@ -5248,6 +5293,11 @@ public class SmartOptimizer : GLib.Object {
             yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
         } catch (Error e) {
             proc.force_exit ();
+            try {
+                yield proc.wait_async (null);
+            } catch (Error wait_error) {
+                debug ("Smart Optimizer child cleanup: %s", wait_error.message);
+            }
             throw e;
         }
         ensure_subprocess_success (proc, cmd, stdout_buf, stderr_buf);
@@ -5259,6 +5309,8 @@ public class SmartOptimizer : GLib.Object {
      * Captures stderr so that failure messages are included in thrown errors.
      */
     private async void run_subprocess_wait (string[] cmd, Cancellable? cancellable = null) throws Error {
+        if (cancellable != null && cancellable.is_cancelled ())
+            throw new IOError.CANCELLED ("Smart Optimizer cancelled.");
         var launcher = new SubprocessLauncher (
             SubprocessFlags.STDERR_PIPE | SubprocessFlags.STDOUT_SILENCE);
         var proc = SubprocessCompat.spawnv (launcher, cmd);
@@ -5269,6 +5321,11 @@ public class SmartOptimizer : GLib.Object {
             yield proc.communicate_utf8_async (null, cancellable, out stdout_buf, out stderr_buf);
         } catch (Error e) {
             proc.force_exit ();
+            try {
+                yield proc.wait_async (null);
+            } catch (Error wait_error) {
+                debug ("Smart Optimizer child cleanup: %s", wait_error.message);
+            }
             throw e;
         }
 

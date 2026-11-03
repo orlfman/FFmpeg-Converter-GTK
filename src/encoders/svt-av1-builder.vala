@@ -108,7 +108,7 @@ public class SvtAv1Builder : Object, ICodecBuilder {
         return build_codec_args_from_snapshot (snapshot_settings ());
     }
 
-    private static string[] build_args_from_snapshot (SvtAv1BuilderSnapshot snapshot) {
+    public static string[] build_args_from_snapshot (SvtAv1BuilderSnapshot snapshot) {
         string[] args = {};
 
         // ── Codec & Preset ───────────────────────────────────────────────────

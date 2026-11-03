@@ -2419,15 +2419,18 @@ namespace SmartOptimizerLogic {
     public string independent_analysis_filter_spec (
         int    segment_count,
         string video_filter_chain,
-        string analysis_filter
+        string analysis_filter,
+        string[]? sample_chains = null
     ) {
         var fc = new StringBuilder ();
         for (int i = 0; i < segment_count; i++) {
             if (i > 0)
                 fc.append (";");
             fc.append ("[%d:v]".printf (i));
-            if (video_filter_chain.length > 0)
-                fc.append (video_filter_chain + ",");
+            string chain = sample_chains != null && i < sample_chains.length
+                ? sample_chains[i] : video_filter_chain;
+            if (chain.length > 0)
+                fc.append (chain + ",");
             fc.append (analysis_filter);
             fc.append ("[analysis%d]".printf (i));
         }

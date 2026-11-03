@@ -737,7 +737,10 @@ public class VideoFilters : Object {
 
     public VideoFilterSettingsSnapshot snapshot_settings (bool ten_bit_selected) {
         var snapshot = new VideoFilterSettingsSnapshot ();
-        snapshot.processing_filters = build_processing_filters (ten_bit_selected);
+        snapshot.processing_filters_eight_bit = build_processing_filters (false);
+        snapshot.processing_filters_ten_bit = build_processing_filters (true);
+        snapshot.has_depth_variants = true;
+        snapshot.select_bit_depth (ten_bit_selected);
         snapshot.hdr_filter = build_hdr_filter ();
         return snapshot;
     }

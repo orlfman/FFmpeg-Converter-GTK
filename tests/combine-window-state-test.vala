@@ -7241,8 +7241,2400 @@ private void test_recent_input_menu_repeated_refresh_is_stable () {
     }
 }
 
+// The profile boundary is deliberately testable without constructing GTK
+// widgets: later jobs must not mutate settings already captured for an encode.
+private class ProfileAdapterTrace : Object {
+    public int stage = 0;
+    public int tab_snapshots = 0;
+    public int builder_snapshots = 0;
+}
+
+private class ProfileAdapterBuilder : Object, ICodecBuilder {
+    private ProfileAdapterTrace trace;
+    public GeneralSettingsSnapshot? captured_general = null;
+
+    public ProfileAdapterBuilder (ProfileAdapterTrace trace) {
+        this.trace = trace;
+    }
+
+    public string get_codec_name () {
+        return "x265";
+    }
+
+    public Object? snapshot_settings (GeneralSettingsSnapshot? general_settings = null) {
+        assert_true (trace.stage == 1, "adapter captures effective tab format before builder");
+        trace.stage = 2;
+        trace.builder_snapshots++;
+        captured_general = general_settings;
+        return general_settings != null ? general_settings.copy () : null;
+    }
+
+    public string[] build_codec_args_from_snapshot (Object? snapshot) {
+        var general = snapshot as GeneralSettingsSnapshot;
+        string pix_fmt = general != null && general.pixel_format.ten_bit_selected
+            ? PixelFormat.YUV422P10LE : PixelFormat.YUV420P;
+        return { "-c:v", "libx265", "-pix_fmt", pix_fmt };
+    }
+
+    public string[] get_codec_args () {
+        return {};
+    }
+}
+
+private class ProfileAdapterTab : Object, ICodecTab {
+    private ProfileAdapterTrace trace;
+    private ICodecBuilder builder;
+    public CodecTabSettingsSnapshot settings = new CodecTabSettingsSnapshot ();
+
+    public ProfileAdapterTab (ProfileAdapterTrace trace, ICodecBuilder builder) {
+        this.trace = trace;
+        this.builder = builder;
+    }
+
+    public ICodecBuilder get_codec_builder () {
+        return builder;
+    }
+
+    public bool get_two_pass () {
+        return false;
+    }
+
+    public string get_container () {
+        return settings.container;
+    }
+
+    public CodecTabSettingsSnapshot snapshot_settings (
+        GeneralSettingsSnapshot? general_settings = null) {
+        assert_true (trace.stage == 0, "adapter snapshots the tab once before builder state");
+        trace.stage = 1;
+        trace.tab_snapshots++;
+        return settings.copy ();
+    }
+
+    public KeyframeSettingsSnapshot snapshot_keyframe_settings (
+        GeneralSettingsSnapshot? general_settings) {
+        return settings.keyframe_settings.copy ();
+    }
+
+    public string[] get_audio_args () {
+        return {};
+    }
+}
+
+private void test_encode_profile_composition_does_not_mutate_callers () {
+    var general = new GeneralSettingsSnapshot ();
+    general.pixel_format.ten_bit_selected = true;
+    general.pixel_format.ten_bit_format_text = "10-bit 4:4:4";
+    var codec = new CodecTabSettingsSnapshot ();
+    codec.container = ContainerExt.WEBM;
+    codec.pixel_format.eight_bit_selected = true;
+    codec.audio_settings.codec = AudioCodecName.COPY;
+    codec.audio_settings.source.presence = MediaStreamPresence.PRESENT;
+    codec.audio_settings.source.codec_name = "aac";
+    codec.audio_settings.source.channels = 2;
+    codec.audio_settings.bitrate_kbps = 160;
+    codec.audio_settings.preserve_all_audio_tracks = true;
+    codec.audio_settings.all_sources = { codec.audio_settings.source.copy () };
+    string[] video_args = { "-c:v", "libvpx-vp9", "-crf", "31" };
+
+    var profile = CodecUtils.compose_encode_profile ("vp9", video_args, codec, general);
+
+    assert_array_has_adjacent_pair (profile.audio_args, "-c:a", "libopus",
+        "WebM job transcodes incompatible AAC rather than copying it");
+    assert_array_has_adjacent_pair (profile.audio_args, "-b:a", "160k",
+        "container coercion retains the requested audio budget");
+    assert_true (profile.preserve_all_audio_tracks, "job preserves the track policy");
+    assert_string_equal (codec.audio_settings.codec, AudioCodecName.COPY,
+        "coercion does not replace the user's reusable Copy selection");
+    assert_string_equal (codec.audio_settings.source.codec_name, "aac",
+        "coercion does not rewrite source observations");
+    assert_true (general.pixel_format.ten_bit_selected,
+        "effective job format does not change caller bit-depth selection");
+    assert_false (general.pixel_format.eight_bit_selected,
+        "caller does not acquire codec-local depth selection");
+    assert_string_equal (profile.video_filters, "format=yuv420p",
+        "job filters use the effective codec-local output format");
+    assert_string_equal (profile.overlay_format, "yuv420",
+        "overlay format agrees with the effective job format");
+
+    video_args[1] = "changed-after-capture";
+    assert_array_has_adjacent_pair (profile.codec_args, "-c:v", "libvpx-vp9",
+        "captured codec arguments are independent from the caller array");
+}
+
+private void test_general_settings_copy_isolates_nested_state () {
+    var requested = new GeneralSettingsSnapshot ();
+    requested.pixel_format.ten_bit_selected = true;
+    requested.pixel_format.ten_bit_format_text = "10-bit 4:2:2";
+    requested.video_filters.processing_filters = { "hqdn3d=1:1:1:1", "deband" };
+    requested.video_filters.hdr_filter = "tonemap=tonemap=hable";
+    requested.crop_enabled = true;
+    requested.crop_value = "160:90:4:6";
+    requested.watermark_enabled = true;
+    requested.watermark_text = "shared settings";
+    requested.delogo_enabled = true;
+    requested.delogo_regions = "8:10:20:24";
+
+    var first_job = requested.copy ();
+    first_job.pixel_format.ten_bit_format_text = "10-bit 4:4:4";
+    first_job.video_filters.processing_filters[0] = "null";
+    first_job.video_filters.hdr_filter = "";
+    first_job.crop_value = "80:44:0:0";
+    first_job.watermark_text = "job-specific";
+    first_job.delogo_regions = "1:1:4:4";
+
+    assert_string_equal (requested.pixel_format.ten_bit_format_text, "10-bit 4:2:2",
+        "resolving one job cannot retarget shared pixel settings");
+    assert_string_equal (requested.video_filters.processing_filters[0], "hqdn3d=1:1:1:1",
+        "processing-filter array is not shared across jobs");
+    assert_string_equal (requested.video_filters.hdr_filter, "tonemap=tonemap=hable",
+        "video-filter snapshot object is not shared across jobs");
+    assert_string_equal (requested.crop_value, "160:90:4:6", "shared crop survives job resolution");
+    assert_string_equal (requested.watermark_text, "shared settings", "shared watermark survives");
+    assert_string_equal (requested.delogo_regions, "8:10:20:24", "shared logo regions survive");
+    assert_true (first_job.crop_enabled && first_job.watermark_enabled && first_job.delogo_enabled,
+        "copy retains enabled processing before job-specific changes");
+}
+
+private void test_codec_settings_copy_isolates_source_observations () {
+    var requested = new CodecTabSettingsSnapshot ();
+    requested.container = ContainerExt.WEBM;
+    requested.keyframe_settings.keyint_text = "Custom";
+    requested.keyframe_settings.custom_mode = 3;
+    requested.audio_settings.codec = AudioCodecName.COPY;
+    requested.audio_settings.source.codec_name = "opus";
+    requested.audio_settings.source.channels = 6;
+    requested.audio_settings.all_sources = { requested.audio_settings.source.copy () };
+    requested.audio_processing.normalize_enabled = true;
+    requested.audio_processing.peak_normalize_gain_db = -3.0;
+    requested.pixel_format.ten_bit_selected = true;
+
+    var first_job = requested.copy ();
+    first_job.keyframe_settings.custom_mode = 0;
+    first_job.audio_settings.source.codec_name = "aac";
+    first_job.audio_settings.all_sources[0].channels = 2;
+    first_job.audio_settings.codec = AudioCodecName.AAC;
+    first_job.audio_processing.peak_normalize_gain_db = -9.0;
+    first_job.pixel_format.ten_bit_selected = false;
+
+    assert_true (requested.keyframe_settings.custom_mode == 3, "job keyframe settings are isolated");
+    assert_string_equal (requested.audio_settings.source.codec_name, "opus",
+        "job primary audio observation is isolated");
+    assert_true (requested.audio_settings.all_sources[0].channels == 6,
+        "job audio track observations are deep-copied");
+    assert_string_equal (requested.audio_settings.codec, AudioCodecName.COPY,
+        "job codec decision cannot replace reusable user policy");
+    assert_true (Math.fabs (requested.audio_processing.peak_normalize_gain_db + 3.0) < 1e-9,
+        "per-file normalization result cannot leak to another job");
+    assert_true (requested.pixel_format.ten_bit_selected, "job pixel settings are isolated");
+    assert_string_equal (first_job.container, ContainerExt.WEBM, "copy retains requested container");
+}
+
+private void test_encode_profile_composition_preserves_processing_contract () {
+    var general = new GeneralSettingsSnapshot ();
+    general.delogo_enabled = true;
+    general.delogo_regions = "8:10:20:24";
+    general.rotate = Rotation.HORIZONTAL_FLIP;
+    general.crop_enabled = true;
+    general.crop_value = "160:90:4:6";
+    general.video_filters.processing_filters = { "hqdn3d=1:1:1:1" };
+    general.video_filters.hdr_filter = "tonemap=tonemap=hable";
+    general.scale_mode = ScaleMode.CUSTOM;
+    general.custom_resolution_value = "128:72";
+    general.scale_algorithm = ScaleAlgorithm.POINT;
+    general.scale_range = "full";
+    general.frame_rate_text = FrameRateLabel.CUSTOM;
+    general.custom_frame_rate_text = "24";
+    general.video_speed_enabled = true;
+    general.video_speed_percent = 50.0;
+    general.audio_speed_enabled = true;
+    general.audio_speed_percent = -50.0;
+    general.color_filter = "eq=brightness=0.02";
+    general.preserve_metadata = true;
+    general.remove_chapters = true;
+    general.watermark_enabled = true;
+    general.watermark_mode = "image";
+    general.watermark_image_path = "/synthetic/overlay.png";
+    general.watermark_image_width = 96;
+    general.watermark_position = "Top Left";
+    general.watermark_opacity = 0.75;
+    general.watermark_margin = 7;
+    var codec = new CodecTabSettingsSnapshot ();
+    codec.pixel_format.ten_bit_selected = true;
+    codec.pixel_format.ten_bit_format_text = "10-bit 4:4:4";
+    codec.audio_settings.codec = AudioCodecName.AAC;
+    codec.audio_settings.bitrate_kbps = 192;
+    codec.audio_settings.preserve_all_audio_tracks = true;
+    codec.audio_processing.channel_downmix = 1;
+    codec.audio_processing.normalize_enabled = true;
+    codec.audio_processing.fade_in_enabled = true;
+    codec.audio_processing.fade_in_duration = 0.8;
+    codec.keyframe_settings.keyint_text = "Custom";
+    codec.keyframe_settings.custom_mode = 1;
+    codec.keyframe_settings.frame_rate_text = "24";
+
+    var profile = CodecUtils.compose_encode_profile ("x265",
+        { "-c:v", "libx265", "-crf", "23" }, codec, general);
+    string before_crop = "delogo=x=8:y=10:w=20:h=24,hflip,";
+    string after_crop = "hqdn3d=1:1:1:1,tonemap=tonemap=hable,";
+    string output_filters = "scale=w=128:h=72:flags=point,zscale=range=full,fps=24,";
+    string after_speed = "format=yuv444p10le,eq=brightness=0.02";
+    assert_string_equal (profile.video_filters,
+        before_crop + "crop=160:90:4:6," + after_crop + output_filters
+            + "setpts=0.666667*PTS," + after_speed,
+        "profile retains source-coordinate delogo and complete filter ordering");
+    assert_string_equal (profile.video_filters_skip_crop,
+        before_crop + after_crop + output_filters + "setpts=0.666667*PTS," + after_speed,
+        "crop-free chain preserves all other transformations");
+    assert_false (profile.video_filters_skip_delogo.contains ("delogo="),
+        "deferred-logo chain excludes pre-rendering logo removal");
+    assert_contains (profile.video_filters_skip_delogo, "hflip,crop=160:90:4:6,",
+        "deferred-logo chain retains crop and rotation");
+    assert_false (profile.video_filters_skip_crop_and_delogo.contains ("crop="),
+        "segment-crop chain excludes shared crop");
+    assert_false (profile.video_filters_skip_crop_and_delogo.contains ("delogo="),
+        "segment-crop chain excludes shared delogo");
+    assert_string_equal (profile.combine_video_filters_per_input,
+        before_crop + after_crop + "eq=brightness=0.02",
+        "combine per-input chain excludes shared output geometry and speed");
+    assert_string_equal (profile.combine_video_filters_post_output,
+        output_filters + "format=yuv444p10le",
+        "combine output chain retains scale, frame rate and effective pixel format");
+    assert_string_equal (profile.audio_filters, "atempo=0.500000", "independent audio speed survives");
+    assert_true (Math.fabs (profile.video_speed_multiplier - 1.5) < 1e-9,
+        "video duration policy retains speed multiplier");
+    assert_true (Math.fabs (profile.audio_speed_multiplier - 0.5) < 1e-9,
+        "audio duration policy retains independent speed multiplier");
+    assert_array_has_adjacent_pair (profile.audio_args, "-c:a", "aac", "profile keeps audio encoder");
+    assert_array_has_adjacent_pair (profile.audio_args, "-b:a", "192k", "profile keeps audio budget");
+    assert_array_has_adjacent_pair (profile.audio_args, "-ac", "2", "profile keeps channel downmix");
+    assert_true (profile.preserve_all_audio_tracks && profile.preserve_metadata && profile.remove_chapters,
+        "profile keeps track, metadata and chapter policies");
+    assert_true (profile.audio_processing.normalize_enabled && profile.audio_processing.fade_in_enabled,
+        "profile carries deferred normalization and fade processing");
+    assert_true (Math.fabs (profile.audio_processing.fade_in_duration - 0.8) < 1e-9,
+        "profile retains fade duration");
+    assert_true (profile.delogo_enabled, "profile carries deferred delogo enabled state");
+    assert_string_equal (profile.delogo_regions, "8:10:20:24", "profile carries deferred logo regions");
+    assert_true (profile.watermark_enabled, "profile carries image watermark enabled state");
+    assert_string_equal (profile.watermark_mode, "image", "profile carries image watermark mode");
+    assert_string_equal (profile.watermark_image_path, "/synthetic/overlay.png", "profile carries image identity");
+    assert_true (profile.watermark_image_width == 96 && profile.watermark_margin == 7,
+        "profile carries overlay geometry");
+    assert_true (Math.fabs (profile.watermark_opacity - 0.75) < 1e-9, "profile carries overlay opacity");
+    assert_string_equal (profile.watermark_position, "Top Left", "profile carries overlay position");
+    assert_string_equal (profile.overlay_format, "yuv444p10", "overlay preserves effective output chroma/depth");
+    assert_array_has_adjacent_pair (CodecUtils.build_codec_args_from_snapshot (profile, ""),
+        "-g", "48", "captured 24 fps custom keyframes resolve without probing an input");
+}
+
+private void test_encode_profile_copy_freezes_execution_state () {
+    var profile = new EncodeProfileSnapshot ();
+    profile.codec_name = "x265";
+    profile.codec_args = { "-c:v", "libx265", "-crf", "23" };
+    profile.audio_args = { "-c:a", "aac", "-b:a", "192k" };
+    profile.keyframe_settings = new KeyframeSettingsSnapshot ();
+    profile.keyframe_settings.keyint_text = "Custom";
+    profile.keyframe_settings.custom_mode = 1;
+    profile.keyframe_settings.frame_rate_text = "24";
+    profile.audio_processing.normalize_enabled = true;
+    profile.audio_processing.peak_normalize_gain_db = -2.0;
+    profile.video_filters = "crop=160:90:4:6,format=yuv420p10le";
+    profile.watermark_image_path = "/synthetic/first.png";
+    profile.overlay_format = "yuv420p10";
+
+    var running_job = profile.copy ();
+    profile.codec_args[3] = "40";
+    profile.audio_args[3] = "64k";
+    profile.keyframe_settings.frame_rate_text = "60";
+    profile.audio_processing.peak_normalize_gain_db = -15.0;
+    profile.video_filters = "null";
+    profile.watermark_image_path = "/synthetic/second.png";
+    profile.overlay_format = "yuv420";
+
+    assert_array_has_adjacent_pair (running_job.codec_args, "-crf", "23", "running video args are frozen");
+    assert_array_has_adjacent_pair (running_job.audio_args, "-b:a", "192k", "running audio args are frozen");
+    assert_array_has_adjacent_pair (CodecUtils.build_codec_args_from_snapshot (running_job, ""),
+        "-g", "48", "running keyframe snapshot is deep-copied");
+    assert_true (Math.fabs (running_job.audio_processing.peak_normalize_gain_db + 2.0) < 1e-9,
+        "running audio processing is deep-copied");
+    assert_string_equal (running_job.video_filters, "crop=160:90:4:6,format=yuv420p10le",
+        "running filter chain is frozen");
+    assert_string_equal (running_job.watermark_image_path, "/synthetic/first.png", "running overlay identity is frozen");
+    assert_string_equal (running_job.overlay_format, "yuv420p10", "running overlay format is frozen");
+    var defaults_copy = new EncodeProfileSnapshot ().copy ();
+    assert_true (defaults_copy.keyframe_settings == null, "copy preserves absent keyframe policy");
+}
+
+private void test_encode_profile_jobs_do_not_leak_audio_or_format () {
+    var general = new GeneralSettingsSnapshot ();
+    general.crop_enabled = true;
+    general.crop_value = "160:90:0:0";
+    var codec = new CodecTabSettingsSnapshot ();
+    codec.audio_settings.enabled = false;
+    codec.pixel_format.ten_bit_selected = true;
+    var first = CodecUtils.compose_encode_profile ("x265", { "-c:v", "libx265" }, codec, general);
+
+    codec.audio_settings.enabled = true;
+    codec.audio_settings.codec = AudioCodecName.AAC;
+    codec.audio_settings.bitrate_kbps = 160;
+    codec.pixel_format.ten_bit_selected = false;
+    codec.pixel_format.eight_bit_selected = true;
+    general.crop_value = "80:44:2:2";
+    var second = CodecUtils.compose_encode_profile ("x264", { "-c:v", "libx264" }, codec, general);
+
+    assert_array_contains (first.audio_args, "-an", "no-audio job remains silent");
+    assert_array_not_contains (second.audio_args, "-an", "next audio-enabled job is not contaminated");
+    assert_array_has_adjacent_pair (second.audio_args, "-c:a", "aac", "next job retains independent audio");
+    assert_string_equal (first.video_filters, "crop=160:90:0:0,format=yuv420p10le", "first job retains its geometry and depth");
+    assert_string_equal (second.video_filters, "crop=80:44:2:2,format=yuv420p", "second job uses its geometry and depth");
+    assert_string_equal (first.overlay_format, "yuv420p10", "first job retains overlay depth");
+    assert_string_equal (second.overlay_format, "yuv420", "second job has independent overlay depth");
+    assert_false (general.pixel_format.eight_bit_selected || general.pixel_format.ten_bit_selected,
+        "neither job resolved output format into shared General settings");
+}
+
+private void test_encode_profile_adapter_reconciles_effective_format_privately () {
+    var trace = new ProfileAdapterTrace ();
+    var builder = new ProfileAdapterBuilder (trace);
+    var tab = new ProfileAdapterTab (trace, builder);
+    tab.settings.pixel_format.ten_bit_selected = true;
+    tab.settings.pixel_format.ten_bit_format_text = "10-bit 4:2:2";
+    var general = new GeneralSettingsSnapshot ();
+    general.pixel_format.eight_bit_selected = true;
+    general.crop_enabled = true;
+    general.crop_value = "160:90:0:0";
+
+    var profile = CodecUtils.snapshot_encode_profile (builder, tab, general);
+
+    assert_true (trace.tab_snapshots == 1 && trace.builder_snapshots == 1,
+        "adapter captures tab and builder exactly once");
+    assert_true (builder.captured_general != null && builder.captured_general != general,
+        "builder receives private General state rather than the caller object");
+    assert_array_has_adjacent_pair (profile.codec_args, "-pix_fmt", "yuv422p10le",
+        "builder receives the codec's effective format before capturing arguments");
+    assert_string_equal (profile.video_filters, "crop=160:90:0:0,format=yuv422p10le",
+        "filters and builder agree on effective chroma/depth");
+    assert_string_equal (profile.overlay_format, "yuv422p10", "overlay agrees with builder format");
+    assert_true (general.pixel_format.eight_bit_selected, "adapter retains caller's 8-bit selection");
+    assert_false (general.pixel_format.ten_bit_selected, "adapter does not write effective depth into caller");
+}
+
+private void test_encode_profile_composition_without_general_uses_defaults () {
+    var codec = new CodecTabSettingsSnapshot ();
+    codec.audio_settings.enabled = false;
+    codec.container = "";
+    var profile = CodecUtils.compose_encode_profile ("x264", { "-c:v", "libx264" }, codec, null);
+
+    assert_string_equal (profile.container, ContainerExt.MKV, "empty container retains profile fallback");
+    assert_array_contains (profile.audio_args, "-an", "audio disable works without General state");
+    assert_string_equal (profile.video_filters, "", "absent General state adds no filters");
+    assert_string_equal (profile.audio_filters, "", "absent General state adds no speed filters");
+    assert_false (profile.watermark_enabled || profile.delogo_enabled, "absent General state adds no overlays");
+    assert_true (profile.video_speed_multiplier == 1.0 && profile.audio_speed_multiplier == 1.0,
+        "absent General state retains neutral duration multipliers");
+}
+
+// Captured from LegacyCodecPresets (pre-extraction implementation) using
+// actual GTK widgets on 2026-11-02. Case order: codec x effort x pass.
+// These values must not be regenerated from the resolver under test.
+private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
+    // x264
+    "e35e995894090fc338f6dd3ae0da0e715c5986f3f000c82f5330ede974c56bed",
+    "ea6e97466f45ccb612046fb47fcdefec8ec1027ee675996d79d508f3777df2b8",
+    "7ef6cec52b87c69c831bf2c83aa93e3f6746a445b0fce83e9a457df23b1f11db",
+    "3275d8f304b6bd551008595181241134728d29971813dd17c2ddc63592563753",
+    "90317aba6c8681ff0acef52ab53e88001a3d2a8dcc2b67970f353ac1e6913c2e",
+    "c8c617cfa48d9f58bb4e8d4478ee94a9b5ea26c95116d32e50b22dd214ee3c4c",
+    "804569cf4d8f3d7cdeee5002674b94e7a425271baea4bed90dd3be2d51a81fd9",
+    "d2977e7d3742aa5c2b15c197a2035e28b744fd20145a5b4a4bb1e0ef46d6f2f8",
+    "5bc50196dbbf58a078ba0f789f09661ea6ba2637eecdc5e5896dd29d0f8d8ba6",
+    "9954489d4fd18565131c2e2f9543ea1260e5b4473c4806dcdb06c8ac97b698a2",
+    // x265
+    "d1f41b6e0daf5bcb92ce33c82688113fb9deea6f7cf75bf49361d2b1a89711f9",
+    "519aa4097a49c55fa4188ea88f112e5263d8720650187e288ed5a45df2ef4a8b",
+    "7f109c7c6a627194cc30c73a8edfb09973bbc124c4fbb2907e1a47f85bd86ea6",
+    "0472c45904b116adfd204f6a5906b4d9c8e3e17c24b31a4b9679899547bb3cd0",
+    "eed1a2d41b6d150753c671f216510229e365374c4bcf7b4b81a40928e5bb43c0",
+    "520ecd28cf2dee99f21673c12534a0245b36e5e3c114b1caf159867079a9d6ca",
+    "310da3878c190ac1c74f311c294052dc7666e06622b6a3eda4e19023cfc7a82e",
+    "e02c417be205ec7485e77304cf993be7a1ed9c5c18ac186889f2b23011e30d94",
+    "796ceed22cae4223cd45fc29273be906a8c7cb250be9b74d3db2bd138c5a2404",
+    "e4fbee7bcf2c5aded6f557c4264aed07afe4d52f51a38195b0c9e378af6eb943",
+    // VP9
+    "f78cb8456b4951f89f8684c5d1d5ad2e3783446a3e28a64888feb9f8a70782f5",
+    "445b0ba6a1404d0a09813476e45deb7814c4e3f78b5015771c45fe97da9400f3",
+    "056ef2c9800038797cd2e38d4cad20618cefcf0e86f1f9c79b8e272cbe72ff8b",
+    "d04d03ada317b4b897278c694b6858614a1193e7dfad492aea90944c99a538b9",
+    "93358514b3cf4cd30e0349b199cbcaf399f26afeeffa0ee25d4c896be42c8a49",
+    "6b55a1ed1b6d78f95ef73fc1f5e625931f44702a36307efafad309ee0942b1c7",
+    "859f620fbeaf23922a2bcae32f7eb43277dc8d954518499bfb0d029fd0286d33",
+    "d6ee7b88e8e92734ded957e67c40cb2ba1667de832561f96d21235a7ea468198",
+    "a6528bc4d205e4831c574a807a56f184cba9f5dc9e145db1043b52d9dc02c863",
+    "375906a09401d866801ad9ead3652255aa9ff5dc819f88a8e3a54a3161ccaabb",
+    // SVT-AV1
+    "605d1685ba990aa77118fc81970351f98743177da6d0701b8f30a09bafdff7af",
+    "679d97fb99da56df3df4f73b328388fec22ffdcc9f47d845b67284747b78cef2",
+    "5272202085a227e7ee211ad950785651486711c9b1841a2b889f81e09b57ee2a",
+    "ff379af935ea933a0627352dd1b189c5b90920cf330c69753d1f4f87ecedb8af",
+    "190c9f9c5b1f55b1a68933b5c1bc28330843214f9536a72319e77aedaffbc4de",
+    "b2970f6d03c7bc3a4b6613283aaf9bc8ddf382ec9744725bcc6baaf3276f5cbf",
+    "8e14025adaeccf3bd1403950bad05481f12e2b09daf5a359411719ec5358965c",
+    "891ef1e966600e1e42e05ed2ebfe8b02b69b14d73e50577d27236adb9bfe12de",
+    "2f984a6b8f795405abef0d2587657b46a33b8254bc1c1c552e5297b185a29d7e",
+    "cadad9457933fb1d9ec8d7bcf3ad83f8e6620968f5102a5af565b36bd161b07b",
+};
+
+// Full-profile goldens are captured from the pre-extraction widget appliers,
+// not from SmartCodecResolver. This keeps policy parity independently checked
+// after the ordinary widget path also starts using the shared resolver.
+private string smart_codec_case_name (int codec_index) {
+    switch (codec_index) {
+        case 0: return "x264";
+        case 1: return "x265";
+        case 2: return "vp9";
+        default: return "svt-av1";
+    }
+}
+
+private OptimizationRecommendation make_smart_codec_case_recommendation (int index) {
+    int codec_index = index / 10;
+    int effort_index = (index % 10) / 2;
+    bool two_pass = (index % 2) != 0;
+    string codec = smart_codec_case_name (codec_index);
+    bool ten_bit = (effort_index % 2) != 0;
+    return OptimizationRecommendation () {
+        codec = codec,
+        crf = 20 + effort_index * 3,
+        preset = codec_index == 2 ? "cpu-used 4"
+            : codec_index == 3 ? "preset 6" : "slow",
+        two_pass = two_pass,
+        target_bitrate_kbps = two_pass ? 1700 + effort_index * 100 : 0,
+        content_type = (ContentType) (effort_index % 4),
+        effort = (EncodeEffort) effort_index,
+        size_tier = (SizeTier) effort_index,
+        pinned_axis = two_pass ? PinnedAxis.SIZE : PinnedAxis.QUALITY,
+        recommended_pix_fmt = ten_bit ? PixelFormat.YUV420P10LE : PixelFormat.YUV420P,
+        source_bit_depth = ten_bit ? 10 : 8,
+        grain_score = effort_index == 4 ? 0.008 : 0.0,
+        detail_score = 0.7,
+        fast_decode = effort_index == 3,
+        native_sharpness = effort_index >= 3 ? 2 : 0,
+        keyint_frames = 173,
+        lookahead_frames = effort_index == 0 ? 0
+            : codec_index == 2 ? 10 + effort_index * 3 : 24 + effort_index * 4,
+        force_compat_container = effort_index == 0 && two_pass,
+        resolved_container = effort_index == 0 && two_pass
+            ? ((codec_index < 2) ? ContainerExt.MP4 : ContainerExt.WEBM)
+            : ContainerExt.MKV,
+        stream_copy_audio = effort_index == 2,
+        audio_encode_kbps = effort_index == 1 || effort_index == 2 ? 0
+            : effort_index == 3 ? 256 : 192,
+        recommended_audio_kbps = effort_index == 2 ? 96 : 192,
+        preserve_all_audio_tracks_effective = effort_index >= 3,
+        strip_metadata = effort_index == 0,
+        notes = "synthetic recommendation for parity coverage"
+    };
+}
+
+private bool smart_codec_case_copy_allowed (int index) {
+    return !(((index % 10) / 2) == 2 && (index % 2) != 0);
+}
+
+private bool smart_codec_case_strip_audio (int index) {
+    return ((index % 10) / 2) == 4 && (index % 2) != 0;
+}
+
+private GeneralSettingsSnapshot make_smart_codec_case_general (int index) {
+    var general = new GeneralSettingsSnapshot ();
+    general.crop_enabled = true;
+    general.crop_value = "320:180:4:6";
+    general.frame_rate_text = FrameRateLabel.CUSTOM;
+    general.custom_frame_rate_text = "24";
+    general.video_filters.processing_filters = { "hqdn3d=1:1:1:1" };
+    general.color_filter = "eq=brightness=0.02";
+    general.preserve_metadata = true;
+    general.remove_chapters = (index % 2) != 0;
+    general.watermark_enabled = true;
+    general.watermark_mode = "image";
+    general.watermark_image_path = "/synthetic/watermark.png";
+    general.watermark_image_width = 64;
+    general.watermark_position = "Top Left";
+    general.watermark_margin = 8;
+    general.watermark_opacity = 0.75;
+    general.delogo_enabled = true;
+    general.delogo_regions = "8:10:20:24";
+    general.audio_speed_enabled = !smart_codec_case_copy_allowed (index);
+    general.audio_speed_percent = general.audio_speed_enabled ? 25.0 : 0.0;
+    general.video_speed_enabled = ((index % 10) / 2) == 4;
+    general.video_speed_percent = general.video_speed_enabled ? 25.0 : 0.0;
+    return general;
+}
+
+private CodecTabSettingsSnapshot make_smart_codec_case_requested (int index) {
+    int codec_index = index / 10;
+    bool absent = (index % 10) == 0;
+    var requested = new CodecTabSettingsSnapshot ();
+    requested.container = ContainerExt.MKV;
+    requested.audio_settings.preserve_all_audio_tracks = true;
+    requested.audio_settings.enabled = !absent;
+    requested.audio_settings.source.presence = absent
+        ? MediaStreamPresence.ABSENT : MediaStreamPresence.PRESENT;
+    requested.audio_settings.source.codec_name = absent ? "" : codec_index < 2 ? "aac" : "opus";
+    requested.audio_settings.source.channels = absent ? 0 : 2;
+    requested.audio_settings.source.sample_fmt = absent ? "" : "fltp";
+    if (!absent) {
+        requested.audio_settings.all_sources = {
+            requested.audio_settings.source.copy (), requested.audio_settings.source.copy ()
+        };
+        requested.audio_settings.all_sources[1].stream_index = 1;
+    }
+    requested.audio_processing.normalize_enabled = true;
+    requested.audio_processing.fade_in_enabled = true;
+    requested.audio_processing.channel_downmix = 2;
+    return requested;
+}
+
+private void append_smart_profile_token (StringBuilder text, string name, string value) {
+    text.append_printf ("%s:%d:%s\n", name, value.length, value);
+}
+
+private void append_smart_profile_array (StringBuilder text, string name, string[] values) {
+    append_smart_profile_token (text, name + ".length", values.length.to_string ());
+    for (int i = 0; i < values.length; i++) {
+        append_smart_profile_token (text, name + "." + i.to_string (), values[i]);
+    }
+}
+
+private string serialize_smart_codec_profile (EncodeProfileSnapshot profile, bool two_pass) {
+    var text = new StringBuilder ();
+    append_smart_profile_token (text, "codec", profile.codec_name);
+    append_smart_profile_token (text, "container", profile.container);
+    append_smart_profile_token (text, "two_pass", two_pass.to_string ());
+    append_smart_profile_array (text, "codec_args", profile.codec_args);
+    append_smart_profile_array (text, "audio_args", profile.audio_args);
+    append_smart_profile_token (text, "all_audio", profile.preserve_all_audio_tracks.to_string ());
+    KeyframeSettingsSnapshot? keyframes = profile.keyframe_settings;
+    append_smart_profile_token (text, "keyframes.present", (keyframes != null).to_string ());
+    if (keyframes != null) {
+        append_smart_profile_token (text, "keyframes.interval", keyframes.keyint_text);
+        append_smart_profile_token (text, "keyframes.mode", keyframes.custom_mode.to_string ());
+        append_smart_profile_token (text, "keyframes.fps", keyframes.frame_rate_text);
+        append_smart_profile_token (text, "keyframes.custom_fps", keyframes.custom_frame_rate_text);
+    }
+    append_smart_profile_token (text, "video", profile.video_filters);
+    append_smart_profile_token (text, "video.skip_crop", profile.video_filters_skip_crop);
+    append_smart_profile_token (text, "video.skip_delogo", profile.video_filters_skip_delogo);
+    append_smart_profile_token (text, "video.skip_crop_delogo", profile.video_filters_skip_crop_and_delogo);
+    append_smart_profile_token (text, "combine.input", profile.combine_video_filters_per_input);
+    append_smart_profile_token (text, "combine.output", profile.combine_video_filters_post_output);
+    append_smart_profile_token (text, "audio.filters", profile.audio_filters);
+    append_smart_profile_token (text, "video.speed", ConversionUtils.format_ffmpeg_double (profile.video_speed_multiplier, "%.6f"));
+    append_smart_profile_token (text, "audio.speed", ConversionUtils.format_ffmpeg_double (profile.audio_speed_multiplier, "%.6f"));
+    append_smart_profile_token (text, "audio.normalize", profile.audio_processing.normalize_enabled.to_string ());
+    append_smart_profile_token (text, "audio.ebu", profile.audio_processing.normalize_ebu.to_string ());
+    append_smart_profile_token (text, "audio.peak", ConversionUtils.format_ffmpeg_double (profile.audio_processing.peak_normalize_gain_db, "%.6f"));
+    append_smart_profile_token (text, "audio.fade_in", profile.audio_processing.fade_in_enabled.to_string ());
+    append_smart_profile_token (text, "audio.fade_in_duration", ConversionUtils.format_ffmpeg_double (profile.audio_processing.fade_in_duration, "%.6f"));
+    append_smart_profile_token (text, "audio.fade_out", profile.audio_processing.fade_out_enabled.to_string ());
+    append_smart_profile_token (text, "audio.fade_out_duration", ConversionUtils.format_ffmpeg_double (profile.audio_processing.fade_out_duration, "%.6f"));
+    append_smart_profile_token (text, "audio.downmix", profile.audio_processing.channel_downmix.to_string ());
+    append_smart_profile_token (text, "metadata", profile.preserve_metadata.to_string ());
+    append_smart_profile_token (text, "chapters.remove", profile.remove_chapters.to_string ());
+    append_smart_profile_token (text, "delogo", profile.delogo_enabled.to_string ());
+    append_smart_profile_token (text, "delogo.regions", profile.delogo_regions);
+    append_smart_profile_token (text, "watermark", profile.watermark_enabled.to_string ());
+    append_smart_profile_token (text, "watermark.mode", profile.watermark_mode);
+    append_smart_profile_token (text, "watermark.image", profile.watermark_image_path);
+    append_smart_profile_token (text, "watermark.width", profile.watermark_image_width.to_string ());
+    append_smart_profile_token (text, "watermark.position", profile.watermark_position);
+    append_smart_profile_token (text, "watermark.opacity", ConversionUtils.format_ffmpeg_double (profile.watermark_opacity, "%.6f"));
+    append_smart_profile_token (text, "watermark.margin", profile.watermark_margin.to_string ());
+    append_smart_profile_token (text, "watermark.format", profile.overlay_format);
+    return text.str;
+}
+
+private BaseCodecTab make_smart_codec_case_tab (int index) {
+    switch (index / 10) {
+        case 0: return new X264Tab ();
+        case 1: return new X265Tab ();
+        case 2: return new Vp9Tab ();
+        default: return new SvtAv1Tab ();
+    }
+}
+
+private EncodeProfileSnapshot capture_smart_codec_widget_case (
+    int index, out bool two_pass) {
+    var rec = make_smart_codec_case_recommendation (index);
+    var requested = make_smart_codec_case_requested (index);
+    var general = make_smart_codec_case_general (index);
+    BaseCodecTab tab = make_smart_codec_case_tab (index);
+    CodecPresets.set_dropdown_by_label (tab.container_combo, requested.container);
+    var probe = new AudioStreamProbeResult () {
+        presence = requested.audio_settings.source.presence,
+        codec_name = requested.audio_settings.source.codec_name,
+        channels = requested.audio_settings.source.channels,
+        sample_fmt = requested.audio_settings.source.sample_fmt,
+        all_sources = requested.audio_settings.all_sources
+    };
+    tab.audio_settings.apply_source_audio_probe_result (probe);
+    tab.audio_settings.set_keep_all_audio_requested (true);
+    tab.audio_settings.update_for_audio_speed (general.audio_speed_enabled);
+    tab.audio_processing_settings.apply_snapshot (requested.audio_processing);
+
+    tab.apply_smart_recommendation (rec);
+    // These effects belonged to AppController, outside the codec appliers.
+    if (rec.strip_metadata)
+        general.preserve_metadata = false;
+    if (smart_codec_case_strip_audio (index))
+        tab.audio_settings.set_audio_enabled (false);
+    two_pass = tab.get_two_pass ();
+    return CodecUtils.snapshot_encode_profile (tab.get_codec_builder (), tab, general);
+}
+
+
+
+
+private void assert_smart_codec_case_digest (int index, EncodeProfileSnapshot profile, bool two_pass) {
+    string serialized = serialize_smart_codec_profile (profile, two_pass);
+    string actual = Checksum.compute_for_string (ChecksumType.SHA256, serialized);
+    string expected = SMART_CODEC_GOLDEN_DIGESTS[index];
+    if (actual != expected) {
+        Test.fail_printf ("smart codec case %d (%s, effort %d, pass %d) expected legacy digest %s but got %s; profile: %s",
+            index, smart_codec_case_name (index / 10), (index % 10) / 2, index % 2,
+            expected, actual, serialized);
+    }
+}
+
+private void test_smart_codec_resolver_matches_legacy_goldens () {
+    for (int index = 0; index < 40; index++) {
+        var requested = make_smart_codec_case_requested (index);
+        var general = make_smart_codec_case_general (index);
+        var rec = make_smart_codec_case_recommendation (index);
+        var result = SmartCodecResolver.resolve (rec, requested, general,
+            smart_codec_case_copy_allowed (index), smart_codec_case_strip_audio (index));
+        assert_true (result != null, "known codec recommendation resolves");
+        if (result == null) return;
+        assert_smart_codec_case_digest (index, result.to_profile (), result.two_pass);
+    }
+}
+
+private void test_smart_codec_widgets_match_legacy_goldens () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    for (int index = 0; index < 40; index++) {
+        bool two_pass;
+        var profile = capture_smart_codec_widget_case (index, out two_pass);
+        assert_smart_codec_case_digest (index, profile, two_pass);
+    }
+}
+
+private void test_smart_codec_resolver_retains_complete_effort_policy () {
+    var x264 = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (8),
+        make_smart_codec_case_requested (8), make_smart_codec_case_general (8));
+    assert_true (x264 != null && x264.builder_settings is X264BuilderSnapshot,
+        "x264 has a typed complete builder snapshot");
+    if (x264 == null) return;
+    var x264_settings = (X264BuilderSnapshot) x264.builder_settings;
+    assert_string_equal (x264_settings.ref_frames, "8", "maximum x264 effort uses eight references");
+    assert_true (x264_settings.bframes == 8 && x264_settings.b_adapt == 2
+            && x264_settings.subme == 11 && x264_settings.me_range == 32,
+        "maximum x264 effort preserves B frames, adaptation and motion search");
+    assert_true (Math.fabs (x264_settings.psy_trellis - 0.25) < 1e-9
+            && x264_settings.open_gop && x264_settings.cabac && x264_settings.mbtree,
+        "maximum x264 effort preserves psy, open GOP and entropy decisions");
+    string[] x264_args = x264.to_profile ().codec_args;
+    assert_contains (get_argv_value_after (x264_args, "-x264-params", "x264 complete parameters"),
+        "ref=8:bframes=8:b-adapt=2:deblock=-1,-1:me=umh:merange=32:subme=11:psy-rd=1.0,0.25",
+        "complete x264 command includes effort policy omitted by the trim shortcut");
+
+    var x265 = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (18),
+        make_smart_codec_case_requested (18), make_smart_codec_case_general (18));
+    assert_true (x265 != null && x265.builder_settings is X265BuilderSnapshot,
+        "x265 has a typed complete builder snapshot");
+    if (x265 == null) return;
+    var x265_settings = (X265BuilderSnapshot) x265.builder_settings;
+    assert_string_equal (x265_settings.ref_frames, "5", "maximum x265 effort uses five references");
+    assert_true (x265_settings.pmode && x265_settings.sao && x265_settings.cutree
+            && x265_settings.deblock_alpha == -1 && x265_settings.deblock_beta == -1,
+        "maximum x265 effort preserves parallel, perceptual and deblock settings");
+    assert_contains (get_argv_value_after (x265.to_profile ().codec_args, "-x265-params", "x265 complete parameters"),
+        "ref=5:deblock=-1,-1:pmode=1:psy-rd=",
+        "complete x265 command includes effort policy");
+
+    var vp9 = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (28),
+        make_smart_codec_case_requested (28), make_smart_codec_case_general (28));
+    assert_true (vp9 != null && vp9.builder_settings is Vp9BuilderSnapshot,
+        "VP9 has a typed complete builder snapshot");
+    if (vp9 == null) return;
+    var vp9_settings = (Vp9BuilderSnapshot) vp9.builder_settings;
+    assert_true (vp9_settings.altref_enabled && vp9_settings.arnr_maxframes == 15
+            && vp9_settings.arnr_strength == 6 && vp9_settings.row_mt && !vp9_settings.frame_parallel,
+        "maximum VP9 effort preserves denoising and threading policy");
+    assert_string_equal (vp9_settings.aq_mode, "Complexity", "VP9 adaptive quantization is retained");
+    assert_array_has_adjacent_pair (vp9.to_profile ().codec_args, "-arnr-maxframes", "15",
+        "complete VP9 command retains alt-ref effort");
+
+    var svt = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (38),
+        make_smart_codec_case_requested (38), make_smart_codec_case_general (38));
+    assert_true (svt != null && svt.builder_settings is SvtAv1BuilderSnapshot,
+        "SVT has a typed complete builder snapshot");
+    if (svt == null) return;
+    var svt_settings = (SvtAv1BuilderSnapshot) svt.builder_settings;
+    assert_true (svt_settings.grain_enabled && svt_settings.grain_denoise_selected == 1
+            && svt_settings.qm_enabled && svt_settings.qm_min == 8 && svt_settings.qm_max == 15,
+        "grainy maximum-effort SVT retains film grain and quantization matrices");
+    string svt_params = get_argv_value_after (svt.to_profile ().codec_args, "-svtav1-params", "SVT complete parameters");
+    assert_contains (svt_params, "film-grain=", "complete SVT command retains measured grain policy");
+    assert_contains (svt_params, "film-grain-denoise=1", "complete SVT command retains grain denoise mode");
+    assert_contains (svt_params, "qm-min=8:qm-max=15", "complete SVT command retains effort-specific QM range");
+}
+
+private void test_smart_codec_resolver_audio_policy_and_processing_reset () {
+    var requested = make_smart_codec_case_requested (4);
+    var general = make_smart_codec_case_general (4);
+    var rec = make_smart_codec_case_recommendation (4);
+    rec.preserve_all_audio_tracks_effective = false;
+    rec.recommended_audio_kbps = 96;
+    general.audio_speed_enabled = true;
+    general.audio_speed_percent = 25.0;
+    // No UI-derived copy_allowed argument: General speed must itself forbid Copy.
+    var result = SmartCodecResolver.resolve (rec, requested, general);
+    assert_true (result != null, "copy-constrained recommendation resolves");
+    if (result == null) return;
+    var profile = result.to_profile ();
+    assert_array_has_adjacent_pair (profile.audio_args, "-c:a", "aac",
+        "General audio speed forces re-encode even when copy_allowed defaults true");
+    assert_array_has_adjacent_pair (profile.audio_args, "-b:a", "128k",
+        "copy fallback rounds the 96 kbps source budget up to the next supported rung");
+    assert_false (profile.audio_processing.normalize_enabled
+            || profile.audio_processing.fade_in_enabled || profile.audio_processing.fade_out_enabled,
+        "normal Smart Optimizer reset semantics discard codec-local processing");
+    assert_true (profile.audio_processing.channel_downmix == 0,
+        "normal Smart Optimizer reset semantics discard codec-local downmix");
+    assert_false (profile.preserve_all_audio_tracks, "effective recommendation track policy wins");
+    assert_true (requested.audio_settings.preserve_all_audio_tracks
+            && requested.audio_processing.normalize_enabled && requested.audio_processing.channel_downmix == 2,
+        "resolving does not erase reusable requested policy or processing values");
+
+    var stripped = SmartCodecResolver.resolve (rec, requested, general, true, true);
+    assert_true (stripped != null, "explicit No Audio recommendation resolves");
+    if (stripped != null)
+        assert_array_contains (stripped.to_profile ().audio_args, "-an", "explicit No Audio is carried to output");
+
+    var absent = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (0),
+        make_smart_codec_case_requested (0), make_smart_codec_case_general (0));
+    assert_true (absent != null, "silent source recommendation resolves");
+    if (absent != null)
+        assert_array_contains (absent.to_profile ().audio_args, "-an",
+            "source with no audio stays silent after default audio reset");
+}
+
+private void test_smart_codec_resolver_owns_inputs_and_profiles () {
+    var requested = make_smart_codec_case_requested (19);
+    var general = make_smart_codec_case_general (19);
+    var rec = make_smart_codec_case_recommendation (19);
+    var result = SmartCodecResolver.resolve (rec, requested, general);
+    assert_true (result != null, "independent recommendation resolves");
+    if (result == null) return;
+    var first = result.to_profile ();
+    string frozen = serialize_smart_codec_profile (first, result.two_pass);
+    requested.audio_settings.source.codec_name = "changed";
+    requested.audio_settings.all_sources[0].channels = 8;
+    requested.audio_processing.normalize_enabled = false;
+    general.crop_value = "16:16:0:0";
+    general.video_filters.processing_filters[0] = "null";
+    general.watermark_image_path = "/synthetic/replaced.png";
+    assert_string_equal (serialize_smart_codec_profile (result.to_profile (), result.two_pass), frozen,
+        "caller changes cannot rewrite an existing resolved job");
+    result.codec_settings.audio_settings.codec = AudioCodecName.FLAC;
+    if (result.general_settings != null)
+        result.general_settings.watermark_image_path = "/synthetic/another.png";
+    assert_string_equal (serialize_smart_codec_profile (first, result.two_pass), frozen,
+        "later changes to resolution data cannot rewrite an already captured execution profile");
+
+    var tiny = make_smart_codec_case_recommendation (1);
+    var tiny_general = make_smart_codec_case_general (1);
+    var tiny_result = SmartCodecResolver.resolve (tiny, make_smart_codec_case_requested (1), tiny_general);
+    assert_true (tiny_result != null, "metadata-stripping recommendation resolves");
+    if (tiny_result != null) {
+        assert_false (tiny_result.to_profile ().preserve_metadata,
+            "recommendation metadata stripping reaches the resolved profile");
+    }
+    assert_true (tiny_general.preserve_metadata,
+        "recommendation metadata policy does not change the caller's General preferences");
+    rec.codec = "unknown";
+    assert_true (SmartCodecResolver.resolve (rec, requested, general) == null,
+        "unknown codecs cannot silently become a different encoder");
+}
+
+private void test_smart_codec_resolver_preserves_inactive_crf_defaults () {
+    for (int codec_index = 0; codec_index < 4; codec_index++) {
+        int index = codec_index * 10 + 9;
+        var result = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (index),
+            make_smart_codec_case_requested (index), make_smart_codec_case_general (index));
+        assert_true (result != null && result.two_pass, "bitrate recommendation resolves as two-pass");
+        if (result == null) return;
+        int inactive_crf = -1;
+        int expected = 28;
+        if (result.builder_settings is X264BuilderSnapshot) {
+            inactive_crf = ((X264BuilderSnapshot) result.builder_settings).crf;
+            expected = 23;
+        } else if (result.builder_settings is X265BuilderSnapshot) {
+            inactive_crf = ((X265BuilderSnapshot) result.builder_settings).crf;
+        } else if (result.builder_settings is Vp9BuilderSnapshot) {
+            inactive_crf = ((Vp9BuilderSnapshot) result.builder_settings).crf;
+            expected = 31;
+        } else if (result.builder_settings is SvtAv1BuilderSnapshot) {
+            inactive_crf = ((SvtAv1BuilderSnapshot) result.builder_settings).crf;
+        }
+        assert_true (inactive_crf == expected,
+            "inactive CRF retains the legacy reset default while two-pass bitrate is selected");
+    }
+}
+
+private void test_smart_codec_resolver_selects_owned_filter_depth_variants () {
+    const string EIGHT_BIT_FILTER = "nlmeans=s=3.000:p=7:r=15";
+    const string TEN_BIT_FILTER = "nlmeans=s=0.1875:p=7:r=15";
+    var general = make_smart_codec_case_general (12);
+    general.pixel_format.eight_bit_selected = true;
+    general.video_filters.has_depth_variants = true;
+    general.video_filters.processing_filters_eight_bit = { EIGHT_BIT_FILTER };
+    general.video_filters.processing_filters_ten_bit = { TEN_BIT_FILTER };
+    general.video_filters.processing_filters = { EIGHT_BIT_FILTER };
+    var requested = make_smart_codec_case_requested (12);
+    var rec = make_smart_codec_case_recommendation (12);
+    rec.recommended_pix_fmt = PixelFormat.YUV420P10LE;
+    rec.source_bit_depth = 10;
+
+    var ten_bit_job = SmartCodecResolver.resolve (rec, requested, general);
+    assert_true (ten_bit_job != null, "10-bit recommendation resolves with captured filter variants");
+    if (ten_bit_job == null) return;
+    string ten_bit_chain = ten_bit_job.to_profile ().video_filters;
+    assert_contains (ten_bit_chain, TEN_BIT_FILTER,
+        "resolved output depth selects the matching captured filter variant");
+    assert_false (ten_bit_chain.contains (EIGHT_BIT_FILTER),
+        "10-bit profile does not retain the previously active 8-bit filter strength");
+    assert_string_equal (general.video_filters.processing_filters[0], EIGHT_BIT_FILTER,
+        "resolving output depth does not overwrite the caller's active filters");
+    assert_true (general.pixel_format.eight_bit_selected && !general.pixel_format.ten_bit_selected,
+        "resolving output depth leaves the caller's bit-depth selection unchanged");
+
+    var copied = general.copy ();
+    copied.video_filters.processing_filters_eight_bit[0] = "null";
+    copied.video_filters.processing_filters_ten_bit[0] = "negate";
+    copied.video_filters.select_bit_depth (true);
+    assert_string_equal (general.video_filters.processing_filters_eight_bit[0], EIGHT_BIT_FILTER,
+        "copied 8-bit variant array is independently owned");
+    assert_string_equal (general.video_filters.processing_filters_ten_bit[0], TEN_BIT_FILTER,
+        "copied 10-bit variant array is independently owned");
+    assert_contains (ten_bit_job.to_profile ().video_filters, TEN_BIT_FILTER,
+        "mutating a later settings copy does not change the already resolved job");
+
+    rec.recommended_pix_fmt = PixelFormat.YUV420P;
+    rec.source_bit_depth = 8;
+    var eight_bit_job = SmartCodecResolver.resolve (rec, requested, general);
+    assert_true (eight_bit_job != null, "subsequent 8-bit recommendation resolves separately");
+    if (eight_bit_job != null) {
+        assert_contains (eight_bit_job.to_profile ().video_filters, EIGHT_BIT_FILTER,
+            "subsequent 8-bit job selects the 8-bit filter variant");
+        assert_false (eight_bit_job.to_profile ().video_filters.contains (TEN_BIT_FILTER),
+            "prior 10-bit resolution does not contaminate subsequent jobs");
+    }
+
+    // Existing manually constructed snapshots carry only processing_filters.
+    // They must keep working without populating the new optional variants.
+    general.video_filters.has_depth_variants = false;
+    general.video_filters.processing_filters = { "unsharp=5:5:0.5:5:5:0" };
+    rec.recommended_pix_fmt = PixelFormat.YUV420P10LE;
+    var legacy_snapshot_job = SmartCodecResolver.resolve (rec, requested, general);
+    assert_true (legacy_snapshot_job != null, "legacy single-filter snapshot still resolves");
+    if (legacy_snapshot_job != null) {
+        assert_contains (legacy_snapshot_job.to_profile ().video_filters,
+            "unsharp=5:5:0.5:5:5:0", "single-filter snapshots keep their supplied processing chain");
+    }
+}
+
+private void test_smart_codec_target_adapter_does_not_mutate_recommendation () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    var rec = make_smart_codec_case_recommendation (6);
+    rec.codec = "not-the-target";
+    rec.preset = "slow";
+    var x264 = new X264Tab ();
+    var x265 = new X265Tab ();
+    for (int i = 0; i < 3; i++) {
+        CodecPresets.apply_smart_x264 (x264, rec);
+        assert_string_equal (rec.codec, "not-the-target",
+            "target adapter does not overwrite/free the caller's codec string");
+        assert_array_has_adjacent_pair (x264.get_codec_builder ().get_codec_args (),
+            "-c:v", "libx264", "target-specific x264 method keeps its historical target contract");
+        CodecPresets.apply_smart_x265 (x265, rec);
+        assert_string_equal (rec.codec, "not-the-target",
+            "another adapter can reuse the same borrowed recommendation");
+        assert_array_has_adjacent_pair (x265.get_codec_builder ().get_codec_args (),
+            "-c:v", "libx265", "target-specific x265 method keeps its historical target contract");
+    }
+}
+
+private class PreparedProbeCapture : Object {
+    public string expected_executable = "/synthetic/captured-ffprobe";
+    public int calls = 0;
+    public int wrong_executable = 0;
+    public bool fail = false;
+
+    public int capture (string[] argv, out string stdout_text, out string stderr_text) {
+        calls++;
+        if (argv.length == 0 || argv[0] != expected_executable)
+            wrong_executable++;
+        stdout_text = "";
+        stderr_text = "";
+        if (fail) return 1;
+        string command = string.joinv (" ", argv);
+        if (command.contains ("stream=r_frame_rate"))
+            stdout_text = "24/1\n";
+        else if (command.contains ("stream=codec_type"))
+            stdout_text = "{\"streams\":[{\"codec_type\":\"video\"}],\"chapters\":[]}";
+        else if (command.contains ("packet=pts_time,duration_time"))
+            stdout_text = command.contains ("%+#1") ? "0.000000,0.040000\n"
+                : "0.000000,0.040000\n1.960000,0.040000\n";
+        else if (command.contains ("stream_tags=DURATION"))
+            stdout_text = "{\"streams\":[{\"codec_name\":\"aac\",\"duration\":\"2.0\"}],\"format\":{\"duration\":\"2.0\"}}";
+        else if (command.contains ("format_tags=title"))
+            stdout_text = "{\"format\":{\"tags\":{\"title\":\"Synthetic title\"}}}";
+        else if (command.contains ("format=duration"))
+            stdout_text = "2.0\n";
+        else if (command.contains ("stream=index"))
+            stdout_text = "0\n";
+        else
+            return 1;
+        return 0;
+    }
+}
+
+private string prepared_fixture_dir () {
+    try {
+        return DirUtils.make_tmp ("ffmpeg-prepared-runtime-XXXXXX");
+    } catch (Error e) {
+        Test.fail_printf ("could not create prepared conversion fixture: %s", e.message);
+        return "";
+    }
+}
+
+private bool write_prepared_test_file (string path, string text, bool executable = false) {
+    try {
+        FileUtils.set_contents (path, text);
+    } catch (Error e) {
+        Test.fail_printf ("could not write prepared fixture: %s", e.message);
+        return false;
+    }
+    if (executable && Posix.chmod (path, 0755) != 0) {
+        Test.fail_printf ("could not make prepared fixture executable");
+        return false;
+    }
+    return true;
+}
+
+private string read_prepared_test_file (string path) {
+    string text = "";
+    try {
+        FileUtils.get_contents (path, out text);
+    } catch (Error e) {
+        Test.fail_printf ("could not read prepared fixture: %s", e.message);
+    }
+    return text;
+}
+
+private void restore_prepared_runtime_preferences (ConversionRuntimeOptions saved) {
+    var settings = AppSettings.get_default ();
+    settings.ffmpeg_path = saved.ffmpeg_path;
+    settings.ffprobe_path = saved.ffprobe_path;
+    settings.generate_collage_thumbnail = saved.generate_collage_thumbnail;
+    settings.collage_size = saved.collage_size;
+    settings.overwrite_enabled = saved.overwrite_enabled;
+}
+
+private void test_prepared_config_and_runtime_are_deep_copies () {
+    var settings = AppSettings.get_default ();
+    var saved = ConversionRuntimeOptions.capture_current ();
+    try {
+        settings.ffmpeg_path = "/synthetic/captured-ffmpeg";
+        settings.ffprobe_path = "/synthetic/captured-ffprobe";
+        settings.generate_collage_thumbnail = true;
+        settings.collage_size = CollageSize.HD_720;
+        settings.overwrite_enabled = true;
+        var config = new ConversionConfig ();
+        config.runtime_options = ConversionRuntimeOptions.capture_current ();
+        config.profile.codec_name = "x264";
+        config.profile.codec_args = { "-c:v", "libx264", "-crf", "23" };
+        config.profile.audio_args = { "-an" };
+        config.profile.keyframe_settings = new KeyframeSettingsSnapshot ();
+        config.profile.keyframe_settings.keyint_text = "173";
+        config.seek_enabled = true;
+        config.seek_timestamp = "00:00:01.250";
+        config.time_enabled = true;
+        config.time_timestamp = "00:00:02.000";
+        config.source_span_seconds = 2.0;
+        config.video_source_span_seconds = 1.5;
+        config.output_fps = 24.0;
+        config.timed_stream_topology_known = true;
+        config.input_has_chapters = true;
+        config.smart_requested_size_kib = 2048;
+        config.smart_planned_size_kib = 1980;
+        config.smart_planning_uncertainty = 0.1;
+        config.passlog_base = "/synthetic/foreign-passlog";
+        var captured = config.copy ();
+        ConversionRuntimeOptions? runtime = captured.runtime_options;
+        assert_true (runtime != null, "config copy retains explicit runtime snapshot");
+        if (runtime == null) return;
+        config.runtime_options.ffmpeg_path = "/synthetic/mutated-original";
+        config.profile.codec_args[1] = "mutated-original";
+        config.profile.keyframe_settings.keyint_text = "240";
+        config.profile.audio_processing.peak_normalize_gain_db = -9.0;
+        settings.ffmpeg_path = "/synthetic/later-global-ffmpeg";
+        settings.ffprobe_path = "/synthetic/later-global-ffprobe";
+        settings.generate_collage_thumbnail = false;
+        settings.collage_size = CollageSize.UHD_4K;
+        settings.overwrite_enabled = false;
+        var runner = new ConversionRunner.for_command_test (captured);
+        string[] argv = runner.build_single_pass_argv_for_test ("/synthetic/input.mkv", "/synthetic/output.mkv");
+        assert_string_equal (argv[0], "/synthetic/captured-ffmpeg", "runner uses captured executable after preferences change");
+        assert_array_has_adjacent_pair (argv, "-c:v", "libx264", "config owns copied codec arguments");
+        assert_array_has_adjacent_pair (argv, "-ss", "00:00:01.250", "copied seek remains effective");
+        assert_array_has_adjacent_pair (argv, "-t", "00:00:02.000", "copied duration remains effective");
+        assert_string_equal (runtime.ffprobe_path, "/synthetic/captured-ffprobe", "probe executable is captured too");
+        assert_true (runtime.generate_collage_thumbnail && runtime.collage_size == CollageSize.HD_720
+                && runtime.overwrite_enabled, "collage and overwrite preferences are frozen together");
+        assert_true (captured.profile.keyframe_settings.keyint_text == "173"
+                && captured.profile.audio_processing.peak_normalize_gain_db == 0.0,
+            "config copy owns nested execution settings");
+        assert_true (captured.source_span_seconds == 2.0 && captured.video_source_span_seconds == 1.5
+                && captured.output_fps == 24.0 && captured.timed_stream_topology_known && captured.input_has_chapters,
+            "copy retains effective timeline, progress and topology");
+        assert_true (captured.smart_requested_size_kib == 2048 && captured.smart_planned_size_kib == 1980
+                && Math.fabs (captured.smart_planning_uncertainty - 0.1) < 1e-9,
+            "copy retains optimizer size reporting");
+        string[] collage = runner.build_collage_argv_for_test ("/synthetic/output.mkv", "/synthetic/collage.png", 2.0);
+        assert_string_equal (collage[0], "/synthetic/captured-ffmpeg", "collage command also uses captured executable");
+        var legacy = new ConversionConfig ();
+        assert_true (legacy.copy ().runtime_options == null, "manual configs retain legacy capture-at-execution semantics");
+    } finally {
+        restore_prepared_runtime_preferences (saved);
+    }
+}
+
+private void test_prepared_probes_use_explicit_path_and_controlled_capture () {
+    var capture = new PreparedProbeCapture ();
+    const string INPUT = "/synthetic/input.mkv";
+    const string TOOL = "/synthetic/captured-ffprobe";
+    assert_true (FfprobeUtils.probe_duration (INPUT, capture.capture, TOOL) == 2.0, "controlled duration parses result");
+    assert_true (FfprobeUtils.probe_input_fps (INPUT, capture.capture, TOOL) == 24.0, "controlled FPS parses result");
+    assert_true (FfprobeUtils.has_video_stream (INPUT, capture.capture, TOOL), "controlled video-presence probe parses result");
+    var topology = FfprobeUtils.probe_timed_stream_topology (INPUT, capture.capture, TOOL);
+    assert_true (topology.success && !topology.has_subtitle_stream && !topology.has_chapters,
+        "controlled topology parses captured JSON");
+    var timeline = FfprobeUtils.probe_video_timeline (INPUT, capture.capture, TOOL);
+    assert_true (timeline.success && Math.fabs (timeline.get_duration () - 2.0) < 1e-9,
+        "all stages of packet timeline probing use controlled capture");
+    assert_string_equal (FfprobeUtils.probe_title (INPUT, capture.capture, TOOL) ?? "", "Synthetic title",
+        "metadata naming can use captured probe executable");
+    assert_true (FfprobeUtils.probe_primary_audio_duration (INPUT, capture.capture, TOOL) == 2.0,
+        "audio-duration fallback can use captured probe executable");
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    try {
+        string path = Path.build_filename (dir, "synthetic-output.mkv");
+        if (!write_prepared_test_file (path, "synthetic output bytes")) return;
+        string reason;
+        assert_true (FfprobeUtils.output_file_is_usable (path, out reason, capture.capture, TOOL),
+            "final output validation uses controlled captured probe");
+        assert_true (capture.calls >= 10 && capture.wrong_executable == 0,
+            "every probe, including timeline subcalls, uses the explicit executable");
+        capture.fail = true;
+        assert_false (FfprobeUtils.output_file_is_usable (path, out reason, capture.capture, TOOL),
+            "failed controlled validation does not declare output usable");
+        assert_contains (reason, "no media", "failed duration verification remains explicit");
+    } finally {
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private string make_prepared_probe_script (string dir, string name, bool block_duration = false) {
+    string path = Path.build_filename (dir, name);
+    string trace = Shell.quote (Path.build_filename (dir, "probe.trace"));
+    string marker = Shell.quote (Path.build_filename (dir, "probe.started"));
+    string blocking = block_duration
+        ? "case \"$*\" in *format=duration*) : > " + marker
+            + "; trap 'exit 143' TERM INT; while :; do sleep 0.02; done ;; esac\n"
+        : "";
+    string script = "#!/bin/sh\n"
+        + "printf 'PROBE\\n' >> " + trace + "\n"
+        + "printf '<%s>\\n' \"$@\" >> " + trace + "\n"
+        + blocking
+        + "case \"$*\" in\n"
+        + "  *stream=r_frame_rate*) printf '24/1\\n' ;;\n"
+        + "  *stream=codec_type*) printf '%s\\n' '{\"streams\":[{\"codec_type\":\"video\"}],\"chapters\":[]}' ;;\n"
+        + "  *packet=pts_time,duration_time*) printf '0.000000,0.040000\\n1.960000,0.040000\\n' ;;\n"
+        + "  *format=duration*) printf '2.0\\n' ;;\n"
+        + "  *stream=index*) printf '0\\n' ;;\n"
+        + "  *) printf '0\\n' ;;\n"
+        + "esac\n";
+    write_prepared_test_file (path, script, true);
+    return path;
+}
+
+private string make_prepared_encoder_script (string dir) {
+    string path = Path.build_filename (dir, "captured-ffmpeg.sh");
+    string trace = Shell.quote (Path.build_filename (dir, "encoder.trace"));
+    string script = "#!/bin/sh\n"
+        + "printf 'ENCODE\\n' >> " + trace + "\n"
+        + "printf '<%s>\\n' \"$@\" >> " + trace + "\n"
+        + "last=''; passlog=''; next=''\n"
+        + "for arg in \"$@\"; do\n"
+        + "  if [ \"$next\" = passlog ]; then passlog=\"$arg\"; next=''; fi\n"
+        + "  if [ \"$arg\" = -passlogfile ]; then next=passlog; fi\n"
+        + "  last=\"$arg\"\n"
+        + "done\n"
+        + "if [ -n \"$passlog\" ]; then printf 'owned log' > \"${passlog}-0.log\"; fi\n"
+        + "if [ \"$last\" != /dev/null ]; then printf 'synthetic encoded output' > \"$last\"; fi\n"
+        + "printf 'frame=48\\nprogress=end\\n' >&2\n";
+    write_prepared_test_file (path, script, true);
+    return path;
+}
+
+private class PreparedTerminalCapture : Object {
+    public int succeeded = 0;
+    public int failed = 0;
+    public int cancelled = 0;
+    public uint64 last_id = 0;
+
+    public int count () { return succeeded + failed + cancelled; }
+
+    // Keep cleanup waits free of closures: Vala 0.56 can emit duplicate
+    // closure helpers when a captured lambda is generated from a finally block.
+    public bool wait_for_count (int expected, int timeout_ms) {
+        MainContext context = MainContext.default ();
+        int64 deadline = get_monotonic_time () + (timeout_ms * TimeSpan.MILLISECOND);
+        while (get_monotonic_time () < deadline) {
+            while (context.pending ())
+                context.iteration (false);
+            if (count () >= expected)
+                return true;
+            Thread.usleep (1000);
+        }
+        return count () >= expected;
+    }
+
+    public void bind (Converter converter) {
+        converter.conversion_succeeded.connect ((id, result) => { succeeded++; last_id = id; });
+        converter.conversion_failed.connect ((id) => { failed++; last_id = id; });
+        converter.conversion_cancelled.connect ((id, reason) => { cancelled++; last_id = id; });
+    }
+}
+
+private ConversionConfig make_prepared_execution_config (string ffmpeg, string ffprobe) {
+    var config = new ConversionConfig ();
+    config.profile.codec_name = "x264";
+    config.profile.codec_args = { "-c:v", "libx264", "-b:v", "100k" };
+    config.profile.audio_args = { "-an" };
+    config.profile.container = ContainerExt.MKV;
+    config.runtime_options = new ConversionRuntimeOptions ();
+    config.runtime_options.ffmpeg_path = ffmpeg;
+    config.runtime_options.ffprobe_path = ffprobe;
+    config.runtime_options.generate_collage_thumbnail = false;
+    return config;
+}
+
+private void test_prepared_worker_owns_passlog_and_captured_request () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var saved = ConversionRuntimeOptions.capture_current ();
+    var converter = new Converter (new StatusArea (), new ConsoleTab (), new GeneralTab ());
+    var terminal = new PreparedTerminalCapture ();
+    terminal.bind (converter);
+    try {
+        string input = Path.build_filename (dir, "synthetic-input.mkv");
+        string output = Path.build_filename (dir, "synthetic-output.mkv");
+        string foreign = Path.build_filename (dir, "foreign-passlog");
+        if (!write_prepared_test_file (input, "synthetic input bytes")
+                || !write_prepared_test_file (foreign + "-0.log", "foreign sentinel")) return;
+        var config = make_prepared_execution_config (make_prepared_encoder_script (dir),
+            make_prepared_probe_script (dir, "captured-ffprobe.sh"));
+        config.passlog_base = foreign;
+        var settings = AppSettings.get_default ();
+        settings.ffmpeg_path = "/synthetic/incorrect-live-ffmpeg";
+        settings.ffprobe_path = "/synthetic/incorrect-live-ffprobe";
+        settings.generate_collage_thumbnail = true;
+        assert_true (converter.start_prepared_conversion (input, output, config, true, 701),
+            "prepared two-pass conversion starts from data without a codec tab");
+        string? owned = converter.passlog_base;
+        assert_true (owned != null && owned != foreign,
+            "prepared execution allocates its own passlog rather than trusting caller path");
+        assert_string_equal (config.passlog_base, foreign, "prepared start does not rewrite caller config");
+        config.profile.codec_args[1] = "mutated-after-start";
+        config.runtime_options.ffmpeg_path = "/synthetic/mutated-after-start";
+        assert_true (spin_main_context_until_deadline (() => { return terminal.count () == 1; }, 6000),
+            "prepared worker reaches a terminal signal");
+        assert_true (terminal.succeeded == 1 && terminal.failed == 0 && terminal.cancelled == 0
+                && terminal.last_id == 701, "prepared worker reports success once for its operation");
+        string trace = read_prepared_test_file (Path.build_filename (dir, "encoder.trace"));
+        assert_true (trace.split ("ENCODE\n").length - 1 == 2,
+            "captured collage=false stays false despite live preference changes");
+        assert_contains (trace, "<libx264>", "worker retains captured codec arguments");
+        assert_false (trace.contains ("mutated-after-start"), "worker does not read changed caller config");
+        assert_string_equal (read_prepared_test_file (foreign + "-0.log"), "foreign sentinel",
+            "cleanup never touches the supplied foreign passlog");
+        assert_true (converter.passlog_base == null, "owned passlog state is cleared before terminal delivery");
+        if (owned != null) {
+            assert_false (FileUtils.test (owned + "-0.log", FileTest.EXISTS),
+                "owned two-pass artifacts are cleaned before terminal delivery");
+        }
+        assert_true (FileUtils.test (output, FileTest.IS_REGULAR), "fake execution produced its local test output");
+    } finally {
+        converter.cancel ();
+        if (terminal.count () == 0)
+            terminal.wait_for_count (1, 6000);
+        restore_prepared_runtime_preferences (saved);
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_prepared_worker_cancels_initial_probe_and_can_retry () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var converter = new Converter (new StatusArea (), new ConsoleTab (), new GeneralTab ());
+    var terminal = new PreparedTerminalCapture ();
+    terminal.bind (converter);
+    bool retry_started = false;
+    try {
+        string input = Path.build_filename (dir, "synthetic-input.mkv");
+        string output = Path.build_filename (dir, "synthetic-output.mkv");
+        if (!write_prepared_test_file (input, "synthetic input bytes")) return;
+        var config = make_prepared_execution_config (make_prepared_encoder_script (dir),
+            make_prepared_probe_script (dir, "blocking-ffprobe.sh", true));
+        assert_true (converter.start_prepared_conversion (input, output, config, true, 702),
+            "prepared worker starts before controlled initial probe");
+        assert_true (spin_main_context_until_deadline (() => {
+            return FileUtils.test (Path.build_filename (dir, "probe.started"), FileTest.EXISTS);
+        }, 3000), "initial duration probe has actually started before cancellation");
+        assert_false (converter.start_prepared_conversion (input, output, config, true, 703),
+            "a busy prepared conversion cannot be replaced by another start");
+        converter.cancel ();
+        assert_true (spin_main_context_until_deadline (() => { return terminal.count () == 1; }, 6000),
+            "cancellation waits for initial probe termination and cleanup");
+        assert_true (terminal.cancelled == 1 && terminal.succeeded == 0 && terminal.failed == 0
+                && terminal.last_id == 702, "initial probe cancellation reports exactly one terminal result");
+        string probe_trace = read_prepared_test_file (Path.build_filename (dir, "probe.trace"));
+        assert_true (probe_trace.split ("PROBE\n").length - 1 == 1,
+            "cancelled first probe does not launch FPS/topology/timeline helpers");
+        assert_false (FileUtils.test (Path.build_filename (dir, "encoder.trace"), FileTest.EXISTS),
+            "cancelled initial probe never launches an encoder");
+        assert_true (converter.passlog_base == null, "cancelled start cleans its owned passlog state");
+        config.runtime_options.ffprobe_path = make_prepared_probe_script (dir, "retry-ffprobe.sh");
+        retry_started = converter.start_prepared_conversion (input, output, config, false, 704);
+        assert_true (retry_started,
+            "same converter can accept a new prepared job after cancelled cleanup");
+        assert_true (spin_main_context_until_deadline (() => { return terminal.count () == 2; }, 6000),
+            "retry finishes without a stale old completion interfering");
+        assert_true (terminal.cancelled == 1 && terminal.succeeded == 1 && terminal.failed == 0
+                && terminal.last_id == 704, "retry receives its own single successful terminal result");
+    } finally {
+        converter.cancel ();
+        int expected_terminals = retry_started ? 2 : 1;
+        if (terminal.count () < expected_terminals)
+            terminal.wait_for_count (expected_terminals, 6000);
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_prepared_optimizer_captures_runtime_and_precancel_skips_spawn () {
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var saved = ConversionRuntimeOptions.capture_current ();
+    try {
+        string executable = Path.build_filename (dir, "no-vmaf-ffmpeg.sh");
+        string marker = Path.build_filename (dir, "optimizer.started");
+        string script = "#!/bin/sh\nprintf 'called\\n' >> " + Shell.quote (marker)
+            + "\nprintf 'Filters:\\n ... scale V->V Scale video\\n'\n";
+        if (!write_prepared_test_file (executable, script, true)) return;
+        var options = new ConversionRuntimeOptions ();
+        options.ffmpeg_path = executable;
+        options.ffprobe_path = "/synthetic/probe-must-not-start";
+        var optimizer = new SmartOptimizer (null, options);
+        options.ffmpeg_path = "/synthetic/mutated-options";
+        AppSettings.get_default ().ffmpeg_path = "/synthetic/mutated-global";
+        bool done = false;
+        bool unsupported = false;
+        optimizer.optimize_for_quality.begin ("/synthetic/not-a-media-file",
+            SmartOptimizerLogic.QualityIntent.HIGH, "x264", OptimizationContext (), null, (obj, res) => {
+                try {
+                    optimizer.optimize_for_quality.end (res);
+                } catch (IOError.NOT_SUPPORTED e) {
+                    unsupported = true;
+                } catch (Error e) {
+                    Test.fail_printf ("unexpected captured optimizer failure: %s", e.message);
+                }
+                done = true;
+            });
+        assert_true (spin_main_context_until_deadline (() => { return done; }, 3000),
+            "quality capability preflight completes without inspecting a source");
+        assert_true (unsupported && FileUtils.test (marker, FileTest.EXISTS),
+            "optimizer uses its captured executable, not mutated options or global paths");
+        FileUtils.unlink (marker);
+        var cancelled = new Cancellable ();
+        cancelled.cancel ();
+        bool probe_done = false;
+        double duration = -1.0;
+        FfprobeUtils.probe_duration_async.begin ("/synthetic/not-a-media-file", cancelled,
+            executable, (obj, res) => {
+                duration = FfprobeUtils.probe_duration_async.end (res);
+                probe_done = true;
+            });
+        assert_true (spin_main_context_until_deadline (() => { return probe_done; }, 3000),
+            "pre-cancelled probe completes promptly");
+        assert_true (duration == 0.0 && !FileUtils.test (marker, FileTest.EXISTS),
+            "pre-cancelled async probe does not spawn a child");
+    } finally {
+        restore_prepared_runtime_preferences (saved);
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+private void test_prepared_naming_and_calibration_filter_contracts () {
+    const string OPENCL_CHAIN = "format=yuv420p,hwupload,nlmeans_opencl=s=2,hwdownload,format=yuv420p";
+    assert_string_equal (FilterBuilder.retarget_yuv_pixel_format_filters (OPENCL_CHAIN, PixelFormat.YUV420P10LE),
+        "format=yuv420p10le,hwupload,nlmeans_opencl=s=2,hwdownload,format=yuv420p10le",
+        "existing calibration retargeting updates both explicit OpenCL wrapper formats");
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    string output_directory = Path.build_filename (dir, "not-created-output");
+    var settings = AppSettings.get_default ();
+    OutputNameMode saved_mode = settings.output_name_mode;
+    string saved_custom = settings.output_custom_name;
+    try {
+        settings.output_name_mode = OutputNameMode.CUSTOM;
+        settings.output_custom_name = "captured-name";
+        var naming = OutputNamingSettingsSnapshot.capture_current ();
+        settings.output_name_mode = OutputNameMode.DEFAULT;
+        settings.output_custom_name = "later-name";
+        var profile = new EncodeProfileSnapshot ();
+        profile.codec_name = "SVT-AV1";
+        profile.container = ContainerExt.WEBM;
+        bool done = false;
+        string result = "";
+        ConversionUtils.compute_output_path_from_profile_async.begin ("/synthetic/source.mkv",
+            output_directory, profile, naming, null, "/synthetic/probe", (obj, res) => {
+                try {
+                    result = ConversionUtils.compute_output_path_from_profile_async.end (res);
+                } catch (Error e) {
+                    Test.fail_printf ("captured output naming failed: %s", e.message);
+                }
+                done = true;
+            });
+        naming.custom_name = "changed-after-call";
+        assert_true (spin_main_context_until_deadline (() => { return done; }, 3000),
+            "captured custom naming completes");
+        assert_string_equal (result, Path.build_filename (output_directory, "captured-name-av1.webm"),
+            "profile-based naming uses captured mode/name and the resolved container");
+        assert_false (FileUtils.test (output_directory, FileTest.EXISTS),
+            "resolving a planned output path does not create destination directories");
+    } finally {
+        settings.output_name_mode = saved_mode;
+        settings.output_custom_name = saved_custom;
+        cleanup_exec_test_dir (dir);
+    }
+}
+
+
+// Folder-mode fixtures contain text bytes and fake helpers only. They must not
+// depend on the user's external media directory or any installed preferences.
+private void cleanup_bulk_fixture_tree (string path) {
+    if (FileUtils.test (path, FileTest.IS_SYMLINK)
+            || !FileUtils.test (path, FileTest.IS_DIR)) {
+        FileUtils.unlink (path);
+        return;
+    }
+    try {
+        var directory = Dir.open (path);
+        string? name;
+        while ((name = directory.read_name ()) != null)
+            cleanup_bulk_fixture_tree (Path.build_filename (path, name));
+    } catch (FileError e) {
+        // Best-effort cleanup is confined to the directory created by this test.
+    }
+    DirUtils.remove (path);
+}
+
+private class BulkScanCapture : Object {
+    public bool done = false;
+    public GenericArray<BulkItem>? result = null;
+    public Error? error = null;
+
+    public void start (string folder, string output, Cancellable? token = null) {
+        done = false;
+        result = null;
+        error = null;
+        BulkConversionController.scan_folder.begin (folder, output, token, (obj, res) => {
+            try {
+                result = BulkConversionController.scan_folder.end (res);
+            } catch (Error e) {
+                error = e;
+            }
+            done = true;
+        });
+    }
+
+    public bool wait (int timeout_ms = 3000) {
+        MainContext context = MainContext.default ();
+        int64 deadline = get_monotonic_time () + timeout_ms * TimeSpan.MILLISECOND;
+        while (!done && get_monotonic_time () < deadline) {
+            while (context.pending ()) context.iteration (false);
+            Thread.usleep (1000);
+        }
+        return done;
+    }
+}
+
+private void test_bulk_scan_sorts_top_level_videos_and_deduplicates_aliases () {
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    try {
+        string first = Path.build_filename (dir, "a.mkv");
+        string last = Path.build_filename (dir, "z.MP4");
+        string nested = Path.build_filename (dir, "nested");
+        string output = Path.build_filename (dir, "rendered.mp4");
+        assert_true (DirUtils.create (nested, 0700) == 0 && DirUtils.create (output, 0700) == 0,
+            "scanner test creates its own nested and output directories");
+        if (!write_prepared_test_file (last, "last synthetic video")
+                || !write_prepared_test_file (first, "first synthetic video")
+                || !write_prepared_test_file (Path.build_filename (dir, "ignore.txt"), "not a video candidate")
+                || !write_prepared_test_file (Path.build_filename (nested, "nested.mkv"), "nested video")
+                || !write_prepared_test_file (Path.build_filename (output, "old-output.mkv"), "existing output")) return;
+        assert_true (Posix.link (first, Path.build_filename (dir, "m-hardlink.mkv")) == 0,
+            "scanner test creates a regular hardlink alias");
+        assert_true (Posix.symlink (first, Path.build_filename (dir, "n-symlink.mkv")) == 0,
+            "scanner test creates a regular-file symbolic alias");
+        assert_true (Posix.symlink (Path.build_filename (output, "old-output.mkv"),
+                Path.build_filename (dir, "p-output-alias.mkv")) == 0,
+            "scanner test creates a candidate alias into the excluded output directory");
+        assert_true (Posix.symlink (Path.build_filename (dir, "missing.mkv"),
+                Path.build_filename (dir, "dangling.mkv")) == 0,
+            "scanner test creates a dangling alias");
+        var capture = new BulkScanCapture ();
+        capture.start (dir, output);
+        assert_true (capture.wait (), "folder scanner completes asynchronously");
+        assert_true (capture.error == null && capture.result != null, "folder scanner returns candidates without error");
+        if (capture.result == null) return;
+        assert_true (capture.result.length == 2,
+            "only top-level regular videos survive extension, directory and identity filtering");
+        if (capture.result.length != 2) return;
+        assert_string_equal (capture.result[0].path, first,
+            "sorted-first path wins when symbolic and hardlink aliases identify the same source");
+        assert_string_equal (capture.result[1].path, last,
+            "candidate order is stable and accepts an uppercase video extension");
+        assert_string_equal (read_prepared_test_file (Path.build_filename (output, "old-output.mkv")),
+            "existing output", "scanning preserves the excluded output directory's contents");
+    } finally {
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_scan_precancel_does_not_return_partial_queue () {
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    try {
+        if (!write_prepared_test_file (Path.build_filename (dir, "source.mkv"), "synthetic")) return;
+        var token = new Cancellable ();
+        token.cancel ();
+        var capture = new BulkScanCapture ();
+        capture.start (dir, Path.build_filename (dir, "output"), token);
+        assert_true (capture.wait (), "pre-cancelled folder scan completes promptly");
+        assert_true (capture.error is IOError.CANCELLED && capture.result == null,
+            "pre-cancelled scan reports cancellation rather than an executable partial queue");
+    } finally {
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_publish_preserves_late_collisions_and_protected_source_aliases () {
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    try {
+        string source = Path.build_filename (dir, "source.mkv");
+        string stage_directory = BulkConversionController.create_staging_directory (dir);
+        string other_stage_directory = BulkConversionController.create_staging_directory (dir);
+        Posix.Stat stage_info;
+        assert_true (stage_directory != other_stage_directory,
+            "each bulk staging directory has an exclusively allocated unique path");
+        assert_true (Posix.stat (stage_directory, out stage_info) == 0
+                && (stage_info.st_mode & 0777) == 0700,
+            "bulk staging directory is private to its owner");
+        string stage = Path.build_filename (stage_directory, "staged-result.mkv");
+        string desired = Path.build_filename (dir, "planned-output.mkv");
+        if (!write_prepared_test_file (source, "source sentinel")
+                || !write_prepared_test_file (stage, "completed conversion")
+                || !write_prepared_test_file (desired, "late collision sentinel")) return;
+        var protected_inputs = new GenericArray<BulkItem> ();
+        protected_inputs.add (new BulkItem (source));
+        string published = BulkConversionController.publish_staged_file (stage, desired, protected_inputs);
+        assert_true (published != desired && FileUtils.test (published, FileTest.IS_REGULAR),
+            "a destination created after planning gets a unique published name");
+        assert_string_equal (read_prepared_test_file (desired), "late collision sentinel",
+            "atomic publication never replaces an existing destination");
+        assert_string_equal (read_prepared_test_file (published), "completed conversion",
+            "the complete staged file is published under the alternate name");
+        assert_false (FileUtils.test (stage, FileTest.EXISTS), "successful publication consumes its stage link");
+
+        string alias_destination = Path.build_filename (dir, "source-hardlink.mkv");
+        assert_true (Posix.link (source, alias_destination) == 0, "publish fixture creates a protected source alias");
+        if (!write_prepared_test_file (stage, "second completed conversion")) return;
+        string second = BulkConversionController.publish_staged_file (stage, alias_destination, protected_inputs);
+        assert_true (second != alias_destination, "a hardlink to a queued source is also a protected collision");
+        assert_string_equal (read_prepared_test_file (source), "source sentinel", "publication preserves original source bytes");
+        assert_string_equal (read_prepared_test_file (alias_destination), "source sentinel", "publication preserves source alias bytes");
+
+        string unsafe_stage = Path.build_filename (dir, "unsafe-source-stage.mkv");
+        assert_true (Posix.link (source, unsafe_stage) == 0, "publish fixture creates an unsafe source-backed stage");
+        bool rejected = false;
+        try {
+            BulkConversionController.publish_staged_file (unsafe_stage,
+                Path.build_filename (dir, "must-not-publish.mkv"), protected_inputs);
+        } catch (Error e) {
+            rejected = true;
+        }
+        assert_true (rejected, "a stage whose identity aliases a queued source is rejected");
+        assert_true (FileUtils.test (unsafe_stage, FileTest.IS_REGULAR), "rejected publication retains the caller's stage");
+        assert_false (FileUtils.test (Path.build_filename (dir, "must-not-publish.mkv"), FileTest.EXISTS),
+            "source-backed stage never becomes a converted output");
+        assert_string_equal (read_prepared_test_file (source), "source sentinel", "rejected publication leaves source unchanged");
+    } catch (Error e) {
+        Test.fail_printf ("bulk atomic publication failed: %s", e.message);
+    } finally {
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_settings_copy_owns_every_per_job_input () {
+    var settings = new BulkConversionSettings ();
+    settings.codec = "vp9";
+    settings.codec_settings.container = ContainerExt.WEBM;
+    settings.codec_settings.audio_settings.all_sources = { new AudioSourceInfo () };
+    settings.codec_settings.audio_settings.all_sources[0].codec_name = "opus";
+    settings.general_settings.crop_enabled = true;
+    settings.general_settings.crop_value = "320:180:4:6";
+    settings.general_settings.video_filters.processing_filters = { "hqdn3d=1:1:3:3" };
+    settings.timing.seek_enabled = true;
+    settings.timing.seek_minutes = 1.0;
+    settings.timing.time_enabled = true;
+    settings.timing.time_seconds = 7.0;
+    settings.runtime_options.ffmpeg_path = "/synthetic/captured-ffmpeg";
+    settings.runtime_options.ffprobe_path = "/synthetic/captured-ffprobe";
+    settings.runtime_options.overwrite_enabled = true;
+    settings.naming.mode = OutputNameMode.CUSTOM;
+    settings.naming.custom_name = "captured-name";
+    settings.target_mb = 17;
+    settings.match_source_size = true;
+    settings.quality_mode = true;
+    settings.quality_intent = SmartOptimizerLogic.QualityIntent.HIGH;
+    settings.content_override = ContentOverride.ANIME;
+    settings.optimize_for_delivery = true;
+    settings.strip_audio = true;
+    var captured = settings.copy ();
+    settings.codec = "x264";
+    settings.codec_settings.container = ContainerExt.MP4;
+    settings.codec_settings.audio_settings.all_sources[0].codec_name = "aac";
+    settings.general_settings.crop_value = "640:360:0:0";
+    settings.general_settings.video_filters.processing_filters[0] = "negate";
+    settings.timing.seek_minutes = 2.0;
+    settings.timing.time_seconds = 9.0;
+    settings.runtime_options.ffmpeg_path = "/synthetic/mutated-ffmpeg";
+    settings.runtime_options.ffprobe_path = "/synthetic/mutated-ffprobe";
+    settings.naming.custom_name = "mutated-name";
+    settings.target_mb = 1;
+    settings.match_source_size = false;
+    settings.quality_mode = false;
+    settings.optimize_for_delivery = false;
+    settings.strip_audio = false;
+    assert_true (captured.codec == "vp9" && captured.codec_settings.container == ContainerExt.WEBM,
+        "bulk copy freezes selected codec and requested container");
+    assert_string_equal (captured.codec_settings.audio_settings.all_sources[0].codec_name, "opus",
+        "bulk copy owns nested audio-source observations");
+    assert_true (captured.general_settings.crop_enabled && captured.general_settings.crop_value == "320:180:4:6"
+            && captured.general_settings.video_filters.processing_filters[0] == "hqdn3d=1:1:3:3",
+        "bulk copy owns General values and nested filter arrays");
+    assert_true (captured.timing.seek_enabled && captured.timing.seek_minutes == 1.0
+            && captured.timing.time_enabled && captured.timing.time_seconds == 7.0,
+        "bulk copy freezes each file's timing request");
+    assert_true (captured.runtime_options.ffmpeg_path == "/synthetic/captured-ffmpeg"
+            && captured.runtime_options.ffprobe_path == "/synthetic/captured-ffprobe"
+            && captured.runtime_options.overwrite_enabled,
+        "bulk copy independently owns runtime tool and output preferences");
+    assert_true (captured.naming.mode == OutputNameMode.CUSTOM && captured.naming.custom_name == "captured-name",
+        "bulk copy independently owns captured naming settings");
+    assert_true (captured.target_mb == 17 && captured.match_source_size && captured.quality_mode
+            && captured.quality_intent == SmartOptimizerLogic.QualityIntent.HIGH
+            && captured.content_override == ContentOverride.ANIME && captured.optimize_for_delivery && captured.strip_audio,
+        "bulk copy retains every optimizer intent, source-size and audio policy");
+}
+
+private class BulkQueueCapture : Object {
+    public BulkConversionController controller;
+    public int callbacks = 0;
+    public int finished_signals = 0;
+    public uint64 last_finished_id = 0;
+    public int output_signals = 0;
+    public int published_count = 0;
+    public bool finished_after_release = true;
+    public bool overlapping_items = false;
+    public bool out_of_order = false;
+    public int analysis_dispatches = 0;
+    public int conversion_dispatches = 0;
+    public bool cancel_first_conversion = false;
+    public bool expect_conversion = false;
+    private HashTable<string, bool> analyzed = new HashTable<string, bool> (str_hash, str_equal);
+    private HashTable<string, bool> converted = new HashTable<string, bool> (str_hash, str_equal);
+
+    public BulkQueueCapture () {
+        controller = new BulkConversionController (new StatusArea (), new ConsoleTab (), new GeneralTab ());
+        controller.changed.connect (on_changed);
+        controller.finished.connect ((id) => {
+            finished_signals++;
+            last_finished_id = id;
+            finished_after_release = finished_after_release && !controller.is_running;
+        });
+        controller.output_ready.connect ((result) => {
+            output_signals++;
+            published_count += result.output_paths.length;
+        });
+    }
+
+    private void on_changed () {
+        int active = 0;
+        bool request_stop = false;
+        for (int i = 0; i < controller.items.length; i++) {
+            BulkItem item = controller.items[i];
+            if (item.state == "analyzing" || item.state == "converting") {
+                active++;
+                if (i > 0) {
+                    string previous = controller.items[i - 1].state;
+                    if (previous != (expect_conversion ? "completed" : "ready"))
+                        out_of_order = true;
+                }
+            }
+            if (item.state == "analyzing" && !analyzed.contains (item.path)) {
+                analyzed.insert (item.path, true);
+                analysis_dispatches++;
+            }
+            if (item.state == "converting" && !converted.contains (item.path)) {
+                converted.insert (item.path, true);
+                conversion_dispatches++;
+                if (cancel_first_conversion && conversion_dispatches == 1)
+                    request_stop = true;
+            }
+        }
+        overlapping_items = overlapping_items || active > 1;
+        if (request_stop)
+            controller.cancel ();
+    }
+
+    public void start (string folder, string output, BulkConversionSettings settings,
+                       bool convert, uint64 operation_id) {
+        analyzed.remove_all ();
+        converted.remove_all ();
+        analysis_dispatches = 0;
+        conversion_dispatches = 0;
+        expect_conversion = convert;
+        controller.run.begin (folder, output, settings, convert, operation_id, (obj, res) => {
+            controller.run.end (res);
+            callbacks++;
+        });
+    }
+
+    public bool wait_for_callbacks (int expected, int timeout_ms = 90000) {
+        MainContext context = MainContext.default ();
+        int64 deadline = get_monotonic_time () + timeout_ms * TimeSpan.MILLISECOND;
+        while (get_monotonic_time () < deadline) {
+            while (context.pending ()) context.iteration (false);
+            if (callbacks >= expected) return true;
+            Thread.usleep (1000);
+        }
+        return callbacks >= expected;
+    }
+}
+
+private void test_bulk_queue_analyzes_converts_and_stops_sequentially () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) {
+        Test.skip ("FFmpeg and FFprobe are required for the synthetic queue integration");
+        return;
+    }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int requested_runs = 0;
+    try {
+        string first = Path.build_filename (dir, "a-synthetic.mkv");
+        string second = Path.build_filename (dir, "b-synthetic.mkv");
+        string output = Path.build_filename (dir, "output");
+        assert_true (DirUtils.create (output, 0700) == 0, "synthetic queue creates an external-to-source output child");
+        string stdout_text, stderr_text;
+        string[] generate = { ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-pix_fmt", "yuv420p", "-an", first };
+        int generated = run_command_for_test (generate, out stdout_text, out stderr_text,
+            "generate two-second synthetic bulk source");
+        assert_true (generated == 0, "real FFmpeg generates the synthetic queue source: " + stderr_text);
+        if (generated != 0) return;
+        File.new_for_path (first).copy (File.new_for_path (second), FileCopyFlags.NONE);
+        var settings = new BulkConversionSettings ();
+        settings.codec = "x264";
+        settings.codec_settings.container = ContainerExt.MKV;
+        settings.runtime_options.ffmpeg_path = ffmpeg;
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = false;
+        settings.target_mb = 4;
+        settings.strip_audio = true;
+        settings.naming.mode = OutputNameMode.CUSTOM;
+        settings.naming.custom_name = "shared-result";
+        settings.general_settings.crop_enabled = true;
+        settings.general_settings.crop_value = "160:90:0:0";
+        settings.timing.seek_enabled = true;
+        settings.timing.seek_seconds = 0.5;
+        settings.timing.time_enabled = true;
+        settings.timing.time_seconds = 1.0;
+        capture.start (dir, output, settings, false, 801);
+        requested_runs++;
+        assert_true (capture.wait_for_callbacks (requested_runs), "real synthetic analysis-only queue finishes");
+        assert_true (capture.controller.items.length == 2 && capture.analysis_dispatches == 2
+                && capture.conversion_dispatches == 0, "analysis processes both candidates without encoding outputs");
+        if (capture.controller.items.length != 2) return;
+        string desired = capture.controller.items[0].output_path;
+        for (int i = 0; i < capture.controller.items.length; i++) {
+            BulkItem item = capture.controller.items[i];
+            assert_string_equal (item.state, "ready", "analysis-only item remains ready for review: " + item.status);
+            assert_true (item.recommendation != null, "analysis-only item retains the full Smart Optimizer recommendation");
+            assert_false (FileUtils.test (item.output_path, FileTest.EXISTS), "analysis-only item does not create its planned output");
+        }
+        assert_true (capture.output_signals == 0, "analysis-only queue publishes no output result");
+        assert_true (desired.length > 0, "analysis resolves a concrete captured output name");
+        if (desired.length == 0) return;
+        if (!write_prepared_test_file (desired, "pre-existing output sentinel")) return;
+        capture.start (dir, output, settings, true, 802);
+        requested_runs++;
+        assert_true (capture.wait_for_callbacks (requested_runs), "real sequential synthetic conversion queue finishes");
+        assert_true (capture.analysis_dispatches == 2 && capture.conversion_dispatches == 2,
+            "conversion analyzes and converts each source exactly once");
+        assert_false (capture.overlapping_items || capture.out_of_order,
+            "each item finishes analysis and conversion before the next item starts");
+        assert_true (capture.output_signals == 1 && capture.published_count == 2,
+            "one aggregate output result contains both published conversions");
+        assert_string_equal (read_prepared_test_file (desired), "pre-existing output sentinel",
+            "queue publication preserves a destination that existed before conversion");
+        string previous_output = "";
+        for (int i = 0; i < capture.controller.items.length; i++) {
+            BulkItem item = capture.controller.items[i];
+            assert_string_equal (item.state, "completed", "synthetic queue item completes: " + item.status);
+            assert_true (item.output_path != desired && item.output_path != previous_output,
+                "colliding custom names become distinct published outputs");
+            previous_output = item.output_path;
+            string reason;
+            bool usable = FfprobeUtils.output_file_is_usable (item.output_path, out reason, null, ffprobe);
+            assert_true (usable, "published queue output is a real usable video: " + reason);
+            string[] probe = { ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=width,height", "-of", "csv=p=0", item.output_path };
+            assert_true (run_command_for_test (probe, out stdout_text, out stderr_text,
+                    "inspect synthetic bulk output crop") == 0 && stdout_text.strip () == "160,90",
+                "captured General crop is applied independently to each queue output");
+            double duration = FfprobeUtils.probe_duration (item.output_path, null, ffprobe);
+            assert_true (duration >= 0.9 && duration <= 1.1, "captured General seek and duration apply to each output");
+        }
+        BulkItem retained_first = capture.controller.items[0];
+        string retained_output = retained_first.output_path;
+        capture.start (dir, output, settings, true, 803);
+        requested_runs++;
+        assert_true (capture.wait_for_callbacks (requested_runs), "second Convert on the same finite queue finishes");
+        assert_true (capture.analysis_dispatches == 0 && capture.conversion_dispatches == 0,
+            "second Convert skips already completed items without optimization or encoding");
+        assert_true (capture.controller.items[0] == retained_first
+                && capture.controller.items[0].output_path == retained_output,
+            "second Convert retains completed item identities and their published paths");
+        assert_true (capture.output_signals == 1 && capture.published_count == 2,
+            "second Convert publishes no duplicate output results");
+        capture.controller.reset_queue ();
+        assert_true (capture.controller.items.length == 0, "explicit idle reset forgets the previous completed finite queue");
+        capture.cancel_first_conversion = true;
+        capture.start (dir, output, settings, true, 804);
+        requested_runs++;
+        assert_true (capture.wait_for_callbacks (requested_runs), "stopped synthetic queue waits for terminal cleanup");
+        assert_true (capture.analysis_dispatches == 1 && capture.conversion_dispatches == 1,
+            "stop during the first converting transition prevents dispatch of the second source");
+        assert_true (capture.controller.items[0].state == "cancelled"
+                && capture.controller.items[1].state == "pending"
+                && capture.controller.items[1].status.down ().contains ("cancelled"),
+            "active row is cancelled while the unstarted row stays queued with a cancellation explanation");
+        assert_true (capture.output_signals == 1 && capture.published_count == 2,
+            "cancelled queue publishes no extra outputs and retains earlier completed results");
+        assert_true (capture.finished_signals == 4 && capture.last_finished_id == 804
+                && capture.finished_after_release && !capture.controller.is_running,
+            "each invocation finishes exactly once after releasing queue ownership");
+        assert_true (FfprobeUtils.has_video_stream (first, null, ffprobe)
+                && FfprobeUtils.has_video_stream (second, null, ffprobe), "all synthetic source files remain usable after queue stop");
+    } catch (Error e) {
+        Test.fail_printf ("synthetic bulk integration failed: %s", e.message);
+    } finally {
+        capture.controller.cancel ();
+        capture.wait_for_callbacks (requested_runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private bool make_bulk_synthetic_source (string ffmpeg, string path) {
+    string stdout_text, stderr_text;
+    string[] generate = { ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12:duration=1",
+        "-c:v", "ffv1", "-pix_fmt", "yuv420p", "-an", path };
+    int result = run_command_for_test (generate, out stdout_text, out stderr_text,
+        "generate small synthetic bulk source");
+    assert_true (result == 0, "synthetic source generation succeeds: " + stderr_text);
+    return result == 0;
+}
+
+private void run_bulk_real_codec_case (int codec_index, bool quality_mode) {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) {
+        Test.skip ("FFmpeg and FFprobe are required for synthetic codec integration");
+        return;
+    }
+    string[] encoders = { "libx264", "libx265", "libvpx-vp9", "libsvtav1" };
+    string[] expected_codecs = { "h264", "hevc", "vp9", "av1" };
+    string encoder = encoders[codec_index];
+    string stdout_text, stderr_text;
+    if (run_command_for_test ({ ffmpeg, "-hide_banner", "-encoders" }, out stdout_text, out stderr_text,
+            "inspect available FFmpeg encoders") != 0 || !stdout_text.contains (" " + encoder + " ")) {
+        Test.skip ("FFmpeg does not expose the " + encoder + " encoder");
+        return;
+    }
+    if (quality_mode) {
+        int filter_result = run_command_for_test ({ ffmpeg, "-hide_banner", "-filters" },
+            out stdout_text, out stderr_text, "inspect available quality measurement filters");
+        if (filter_result != 0 || !FfmpegRuntimeCapabilities.filter_listing_has_libvmaf (stdout_text)) {
+            Test.skip ("FFmpeg does not expose libvmaf for measured quality-mode integration");
+            return;
+        }
+    }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int requested_runs = 0;
+    try {
+        string input = Path.build_filename (dir, "synthetic-source.mkv");
+        string output = Path.build_filename (dir, "output");
+        if (!make_bulk_synthetic_source (ffmpeg, input)) return;
+        var settings = new BulkConversionSettings ();
+        settings.codec = smart_codec_case_name (codec_index);
+        settings.codec_settings.container = codec_index >= 2 ? ContainerExt.WEBM : ContainerExt.MKV;
+        settings.runtime_options.ffmpeg_path = ffmpeg;
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = false;
+        settings.target_mb = 4;
+        settings.strip_audio = true;
+        settings.quality_mode = quality_mode;
+        settings.quality_intent = SmartOptimizerLogic.QualityIntent.HIGH;
+        if (!quality_mode && codec_index == 0) {
+            // Height 240 is valid only after 320x180 has rotated to 180x320.
+            // Checking the original dimensions would reject this valid crop.
+            settings.general_settings.rotate = Rotation.CW_90;
+            settings.general_settings.crop_enabled = true;
+            settings.general_settings.crop_value = "160:240:0:0";
+        }
+        capture.start (dir, output, settings, true, (uint64) (850 + codec_index + (quality_mode ? 10 : 0)));
+        requested_runs++;
+        assert_true (capture.wait_for_callbacks (requested_runs), "synthetic codec queue reaches terminal cleanup");
+        assert_true (capture.controller.items.length == 1, "synthetic codec queue contains one source");
+        if (capture.controller.items.length != 1) return;
+        BulkItem item = capture.controller.items[0];
+        assert_string_equal (item.state, "completed", settings.codec + " synthetic conversion completes: " + item.status);
+        assert_true (capture.analysis_dispatches == 1 && capture.conversion_dispatches == 1
+                && capture.output_signals == 1 && capture.published_count == 1,
+            "synthetic codec item is analyzed, encoded and published exactly once");
+        assert_true (item.recommendation != null, "published item retains its complete optimizer recommendation");
+        if (item.recommendation != null) {
+            assert_true (item.recommendation.pinned_axis == (quality_mode ? PinnedAxis.QUALITY : PinnedAxis.SIZE),
+                "the selected size or measured quality axis reaches the per-file optimizer");
+        }
+        string reason;
+        bool usable = FfprobeUtils.output_file_is_usable (item.output_path, out reason, null, ffprobe);
+        assert_true (usable, "synthetic codec output is usable: " + reason);
+        int codec_result = run_command_for_test ({ ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", item.output_path },
+            out stdout_text, out stderr_text, "inspect published synthetic codec");
+        assert_true (codec_result == 0 && stdout_text.strip () == expected_codecs[codec_index],
+            "published synthetic video uses the selected " + expected_codecs[codec_index] + " codec");
+        if (!quality_mode && codec_index == 0) {
+            int crop_result = run_command_for_test ({ ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "csv=p=0", item.output_path },
+                out stdout_text, out stderr_text, "inspect rotated nonsquare crop");
+            assert_true (crop_result == 0 && stdout_text.strip () == "160,240",
+                "crop validation uses dimensions after the General 90-degree rotation");
+            capture.controller.reset_queue ();
+            settings.general_settings.crop_value = "240:160:0:0";
+            capture.start (dir, output, settings, false, 875);
+            requested_runs++;
+            assert_true (capture.wait_for_callbacks (requested_runs), "invalid post-rotation crop is rejected promptly");
+            assert_true (capture.controller.items[0].state == "failed"
+                    && capture.controller.items[0].status.contains ("outside"),
+                "a crop fitting only the unrotated source fails before optimization or conversion");
+            assert_true (capture.conversion_dispatches == 0, "invalid rotated crop launches no prepared conversion");
+        }
+    } finally {
+        capture.controller.cancel ();
+        capture.wait_for_callbacks (requested_runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_size_x264 () { run_bulk_real_codec_case (0, false); }
+private void test_bulk_size_x265 () { run_bulk_real_codec_case (1, false); }
+private void test_bulk_size_vp9 () { run_bulk_real_codec_case (2, false); }
+private void test_bulk_size_svt_av1 () { run_bulk_real_codec_case (3, false); }
+private void test_bulk_quality_x264 () { run_bulk_real_codec_case (0, true); }
+private void test_bulk_quality_x265 () { run_bulk_real_codec_case (1, true); }
+private void test_bulk_quality_vp9 () { run_bulk_real_codec_case (2, true); }
+private void test_bulk_quality_svt_av1 () { run_bulk_real_codec_case (3, true); }
+
+private void test_bulk_late_collage_cancellation_keeps_verified_video () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) {
+        Test.skip ("FFmpeg and FFprobe are required for optional collage cancellation integration");
+        return;
+    }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int requested_runs = 0;
+    string release = Path.build_filename (dir, "collage.release");
+    try {
+        string first = Path.build_filename (dir, "a-synthetic.mkv");
+        string second = Path.build_filename (dir, "b-synthetic.mkv");
+        string marker = Path.build_filename (dir, "collage.started");
+        string wrapper = Path.build_filename (dir, "collage-wrapper.sh");
+        string output = Path.build_filename (dir, "output");
+        if (!make_bulk_synthetic_source (ffmpeg, first)) return;
+        File.new_for_path (first).copy (File.new_for_path (second), FileCopyFlags.NONE);
+        // All real probing, calibration and encoding use FFmpeg. Only the
+        // optional PNG command pauses so cancellation occurs at a known stage.
+        string script = "#!/bin/sh\nfor argument in \"$@\"; do\n"
+            + " case \"$argument\" in *-collage.png)\n"
+            + "  : > " + Shell.quote (marker) + "\n"
+            + "  trap 'exit 143' TERM INT\n"
+            + "  while [ ! -f " + Shell.quote (release) + " ]; do sleep 0.02; done\n"
+            + "  exit 0 ;;\n esac\ndone\nexec " + Shell.quote (ffmpeg) + " \"$@\"\n";
+        if (!write_prepared_test_file (wrapper, script, true)) return;
+        var settings = new BulkConversionSettings ();
+        settings.codec = "x264";
+        settings.codec_settings.container = ContainerExt.MKV;
+        settings.runtime_options.ffmpeg_path = wrapper;
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = true;
+        settings.runtime_options.collage_size = CollageSize.HD_720;
+        settings.target_mb = 4;
+        settings.strip_audio = true;
+        capture.start (dir, output, settings, true, 880);
+        requested_runs++;
+        assert_true (spin_main_context_until_deadline (() => { return FileUtils.test (marker, FileTest.EXISTS); }, 30000),
+            "first item's verified video reaches the controlled optional collage helper");
+        if (!FileUtils.test (marker, FileTest.EXISTS)) return;
+        capture.controller.cancel ();
+        assert_true (capture.wait_for_callbacks (requested_runs, 15000), "late cancellation reaps the optional helper and finishes the queue");
+        assert_true (capture.analysis_dispatches == 1 && capture.conversion_dispatches == 1,
+            "cancelling optional collage work prevents any second item dispatch");
+        assert_true (capture.controller.items.length == 2, "late-cancel queue retains both source rows");
+        if (capture.controller.items.length != 2) return;
+        BulkItem completed = capture.controller.items[0];
+        assert_string_equal (completed.state, "completed", "verified video remains completed after optional collage cancellation");
+        assert_true (completed.status.down ().contains ("cancel"), "completed row explains that optional work was cancelled");
+        assert_true (capture.controller.items[1].state == "pending", "unstarted second item stays queued after late cancellation");
+        assert_true (capture.output_signals == 1 && capture.published_count == 1,
+            "late cancellation still publishes the one verified main video");
+        string reason;
+        bool usable = FfprobeUtils.output_file_is_usable (completed.output_path, out reason, null, ffprobe);
+        assert_true (usable, "kept late-cancel video is usable: " + reason);
+        assert_false (FileUtils.test (ConversionUtils.build_collage_output_path (completed.output_path), FileTest.EXISTS),
+            "cancelled optional collage does not claim a nonexistent PNG output");
+        assert_true (capture.finished_signals == 1 && capture.last_finished_id == 880
+                && capture.finished_after_release && !capture.controller.is_running,
+            "late-cancel queue releases ownership and finishes exactly once");
+    } catch (Error e) {
+        Test.fail_printf ("late collage cancellation integration failed: %s", e.message);
+    } finally {
+        write_prepared_test_file (release, "release cleanup");
+        capture.controller.cancel ();
+        capture.wait_for_callbacks (requested_runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_match_source_size_waits_for_each_file () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var settings = AppSettings.get_default ();
+    bool saved_match = settings.smart_optimizer_match_source_size;
+    try {
+        settings.smart_optimizer_match_source_size = true;
+        var tab = new X264Tab ();
+        string first = Path.build_filename (dir, "first.mkv");
+        string second = Path.build_filename (dir, "second.mkv");
+        if (!write_prepared_test_file (first, string.nfill (2 * 1024 * 1024, 'a'))
+                || !write_prepared_test_file (second, string.nfill (3 * 1024 * 1024, 'b'))) return;
+        tab.update_source_file_size (first);
+        tab.set_folder_input_mode (true);
+        tab.update_source_file_size (dir);
+        int64 settle_deadline = get_monotonic_time () + 50 * TimeSpan.MILLISECOND;
+        assert_true (spin_main_context_until_deadline (() => { return get_monotonic_time () >= settle_deadline; }, 1000),
+            "retired file-size query has time to deliver its stale result");
+        assert_true (tab.match_source_size_active && tab.get_source_file_size_bytes () == -1,
+            "folder transition retires a pending size query and keeps Match Source Size selected");
+        tab.set_folder_input_mode (false);
+        tab.update_source_file_size (first);
+        assert_true (spin_main_context_until_deadline (() => { return tab.get_source_file_size_bytes () == 2 * 1024 * 1024; }, 3000),
+            "first individual source obtains its own byte count after returning from folder mode");
+        assert_true (tab.match_source_size_active && tab.get_target_mb () == 2,
+            "first file matches its own two-MiB source target");
+        tab.set_folder_input_mode (true);
+        assert_true (tab.match_source_size_active && tab.get_source_file_size_bytes () == -1,
+            "folder mode clears the single-file observation while retaining the matching request");
+        tab.set_folder_input_mode (false);
+        tab.update_source_file_size (second);
+        assert_true (spin_main_context_until_deadline (() => { return tab.get_source_file_size_bytes () == 3 * 1024 * 1024; }, 3000),
+            "later individual source gets a fresh size observation");
+        assert_true (tab.match_source_size_active && tab.get_target_mb () == 3,
+            "later file matches its own three-MiB target rather than a prior source or folder");
+    } finally {
+        settings.smart_optimizer_match_source_size = saved_match;
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private class BulkAdmissionGate : Object {
+    public bool allowed = true;
+    public bool permits_input () { return allowed; }
+}
+
+private bool wait_bulk_input_kind (FilePickers pickers, InputSourceKind expected, int timeout_ms = 3000) {
+    MainContext context = MainContext.default ();
+    int64 deadline = get_monotonic_time () + timeout_ms * TimeSpan.MILLISECOND;
+    while (get_monotonic_time () < deadline) {
+        while (context.pending ()) context.iteration (false);
+        if (pickers.kind == expected) return true;
+        Thread.usleep (1000);
+    }
+    return pickers.kind == expected;
+}
+
+private bool wait_bulk_detection_idle (GeneralTab general, int timeout_ms = 3000) {
+    MainContext context = MainContext.default ();
+    int64 deadline = get_monotonic_time () + timeout_ms * TimeSpan.MILLISECOND;
+    while (get_monotonic_time () < deadline) {
+        while (context.pending ()) context.iteration (false);
+        if (!general.is_source_detection_active ()) return true;
+        Thread.usleep (1000);
+    }
+    return !general.is_source_detection_active ();
+}
+
+private void test_bulk_input_classification_admission_and_general_preservation () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var pickers = new FilePickers ();
+    var general = new GeneralTab ();
+    var gate = new BulkAdmissionGate ();
+    pickers.set_input_admission (gate.permits_input);
+    try {
+        string first = Path.build_filename (dir, "first.mkv");
+        string second = Path.build_filename (dir, "second.mp4");
+        string extensionless = Path.build_filename (dir, "source-without-extension");
+        string folder = Path.build_filename (dir, "folder-named-video.mp4");
+        assert_true (DirUtils.create (folder, 0700) == 0, "typed-input fixture creates a directory with a video suffix");
+        if (!write_prepared_test_file (first, "first synthetic source")
+                || !write_prepared_test_file (second, "second synthetic source")
+                || !write_prepared_test_file (extensionless, "extensionless synthetic source")) return;
+        pickers.request_input (extensionless);
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FILE),
+            "an existing regular file without an extension remains a valid individual-file selection");
+        assert_string_equal (pickers.source_path, extensionless, "extensionless individual source path is retained");
+        general.crop_check.active = true;
+        general.crop_value.text = "320:180:4:6";
+        general.delogo_check.active = true;
+        general.delogo_value.text = "4:6:20:24";
+        general.preserve_metadata.active = true;
+        general.remove_chapters.active = true;
+        general.video_speed_check.active = true;
+        general.video_speed.set_value (25.0);
+        general.seek_check.active = true;
+        general.seek_ss.set_value (3.0);
+        general.time_check.active = true;
+        general.time_ss.set_value (7.0);
+        pickers.request_input (first);
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FILE), "regular video input resolves to the typed file mode");
+        assert_string_equal (pickers.source_path, first, "typed source retains the accepted file path");
+        pickers.request_input (folder);
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FOLDER), "filesystem directory wins over its video-like suffix");
+        general.set_folder_input_mode (true);
+        assert_false (general.detect_crop_button.sensitive || general.detect_logo_button.sensitive
+                || general.detect_moving_logo_button.sensitive, "folder mode disables every source-specific detection button");
+        var snapshot = general.snapshot_settings ();
+        var timing = general.snapshot_timing_only ();
+        assert_true (snapshot.crop_enabled && snapshot.crop_value == "320:180:4:6"
+                && snapshot.delogo_enabled && snapshot.delogo_regions == "4:6:20:24",
+            "file-to-folder transition preserves entered crop and logo-removal settings");
+        assert_true (snapshot.preserve_metadata && snapshot.remove_chapters
+                && snapshot.video_speed_enabled && snapshot.video_speed_percent == 25.0,
+            "folder mode keeps metadata, chapters and speed settings");
+        assert_true (timing.seek_enabled && timing.seek_seconds == 3.0
+                && timing.time_enabled && timing.time_seconds == 7.0,
+            "folder mode keeps the General timing request");
+        pickers.output_entry.set_text (folder);
+        pickers.set_operation_locked (true);
+        pickers.request_input (second);
+        pickers.input_entry.set_text (second);
+        pickers.output_entry.set_text (dir);
+        assert_true (pickers.kind == InputSourceKind.FOLDER, "busy admission cannot replace the typed source model");
+        assert_string_equal (pickers.source_path, folder, "busy request preserves the accepted source");
+        assert_string_equal (pickers.input_entry.get_text (), folder, "raw input writes are also rejected while busy");
+        assert_string_equal (pickers.output_entry.get_text (), folder, "busy output writes preserve the accepted destination");
+        pickers.set_operation_locked (false);
+        gate.allowed = false;
+        pickers.request_input (second);
+        pickers.input_entry.set_text (second);
+        assert_true (pickers.kind == InputSourceKind.FOLDER, "shared admission gate rejects legacy input-entry writes too");
+        gate.allowed = true;
+        pickers.request_input (second);
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FILE), "unlocking allows a new individual video input");
+        general.set_folder_input_mode (false);
+        assert_true (general.detect_crop_button.sensitive && general.detect_logo_button.sensitive
+                && general.detect_moving_logo_button.sensitive, "returning to file mode restores source detectors");
+        snapshot = general.snapshot_settings ();
+        assert_true (snapshot.crop_value == "320:180:4:6" && snapshot.delogo_regions == "4:6:20:24"
+                && snapshot.video_speed_enabled, "folder-to-file transition preserves the same General values");
+
+        // A superseded asynchronous classification must not put the old folder
+        // back after a newer file request, or admit a result after busy starts.
+        pickers.request_input (folder);
+        pickers.request_input (first);
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FILE), "newer file request retires in-flight folder classification");
+        assert_string_equal (pickers.source_path, first, "stale folder result cannot replace the newer accepted file");
+        pickers.request_input (folder);
+        gate.allowed = false;
+        assert_true (wait_bulk_input_kind (pickers, InputSourceKind.FILE), "classification rechecks operation admission before accepting");
+        assert_string_equal (pickers.source_path, first, "denied in-flight result restores the last accepted typed source");
+    } finally {
+        pickers.set_operation_locked (false);
+        gate.allowed = true;
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_folder_mode_retires_crop_worker_and_blocks_direct_detectors () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var saved = ConversionRuntimeOptions.capture_current ();
+    var general = new GeneralTab ();
+    var console = new ConsoleTab ();
+    int activity_changes = 0;
+    ulong activity_id = general.source_detection_activity_changed.connect (() => { activity_changes++; });
+    string release = Path.build_filename (dir, "crop.release");
+    try {
+        string input = Path.build_filename (dir, "synthetic-input.mkv");
+        string executable = Path.build_filename (dir, "crop-ffmpeg.sh");
+        string marker = Path.build_filename (dir, "crop.started");
+        string script = "#!/bin/sh\n: > " + Shell.quote (marker)
+            + "\nwhile [ ! -f " + Shell.quote (release) + " ]; do sleep 0.02; done\n"
+            + "printf 'crop=640:360:0:0\\n'\n";
+        if (!write_prepared_test_file (input, "synthetic input bytes")
+                || !write_prepared_test_file (executable, script, true)) return;
+        AppSettings.get_default ().ffmpeg_path = executable;
+        general.start_crop_detection (input, console);
+        assert_true (general.is_source_detection_active (), "crop detector registers its live worker before returning");
+        assert_true (activity_changes == 1, "main-window admission gets notified when detection starts");
+        assert_true (spin_main_context_until_deadline (() => { return FileUtils.test (marker, FileTest.EXISTS); }, 3000),
+            "fake crop worker starts before the source mode changes");
+        general.set_folder_input_mode (true);
+        general.crop_check.active = true;
+        general.crop_value.text = "320:180:4:6";
+        general.delogo_check.active = true;
+        general.delogo_value.text = "4:6:20:24";
+        general.start_crop_detection (input, console);
+        general.start_logo_detection (input, console);
+        general.start_logo_detection (input, console, true);
+        assert_true (general.is_source_detection_active (), "retired worker remains active until it actually exits");
+        if (!write_prepared_test_file (release, "release")) return;
+        assert_true (wait_bulk_detection_idle (general), "retired crop worker eventually releases source-detection admission");
+        assert_true (activity_changes == 2, "main-window Convert sensitivity refreshes even after a stale detector completes");
+        assert_string_equal (general.crop_value.text, "320:180:4:6", "stale crop completion cannot overwrite preserved folder settings");
+        assert_string_equal (general.delogo_value.text, "4:6:20:24", "direct logo-detector calls are blocked in folder mode");
+        assert_false (general.detect_crop_button.sensitive || general.detect_logo_button.sensitive
+                || general.detect_moving_logo_button.sensitive, "stale completion cannot re-enable folder detectors");
+        general.start_crop_detection (input, console);
+        general.start_logo_detection (input, console);
+        general.start_logo_detection (input, console, true);
+        assert_false (general.is_source_detection_active (), "folder-mode direct detector calls launch no additional workers");
+        general.set_folder_input_mode (false);
+        assert_true (general.detect_crop_button.sensitive && general.detect_logo_button.sensitive
+                && general.detect_moving_logo_button.sensitive, "file mode restores detector controls after retired work finishes");
+    } finally {
+        write_prepared_test_file (release, "release cleanup");
+        wait_bulk_detection_idle (general);
+        general.disconnect (activity_id);
+        restore_prepared_runtime_preferences (saved);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_sampled_logo_windows_match_real_ffmpeg_frames () {
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    if (ffmpeg == null) { Test.skip ("FFmpeg is required for sample-frame comparison"); return; }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    try {
+        string source = Path.build_filename (dir, "sample-source.mkv");
+        string stdout_text, stderr_text;
+        int result = run_command_for_test ({ ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+            "testsrc2=size=64x64:rate=5:duration=4", "-c:v", "ffv1", source },
+            out stdout_text, out stderr_text, "generate source for timed-logo calibration");
+        assert_true (result == 0, "generated source: " + stderr_text);
+        if (result != 0) return;
+        var optimizer = new SmartOptimizer ();
+        string actual_graph = optimizer.sampled_filter_graph_for_test (
+            "delogo=x=4:y=4:w=12:h=12:enable='between(t,2,2.5)'", { 0.0, 2.0 }, 1.0);
+        string expected_graph = "[0:v]null[a];[1:v]delogo=x=4:y=4:w=12:h=12:enable='between(t,0,0.5)'[b];"
+            + "[a][b]concat=n=2:v=1:a=0[v]";
+        string actual_frames;
+        result = run_command_for_test ({ ffmpeg, "-v", "error", "-ss", "0", "-t", "1", "-i", source,
+            "-ss", "2", "-t", "1", "-i", source, "-filter_complex", actual_graph,
+            "-map", "[v]", "-f", "framemd5", "-" }, out actual_frames, out stderr_text,
+            "measure actual sampled-logo output frames");
+        assert_true (result == 0, "actual graph executes: " + stderr_text);
+        result = run_command_for_test ({ ffmpeg, "-v", "error", "-ss", "0", "-t", "1", "-i", source,
+            "-ss", "2", "-t", "1", "-i", source, "-filter_complex", expected_graph,
+            "-map", "[v]", "-f", "framemd5", "-" }, out stdout_text, out stderr_text,
+            "measure independent source-window expectation");
+        assert_true (result == 0, "reference graph executes: " + stderr_text);
+        assert_string_equal (actual_frames, stdout_text,
+            "sampled optimizer frames match independently specified local logo windows");
+    } finally { cleanup_bulk_fixture_tree (dir); }
+}
+
+private void test_sampled_logo_windows_follow_source_seek () {
+    string chain = "delogo=x=4:y=4:w=12:h=12:enable='between(t,10,14)',"
+        + "delogo=x=20:y=4:w=8:h=8,drawtext=text='comma,between(t,10,14)':x=1:y=1";
+    var optimizer = new SmartOptimizer ();
+    string graph = optimizer.sampled_filter_graph_for_test (chain, { 0.0, 9.004, 12.0, 20.0 }, 3.0);
+    assert_contains (graph, "[0:v]delogo=x=20:y=4:w=8:h=8,drawtext=", "early sample omits inactive timed logo");
+    assert_contains (graph, "[1:v]delogo=x=4:y=4:w=12:h=12:enable='between(t,1.000000,3.000000)'",
+        "sample seek rounds identically to FFmpeg and clips window at sample end");
+    assert_contains (graph, "[2:v]delogo=x=4:y=4:w=12:h=12:enable='between(t,0.000000,2.000000)'",
+        "overlapping window clips at sample start");
+    assert_contains (graph, "[3:v]delogo=x=20:y=4:w=8:h=8,drawtext=", "late sample omits expired timed logo");
+    assert_contains (graph, "drawtext=text='comma,between(t,10,14)'", "quoted unrelated expressions are preserved");
+    string only_timed = "delogo=x=4:y=4:w=12:h=12:enable='between(t,10,14)'";
+    assert_contains (optimizer.sampled_filter_graph_for_test (only_timed, { 20.0 }, 3.0),
+        "[0:v]null[s0]", "inactive-only sample retains valid graph connectivity");
+    string[] chains = { FilterBuilder.retarget_timed_delogo_filters (only_timed, 12.0, 3.0), "" };
+    string analysis = SmartOptimizerLogic.independent_analysis_filter_spec (2, only_timed, "signalstats", chains);
+    assert_contains (analysis, "between(t,0.000000,2.000000)", "independent analysis uses local timing");
+    assert_contains (analysis, "[1:v]signalstats[analysis1]", "inactive independent sample still measures video");
+}
+
 void main (string[] args) {
     Test.init (ref args);
+
+
+    Test.add_func ("/bulk-conversion/calibration/timed-logo-real-frames", test_sampled_logo_windows_match_real_ffmpeg_frames);
+    Test.add_func ("/bulk-conversion/calibration/timed-logo-sample-seek", test_sampled_logo_windows_follow_source_seek);
+    Test.add_func ("/bulk-conversion/scan/top-level-sort-and-aliases",
+        test_bulk_scan_sorts_top_level_videos_and_deduplicates_aliases);
+    Test.add_func ("/bulk-conversion/scan/pre-cancel",
+        test_bulk_scan_precancel_does_not_return_partial_queue);
+    Test.add_func ("/bulk-conversion/publish/collisions-and-source-aliases",
+        test_bulk_publish_preserves_late_collisions_and_protected_source_aliases);
+    Test.add_func ("/bulk-conversion/settings/copy-isolation",
+        test_bulk_settings_copy_owns_every_per_job_input);
+    Test.add_func ("/bulk-conversion/widgets/synthetic-sequential-queue-and-stop",
+        test_bulk_queue_analyzes_converts_and_stops_sequentially);
+    Test.add_func ("/bulk-conversion/widgets/late-collage-cancel-keeps-video",
+        test_bulk_late_collage_cancellation_keeps_verified_video);
+    Test.add_func ("/bulk-conversion/widgets/match-source-size-per-file",
+        test_bulk_match_source_size_waits_for_each_file);
+    Test.add_func ("/bulk-conversion/widgets/codecs/size/x264", test_bulk_size_x264);
+    Test.add_func ("/bulk-conversion/widgets/codecs/size/x265", test_bulk_size_x265);
+    Test.add_func ("/bulk-conversion/widgets/codecs/size/vp9", test_bulk_size_vp9);
+    Test.add_func ("/bulk-conversion/widgets/codecs/size/svt-av1", test_bulk_size_svt_av1);
+    Test.add_func ("/bulk-conversion/widgets/codecs/quality/x264", test_bulk_quality_x264);
+    Test.add_func ("/bulk-conversion/widgets/codecs/quality/x265", test_bulk_quality_x265);
+    Test.add_func ("/bulk-conversion/widgets/codecs/quality/vp9", test_bulk_quality_vp9);
+    Test.add_func ("/bulk-conversion/widgets/codecs/quality/svt-av1", test_bulk_quality_svt_av1);
+    Test.add_func ("/bulk-conversion/widgets/typed-input-admission-and-preservation",
+        test_bulk_input_classification_admission_and_general_preservation);
+    Test.add_func ("/bulk-conversion/widgets/retired-detector-and-direct-guards",
+        test_bulk_folder_mode_retires_crop_worker_and_blocks_direct_detectors);
+
+    Test.add_func ("/prepared-conversion/config/runtime-and-profile-copy",
+        test_prepared_config_and_runtime_are_deep_copies);
+    Test.add_func ("/prepared-conversion/probes/captured-controlled-execution",
+        test_prepared_probes_use_explicit_path_and_controlled_capture);
+    Test.add_func ("/prepared-conversion/widgets/passlog-and-request-ownership",
+        test_prepared_worker_owns_passlog_and_captured_request);
+    Test.add_func ("/prepared-conversion/widgets/cancel-initial-probe-and-retry",
+        test_prepared_worker_cancels_initial_probe_and_can_retry);
+    Test.add_func ("/prepared-conversion/optimizer/captured-runtime-and-pre-cancel",
+        test_prepared_optimizer_captures_runtime_and_precancel_skips_spawn);
+    Test.add_func ("/prepared-conversion/naming/captured-options-and-calibration-retarget",
+        test_prepared_naming_and_calibration_filter_contracts);
+
+    Test.add_func ("/smart-codec/golden/all-four-codecs",
+        test_smart_codec_resolver_matches_legacy_goldens);
+    Test.add_func ("/smart-codec/widgets/frozen-profile-parity",
+        test_smart_codec_widgets_match_legacy_goldens);
+    Test.add_func ("/smart-codec/policy/full-effort-features",
+        test_smart_codec_resolver_retains_complete_effort_policy);
+    Test.add_func ("/smart-codec/policy/audio-reset-and-copy-block",
+        test_smart_codec_resolver_audio_policy_and_processing_reset);
+    Test.add_func ("/smart-codec/ownership/request-and-profile-isolation",
+        test_smart_codec_resolver_owns_inputs_and_profiles);
+    Test.add_func ("/smart-codec/policy/inactive-crf-reset-defaults",
+        test_smart_codec_resolver_preserves_inactive_crf_defaults);
+    Test.add_func ("/smart-codec/ownership/filter-depth-variants",
+        test_smart_codec_resolver_selects_owned_filter_depth_variants);
+    Test.add_func ("/smart-codec/widgets/target-recommendation-ownership",
+        test_smart_codec_target_adapter_does_not_mutate_recommendation);
+
+
+    Test.add_func ("/encode-profile/composition/preserves-caller-state",
+        test_encode_profile_composition_does_not_mutate_callers);
+    Test.add_func ("/encode-profile/copy/general-nested-state",
+        test_general_settings_copy_isolates_nested_state);
+    Test.add_func ("/encode-profile/copy/codec-source-observations",
+        test_codec_settings_copy_isolates_source_observations);
+    Test.add_func ("/encode-profile/composition/processing-contract",
+        test_encode_profile_composition_preserves_processing_contract);
+    Test.add_func ("/encode-profile/copy/frozen-execution-state",
+        test_encode_profile_copy_freezes_execution_state);
+    Test.add_func ("/encode-profile/composition/independent-jobs",
+        test_encode_profile_jobs_do_not_leak_audio_or_format);
+    Test.add_func ("/encode-profile/adapter/effective-format-private-state",
+        test_encode_profile_adapter_reconciles_effective_format_privately);
+    Test.add_func ("/encode-profile/composition/without-general",
+        test_encode_profile_composition_without_general_uses_defaults);
 
     Test.add_func ("/combine/widgets/move-up-button",
         test_move_up_button_reorders_files);

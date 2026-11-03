@@ -76,3 +76,33 @@ Also keep one external subtitle file handy:
 
 - This checklist is meant to catch regressions in signal wiring, binding lifetime, playback interaction, and state synchronization.
 - Automated tests cover logic and some widget wiring, but they do not replace desktop GTK smoke testing.
+
+## Folder conversion
+
+Use disposable synthetic inputs and an output folder outside the repository.
+Never overwrite source media or remove existing outputs to make a check pass.
+
+- Choose/drop a folder (including a directory whose name ends in `.mp4`). Confirm
+  the queue lists only top-level supported videos, in stable order, without aliases.
+- Move from a single file to a folder and back. General manual crop/logo values
+  survive; old media previews clear. Crop & Trim, Audio and Subtitles are disabled
+  for folders, including programmatic navigation; General Detect actions are disabled.
+- Confirm the resolved output destination, per-file Match Source Size description,
+  chosen codec and queue results are visible. No new hamburger-menu bulk item exists.
+- Try size and quality objectives, all four codecs, content/delivery choices,
+  No Audio, multiple audio tracks and General crop/rotation/timing/speed/watermark.
+  Confirm unavailable quality capability and impossible per-file targets are clear.
+- Optimize with Auto-Convert off: rows become Ready without output files. Convert
+  then processes one file at a time. Retry skips completed rows; Rescan includes them.
+- During analysis/encoding, attempt another Optimize, Convert, Combine, recent-file
+  selection and input drop. They cannot replace the active input or launch competing work.
+- Pre-create output names and sidecars, including source aliases. Verify bytes are
+  unchanged and new outputs get suffixes. Verify the default `Converted` folder.
+- Cancel during analysis, each encoding pass and optional collage. Check no next file
+  starts, subprocesses/passlogs/staging are released, and completed videos remain.
+- Close while processing and confirm cancellation waits for cleanup. Check unavailable
+  or full destinations stop dispatch while source-specific failures allow later items.
+
+Automated synthetic tests cover these areas partially; this checklist also requires
+an actual desktop pass. Timed-logo calibration fixes and remaining long-range VMAF alignment
+investigations are tracked in `docs/AUDIT.md`.

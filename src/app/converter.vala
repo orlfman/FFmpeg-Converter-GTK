@@ -15,9 +15,41 @@ internal enum ConversionPhase {
 //  ConversionConfig — Data object bundling everything ConversionRunner needs
 // ═══════════════════════════════════════════════════════════════════════════════
 
+public class ConversionRuntimeOptions : Object {
+    public string ffmpeg_path = "ffmpeg";
+    public string ffprobe_path = "ffprobe";
+    public bool generate_collage_thumbnail = false;
+    public CollageSize collage_size = CollageSize.FHD_1080;
+    public bool overwrite_enabled = false;
+
+    public static ConversionRuntimeOptions capture_current () {
+        var settings = AppSettings.get_default ();
+        var options = new ConversionRuntimeOptions ();
+        options.ffmpeg_path = settings.ffmpeg_path;
+        options.ffprobe_path = settings.ffprobe_path;
+        options.generate_collage_thumbnail = settings.generate_collage_thumbnail;
+        options.collage_size = settings.collage_size;
+        options.overwrite_enabled = settings.overwrite_enabled;
+        return options;
+    }
+
+    public ConversionRuntimeOptions copy () {
+        var options = new ConversionRuntimeOptions ();
+        options.ffmpeg_path = ffmpeg_path;
+        options.ffprobe_path = ffprobe_path;
+        options.generate_collage_thumbnail = generate_collage_thumbnail;
+        options.collage_size = collage_size;
+        options.overwrite_enabled = overwrite_enabled;
+        return options;
+    }
+}
+
 public class ConversionConfig : Object {
     // ── FFmpeg arguments ────────────────────────────────────────────────────
     public EncodeProfileSnapshot profile { get; set; default = new EncodeProfileSnapshot (); }
+    // Null preserves compatibility with callers constructing configs manually;
+    // execution captures the current runtime exactly once when it is absent.
+    public ConversionRuntimeOptions? runtime_options { get; set; default = null; }
     public string passlog_base   { get; set; default = ""; }
     public SvtAv1CrfTwoPassCapabilityStatus svt_crf_two_pass_status {
         get; set; default = SvtAv1CrfTwoPassCapabilityStatus.UNKNOWN;
@@ -50,6 +82,30 @@ public class ConversionConfig : Object {
     //    Effective output fps resolved at snapshot time from the General tab's
     //    frame rate setting.  0.0 means "use probed input fps".
     public double output_fps { get; set; default = 0.0; }
+
+    public ConversionConfig copy () {
+        var config = new ConversionConfig ();
+        config.profile = profile.copy ();
+        ConversionRuntimeOptions? runtime = runtime_options;
+        config.runtime_options = runtime != null ? runtime.copy () : null;
+        config.passlog_base = passlog_base;
+        config.svt_crf_two_pass_status = svt_crf_two_pass_status;
+        config.svt_crf_two_pass_reason = svt_crf_two_pass_reason;
+        config.seek_enabled = seek_enabled;
+        config.seek_timestamp = seek_timestamp;
+        config.time_enabled = time_enabled;
+        config.time_timestamp = time_timestamp;
+        config.source_span_seconds = source_span_seconds;
+        config.video_source_span_seconds = video_source_span_seconds;
+        config.timed_stream_topology_known = timed_stream_topology_known;
+        config.input_has_subtitle_stream = input_has_subtitle_stream;
+        config.input_has_chapters = input_has_chapters;
+        config.smart_requested_size_kib = smart_requested_size_kib;
+        config.smart_planned_size_kib = smart_planned_size_kib;
+        config.smart_planning_uncertainty = smart_planning_uncertainty;
+        config.output_fps = output_fps;
+        return config;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -299,8 +355,44 @@ public class Converter : Object {
                                   ICodecTab codec_tab,
                                   ICodecBuilder builder,
                                   uint64 operation_id) {
-        if (input_file == "") {
-            status_area.set_status ("Please select an input file first!",
+        bool two_pass = codec_tab.get_two_pass ();
+        return start_execution (input_file, output_file, two_pass, operation_id,
+            () => { return snapshot_config (codec_tab, builder); });
+    }
+
+    /** Execute a captured profile without reading the live codec/General UI. */
+    public bool start_prepared_conversion (string input_file,
+                                           string output_file,
+                                           ConversionConfig captured_config,
+                                           bool two_pass,
+                                           uint64 operation_id) {
+        if (input_file.length == 0
+                || !FileUtils.test (input_file, FileTest.IS_REGULAR)) {
+            status_area.set_status ("The prepared input file is not available.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+        if (captured_config.profile.codec_name.length == 0) {
+            status_area.set_status ("The prepared conversion has no codec profile.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return false;
+        }
+        ConversionConfig frozen_config = captured_config.copy ();
+        if (frozen_config.runtime_options == null)
+            frozen_config.runtime_options = ConversionRuntimeOptions.capture_current ();
+        return start_execution (input_file, output_file, two_pass, operation_id,
+            () => { return frozen_config; });
+    }
+
+    private delegate ConversionConfig ConfigFactory ();
+
+    private bool start_execution (string input_file,
+                                   string output_file,
+                                   bool two_pass,
+                                   uint64 operation_id,
+                                   owned ConfigFactory capture_config) {
+        if (input_file.length == 0 || output_file.length == 0) {
+            status_area.set_status ("Select an input file and output location first.",
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
             return false;
         }
@@ -319,39 +411,66 @@ public class Converter : Object {
             return false;
         }
 
+        // Capture only after reservation: UI snapshotting also consumes a
+        // staged optimizer report and must not run for a rejected start.
+        ConversionConfig config = capture_config ();
+        if (config.runtime_options == null)
+            config.runtime_options = ConversionRuntimeOptions.capture_current ();
+        ConversionRuntimeOptions runtime = config.runtime_options.copy ();
+        config.runtime_options = runtime;
+        if (!prepare_passlog (config, two_pass)) {
+            rollback_conversion_start (operation_id, runner);
+            report_error ("Could not create an owned two-pass log directory.");
+            return false;
+        }
+
         last_output_file = output_file;
-
-        string codec_name = builder.get_codec_name ();
         console_tab.add_section_header (
-            "Conversion #%s — %s".printf (operation_id.to_string (), codec_name.up ()),
-            {
-                "Input:  " + input_file,
-                "Output: " + output_file
-            }
+            "Conversion #%s — %s".printf (
+                operation_id.to_string (), config.profile.codec_name.up ()),
+            { "Input:  " + input_file, "Output: " + output_file }
         );
-
         status_area.set_status (@"Starting conversion...\nOutput will be:\n$output_file",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
-
-        bool two_pass = codec_tab.get_two_pass ();
-
-        // Snapshot all UI state into a ConversionConfig
-        var config = snapshot_config (input_file, output_file, codec_tab, builder, two_pass);
 
         progress_tracker.reset_throttle ();
         progress_tracker.show_pulse ();
 
         try {
             new Thread<void>.try ("ffmpeg-thread", () => {
-                // Probe duration and fps on background thread
-                double dur = FfprobeUtils.probe_duration (input_file);
-                double probed_fps = FfprobeUtils.probe_input_fps (input_file);
+                // Every helper is owned by this runner, including the first
+                // duration/FPS probes, so cancellation never waits on an
+                // untracked child or switches to a newly changed tool path.
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
+                double dur = FfprobeUtils.probe_duration (
+                    input_file, runner.execute_capture, runtime.ffprobe_path);
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
+                double probed_fps = FfprobeUtils.probe_input_fps (
+                    input_file, runner.execute_capture, runtime.ffprobe_path);
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
                 TimedStreamTopologyProbeResult timed_topology =
                     FfprobeUtils.probe_timed_stream_topology (
-                        input_file, runner.execute_capture);
+                        input_file, runner.execute_capture, runtime.ffprobe_path);
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
                 VideoTimelineProbeResult video_timeline =
                     FfprobeUtils.probe_video_timeline (
-                        input_file, runner.execute_capture);
+                        input_file, runner.execute_capture, runtime.ffprobe_path);
+                if (!accepts_runner_updates (runner)) {
+                    finish_conversion (operation_id, runner, false);
+                    return;
+                }
                 bool still_active;
 
                 state_mutex.lock ();
@@ -423,44 +542,31 @@ public class Converter : Object {
         return true;
     }
 
-    /**
-     * Snapshot all relevant UI state into a ConversionConfig.
-     * Called on the main thread before spawning the background thread.
-     * This decouples ConversionRunner from live widget state.
-     */
-    private ConversionConfig snapshot_config (string input_file,
-                                              string output_file,
-                                              ICodecTab codec_tab,
-                                              ICodecBuilder builder,
-                                              bool two_pass) {
-        var config = new ConversionConfig ();
-
+    /** Allocate logs only in a directory created exclusively for this run. */
+    private bool prepare_passlog (ConversionConfig config, bool two_pass) {
+        // A caller's passlog path is data, never proof that we own its files.
+        config.passlog_base = "";
         passlog_base = null;
         _passlog_run_dir = null;
+        if (!two_pass)
+            return true;
 
-        if (two_pass) {
-            string codec_name = builder.get_codec_name ();
-            string? managed_run_dir = ConversionUtils.create_managed_temp_run_dir (
-                "conversion",
-                codec_name
-            );
+        string? run_dir = ConversionUtils.create_managed_temp_run_dir (
+            "conversion", config.profile.codec_name);
+        if (run_dir == null)
+            return false;
+        _passlog_run_dir = run_dir;
+        string base_path = Path.build_filename (run_dir, "passlog");
+        passlog_base = base_path;
+        config.passlog_base = base_path;
+        return true;
+    }
 
-            if (managed_run_dir != null) {
-                _passlog_run_dir = managed_run_dir;
-                string plog = Path.build_filename (managed_run_dir, "passlog");
-                passlog_base = plog;
-                config.passlog_base = plog;
-            } else {
-                // Fall back to the legacy temp-file base if the managed run
-                // directory cannot be created.
-                string plog = Path.build_filename (
-                    Environment.get_tmp_dir (),
-                    "ffmpeg_passlog_" + GLib.get_real_time ().to_string ()
-                );
-                passlog_base = plog;
-                config.passlog_base = plog;
-            }
-        }
+    /** Capture UI state on the main thread before starting the worker. */
+    private ConversionConfig snapshot_config (ICodecTab codec_tab,
+                                              ICodecBuilder builder) {
+        var config = new ConversionConfig ();
+        config.runtime_options = ConversionRuntimeOptions.capture_current ();
 
         PixelFormatSettingsSnapshot? pixel_format =
             (codec_tab is BaseCodecTab)

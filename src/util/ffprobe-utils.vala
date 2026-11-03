@@ -167,6 +167,11 @@ namespace FfprobeUtils {
         stdout_text = "";
         stderr_text = "";
 
+        if (cancellable != null && cancellable.is_cancelled ()) {
+            log_ffprobe_debug ("async probe cancelled before spawn", cmd);
+            return false;
+        }
+
         try {
             var launcher = new SubprocessLauncher (
                 SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
@@ -182,6 +187,12 @@ namespace FfprobeUtils {
                     log_ffprobe_debug ("async communication failed", cmd, e.message);
                 }
                 proc.force_exit ();
+                try {
+                    yield proc.wait_async (null);
+                } catch (Error wait_error) {
+                    log_ffprobe_debug ("async child cleanup failed", cmd,
+                        wait_error.message);
+                }
                 return false;
             }
 
@@ -771,9 +782,10 @@ namespace FfprobeUtils {
      * inferring from the pixel-format name.
      */
     public async int probe_video_bit_depth_async (string input_file,
-                                                  Cancellable? cancellable = null) {
+                                                  Cancellable? cancellable = null,
+                                                  string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "json",
             "-select_streams", "v:0",
@@ -798,9 +810,11 @@ namespace FfprobeUtils {
      * need the value before they can build a command line. The preview players
      * do not probe frame rate at all — mpv steps decoded frames directly.
      */
-    public double probe_input_fps (string input_file) {
+    public double probe_input_fps (string input_file,
+                                   FfprobeCaptureRunner? capture_runner = null,
+                                   string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-select_streams", "v:0",
             "-show_entries", "stream=r_frame_rate",
@@ -810,15 +824,17 @@ namespace FfprobeUtils {
         string stdout_text;
         string stderr_text;
 
-        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+        if (!run_ffprobe_controlled (cmd, capture_runner, out stdout_text, out stderr_text))
             return 0.0;
 
         return parse_ffprobe_fps_output (stdout_text);
     }
 
-    public bool has_video_stream (string input_file) {
+    public bool has_video_stream (string input_file,
+                                  FfprobeCaptureRunner? capture_runner = null,
+                                  string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-select_streams", "v:0",
             "-show_entries", "stream=index",
@@ -828,7 +844,7 @@ namespace FfprobeUtils {
         string stdout_text;
         string stderr_text;
 
-        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+        if (!run_ffprobe_controlled (cmd, capture_runner, out stdout_text, out stderr_text))
             return false;
 
         return stdout_text.strip ().length > 0;
@@ -836,10 +852,11 @@ namespace FfprobeUtils {
 
     public TimedStreamTopologyProbeResult probe_timed_stream_topology (
         string input_file,
-        FfprobeCaptureRunner? capture_runner = null
+        FfprobeCaptureRunner? capture_runner = null,
+        string? ffprobe_path = null
     ) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "error",
             "-show_entries", "stream=codec_type:chapter=start_time,end_time",
             "-of", "json",
@@ -862,12 +879,13 @@ namespace FfprobeUtils {
      */
     public VideoTimelineProbeResult probe_video_timeline (
         string input_file,
-        FfprobeCaptureRunner? capture_runner = null
+        FfprobeCaptureRunner? capture_runner = null,
+        string? ffprobe_path = null
     ) {
         // Read just the first packet. This establishes the real video origin
         // without trusting the container's start time.
         string[] first_cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "error",
             "-select_streams", "v:0",
             "-read_intervals", "%+#1",
@@ -904,7 +922,7 @@ namespace FfprobeUtils {
         // it is never returned as the video duration. This keeps the original
         // leading-gap bug from reappearing when metadata is misleading.
         string[] duration_cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "csv=p=0",
             "-show_entries", "format=duration",
@@ -945,7 +963,7 @@ namespace FfprobeUtils {
                 tail_start, "%.6f") + "%"
                 + ConversionUtils.format_ffmpeg_double (tail_end, "%.6f");
             string[] tail_cmd = {
-                AppSettings.get_default ().ffprobe_path,
+                ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
                 "-v", "error",
                 "-select_streams", "v:0",
                 "-read_intervals", interval,
@@ -998,9 +1016,10 @@ namespace FfprobeUtils {
      * depending on Converter.
      */
     public async double probe_duration_async (string input_file,
-                                              Cancellable? cancellable = null) {
+                                              Cancellable? cancellable = null,
+                                              string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "csv=p=0",
             "-show_entries", "format=duration",
@@ -1017,10 +1036,11 @@ namespace FfprobeUtils {
 
     public async AudioStreamProbeResult probe_primary_audio_stream_async (
         string input_file,
-        Cancellable? cancellable = null) {
+        Cancellable? cancellable = null,
+        string? ffprobe_path = null) {
         var result = new AudioStreamProbeResult ();
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-select_streams", "a:0",
             "-show_entries", "stream=codec_name,channels,sample_fmt,bits_per_raw_sample",
@@ -1064,7 +1084,10 @@ namespace FfprobeUtils {
      *
      * @reason is a short user-facing explanation when the file is unusable.
      */
-    public bool output_file_is_usable (string path, out string reason) {
+    public bool output_file_is_usable (string path,
+                                       out string reason,
+                                       FfprobeCaptureRunner? capture_runner = null,
+                                       string? ffprobe_path = null) {
         reason = "";
 
         if (path.length == 0 || !FileUtils.test (path, FileTest.EXISTS)) {
@@ -1088,7 +1111,7 @@ namespace FfprobeUtils {
 
         // The decisive check. A header-only container has a plausible size but
         // no readable duration.
-        if (probe_duration (path) <= 0.0) {
+        if (probe_duration (path, capture_runner, ffprobe_path) <= 0.0) {
             reason = "FFmpeg reported success but the output contains no media "
                    + "— it may have been asked to encode a range with no frames "
                    + "in it.";
@@ -1098,9 +1121,11 @@ namespace FfprobeUtils {
         return true;
     }
 
-    public double probe_duration (string input_file) {
+    public double probe_duration (string input_file,
+                                  FfprobeCaptureRunner? capture_runner = null,
+                                  string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "csv=p=0",
             "-show_entries", "format=duration",
@@ -1109,7 +1134,7 @@ namespace FfprobeUtils {
         string stdout_buf;
         string stderr_buf;
 
-        if (!run_ffprobe_sync (cmd, out stdout_buf, out stderr_buf))
+        if (!run_ffprobe_controlled (cmd, capture_runner, out stdout_buf, out stderr_buf))
             return 0.0;
 
         return parse_ffprobe_duration_output (stdout_buf);
@@ -1124,9 +1149,10 @@ namespace FfprobeUtils {
      * fall back to the filename.
      */
     public async string? probe_title_async (string input_file,
-                                            Cancellable? cancellable = null) {
+                                            Cancellable? cancellable = null,
+                                            string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "json",
             "-show_entries", "format_tags=title:stream_tags=title",
@@ -1142,9 +1168,11 @@ namespace FfprobeUtils {
         return parse_ffprobe_title_output (stdout_text);
     }
 
-    public string? probe_title (string input_file) {
+    public string? probe_title (string input_file,
+                               FfprobeCaptureRunner? capture_runner = null,
+                               string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "quiet",
             "-print_format", "json",
             "-show_entries", "format_tags=title:stream_tags=title",
@@ -1154,7 +1182,7 @@ namespace FfprobeUtils {
         string stdout_text;
         string stderr_text;
 
-        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+        if (!run_ffprobe_controlled (cmd, capture_runner, out stdout_text, out stderr_text))
             return null;
 
         return parse_ffprobe_title_output (stdout_text);
@@ -1198,11 +1226,12 @@ namespace FfprobeUtils {
      */
     public async AudioStreamsProbeResult probe_all_audio_streams_async (
         string input_file,
-        Cancellable? cancellable = null) {
+        Cancellable? cancellable = null,
+        string? ffprobe_path = null) {
         var result = new AudioStreamsProbeResult ();
 
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "error",
             "-select_streams", "a",
             "-show_entries",
@@ -1228,9 +1257,11 @@ namespace FfprobeUtils {
      * TrimRunner uses this as a filter-placement hint for through-EOF audio
      * fade-out. It must not be used as an FFmpeg output limit.
      */
-    public double probe_primary_audio_duration (string input_file) {
+    public double probe_primary_audio_duration (string input_file,
+                                                FfprobeCaptureRunner? capture_runner = null,
+                                                string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path,
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path,
             "-v", "error",
             "-select_streams", "a:0",
             "-show_entries",
@@ -1241,7 +1272,7 @@ namespace FfprobeUtils {
         string stdout_text;
         string stderr_text;
 
-        if (!run_ffprobe_sync (cmd, out stdout_text, out stderr_text))
+        if (!run_ffprobe_controlled (cmd, capture_runner, out stdout_text, out stderr_text))
             return 0.0;
 
         AudioStreamsProbeResult result = parse_all_audio_streams_output (stdout_text);
@@ -1259,9 +1290,10 @@ namespace FfprobeUtils {
      * Returns null if ffprobe could not be run or exited non-zero.
      */
     public async string? probe_format_and_streams_async (string input_file,
-                                                         Cancellable? cancellable = null) {
+                                                         Cancellable? cancellable = null,
+                                                         string? ffprobe_path = null) {
         string[] cmd = {
-            AppSettings.get_default ().ffprobe_path, "-v", "error",
+            ffprobe_path ?? AppSettings.get_default ().ffprobe_path, "-v", "error",
             "-show_format", "-show_streams",
             input_file
         };

@@ -3,6 +3,29 @@ using Gtk;
 public class VideoFilterSettingsSnapshot : Object {
     public string[] processing_filters = {};
     public string hdr_filter = "";
+    // Capture both variants while widgets are available. A recommendation can
+    // choose a different output depth after the batch settings were captured.
+    public bool has_depth_variants = false;
+    public string[] processing_filters_eight_bit = {};
+    public string[] processing_filters_ten_bit = {};
+
+    public void select_bit_depth (bool ten_bit_selected) {
+        if (!has_depth_variants)
+            return;
+        processing_filters = ten_bit_selected
+            ? processing_filters_ten_bit.copy ()
+            : processing_filters_eight_bit.copy ();
+    }
+
+    public VideoFilterSettingsSnapshot copy () {
+        var snapshot = new VideoFilterSettingsSnapshot ();
+        snapshot.processing_filters = processing_filters.copy ();
+        snapshot.hdr_filter = hdr_filter;
+        snapshot.has_depth_variants = has_depth_variants;
+        snapshot.processing_filters_eight_bit = processing_filters_eight_bit.copy ();
+        snapshot.processing_filters_ten_bit = processing_filters_ten_bit.copy ();
+        return snapshot;
+    }
 }
 
 public class PixelFormatSettingsSnapshot : Object {
@@ -57,6 +80,44 @@ public class GeneralSettingsSnapshot : Object {
     // "x:y:w:h" entries in source-frame coordinates, comma separated.
     public bool delogo_enabled = false;
     public string delogo_regions = "";
+
+    public GeneralSettingsSnapshot copy () {
+        var snapshot = new GeneralSettingsSnapshot ();
+        snapshot.scale_mode = scale_mode;
+        snapshot.resolution_preset_value = resolution_preset_value;
+        snapshot.custom_resolution_value = custom_resolution_value;
+        snapshot.scale_width_multiplier = scale_width_multiplier;
+        snapshot.scale_height_multiplier = scale_height_multiplier;
+        snapshot.scale_algorithm = scale_algorithm;
+        snapshot.scale_range = scale_range;
+        snapshot.rotate = rotate;
+        snapshot.crop_enabled = crop_enabled;
+        snapshot.crop_value = crop_value;
+        snapshot.video_filters = video_filters.copy ();
+        snapshot.pixel_format = pixel_format.copy ();
+        snapshot.frame_rate_text = frame_rate_text;
+        snapshot.custom_frame_rate_text = custom_frame_rate_text;
+        snapshot.video_speed_enabled = video_speed_enabled;
+        snapshot.video_speed_percent = video_speed_percent;
+        snapshot.audio_speed_enabled = audio_speed_enabled;
+        snapshot.audio_speed_percent = audio_speed_percent;
+        snapshot.color_filter = color_filter;
+        snapshot.preserve_metadata = preserve_metadata;
+        snapshot.remove_chapters = remove_chapters;
+        snapshot.watermark_enabled = watermark_enabled;
+        snapshot.watermark_mode = watermark_mode;
+        snapshot.watermark_text = watermark_text;
+        snapshot.watermark_position = watermark_position;
+        snapshot.watermark_color = watermark_color;
+        snapshot.watermark_opacity = watermark_opacity;
+        snapshot.watermark_margin = watermark_margin;
+        snapshot.watermark_font_size = watermark_font_size;
+        snapshot.watermark_image_path = watermark_image_path;
+        snapshot.watermark_image_width = watermark_image_width;
+        snapshot.delogo_enabled = delogo_enabled;
+        snapshot.delogo_regions = delogo_regions;
+        return snapshot;
+    }
 }
 
 public class CodecTabSettingsSnapshot : Object {
@@ -65,6 +126,16 @@ public class CodecTabSettingsSnapshot : Object {
     public AudioSettingsSnapshot audio_settings { get; set; default = new AudioSettingsSnapshot (); }
     public AudioProcessingSettingsSnapshot audio_processing { get; set; default = new AudioProcessingSettingsSnapshot (); }
     public PixelFormatSettingsSnapshot pixel_format { get; set; default = new PixelFormatSettingsSnapshot (); }
+
+    public CodecTabSettingsSnapshot copy () {
+        var snapshot = new CodecTabSettingsSnapshot ();
+        snapshot.container = container;
+        snapshot.keyframe_settings = keyframe_settings.copy ();
+        snapshot.audio_settings = audio_settings.copy ();
+        snapshot.audio_processing = audio_processing.copy ();
+        snapshot.pixel_format = pixel_format.copy ();
+        return snapshot;
+    }
 }
 
 public class KeyframeSettingsSnapshot : Object {
@@ -72,6 +143,15 @@ public class KeyframeSettingsSnapshot : Object {
     public int custom_mode = 0;
     public string frame_rate_text = "";
     public string custom_frame_rate_text = "";
+
+    public KeyframeSettingsSnapshot copy () {
+        var snapshot = new KeyframeSettingsSnapshot ();
+        snapshot.keyint_text = keyint_text;
+        snapshot.custom_mode = custom_mode;
+        snapshot.frame_rate_text = frame_rate_text;
+        snapshot.custom_frame_rate_text = custom_frame_rate_text;
+        return snapshot;
+    }
 }
 
 public class EncodeProfileSnapshot : Object {
@@ -122,6 +202,40 @@ public class EncodeProfileSnapshot : Object {
     // FFmpeg overlay filter output family selected for the video. Empty keeps
     // the filter's default when the user left output depth/chroma on Auto.
     public string overlay_format = "";
+
+    public EncodeProfileSnapshot copy () {
+        var snapshot = new EncodeProfileSnapshot ();
+        snapshot.codec_name = codec_name;
+        snapshot.container = container;
+        snapshot.codec_args = codec_args.copy ();
+        KeyframeSettingsSnapshot? keyframes = keyframe_settings;
+        snapshot.keyframe_settings = keyframes != null ? keyframes.copy () : null;
+        snapshot.audio_args = audio_args.copy ();
+        snapshot.preserve_all_audio_tracks = preserve_all_audio_tracks;
+        snapshot.video_filters = video_filters;
+        snapshot.video_filters_skip_crop = video_filters_skip_crop;
+        snapshot.delogo_enabled = delogo_enabled;
+        snapshot.delogo_regions = delogo_regions;
+        snapshot.video_filters_skip_delogo = video_filters_skip_delogo;
+        snapshot.video_filters_skip_crop_and_delogo = video_filters_skip_crop_and_delogo;
+        snapshot.combine_video_filters_per_input = combine_video_filters_per_input;
+        snapshot.combine_video_filters_post_output = combine_video_filters_post_output;
+        snapshot.audio_filters = audio_filters;
+        snapshot.video_speed_multiplier = video_speed_multiplier;
+        snapshot.audio_speed_multiplier = audio_speed_multiplier;
+        snapshot.audio_processing = audio_processing.copy ();
+        snapshot.preserve_metadata = preserve_metadata;
+        snapshot.remove_chapters = remove_chapters;
+        snapshot.watermark_enabled = watermark_enabled;
+        snapshot.watermark_mode = watermark_mode;
+        snapshot.watermark_image_path = watermark_image_path;
+        snapshot.watermark_image_width = watermark_image_width;
+        snapshot.watermark_position = watermark_position;
+        snapshot.watermark_opacity = watermark_opacity;
+        snapshot.watermark_margin = watermark_margin;
+        snapshot.overlay_format = overlay_format;
+        return snapshot;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -461,7 +575,9 @@ namespace CodecUtils {
      */
     public string[] resolve_custom_keyframe_args_from_snapshot (
         KeyframeSettingsSnapshot? snapshot,
-        string input_file) {
+        string input_file,
+        FfprobeCaptureRunner? capture_runner = null,
+        string? ffprobe_path = null) {
         if (snapshot == null)
             return {};
 
@@ -488,7 +604,8 @@ namespace CodecUtils {
 
         // If still unknown, probe the input file
         if (fps <= 0.0)
-            fps = FfprobeUtils.probe_input_fps (input_file);
+            fps = FfprobeUtils.probe_input_fps (
+                input_file, capture_runner, ffprobe_path);
 
         // Sanity — fall back to a safe default
         if (!fps.is_finite () || fps <= 0.0)
@@ -509,15 +626,44 @@ namespace CodecUtils {
         ICodecBuilder builder,
         ICodecTab codec_tab,
         GeneralSettingsSnapshot? general_settings) {
-        var snapshot = new EncodeProfileSnapshot ();
-        CodecTabSettingsSnapshot codec_settings = codec_tab.snapshot_settings (general_settings);
-        if (general_settings != null) {
-            general_settings.pixel_format = codec_settings.pixel_format.copy ();
+        GeneralSettingsSnapshot? effective_general = general_settings != null
+            ? general_settings.copy () : null;
+        CodecTabSettingsSnapshot codec_settings = codec_tab.snapshot_settings (effective_general);
+        if (effective_general != null) {
+            effective_general.pixel_format = codec_settings.pixel_format.copy ();
+            effective_general.video_filters.select_bit_depth (
+                effective_general.pixel_format.ten_bit_selected);
         }
-        Object? builder_snapshot = builder.snapshot_settings (general_settings);
+        Object? builder_snapshot = builder.snapshot_settings (effective_general);
 
-        snapshot.codec_name = builder.get_codec_name ();
-        snapshot.codec_args = builder.build_codec_args_from_snapshot (builder_snapshot);
+        return compose_encode_profile (
+            builder.get_codec_name (),
+            builder.build_codec_args_from_snapshot (builder_snapshot),
+            codec_settings, effective_general);
+    }
+
+    /**
+     * Compose an encode profile from already captured data. All mutable inputs
+     * are copied before applying container or output-format decisions, so one
+     * job cannot change settings another job still needs.
+     */
+    public EncodeProfileSnapshot compose_encode_profile (
+        string codec_name,
+        string[] codec_args,
+        CodecTabSettingsSnapshot requested_codec_settings,
+        GeneralSettingsSnapshot? general_settings) {
+        var snapshot = new EncodeProfileSnapshot ();
+        CodecTabSettingsSnapshot codec_settings = requested_codec_settings.copy ();
+        GeneralSettingsSnapshot? effective_general = general_settings != null
+            ? general_settings.copy () : null;
+        if (effective_general != null) {
+            effective_general.pixel_format = codec_settings.pixel_format.copy ();
+            effective_general.video_filters.select_bit_depth (
+                effective_general.pixel_format.ten_bit_selected);
+        }
+
+        snapshot.codec_name = codec_name;
+        snapshot.codec_args = codec_args.copy ();
         snapshot.keyframe_settings = codec_settings.keyframe_settings;
 
         string container = codec_settings.container;
@@ -544,55 +690,58 @@ namespace CodecUtils {
             codec_settings.audio_settings.preserve_all_audio_tracks;
         snapshot.audio_processing = codec_settings.audio_processing.copy ();
 
-        if (general_settings != null) {
+        if (effective_general != null) {
             snapshot.video_filters = FilterBuilder.build_video_filter_chain_from_snapshot (
-                general_settings, false, snapshot.codec_name);
+                effective_general, false, snapshot.codec_name);
             snapshot.video_filters_skip_crop = FilterBuilder.build_video_filter_chain_from_snapshot (
-                general_settings, true, snapshot.codec_name);
-            snapshot.delogo_enabled = general_settings.delogo_enabled;
-            snapshot.delogo_regions = general_settings.delogo_regions;
+                effective_general, true, snapshot.codec_name);
+            snapshot.delogo_enabled = effective_general.delogo_enabled;
+            snapshot.delogo_regions = effective_general.delogo_regions;
             snapshot.video_filters_skip_delogo =
                 FilterBuilder.build_video_filter_chain_from_snapshot (
-                    general_settings, false, snapshot.codec_name, true);
+                    effective_general, false, snapshot.codec_name, true);
             snapshot.video_filters_skip_crop_and_delogo =
                 FilterBuilder.build_video_filter_chain_from_snapshot (
-                    general_settings, true, snapshot.codec_name, true);
+                    effective_general, true, snapshot.codec_name, true);
             snapshot.combine_video_filters_per_input =
                 FilterBuilder.build_combine_per_input_video_filters_from_snapshot (
-                    general_settings, true, snapshot.codec_name);
+                    effective_general, true, snapshot.codec_name);
             snapshot.combine_video_filters_post_output =
                 FilterBuilder.build_combine_post_output_video_filters_from_snapshot (
-                    general_settings);
+                    effective_general);
             snapshot.video_speed_multiplier =
-                FilterBuilder.get_video_speed_multiplier (general_settings);
+                FilterBuilder.get_video_speed_multiplier (effective_general);
             snapshot.audio_speed_multiplier =
-                FilterBuilder.get_audio_speed_multiplier (general_settings);
+                FilterBuilder.get_audio_speed_multiplier (effective_general);
             snapshot.audio_filters = FilterBuilder.build_audio_filter_chain_from_snapshot (
-                general_settings);
-            snapshot.preserve_metadata = general_settings.preserve_metadata;
-            snapshot.remove_chapters = general_settings.remove_chapters;
-            snapshot.watermark_enabled = general_settings.watermark_enabled;
-            snapshot.watermark_mode = general_settings.watermark_mode;
-            snapshot.watermark_image_path = general_settings.watermark_image_path;
-            snapshot.watermark_image_width = general_settings.watermark_image_width;
-            snapshot.watermark_position = general_settings.watermark_position;
-            snapshot.watermark_opacity = general_settings.watermark_opacity;
-            snapshot.watermark_margin = general_settings.watermark_margin;
+                effective_general);
+            snapshot.preserve_metadata = effective_general.preserve_metadata;
+            snapshot.remove_chapters = effective_general.remove_chapters;
+            snapshot.watermark_enabled = effective_general.watermark_enabled;
+            snapshot.watermark_mode = effective_general.watermark_mode;
+            snapshot.watermark_image_path = effective_general.watermark_image_path;
+            snapshot.watermark_image_width = effective_general.watermark_image_width;
+            snapshot.watermark_position = effective_general.watermark_position;
+            snapshot.watermark_opacity = effective_general.watermark_opacity;
+            snapshot.watermark_margin = effective_general.watermark_margin;
             snapshot.overlay_format = FilterBuilder.get_overlay_output_format (
-                general_settings.pixel_format);
+                effective_general.pixel_format);
         }
 
         return snapshot;
     }
 
     public string[] build_codec_args_from_snapshot (EncodeProfileSnapshot? snapshot,
-                                                    string input_file) {
+                                                    string input_file,
+                                                    FfprobeCaptureRunner? capture_runner = null,
+                                                    string? ffprobe_path = null) {
         if (snapshot == null)
             return {};
 
         string[] codec_args = snapshot.codec_args;
         foreach (string arg in resolve_custom_keyframe_args_from_snapshot (
-                     snapshot.keyframe_settings, input_file)) {
+                     snapshot.keyframe_settings, input_file, capture_runner,
+                     ffprobe_path)) {
             codec_args += arg;
         }
         return codec_args;

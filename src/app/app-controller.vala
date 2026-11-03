@@ -45,6 +45,13 @@ public class AppController : Object {
     /** Emitted when Smart Optimizer finishes and auto-convert is enabled.
      *  Carries the codec name so MainWindow can ensure the correct tab is visible. */
     public signal void auto_convert_requested (string codec);
+    public signal void folder_optimizer_requested (string codec, bool auto_convert);
+    public delegate bool OptimizerAdmission ();
+    private OptimizerAdmission? optimizer_admission;
+
+    public void set_optimizer_admission (owned OptimizerAdmission admission) {
+        optimizer_admission = (owned) admission;
+    }
 
     /** Emitted when a Smart Optimizer run starts or finishes, so MainWindow
      *  can enable/disable the cancel button appropriately. */
@@ -78,6 +85,7 @@ public class AppController : Object {
     // Whether an input change is replacing an earlier file, which is the only
     // case where a heap trim has anything to hand back.
     private string previous_input_path = "";
+    private InputSourceKind previous_resolved_input_kind = InputSourceKind.NONE;
 
     // ── FFmpeg capability probing ────────────────────────────────────────────
     private Cancellable? drawtext_probe_cancel = null;
@@ -335,7 +343,8 @@ public class AppController : Object {
         SmartOptimizerRunSnapshot expected,
         string codec
     ) {
-        if (file_pickers.input_entry.get_text () != expected.input_file)
+        if (file_pickers.kind != InputSourceKind.FILE
+                || file_pickers.source_path != expected.input_file)
             return false;
 
         ConversionUtils.FileSignature? current_signature =
@@ -729,19 +738,33 @@ public class AppController : Object {
     // ── Input file changed → probe info, load trim preview, load subtitles ──
 
     private void wire_file_input_changed () {
-        file_pickers.input_entry.changed.connect (() => {
+        file_pickers.input_selection_changed.connect (() => {
             // A recommendation belongs to the exact file that was measured.
             // Cancel immediately; the end-of-run signature guard below is the
             // backstop for changes that race with async completion.
             if (smart_opt_cancel != null)
                 cancel_smart_optimizer ();
-            string path = file_pickers.input_entry.get_text ();
+            bool folder = file_pickers.kind == InputSourceKind.FOLDER;
+            bool single_file = file_pickers.kind == InputSourceKind.FILE;
+            string path = single_file ? file_pickers.source_path : "";
             bool replaced_previous_input = previous_input_path.strip ().length > 0;
             previous_input_path = path;
             info_tab.load_input_info (path);
             info_tab.reset_output ();
-            general_tab.reset_crop ();
-            general_tab.reset_logo_removal ();
+            // Resolution/invalid states are not detector inputs either. Keep
+            // folder-configured values when returning to an individual file;
+            // ordinary file-to-file changes retain their existing reset policy.
+            general_tab.set_folder_input_mode (folder
+                || file_pickers.kind == InputSourceKind.RESOLVING
+                || file_pickers.kind == InputSourceKind.INVALID);
+            if ((single_file && previous_resolved_input_kind != InputSourceKind.FOLDER)
+                    || file_pickers.kind == InputSourceKind.NONE) {
+                general_tab.reset_crop ();
+                general_tab.reset_logo_removal ();
+            }
+            if (single_file || folder || file_pickers.kind == InputSourceKind.NONE)
+                previous_resolved_input_kind = file_pickers.kind;
+            sync_general_tab_locks ();
             trim_tab.load_video (path);
             audio_tab.load_video (path);
             subtitles_tab.load_video (path);
@@ -751,7 +774,11 @@ public class AppController : Object {
                     ? AudioProbeDisplayState.CHECKING
                     : AudioProbeDisplayState.UNKNOWN
             );
-            update_codec_source_file_size (path);
+            foreach (unowned ISmartCodecTab smart_tab in codec_registry.get_values ()) {
+                var base_tab = smart_tab as BaseCodecTab;
+                if (base_tab != null) base_tab.set_folder_input_mode (folder);
+            }
+            if (!folder) update_codec_source_file_size (path);
 
             // Both players have just torn down their pipelines for the outgoing
             // file. Hand the freed pages back once teardown and the new load
@@ -781,7 +808,8 @@ public class AppController : Object {
 
     private void wire_audio_probe_sync () {
         audio_tab.source_audio_probe_updated.connect ((audio_probe) => {
-            apply_codec_audio_probe_result (audio_probe);
+            if (file_pickers.kind == InputSourceKind.FILE)
+                apply_codec_audio_probe_result (audio_probe);
         });
     }
 
@@ -789,7 +817,8 @@ public class AppController : Object {
 
     private void wire_crop_detection () {
         general_tab.crop_detect_clicked.connect (() => {
-            string input_file = file_pickers.input_entry.get_text ();
+            if (file_pickers.kind != InputSourceKind.FILE) return;
+            string input_file = file_pickers.source_path;
             general_tab.start_crop_detection (input_file, console_tab);
         });
     }
@@ -798,11 +827,13 @@ public class AppController : Object {
 
     private void wire_logo_detection () {
         general_tab.logo_detect_clicked.connect (() => {
-            string input_file = file_pickers.input_entry.get_text ();
+            if (file_pickers.kind != InputSourceKind.FILE) return;
+            string input_file = file_pickers.source_path;
             general_tab.start_logo_detection (input_file, console_tab);
         });
         general_tab.logo_detect_moving_clicked.connect (() => {
-            string input_file = file_pickers.input_entry.get_text ();
+            if (file_pickers.kind != InputSourceKind.FILE) return;
+            string input_file = file_pickers.source_path;
             general_tab.start_logo_detection (input_file, console_tab, true);
         });
     }
@@ -898,6 +929,10 @@ public class AppController : Object {
      * is the currently visible page.
      */
     private void sync_general_tab_locks () {
+        if (file_pickers.kind != InputSourceKind.FILE) {
+            general_tab.notify_trim_tab_mode (-1);
+            return;
+        }
         string? page = view_stack.visible_child_name;
         if (page == "trim") {
             // Trim tab is in focus — lock based on its current mode
@@ -975,11 +1010,26 @@ public class AppController : Object {
      * and output audio bitrate. All are gathered from the GeneralTab state.
      */
     private async void run_smart_optimizer (string codec) {
+        if (optimizer_admission != null && !optimizer_admission ()) {
+            status_area.set_status ("Wait for the current operation to finish.",
+                StatusIcon.WAITING_ICON, StatusIcon.WAITING_CSS);
+            return;
+        }
+        if (file_pickers.kind == InputSourceKind.FOLDER) {
+            var tab = codec_registry.get (codec);
+            folder_optimizer_requested (codec, tab != null && tab.get_auto_convert_active ());
+            return;
+        }
+        if (file_pickers.kind != InputSourceKind.FILE) {
+            status_area.set_status ("Select a video file or folder first.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
         // A new analysis supersedes any not-yet-consumed report staged by an
         // older recommendation, including when this run cannot start.
         converter.stage_smart_size_report ("", 0, 0, 0.0);
 
-        string input_file = file_pickers.input_entry.get_text ();
+        string input_file = file_pickers.source_path;
         if (input_file.length == 0) {
             status_area.set_status ("Smart Optimizer: select an input file first.",
                 StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);

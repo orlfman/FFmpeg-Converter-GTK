@@ -481,8 +481,9 @@ namespace FilterBuilder {
         string[]? pre_input_args = null,
         string[]? post_input_args = null,
         string[]? output_args = null,
-        string? audio_map = null) {
-        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
+        string? audio_map = null,
+        string? ffmpeg_path = null) {
+        string[] cmd = { ffmpeg_path ?? AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
 
         if (pre_input_args != null) {
             foreach (unowned string arg in pre_input_args) {
@@ -526,8 +527,9 @@ namespace FilterBuilder {
         string[] input_args,
         string filter_complex,
         string output_label,
-        string[]? output_args = null) {
-        string[] cmd = { AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
+        string[]? output_args = null,
+        string? ffmpeg_path = null) {
+        string[] cmd = { ffmpeg_path ?? AppSettings.get_default ().ffmpeg_path, "-hide_banner" };
 
         foreach (unowned string arg in input_args) {
             cmd += arg;
@@ -860,6 +862,41 @@ namespace FilterBuilder {
         return result.length > 0
             ? result + ",format=" + target
             : "format=" + target;
+    }
+
+    /** Retarget generated source-timed delogo windows to one seeked sample. */
+    public static string retarget_timed_delogo_filters (string chain,
+                                                        double source_start,
+                                                        double span) {
+        string[] result = {};
+        const string MARKER = ":enable='between(t,";
+        foreach (string original in split_filter_chain_at_top_level_commas (chain)) {
+            string filter = original.strip ();
+            int marker = filter.index_of (MARKER);
+            if (!filter.has_prefix ("delogo=") || marker < 0 || !filter.has_suffix (")'")) {
+                result += original;
+                continue;
+            }
+            string[] bounds = filter.substring (marker + MARKER.length,
+                filter.length - marker - MARKER.length - 2).split (",");
+            double start = 0.0, end = 0.0;
+            if (bounds.length != 2 || !double.try_parse (bounds[0], out start)
+                    || !double.try_parse (bounds[1], out end)
+                    || !start.is_finite () || !end.is_finite ()) {
+                result += original;
+                continue;
+            }
+            start -= source_start;
+            end -= source_start;
+            if (end <= 0.0 || (span > 0.0 && start >= span))
+                continue;
+            start = double.max (0.0, start);
+            if (span > 0.0) end = double.min (span, end);
+            result += filter.substring (0, marker) + MARKER
+                + ConversionUtils.format_ffmpeg_double (start, "%.6f") + ","
+                + ConversionUtils.format_ffmpeg_double (end, "%.6f") + ")'";
+        }
+        return string.joinv (",", result);
     }
 
     /**

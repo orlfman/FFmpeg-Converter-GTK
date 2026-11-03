@@ -87,6 +87,9 @@ public class GeneralTab : Box {
     public Button   detect_crop_button { get; private set; }
     public Entry    crop_value         { get; private set; }
     private uint    crop_detect_gen    = 0;
+    private bool folder_input_mode = false;
+    private uint active_source_detections = 0;
+    public signal void source_detection_activity_changed ();
 
     public Adw.ExpanderRow crop_expander;
     private bool trim_crop_locked = false;
@@ -1420,11 +1423,36 @@ public class GeneralTab : Box {
     //  CROP DETECTION
     // ═════════════════════════════════════════════════════════════════════════
 
+    public bool is_source_detection_active () {
+        return active_source_detections > 0;
+    }
+
+    public void set_folder_input_mode (bool enabled) {
+        if (folder_input_mode == enabled) return;
+        folder_input_mode = enabled;
+        // Retire results without erasing user-entered crop/logo settings. The
+        // existing workers finish normally; admission waits for the active
+        // count to reach zero before starting a folder batch.
+        crop_detect_gen++;
+        delogo_detect_gen++;
+        detect_crop_button.sensitive = !enabled;
+        set_logo_detect_buttons_sensitive (!enabled);
+        if (enabled) {
+            delogo_detect_row.set_subtitle ("Select an individual video to detect a watermark");
+            delogo_moving_row.set_subtitle ("Select an individual video to detect a moving watermark");
+        } else {
+            delogo_detect_row.set_subtitle (DELOGO_DETECT_SUBTITLE_DEFAULT);
+            delogo_moving_row.set_subtitle (DELOGO_MOVING_SUBTITLE_DEFAULT);
+        }
+    }
+
     public void start_crop_detection (string input_file, ConsoleTab console_tab) {
+        if (folder_input_mode) return;
         if (input_file == "") {
             crop_value.set_text ("Please select an input file first");
             return;
         }
+        if (!FileUtils.test (input_file, FileTest.IS_REGULAR)) return;
 
         detect_crop_button.sensitive = false;
         crop_value.set_text ("Analyzing for crop (30 seconds)...");
@@ -1434,6 +1462,8 @@ public class GeneralTab : Box {
         console_tab.add_line ("Filter chain: " + FilterBuilder.get_crop_detection_chain (this));
 
         uint gen = crop_detect_gen;
+        active_source_detections++;
+        source_detection_activity_changed ();
         new Thread<void> ("crop-detect-thread", () => {
             perform_crop_detection (input_file, console_tab, gen);
         });
@@ -1480,6 +1510,8 @@ public class GeneralTab : Box {
 
             string result_crop = last_crop;
             Idle.add (() => {
+                active_source_detections--;
+                source_detection_activity_changed ();
                 if (gen != crop_detect_gen) return Source.REMOVE;
                 if (is_valid_crop_value (result_crop)) {
                     crop_value.set_text (result_crop);
@@ -1488,17 +1520,19 @@ public class GeneralTab : Box {
                     crop_value.set_text ("No crop detected");
                     console_tab.add_line ("⚠️ No valid crop= format found");
                 }
-                detect_crop_button.sensitive = true;
+                detect_crop_button.sensitive = !folder_input_mode;
                 return Source.REMOVE;
             });
 
         } catch (GLib.Error e) {
             string err_msg = e.message;
             Idle.add (() => {
+                active_source_detections--;
+                source_detection_activity_changed ();
                 if (gen != crop_detect_gen) return Source.REMOVE;
                 crop_value.set_text ("Detection error");
                 console_tab.add_line ("Crop detection failed: " + err_msg);
-                detect_crop_button.sensitive = true;
+                detect_crop_button.sensitive = !folder_input_mode;
                 return Source.REMOVE;
             });
         }
@@ -1643,7 +1677,7 @@ public class GeneralTab : Box {
         crop_detect_gen++;
         crop_check.active = false;
         crop_value.text = "";
-        detect_crop_button.sensitive = true;
+        detect_crop_button.sensitive = !folder_input_mode;
     }
 
     /**
@@ -1803,11 +1837,13 @@ public class GeneralTab : Box {
     public void start_logo_detection (string input_file, ConsoleTab console_tab,
                                       bool moving = false) {
         Adw.ActionRow row = moving ? delogo_moving_row : delogo_detect_row;
+        if (folder_input_mode) return;
 
         if (input_file.strip () == "") {
             row.set_subtitle ("Please select an input file first");
             return;
         }
+        if (!FileUtils.test (input_file, FileTest.IS_REGULAR)) return;
         if (!delogo_available) {
             row.set_subtitle (delogo_unavailable_reason ?? DELOGO_UNAVAILABLE);
             return;
@@ -1825,14 +1861,16 @@ public class GeneralTab : Box {
             : "=== Watermark Detection Started ===");
 
         uint generation = ++delogo_detect_gen;
+        active_source_detections++;
+        source_detection_activity_changed ();
         new Thread<void> ("logo-detect-thread", () => {
             perform_logo_detection (input_file, console_tab, generation, moving);
         });
     }
 
     private void set_logo_detect_buttons_sensitive (bool sensitive) {
-        detect_logo_button.sensitive = sensitive;
-        detect_moving_logo_button.sensitive = sensitive;
+        detect_logo_button.sensitive = sensitive && !folder_input_mode;
+        detect_moving_logo_button.sensitive = sensitive && !folder_input_mode;
     }
 
     private void perform_logo_detection (string input_file,
@@ -1856,6 +1894,8 @@ public class GeneralTab : Box {
                                 settings.ffprobe_path, log);
 
         Idle.add (() => {
+            active_source_detections--;
+            source_detection_activity_changed ();
             if (generation != delogo_detect_gen) return Source.REMOVE;
             apply_logo_detection_result (result, console_tab, moving);
             return Source.REMOVE;
