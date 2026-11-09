@@ -6,6 +6,16 @@ Task: `TASK-20261102-bulk-conversion-plan`.
 Source baseline: `1409c0c` on `main`; implementation changes are uncommitted.
 Implementation task: `TASK-20261102-bulk-implementation`.
 
+## Follow-up: existing Convert and Optimize behavior
+
+The manual-settings extension is implemented in the current working tree under
+TASK-20261102-bulk-actions-implementation. See manual-bulk-conversion-plan.md for
+its requirements and AUDIT.md / CHANGELOG.md for verification. It supersedes this
+plan's original automatic optimization on Convert and reanalysis of Ready items:
+Convert now uses manual settings or retained per-file settings, and only Optimize
+runs analysis. No mode selector was added. Original implementation notes below
+remain as historical context.
+
 ## Implementation progress — 2026-11-02
 
 - **Done: phase 1a.** Added deep-copy support for nested General/filter/codec/

@@ -32,6 +32,88 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261102-bulk-actions-implementation — Implementation and verification
+
+- **Task/agent/date/base:** TASK-20261102-bulk-actions-implementation; Codex primary;
+  2026-11-02 21:18 America/Phoenix (UTC-07:00); main at fe740b3 with uncommitted changes.
+- **Scope:** Existing Convert/Optimize actions for folders, per-file retained settings,
+  explicit edits, manual profiles and related lifecycle/audio/output behavior.
+- **Results:** Build passes; full suite has 27 OK, no assertion failures, and the
+  pre-existing mpv-backend timeout (30 seconds, audio/runtime permission message).
+  Bulk coverage across focused runs: 31 cases pass, including all four codecs in
+  manual CRF and manual bitrate two-pass, real output decoding, no optimizer/VMAF
+  dependency for Convert, profile parity, edits back to original values, mixed audio,
+  partial analysis/stale sources, retries and cancellation. Four shared GTK cases pass.
+- **Desktop evidence:** Actual rebuilt app on Wayland with isolated XDG preferences
+  and synthetic inputs, driven by its MainWindow/AppController handlers. Direct
+  Convert, both Auto-Convert states and later Convert with edited CRF work; two
+  files keep different optimized GOP values. Eight outputs fully decode. Input
+  returning to FILE restores Convert and all source-page sensitivities. No staging
+  remains. Native chooser/mouse coverage is not established.
+- **Shutdown/runtime limits:** A direct debugger gtk_window_close call stalled in
+  Wayland roundtrip / GTK Vulkan renderer teardown while stopped in the event loop.
+  That idle test process was terminated. A fresh instance closed and exited normally
+  when the close action was scheduled through GTK's event loop. This is a driver
+  limitation in this check, not proof of a production close defect. The private
+  test bus also reported an accessibility registry warning. Active desktop close,
+  historical VMAF ranges and mpv timeout root cause remain outside this validation.
+- **Report/artifacts:** [manual-bulk-conversion-findings.md](manual-bulk-conversion-findings.md).
+  Isolated build logs: manual-full-suite-final.log, manual-widgets-verified.log,
+  manual-two-pass.log, manual-build-release.log. No supplied external media accessed.
+
+#### MANUAL-BULK-F1 — Disabled psycho-visual options rejected by FFmpeg
+
+- **Severity/status/owner:** Medium; verified fixed; Codex primary.
+- **Affected revision/files:** fe740b3, x264-builder.vala and x265-builder.vala.
+- **Evidence:** Real manual encodes rejected x264-params containing bare no-psy and
+  x265-params containing bare no-psy-rd with an invalid argument error. Independent
+  short FFmpeg invocations reproduced both failures before the correction.
+- **Fix:** Emit psy=0 and psy-rd=0 respectively, retaining the intended disabled
+  setting in FFmpeg-compatible key/value syntax. Included in the implementation task.
+- **Verification:** Real manual CRF and two-pass encodes pass for x264 and x265,
+  command assertions verify the corrected values, and full output decoding passes.
+  Shared four-codec resolver's 40 frozen-profile expectations remain passing.
+
+### AUD-20261102-bulk-actions-plan — Revised action-sequence planning review
+
+- **Task/agent/date/base:** TASK-20261102-bulk-actions-plan; Codex primary;
+  2026-11-02 20:50 America/Phoenix (UTC-07:00); main at fe740b3.
+- **Scope/evidence:** Reviewed AppController's single-file recommendation application
+  and Auto-Convert routing, and bulk-conversion.vala's ready branch and execution.
+  Bulk analysis currently discards its resolved local profile on the ready branch;
+  subsequent Convert repeats analysis. Matching the requested normal workflow
+  therefore needs retained per-file executable settings, not only manual conversion.
+- **Disposition:** Revised [plan](manual-bulk-conversion-plan.md) includes distinct
+  existing actions, retained settings, explicit user-edit overrides, stale-result
+  checks and tests that assert no analysis on Convert. Supersedes the previous
+  plan's mode selector and disabled optimizer controls. No new runtime defect
+  established; these are requirements for the requested behavior extension.
+- **Limits/handoff:** Static review and documentation checks only; no code changes,
+  builds or tests. Implementation/runtime validation unassigned. Existing baseline
+  mpv and historical VMAF findings unchanged.
+
+### AUD-20261102-manual-bulk-plan — Manual mode planning review
+
+- **Task/agent/date/base:** TASK-20261102-manual-bulk-plan; Codex primary;
+  2026-11-02 20:18 America/Phoenix (UTC-07:00); main at fe740b3.
+- **Scope:** Source-informed [manual bulk plan](manual-bulk-conversion-plan.md).
+  Read main.vala request capture/routing, bulk-conversion.vala preparation/preflight,
+  codec-builder.vala, base-codec-tab.vala, codec-utils.vala profile composition,
+  Converter snapshot configuration and audio compatibility helpers.
+- **Evidence/design constraints:** Generic codec snapshots omit full encoder-builder
+  arguments; these must be captured for manual mode. Current per-item preparation
+  always runs optimization and config/status paths depend on its context/results.
+  Manual preflight must check the requested pixel format and bypass quality-mode
+  libvmaf checks. Shared profile composition already provides audio-container
+  fallback; each source still needs fresh audio metadata and processing checks.
+- **Findings:** No new runtime defect established. These are planned extension
+  requirements, recorded in phases 1–4 rather than claims of implemented fixes.
+  Plan includes mode-switch stale-state guards, completed-item retry semantics,
+  supported two-pass validation, parity tests and real conversion/desktop checks.
+- **Checks/limits:** Static review and documentation path/whitespace checks only.
+  No build, tests, media access or UI execution. Existing mpv and historical VMAF
+  limitations remain unchanged. Implementation and runtime validation unassigned.
+
 ### AUD-20261102-installed-bulk-check — Actual installed development app
 
 - **Task/date/agent:** `TASK-20261102-installed-bulk-check`; 2026-11-02 19:55 America/Phoenix (UTC-07:00); Codex primary.

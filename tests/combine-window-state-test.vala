@@ -8877,6 +8877,301 @@ private void test_bulk_settings_copy_owns_every_per_job_input () {
         "bulk copy retains every optimizer intent, source-size and audio policy");
 }
 
+private void test_bulk_saved_settings_merge_preserves_per_file_choices () {
+    var baseline = new BulkConversionSettings ();
+    baseline.codec = "x264";
+    baseline.builder_settings = new X264BuilderSnapshot ();
+    baseline.general_settings.preserve_metadata = true;
+    var current = baseline.copy ();
+    ((X264BuilderSnapshot) current.builder_settings).crf = 31;
+    current.general_settings.scale_mode = ScaleMode.PERCENTAGE;
+    current.general_settings.scale_width_multiplier = 0.5;
+    current.general_settings.scale_height_multiplier = 0.5;
+    var rec = make_smart_codec_case_recommendation (1);
+    SmartCodecResolution? first = SmartCodecResolver.resolve (rec, baseline.codec_settings, baseline.general_settings);
+    rec.preset = "fast";
+    rec.keyint_frames = 81;
+    SmartCodecResolution? second = SmartCodecResolver.resolve (rec, baseline.codec_settings, baseline.general_settings);
+    assert_true (first != null && second != null, "prepare independent optimized settings");
+    if (first == null || second == null) return;
+    var a = BulkSettingsEdits.apply (first, baseline, current);
+    var b = BulkSettingsEdits.apply (second, baseline, current);
+    assert_true (((X264BuilderSnapshot) a.builder_settings).crf == 31
+            && ((X264BuilderSnapshot) b.builder_settings).crf == 31,
+        "manual CRF edit overrides both prepared profiles");
+    assert_array_has_adjacent_pair (a.to_profile ().codec_args, "-crf", "31",
+        "editing CRF uses the visible manual rate-control choice instead of retained ABR");
+    assert_false (a.two_pass, "manual rate-control edit also honors the visible two-pass setting");
+    assert_string_equal (((X264BuilderSnapshot) a.builder_settings).preset, "slow", "first file keeps its optimized preset");
+    assert_string_equal (((X264BuilderSnapshot) b.builder_settings).preset, "fast", "second file keeps its optimized preset");
+    assert_string_equal (b.codec_settings.keyframe_settings.keyint_text, "81", "unrelated per-file keyframes survive edits");
+    assert_true (!a.general_settings.preserve_metadata && a.general_settings.scale_width_multiplier == 0.5,
+        "optimizer metadata decision survives an unrelated General edit");
+    assert_true (BulkSettingsEdits.changed (baseline, current), "edits invalidate old estimates");
+    var optimizer_only = baseline.copy ();
+    optimizer_only.target_mb = 78;
+    optimizer_only.quality_mode = true;
+    assert_false (BulkSettingsEdits.changed (baseline, optimizer_only), "optimizer control changes do not change prepared encoder settings");
+    a.codec_settings.audio_settings.bitrate_kbps = 12;
+    a.general_settings.video_filters.processing_filters = { "changed" };
+    assert_true (first.codec_settings.audio_settings.bitrate_kbps != 12
+            && first.general_settings.video_filters.processing_filters.length == 0,
+        "edited profiles own their mutable nested data");
+    var returned = baseline.copy ();
+    BulkSettingsEdits.record_changes (baseline, current, returned.edited_fields);
+    var restored = BulkSettingsEdits.apply (first, baseline, returned);
+    assert_true (((X264BuilderSnapshot) restored.builder_settings).crf == 23,
+        "returning a user-edited CRF to its original control value overrides optimization too");
+    current = baseline.copy ();
+    current.codec_settings.audio_processing.fade_in_enabled = true;
+    assert_true (BulkSettingsEdits.changed (baseline, current), "audio processing edits clear optimizer estimates");
+}
+
+private void run_bulk_manual_codec_case (int index, bool two_pass = false) {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) { Test.skip ("FFmpeg tools unavailable"); return; }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int runs = 0;
+    try {
+        string input = Path.build_filename (dir, "manual source.mkv");
+        if (!make_bulk_synthetic_source (ffmpeg, input)) return;
+        var settings = new BulkConversionSettings ();
+        settings.codec = smart_codec_case_name (index);
+        settings.two_pass = two_pass;
+        settings.quality_mode = true; // Must not require libvmaf or run quality analysis.
+        settings.target_mb = 0;       // Not a meaningful optimizer target.
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = false;
+        string calls = Path.build_filename (dir, "calls.txt");
+        string wrapper = Path.build_filename (dir, "ffmpeg-wrapper");
+        string script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + Shell.quote (calls)
+            + "\ncase \" $* \" in *' -filters '*) exit 99;; esac\nexec " + Shell.quote (ffmpeg) + " \"$@\"\n";
+        if (!write_prepared_test_file (wrapper, script)) return;
+        FileUtils.chmod (wrapper, 0700);
+        settings.runtime_options.ffmpeg_path = wrapper;
+        if (index == 0) {
+            var builder = new X264BuilderSnapshot ();
+            builder.preset = "ultrafast"; builder.crf = 31;
+            if (two_pass) { builder.rc_mode = RateControl.ABR; builder.abr_bitrate_kbps = 300; }
+            settings.builder_settings = builder;
+        } else if (index == 1) {
+            var builder = new X265BuilderSnapshot ();
+            builder.preset = "ultrafast"; builder.crf = 31;
+            if (two_pass) { builder.rc_mode = RateControl.ABR; builder.abr_bitrate_kbps = 300; }
+            settings.builder_settings = builder;
+        } else if (index == 2) {
+            var builder = new Vp9BuilderSnapshot ();
+            builder.crf = 31;
+            if (two_pass) { builder.rc_mode = RateControl.VBR; builder.vbr_bitrate_kbps = 300; }
+            settings.builder_settings = builder;
+        } else {
+            var builder = new SvtAv1BuilderSnapshot ();
+            builder.preset = 12; builder.crf = 31; builder.threads = "2";
+            if (two_pass) { builder.rc_mode = RateControl.VBR; builder.vbr_bitrate_kbps = 300; }
+            settings.builder_settings = builder;
+        }
+        settings.codec_settings.audio_settings.enabled = false;
+        settings.general_settings.crop_enabled = true;
+        settings.general_settings.crop_value = "160:90:0:0";
+        capture.start (dir, Path.build_filename (dir, "output"), settings, true, (uint64) (980 + index), false);
+        runs++;
+        assert_true (capture.wait_for_callbacks (runs), "manual conversion finishes");
+        assert_true (capture.analysis_dispatches == 0 && capture.conversion_dispatches == 1,
+            "Convert performs no optimizer analysis");
+        if (capture.controller.items.length != 1) { Test.fail (); return; }
+        BulkItem item = capture.controller.items[0];
+        assert_string_equal (item.state, "completed", "manual file completes: " + item.status);
+        assert_true (item.recommendation == null, "manual conversion creates no recommendation");
+        if (item.state != "completed") return;
+        string stdout_text, stderr_text;
+        assert_true (run_command_for_test ({ ffprobe, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=p=0", item.output_path },
+            out stdout_text, out stderr_text, "check manual General crop") == 0 && stdout_text.strip () == "160,90",
+            "General settings apply to manual conversion");
+        assert_true (run_command_for_test ({ ffmpeg, "-v", "error", "-i", item.output_path,
+            "-f", "null", "-" }, out stdout_text, out stderr_text, "decode manual output") == 0,
+            "manual output fully decodes: " + stderr_text);
+        string logged = read_prepared_test_file (calls);
+        if (index == 0) {
+            assert_true (logged.contains ("psy=0"), "disabled x264 psy uses a valid key=value parameter");
+        } else if (index == 1) {
+            assert_true (logged.contains ("psy-rd=0"), "disabled x265 psy uses a valid key=value parameter");
+        }
+        assert_true (logged.contains (two_pass ? "-b:v 300k" : "-crf 31"),
+            "manual rate-control value reaches the real encoder command");
+        if (two_pass)
+            assert_true (logged.contains ("-pass 1") && logged.contains ("-pass 2"),
+                "manual bitrate conversion executes both passes");
+        assert_false (logged.contains ("-filters") || logged.contains ("libvmaf")
+            || logged.contains ("smart-optimizer"), "manual conversion neither probes VMAF nor calibrates");
+    } catch (Error e) {
+        Test.fail_printf ("manual codec case failed: %s", e.message);
+    } finally {
+        capture.controller.cancel (); capture.wait_for_callbacks (runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_manual_x264 () { run_bulk_manual_codec_case (0); }
+private void test_bulk_manual_x265 () { run_bulk_manual_codec_case (1); }
+private void test_bulk_manual_vp9 () { run_bulk_manual_codec_case (2); }
+private void test_bulk_manual_svt () { run_bulk_manual_codec_case (3); }
+
+private void test_bulk_manual_two_pass_x264 () { run_bulk_manual_codec_case (0, true); }
+private void test_bulk_manual_two_pass_x265 () { run_bulk_manual_codec_case (1, true); }
+private void test_bulk_manual_two_pass_vp9 () { run_bulk_manual_codec_case (2, true); }
+private void test_bulk_manual_two_pass_svt () { run_bulk_manual_codec_case (3, true); }
+
+private void test_bulk_manual_adapter_matches_single_file () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    BaseCodecTab[] tabs = { new X264Tab (), new X265Tab (), new Vp9Tab (), new SvtAv1Tab () };
+    for (int i = 0; i < tabs.length; i++) {
+        var general = new GeneralTab ();
+        general.crop_check.active = true;
+        general.crop_value.text = "160:90:0:0";
+        var settings = new BulkConversionSettings ();
+        settings.codec = smart_codec_case_name (i);
+        settings.general_settings = general.snapshot_settings (tabs[i].snapshot_pixel_format_settings ());
+        settings.codec_settings = tabs[i].snapshot_settings (settings.general_settings);
+        settings.builder_settings = tabs[i].get_codec_builder ().snapshot_settings (settings.general_settings);
+        settings.two_pass = tabs[i].get_two_pass ();
+        var frozen = settings.copy ();
+        var manual = new SmartCodecResolution ();
+        manual.codec_name = tabs[i].get_codec_builder ().get_codec_name ();
+        manual.builder_settings = frozen.builder_settings;
+        manual.codec_settings = frozen.codec_settings;
+        manual.general_settings = frozen.general_settings;
+        EncodeProfileSnapshot ordinary = CodecUtils.snapshot_encode_profile (
+            tabs[i].get_codec_builder (), tabs[i], settings.general_settings);
+        assert_string_equal (serialize_smart_codec_profile (manual.to_profile (), frozen.two_pass),
+            serialize_smart_codec_profile (ordinary, settings.two_pass), "manual profile matches normal single-file capture");
+    }
+}
+
+private void test_bulk_partial_optimization_and_stale_sources () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) { Test.skip ("FFmpeg tools unavailable"); return; }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int runs = 0;
+    bool cancel_after_ready = true;
+    ulong changed = capture.controller.changed.connect (() => {
+        if (cancel_after_ready && capture.controller.items.length > 0
+                && capture.controller.items[0].state == "ready") {
+            cancel_after_ready = false;
+            capture.controller.cancel ();
+        }
+    });
+    try {
+        string input = Path.build_filename (dir, "a-first.mkv");
+        string second = Path.build_filename (dir, "b-second.mkv");
+        string output = Path.build_filename (dir, "output");
+        if (!make_bulk_synthetic_source (ffmpeg, input)) return;
+        File.new_for_path (input).copy (File.new_for_path (second), FileCopyFlags.NONE);
+        var settings = new BulkConversionSettings ();
+        settings.codec = "x264";
+        settings.builder_settings = new X264BuilderSnapshot ();
+        settings.strip_audio = true;
+        settings.runtime_options.ffmpeg_path = ffmpeg;
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = false;
+        settings.target_mb = 4;
+        capture.start (dir, output, settings, false, 991); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "interrupted analysis finishes cleanup");
+        assert_true (capture.controller.items[0].state == "ready"
+            && capture.controller.items[1].prepared == null, "cancelled analysis retains only completed recommendations");
+        capture.start (dir, output, settings, true, 992, false); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "Convert after partial analysis finishes");
+        assert_true (capture.analysis_dispatches == 0 && capture.conversion_dispatches == 1
+            && capture.controller.items[0].state == "completed" && capture.controller.items[1].state == "failed",
+            "only the prepared file converts; unfinished analysis does not fall back to manual settings");
+        capture.controller.reset_queue ();
+        capture.start (dir, output, settings, false, 993); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "fresh analysis completes");
+        FileUtils.remove (input);
+        if (!write_prepared_test_file (input, "source was replaced after Optimize")) return;
+        capture.start (dir, output, settings, true, 994, false); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "changed-source conversion finishes");
+        assert_true (capture.analysis_dispatches == 0 && capture.controller.items[0].state == "failed"
+            && capture.controller.items[1].state == "completed", "stale source is rejected without reanalysis while valid file converts");
+    } catch (Error e) {
+        Test.fail_printf ("partial analysis regression: %s", e.message);
+    } finally {
+        capture.controller.disconnect (changed);
+        capture.controller.cancel (); capture.wait_for_callbacks (runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
+private void test_bulk_manual_audio_and_cancel () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    string? ffmpeg = Environment.find_program_in_path ("ffmpeg");
+    string? ffprobe = Environment.find_program_in_path ("ffprobe");
+    if (ffmpeg == null || ffprobe == null) { Test.skip ("FFmpeg tools unavailable"); return; }
+    string dir = prepared_fixture_dir ();
+    if (dir.length == 0) return;
+    var capture = new BulkQueueCapture ();
+    int runs = 0;
+    try {
+        string input = Path.build_filename (dir, "a-audio.mkv");
+        string silent = Path.build_filename (dir, "b-silent.mkv");
+        string output = Path.build_filename (dir, "output");
+        string stdout_text, stderr_text;
+        int generated = run_command_for_test ({ ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+            "testsrc2=size=160x90:rate=12:duration=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=1", "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "ffv1", "-c:a", "flac", input }, out stdout_text, out stderr_text, "create two-track audio fixture");
+        assert_true (generated == 0, "audio fixture generated: " + stderr_text);
+        if (generated != 0 || !make_bulk_synthetic_source (ffmpeg, silent)) return;
+        var settings = new BulkConversionSettings ();
+        settings.codec = "x264";
+        var builder = new X264BuilderSnapshot (); builder.preset = "ultrafast";
+        settings.builder_settings = builder;
+        settings.codec_settings.container = ContainerExt.MP4;
+        settings.codec_settings.audio_settings.codec = AudioCodecName.COPY;
+        settings.codec_settings.audio_settings.preserve_all_audio_tracks = true;
+        settings.codec_settings.audio_processing.fade_in_enabled = true;
+        settings.codec_settings.audio_processing.channel_downmix = 1;
+        settings.runtime_options.ffmpeg_path = ffmpeg;
+        settings.runtime_options.ffprobe_path = ffprobe;
+        settings.runtime_options.generate_collage_thumbnail = false;
+        capture.start (dir, output, settings, true, 995, false); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "mixed-audio manual queue finishes");
+        for (int i = 0; i < capture.controller.items.length; i++) {
+            BulkItem item = capture.controller.items[i];
+            assert_string_equal (item.state, "completed", "mixed-audio file completes: " + item.status);
+            if (item.state != "completed") continue;
+            int code = run_command_for_test ({ ffprobe, "-v", "error", "-select_streams", "a",
+                "-show_entries", "stream=codec_name", "-of", "csv=p=0", item.output_path },
+                out stdout_text, out stderr_text, "check manual audio streams");
+            assert_true (code == 0 && stdout_text.strip () == (i == 0 ? "aac\naac" : ""),
+                "per-file probing preserves both processed tracks and silent input stays silent");
+            assert_true (run_command_for_test ({ ffmpeg, "-v", "error", "-i", item.output_path,
+                "-f", "null", "-" }, out stdout_text, out stderr_text, "decode processed manual audio") == 0,
+                "audio/video output fully decodes: " + stderr_text);
+        }
+        capture.controller.reset_queue ();
+        capture.cancel_first_conversion = true;
+        capture.start (dir, output, settings, true, 996, false); runs++;
+        assert_true (capture.wait_for_callbacks (runs), "manual cancel waits for cleanup");
+        assert_true (capture.analysis_dispatches == 0 && capture.conversion_dispatches == 1
+            && capture.controller.items[0].state == "cancelled" && capture.controller.items[1].state == "pending",
+            "manual cancel prevents the next file from starting");
+    } catch (Error e) {
+        Test.fail_printf ("manual audio regression: %s", e.message);
+    } finally {
+        capture.controller.cancel (); capture.wait_for_callbacks (runs, 15000);
+        cleanup_bulk_fixture_tree (dir);
+    }
+}
+
 private class BulkQueueCapture : Object {
     public BulkConversionController controller;
     public int callbacks = 0;
@@ -8938,13 +9233,13 @@ private class BulkQueueCapture : Object {
     }
 
     public void start (string folder, string output, BulkConversionSettings settings,
-                       bool convert, uint64 operation_id) {
+                       bool convert, uint64 operation_id, bool optimize = true) {
         analyzed.remove_all ();
         converted.remove_all ();
         analysis_dispatches = 0;
         conversion_dispatches = 0;
         expect_conversion = convert;
-        controller.run.begin (folder, output, settings, convert, operation_id, (obj, res) => {
+        controller.run.begin (folder, output, settings, convert, operation_id, optimize, (obj, res) => {
             controller.run.end (res);
             callbacks++;
         });
@@ -9022,11 +9317,11 @@ private void test_bulk_queue_analyzes_converts_and_stops_sequentially () {
         assert_true (desired.length > 0, "analysis resolves a concrete captured output name");
         if (desired.length == 0) return;
         if (!write_prepared_test_file (desired, "pre-existing output sentinel")) return;
-        capture.start (dir, output, settings, true, 802);
+        capture.start (dir, output, settings, true, 802, false);
         requested_runs++;
         assert_true (capture.wait_for_callbacks (requested_runs), "real sequential synthetic conversion queue finishes");
-        assert_true (capture.analysis_dispatches == 2 && capture.conversion_dispatches == 2,
-            "conversion analyzes and converts each source exactly once");
+        assert_true (capture.analysis_dispatches == 0 && capture.conversion_dispatches == 2,
+            "Convert uses retained per-file settings without analyzing again");
         assert_false (capture.overlapping_items || capture.out_of_order,
             "each item finishes analysis and conversion before the next item starts");
         assert_true (capture.output_signals == 1 && capture.published_count == 2,
@@ -9559,6 +9854,18 @@ void main (string[] args) {
     Test.init (ref args);
 
 
+    Test.add_func ("/bulk-conversion/widgets/manual/two-pass/x264", test_bulk_manual_two_pass_x264);
+    Test.add_func ("/bulk-conversion/widgets/manual/two-pass/x265", test_bulk_manual_two_pass_x265);
+    Test.add_func ("/bulk-conversion/widgets/manual/two-pass/vp9", test_bulk_manual_two_pass_vp9);
+    Test.add_func ("/bulk-conversion/widgets/manual/two-pass/svt-av1", test_bulk_manual_two_pass_svt);
+    Test.add_func ("/bulk-conversion/widgets/manual/audio-and-cancel", test_bulk_manual_audio_and_cancel);
+    Test.add_func ("/bulk-conversion/widgets/partial-analysis-and-stale-source", test_bulk_partial_optimization_and_stale_sources);
+    Test.add_func ("/bulk-conversion/settings/saved-edits", test_bulk_saved_settings_merge_preserves_per_file_choices);
+    Test.add_func ("/bulk-conversion/widgets/manual/profile-parity", test_bulk_manual_adapter_matches_single_file);
+    Test.add_func ("/bulk-conversion/widgets/manual/x264", test_bulk_manual_x264);
+    Test.add_func ("/bulk-conversion/widgets/manual/x265", test_bulk_manual_x265);
+    Test.add_func ("/bulk-conversion/widgets/manual/vp9", test_bulk_manual_vp9);
+    Test.add_func ("/bulk-conversion/widgets/manual/svt-av1", test_bulk_manual_svt);
     Test.add_func ("/bulk-conversion/calibration/timed-logo-real-frames", test_sampled_logo_windows_match_real_ffmpeg_frames);
     Test.add_func ("/bulk-conversion/calibration/timed-logo-sample-seek", test_sampled_logo_windows_follow_source_seek);
     Test.add_func ("/bulk-conversion/scan/top-level-sort-and-aliases",

@@ -211,7 +211,7 @@ public class X264Builder : Object, ICodecBuilder {
                 ConversionUtils.format_ffmpeg_double (psy_trellis, "%.2f")
             );
         } else {
-            params += "no-psy";
+            params += "psy=0";
         }
 
         if (profile == "Baseline" || fast_decode || !snapshot.cabac)

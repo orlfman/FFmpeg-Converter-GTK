@@ -92,8 +92,18 @@ Never overwrite source media or remove existing outputs to make a check pass.
 - Try size and quality objectives, all four codecs, content/delivery choices,
   No Audio, multiple audio tracks and General crop/rotation/timing/speed/watermark.
   Confirm unavailable quality capability and impossible per-file targets are clear.
-- Optimize with Auto-Convert off: rows become Ready without output files. Convert
-  then processes one file at a time. Retry skips completed rows; Rescan includes them.
+- Convert directly with manual CRF/bitrate/preset and General settings: no optimizer
+  analysis occurs, even with Auto-Convert/quality target enabled. Check all four codecs.
+- Optimize with Auto-Convert on: each file finishes optimization, encoding and cleanup
+  before the next starts. With it off, rows become Ready without output files.
+  Convert uses each file's saved settings without another optimization pass.
+- Edit a codec/General value after Optimize, including changing it back to its original
+  control value: the edit applies to every unfinished file, other per-file settings
+  survive, and old estimates clear. Optimizer-only controls do not alter saved profiles.
+- Cancel analysis halfway: only prepared files can subsequently convert; other rows
+  explain that Optimize is needed. Replace a source/watermark and check stale settings
+  are rejected. Switching codec uses the new codec and clears incompatible saved settings.
+- Retry skips completed rows; Rescan includes them and clears recommendations.
 - During analysis/encoding, attempt another Optimize, Convert, Combine, recent-file
   selection and input drop. They cannot replace the active input or launch competing work.
 - Pre-create output names and sidecars, including source aliases. Verify bytes are

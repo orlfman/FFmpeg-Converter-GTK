@@ -8,12 +8,18 @@ My own pet project. FFmpeg-Converter-GTK a simple GTK / Libadwaita frontend for 
 
 Use the folder button beside **Input**, or drop a folder into the input area.
 The queue includes supported videos directly inside that folder, in stable filename
-order; subfolders are excluded. Choose a codec tab, configure General and Smart
-Optimizer, then click **Convert Folder**. Each file is analyzed, optimized and
-converted completely before the next one starts. All four codecs, size targets,
-per-file Match Source Size, quality ceilings, content/delivery options and
-Smart Optimizer audio handling use the existing optimizer. Quality mode requires
-an FFmpeg build with libvmaf.
+order; subfolders are excluded. Choose a codec tab and configure your settings:
+
+- **Convert Folder** uses the current manual codec and General settings.
+- **Optimize** with Auto-Convert on optimizes and converts each video completely
+  before starting the next.
+- **Optimize** with Auto-Convert off saves separate settings for each video.
+  Press **Convert Folder** afterward to use those settings without optimizing again.
+
+All four codecs and their supported manual options are available. Smart Optimizer
+retains size targets, per-file Match Source Size, quality ceilings, content/delivery
+options and optimizer audio handling. Only measured optimization requires libvmaf;
+manual conversion and conversion of saved settings do not.
 
 Crop & Trim, Audio and Subtitles tabs are disabled in folder mode. General settings
 still apply to every file, including manual crop, timing and filters; source-specific
@@ -26,10 +32,17 @@ receive a numeric suffix, even if ordinary single-file overwrite is enabled.
 Publication requires a destination filesystem supporting hard links; unsupported
 filesystems fail safely. Cancel stops further dispatch and keeps completed outputs.
 
-With Auto-Convert off, **Optimize** analyzes the queue and leaves recommendations
-Ready. **Convert Folder** revalidates and reanalyzes unfinished files using the
-optimizer cache, and skips completed items. **Rescan** explicitly starts a new
-queue, including previously completed inputs. Queue state lasts for this session.
+Queue rows summarize each video's saved settings. Changes to codec or General
+controls after optimization override the edited fields for unfinished files while
+preserving their other optimized values. Editing settings clears old size/quality
+estimates. Optimizer controls take effect on the next **Optimize**. Changed source
+files or watermark assets need fresh analysis; **Convert Folder** does not silently
+run it. Failed or unfinished analysis is reported rather than converted with unrelated
+settings. Changing codec clears incompatible saved settings.
+
+**Convert Folder** skips completed items. **Rescan** explicitly starts a new queue,
+including previously completed inputs, and clears saved recommendations. Queue state
+lasts for this session.
 
 ![Screenshot](Screenshots/Screenshot.png)
 

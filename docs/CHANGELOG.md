@@ -8,8 +8,8 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-No active implementation tasks. Installed-app findings and their publication review
-are complete; the technical report is included in the commit containing this record.
+No active implementation tasks. Folder Convert/Optimize behavior is implemented
+and verified within the limits recorded below; changes remain uncommitted.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -25,6 +25,81 @@ Dependencies / blockers / next action:
 ```
 
 ## History
+
+### TASK-20261102-bulk-actions-implementation — Existing actions for folder conversion
+
+- **Agent/date/base:** Codex primary; 2026-11-02 21:18 America/Phoenix (UTC-07:00); main at fe740b3.
+  Project worktree: /home/pieman/Files/Archive/projects/FFmpeg-Converter-GTK.
+  Build/test copy: Codex workspace work/bulk-implementation/builddir-bulk.
+- **Status:** Complete, uncommitted. No commit, push, installation or version bump.
+- **Behavior/why:** Convert uses manual settings or retained per-file optimized
+  settings; only Optimize runs analysis. Auto-Convert controls immediate sequential
+  conversion after Optimize. This follows the user's existing-button workflow.
+- **Changes:** Added src/app/bulk-settings.vala for captured builder/common settings,
+  typed per-field merges and explicit edit tracking. Updated bulk-conversion.vala,
+  main.vala, all four Meson source lists, regression tests, README, smoke checklist
+  and both bulk plans. Ready rows show per-file settings. Rate-control fields and
+  two-pass intent are edited together; unrelated optimized choices survive edits.
+  Partial analysis, stale sources/assets, codec changes, retries and Rescan have
+  explicit handling. Existing staging/publication/cancellation paths are reused.
+- **Additional fix:** x264/x265 builders now emit valid psy=0 / psy-rd=0 parameters
+  when those features are disabled. See MANUAL-BULK-F1 in AUDIT.md.
+- **Validation:** Development build passes with the same three Vala warnings.
+  Full suite: 27 passing suites, no assertion failures, one existing mpv timeout.
+  Focused bulk runs: 7 data cases, 20 GTK cases and 4 added manual two-pass cases
+  pass; shared codec/prepared GTK cases: 4 pass. All four codecs perform real manual
+  CRF and bitrate two-pass conversions with full decode checks. No capability skips
+  in the display runs. Headless display-dependent skips are not counted as coverage.
+- **Desktop:** Actual rebuilt Wayland window, isolated preferences, synthetic inputs,
+  local debugger driving existing handlers: direct Convert, Optimize-only followed
+  by Convert with a CRF edit, Optimize with Auto-Convert, and return to single-file
+  mode pass. Per-file keyframes remain distinct. Eight outputs decode cleanly.
+  A fresh instance closes normally via the GTK event loop; direct debugger close
+  had a Wayland/Vulkan teardown stall. No native mouse/chooser or active-close claim.
+- **Evidence/limits:** [Findings](manual-bulk-conversion-findings.md),
+  AUD-20261102-bulk-actions-implementation. Local build logs: manual-full-suite-final.log,
+  manual-widgets-verified.log, manual-two-pass.log. Historical VMAF/mpv limitations
+  remain. No external test media accessed, user preferences changed or media uploaded.
+- **Preservation/handoff:** Four pre-existing DevTools mode changes and empty
+  docs/README.md preserved. Source tree matches the isolated tested copy; no required
+  implementation work remains. User may build/install normally when desired.
+
+### TASK-20261102-bulk-actions-plan — Preserve normal Convert and Optimize behavior
+
+- **Agent/date/base:** Codex primary; 2026-11-02 20:50 America/Phoenix (UTC-07:00); main at fe740b3,
+  /home/pieman/Files/Archive/projects/FFmpeg-Converter-GTK.
+- **Status:** Planning complete; uncommitted documentation only. No implementation.
+- **User correction:** No mode selector. Convert uses current settings; Optimize
+  with Auto-Convert performs sequential optimization/conversion; without it,
+  retain per-file settings for a later Convert, without repeated optimization.
+- **Changes:** Rewrote [manual-bulk-conversion-plan.md](manual-bulk-conversion-plan.md).
+  Supersedes the selector/disabled-Optimize proposal in the older entry below.
+  Added retained per-item profiles, explicit edit handling and action-sequence tests.
+- **Validation:** Static review of single-file recommendation application and bulk
+  analysis-only/profile execution, documentation consistency and whitespace checks.
+  No builds, runtime tests or media access. See AUD-20261102-bulk-actions-plan.
+- **Handoff:** Implementation unassigned. Follow the revised plan; earlier selector
+  decisions are historical. Preserve existing unrelated edits. No commit or push.
+
+### TASK-20261102-manual-bulk-plan — Manual folder settings plan
+
+- **Agent/date/base:** Codex primary; 2026-11-02 20:18 America/Phoenix (UTC-07:00); main at fe740b3,
+  /home/pieman/Files/Archive/projects/FFmpeg-Converter-GTK.
+- **Status:** Planning complete; documentation uncommitted. No implementation,
+  commit, push or installation performed.
+- **Changes/why:** Added [manual-bulk-conversion-plan.md](manual-bulk-conversion-plan.md)
+  for the requested manual folder-conversion option. Proposed folder-only method
+  selector defaults to Smart Optimizer; manual mode uses full codec-builder settings
+  and General settings through the existing sequential prepared-conversion pipeline.
+- **Decisions:** Per-file audio/compatibility checks remain necessary. Manual mode
+  bypasses optimizer/VMAF requirements. Method switching invalidates unfinished
+  recommendations and preserves completed rows; Rescan explicitly reprocesses them.
+- **Validation:** Static source and documentation review, referenced paths and
+  whitespace checks only; no builds, runtime tests or media access.
+  See AUD-20261102-manual-bulk-plan in AUDIT.md.
+- **Preservation/handoff:** Existing four DevTools edits and untracked docs/README.md
+  unchanged. Implementation unassigned; next owner should claim work, implement the
+  plan's capture/preparation/UI phases and complete its regression/desktop checks.
 
 ### TASK-20261102-findings-report — Technical findings report
 

@@ -1,47 +1,5 @@
 using GLib;
 
-/** Everything that can affect a folder job, captured before its first yield. */
-public class BulkConversionSettings : Object {
-    public string codec = "x265";
-    public CodecTabSettingsSnapshot codec_settings = new CodecTabSettingsSnapshot ();
-    public GeneralSettingsSnapshot general_settings = new GeneralSettingsSnapshot ();
-    public GeneralTimingSettingsSnapshot timing = new GeneralTimingSettingsSnapshot ();
-    public ConversionRuntimeOptions runtime_options = new ConversionRuntimeOptions ();
-    public OutputNamingSettingsSnapshot naming = new OutputNamingSettingsSnapshot ();
-    public int target_mb = 4;
-    public bool match_source_size = false;
-    public bool quality_mode = false;
-    public SmartOptimizerLogic.QualityIntent quality_intent = SmartOptimizerLogic.QualityIntent.MEDIUM;
-    public ContentOverride content_override = ContentOverride.AUTO;
-    public bool optimize_for_delivery = false;
-    public bool strip_audio = false;
-
-    public BulkConversionSettings copy () {
-        var settings = new BulkConversionSettings ();
-        settings.codec = codec;
-        settings.codec_settings = codec_settings.copy ();
-        settings.general_settings = general_settings.copy ();
-        settings.timing.seek_enabled = timing.seek_enabled;
-        settings.timing.seek_hours = timing.seek_hours;
-        settings.timing.seek_minutes = timing.seek_minutes;
-        settings.timing.seek_seconds = timing.seek_seconds;
-        settings.timing.time_enabled = timing.time_enabled;
-        settings.timing.time_hours = timing.time_hours;
-        settings.timing.time_minutes = timing.time_minutes;
-        settings.timing.time_seconds = timing.time_seconds;
-        settings.runtime_options = runtime_options.copy ();
-        settings.naming = naming.copy ();
-        settings.target_mb = target_mb;
-        settings.match_source_size = match_source_size;
-        settings.quality_mode = quality_mode;
-        settings.quality_intent = quality_intent;
-        settings.content_override = content_override;
-        settings.optimize_for_delivery = optimize_for_delivery;
-        settings.strip_audio = strip_audio;
-        return settings;
-    }
-}
-
 public class BulkItem : Object {
     public string path;
     public string state = "pending";
@@ -49,6 +7,9 @@ public class BulkItem : Object {
     public string output_path = "";
     public OperationOutputResult? result = null;
     public OptimizationRecommendation? recommendation = null;
+    internal SmartCodecResolution? prepared = null;
+    internal BulkConversionSettings? prepared_request = null;
+    internal string watermark_identity = "";
     // Device/inode identify aliases; size/mtime detect changes while analyzing.
     internal string file_identity = "";
     internal string file_revision = "";
@@ -76,6 +37,27 @@ public class BulkConversionController : Object {
     private bool stop_requested = false;
     private string queued_folder = "";
     private string queued_output = "";
+    private string optimized_codec = "";
+    private BulkConversionSettings? observed_settings = null;
+    private HashTable<string, bool> user_edits = new HashTable<string, bool> (str_hash, str_equal);
+
+    /** Track actual control edits, including changing a value back to its default. */
+    public void observe_settings (BulkConversionSettings current) {
+        if (is_running || observed_settings == null || current.codec != observed_settings.codec)
+            return;
+        BulkSettingsEdits.record_changes (observed_settings, current, user_edits);
+        observed_settings = current.copy ();
+        for (int i = 0; i < items.length; i++) {
+            BulkItem item = items[i];
+            if (item.state == "ready" && item.prepared != null && item.prepared_request != null) {
+                var edited = current.copy ();
+                user_edits.foreach ((key, value) => { edited.edited_fields.insert (key, value); });
+                item.status = "Settings ready — " + BulkSettingsEdits.describe (
+                    BulkSettingsEdits.apply (item.prepared, item.prepared_request, edited));
+            }
+        }
+        changed ();
+    }
     private const string SCAN_ATTRIBUTES = "standard::name,standard::type,standard::size,unix::device,unix::inode,time::modified,time::modified-usec";
 
     public BulkConversionController (StatusArea status_area,
@@ -103,6 +85,9 @@ public class BulkConversionController : Object {
             return;
         queued_folder = "";
         queued_output = "";
+        optimized_codec = "";
+        observed_settings = null;
+        user_edits.remove_all ();
         items = new GenericArray<BulkItem> ();
         changed ();
     }
@@ -516,7 +501,8 @@ public class BulkConversionController : Object {
 
     private static async void preflight_runtime (BulkConversionSettings settings,
                                                  FfmpegRuntimeCapabilities capabilities,
-                                                 Cancellable cancellable) throws Error {
+                                                 Cancellable cancellable,
+                                                 bool optimize) throws Error {
         check_cancelled (cancellable);
         validate_executable (settings.runtime_options.ffmpeg_path, "FFmpeg");
         validate_executable (settings.runtime_options.ffprobe_path, "FFprobe");
@@ -541,7 +527,7 @@ public class BulkConversionController : Object {
         if (capability.status != EncoderPixelFormatCapabilityStatus.SUPPORTED)
             throw new IOError.NOT_SUPPORTED (capability.reason
                 ?? "The selected encoder is unavailable in the captured FFmpeg build.");
-        if (settings.quality_mode) {
+        if (optimize && settings.quality_mode) {
             var vmaf = yield capabilities.get_vmaf_capability (
                 settings.runtime_options.ffmpeg_path, cancellable);
             check_cancelled (cancellable);
@@ -551,20 +537,47 @@ public class BulkConversionController : Object {
         }
     }
 
-    /** Retry the frozen queue, reanalyzing unfinished files and keeping completed outputs. */
+    private static async void validate_profile (EncodeProfileSnapshot profile,
+                                                BulkConversionSettings settings,
+                                                FfmpegRuntimeCapabilities capabilities,
+                                                Cancellable cancellable) throws Error {
+        string encoder = "";
+        string format = "";
+        for (int i = 0; i + 1 < profile.codec_args.length; i++) {
+            if (profile.codec_args[i] == "-c:v") encoder = profile.codec_args[i + 1];
+            if (profile.codec_args[i] == "-pix_fmt") format = profile.codec_args[i + 1];
+        }
+        if (encoder.length == 0)
+            throw new IOError.INVALID_ARGUMENT ("The selected codec settings do not specify an encoder.");
+        if (format.length > 0) {
+            var capability = yield capabilities.get_encoder_pixel_format_capability (
+                settings.runtime_options.ffmpeg_path, encoder, format, cancellable);
+            if (capability.status != EncoderPixelFormatCapabilityStatus.SUPPORTED)
+                throw new IOError.NOT_SUPPORTED (capability.reason ?? "The selected pixel format is unavailable.");
+        }
+    }
+
+    /** Convert uses captured/manual or retained settings; only Optimize runs analysis. */
     public async void run (string folder,
                            string output_folder,
                            BulkConversionSettings requested_settings,
                            bool convert,
-                           uint64 operation_id) {
+                           uint64 operation_id,
+                           bool optimize = true) {
         if (is_running)
             return;
+        if (!optimize) observe_settings (requested_settings);
         is_running = true;
         stop_requested = false;
         var cancellable = new Cancellable ();
         active_cancel = cancellable;
         BulkConversionSettings settings = requested_settings.copy ();
         settings.codec = settings.codec.down ();
+        if (optimize) {
+            user_edits.remove_all ();
+            observed_settings = settings.copy ();
+        }
+        user_edits.foreach ((key, value) => { settings.edited_fields.insert (key, value); });
         // Bulk publication always preserves existing files, including other
         // queue inputs and files created by a second process during encoding.
         settings.runtime_options.overwrite_enabled = false;
@@ -574,11 +587,16 @@ public class BulkConversionController : Object {
         bool destination_failed = false;
         string? run_error = null;
         var capabilities = new FfmpegRuntimeCapabilities ();
-        var optimizer = new SmartOptimizer (capabilities, settings.runtime_options);
-        optimizer.progress.connect ((line) => {
-            console_tab.add_line ("[Bulk Smart Optimizer] " + line);
-        });
+        SmartOptimizer? optimizer = null;
+        if (optimize) {
+            optimizer = new SmartOptimizer (capabilities, settings.runtime_options);
+            optimizer.progress.connect ((line) => {
+                console_tab.add_line ("[Bulk Smart Optimizer] " + line);
+            });
+        }
         try {
+            if (!optimize && !convert)
+                throw new IOError.INVALID_ARGUMENT ("Choose Convert or Optimize for this folder.");
             if (settings.codec != "x264" && settings.codec != "x265"
                     && settings.codec != "vp9" && settings.codec != "svt-av1")
                 throw new IOError.INVALID_ARGUMENT ("Select a supported video codec before processing a folder.");
@@ -592,12 +610,28 @@ public class BulkConversionController : Object {
                 items = new GenericArray<BulkItem> ();
                 changed ();
                 items = yield scan_folder (folder, output_folder, cancellable);
+                optimized_codec = "";
                 queued_folder = folder_key;
                 queued_output = output_key;
                 changed ();
             }
             if (items.length == 0)
                 throw new IOError.NOT_FOUND ("No supported video files were found in this folder.");
+            if (optimized_codec.length > 0 && optimized_codec != settings.codec) {
+                for (int i = 0; i < items.length; i++) {
+                    items[i].prepared = null;
+                    items[i].prepared_request = null;
+                    items[i].recommendation = null;
+                    if (items[i].state != "completed")
+                        update_item (items[i], "pending", "Codec changed — current settings will apply");
+                }
+                optimized_codec = "";
+                user_edits.remove_all ();
+                settings.edited_fields.remove_all ();
+                observed_settings = null;
+            }
+            if (optimize)
+                optimized_codec = settings.codec;
             int remaining = 0;
             for (int i = 0; i < items.length; i++) {
                 if (items[i].state != "completed")
@@ -605,7 +639,16 @@ public class BulkConversionController : Object {
             }
             if (remaining > 0) {
                 status_area.set_status ("Checking FFmpeg capabilities…", StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
-                yield preflight_runtime (settings, capabilities, cancellable);
+                yield preflight_runtime (settings, capabilities, cancellable, optimize);
+                if (!optimize && optimized_codec.length == 0) {
+                    var manual = new SmartCodecResolution ();
+                    manual.codec_name = settings.codec;
+                    manual.builder_settings = settings.builder_settings;
+                    manual.codec_settings = settings.codec_settings;
+                    manual.general_settings = settings.general_settings;
+                    BulkSettingsEdits.set_general (manual.builder_settings, settings.general_settings);
+                    yield validate_profile (manual.to_profile (), settings, capabilities, cancellable);
+                }
             }
             if (convert && remaining > 0) {
                 check_cancelled (cancellable);
@@ -630,12 +673,22 @@ public class BulkConversionController : Object {
                 BulkItem item = items[index];
                 if (item.state == "completed")
                     continue;
+                if (!optimize && optimized_codec.length > 0 && item.prepared == null) {
+                    update_item (item, "failed", "No optimized settings ready — run Optimize again or Rescan to use manual settings");
+                    continue;
+                }
                 if (convert && !destination_healthy (output_folder)) {
                     destination_failed = true;
                     break;
                 }
                 try {
-                    update_item (item, "analyzing", "Analyzing with Smart Optimizer");
+                    if (optimize) {
+                        item.prepared = null;
+                        item.prepared_request = null;
+                        item.recommendation = null;
+                    }
+                    update_item (item, optimize ? "analyzing" : "checking",
+                        optimize ? "Analyzing with Smart Optimizer" : "Checking conversion settings");
                     console_tab.add_section_header ("Bulk item %d of %u".printf (index + 1, items.length),
                         { "Input: " + item.path });
                     yield validate_source (item, cancellable);
@@ -652,7 +705,14 @@ public class BulkConversionController : Object {
                     check_cancelled (cancellable);
                     if (primary.presence == MediaStreamPresence.ERROR || !all_audio.success)
                         throw new IOError.INVALID_DATA ("Could not verify this file's source audio streams.");
-                    CodecTabSettingsSnapshot requested = settings.codec_settings.copy ();
+                    SmartCodecResolution? retained = null;
+                    bool edited = false;
+                    if (!optimize && item.prepared != null && item.prepared_request != null) {
+                        retained = BulkSettingsEdits.apply (item.prepared, item.prepared_request, settings);
+                        edited = BulkSettingsEdits.changed (item.prepared_request, settings);
+                    }
+                    CodecTabSettingsSnapshot requested = retained != null
+                        ? retained.codec_settings.copy () : settings.codec_settings.copy ();
                     requested.audio_settings.source = AudioSourceLogic.from_probe_result (primary);
                     AudioSourceInfo[] sources = {};
                     for (int audio_index = 0; audio_index < all_audio.streams.length; audio_index++)
@@ -660,7 +720,15 @@ public class BulkConversionController : Object {
                     requested.audio_settings.all_sources = sources;
                     if (sources.length > 0)
                         requested.audio_settings.source = sources[0].copy ();
-                    GeneralSettingsSnapshot general = settings.general_settings.copy ();
+                    GeneralSettingsSnapshot general = retained != null && retained.general_settings != null
+                        ? retained.general_settings.copy () : settings.general_settings.copy ();
+                    var item_watermark = FilterBuilder.snapshot_smart_image_watermark (general);
+                    if (!optimize && item.prepared != null && item_watermark != null
+                            && item.prepared_request != null
+                            && item.watermark_identity.length > 0
+                            && general.watermark_image_path == item.prepared_request.general_settings.watermark_image_path
+                            && item_watermark.file_identity != item.watermark_identity)
+                        throw new IOError.INVALID_DATA ("The watermark changed after optimization. Run Optimize again.");
                     if (general.crop_enabled || general.delogo_enabled) {
                         string? streams = yield FfprobeUtils.probe_format_and_streams_async (
                             item.path, cancellable, settings.runtime_options.ffprobe_path);
@@ -685,7 +753,7 @@ public class BulkConversionController : Object {
                     ctx.audio_requires_reencode = general.audio_speed_enabled
                         && Math.fabs (general.audio_speed_percent) > 1e-9;
                     ctx.video_filter_chain = FilterBuilder.build_video_filter_chain_from_snapshot (general, false, settings.codec);
-                    ctx.image_watermark = watermark;
+                    ctx.image_watermark = item_watermark;
                     ctx.tone_mapping_active = ctx.video_filter_chain.contains ("tonemap=");
                     ctx.video_speed_multiplier = FilterBuilder.get_video_speed_multiplier (general);
                     double output_fps;
@@ -694,50 +762,104 @@ public class BulkConversionController : Object {
                     ctx.trim_start_seconds = start;
                     ctx.trim_end_seconds = start + span;
                     ctx.effective_duration = span;
-                    int target_mb = SmartOptimizerLogic.resolve_target_mb (
-                        settings.target_mb, settings.match_source_size, item.size_bytes);
-                    if (settings.match_source_size && (settings.timing.seek_enabled || settings.timing.time_enabled))
-                        target_mb = SmartOptimizerLogic.match_source_target_mb_for_window (item.size_bytes, span, duration);
-                    OptimizationRecommendation rec = settings.quality_mode
-                        ? yield optimizer.optimize_for_quality (item.path, settings.quality_intent, settings.codec, ctx, cancellable)
-                        : yield optimizer.optimize_for_target_size (item.path, target_mb, settings.codec, ctx, cancellable);
-                    check_cancelled (cancellable);
-                    yield validate_source (item, cancellable);
-                    if (watermark != null) {
-                        var current = FilterBuilder.snapshot_smart_image_watermark (general);
-                        if (current == null || current.file_identity != watermark.file_identity)
-                            throw new IOError.FAILED ("The watermark image changed during folder processing.");
+                    OptimizationRecommendation? rec = item.recommendation;
+                    SmartCodecResolution? resolution = retained;
+                    if (optimize) {
+                        int target_mb = SmartOptimizerLogic.resolve_target_mb (
+                            settings.target_mb, settings.match_source_size, item.size_bytes);
+                        if (settings.match_source_size && (settings.timing.seek_enabled || settings.timing.time_enabled))
+                            target_mb = SmartOptimizerLogic.match_source_target_mb_for_window (item.size_bytes, span, duration);
+                        rec = settings.quality_mode
+                            ? yield optimizer.optimize_for_quality (item.path, settings.quality_intent, settings.codec, ctx, cancellable)
+                            : yield optimizer.optimize_for_target_size (item.path, target_mb, settings.codec, ctx, cancellable);
+                        check_cancelled (cancellable);
+                        yield validate_source (item, cancellable);
+                        if (watermark != null) {
+                            var current = FilterBuilder.snapshot_smart_image_watermark (general);
+                            if (current == null || current.file_identity != watermark.file_identity)
+                                throw new IOError.FAILED ("The watermark image changed during folder processing.");
+                        }
+                        item.recommendation = rec;
+                        item.prepared = null;
+                        item.prepared_request = null;
+                        console_tab.add_line (SmartOptimizer.format_recommendation (rec));
+                        if (rec.is_impossible || rec.bit_depth_attention_required) {
+                            update_item (item, "failed", rec.bit_depth_attention_required
+                                ? (rec.bit_depth_attention_reason ?? "Output bit depth requires attention.")
+                                : "Smart Optimizer could not solve this file: " + rec.notes);
+                            continue;
+                        }
+                        resolution = SmartCodecResolver.resolve (rec, requested, general, true, settings.strip_audio);
+                        if (resolution == null)
+                            throw new IOError.INVALID_ARGUMENT ("Smart Optimizer returned an unsupported codec.");
+                        string incompatible_codec;
+                        bool copy_allowed = AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
+                            resolution.codec_settings.container, requested.audio_settings.source,
+                            requested.audio_settings.all_sources, rec.preserve_all_audio_tracks_effective,
+                            out incompatible_codec);
+                        resolution = SmartCodecResolver.resolve (rec, requested, general, copy_allowed, settings.strip_audio);
+                        if (resolution == null)
+                            throw new IOError.INVALID_ARGUMENT ("The recommendation could not be resolved.");
+                        item.prepared = resolution;
+                        item.prepared_request = settings.copy ();
+                        item.watermark_identity = item_watermark != null ? item_watermark.file_identity : "";
+                    } else if (resolution == null) {
+                        resolution = new SmartCodecResolution ();
+                        resolution.codec_name = settings.codec == "svt-av1" ? "SVT-AV1"
+                            : settings.codec == "vp9" ? "VP9" : settings.codec;
+                        resolution.builder_settings = BulkSettingsEdits.copy_builder (settings.builder_settings);
+                        resolution.two_pass = settings.two_pass;
+                        resolution.general_settings = general;
+                        resolution.codec_settings = requested;
                     }
-                    item.recommendation = rec;
-                    console_tab.add_line (SmartOptimizer.format_recommendation (rec));
-                    if (rec.is_impossible || rec.bit_depth_attention_required) {
-                        update_item (item, "failed", rec.bit_depth_attention_required
-                            ? (rec.bit_depth_attention_reason ?? "Output bit depth requires attention.")
-                            : "Smart Optimizer could not solve this file: " + rec.notes);
-                        continue;
+                    // Re-probe audio even for a retained recommendation; snapshots
+                    // must never borrow observations from another source.
+                    resolution.codec_settings.audio_settings.source = requested.audio_settings.source.copy ();
+                    resolution.codec_settings.audio_settings.all_sources = requested.audio_settings.all_sources;
+                    if (resolution.codec_settings.audio_settings.codec == AudioCodecName.COPY
+                            && (resolution.codec_settings.audio_processing.requires_audio_reencode ()
+                                || Math.fabs (FilterBuilder.get_audio_speed_multiplier (general) - 1.0) > 1e-9)) {
+                        resolution.codec_settings.audio_settings.codec =
+                            AudioCompatibilityLogic.get_copy_fallback_codec_for_container (resolution.codec_settings.container);
+                        if (resolution.codec_settings.audio_settings.codec.length == 0)
+                            resolution.codec_settings.audio_settings.codec = AudioCodecName.AAC;
+                        console_tab.add_line ("[Bulk] Audio processing requires re-encoding this file's audio.");
                     }
-                    SmartCodecResolution? resolution = SmartCodecResolver.resolve (rec, requested, general, true, settings.strip_audio);
-                    if (resolution == null)
-                        throw new IOError.INVALID_ARGUMENT ("Smart Optimizer returned an unsupported codec.");
-                    string incompatible_codec;
-                    bool copy_allowed = AudioCompatibilityLogic.container_supports_audio_copy_for_selection (
-                        resolution.codec_settings.container, requested.audio_settings.source,
-                        requested.audio_settings.all_sources, rec.preserve_all_audio_tracks_effective,
-                        out incompatible_codec);
-                    resolution = SmartCodecResolver.resolve (rec, requested, general, copy_allowed, settings.strip_audio);
-                    if (resolution == null)
-                        throw new IOError.INVALID_ARGUMENT ("The recommendation could not be resolved.");
+                    string requested_audio_codec = resolution.codec_settings.audio_settings.codec;
+                    AudioSettings.coerce_copy_selection_for_container (
+                        resolution.codec_settings.audio_settings, resolution.codec_settings.container);
+                    if (requested_audio_codec != resolution.codec_settings.audio_settings.codec)
+                        console_tab.add_line ("[Bulk] Audio copy is incompatible with the container; using "
+                            + resolution.codec_settings.audio_settings.codec + ".");
+                    resolution.general_settings.pixel_format = resolution.codec_settings.pixel_format.copy ();
+                    resolution.general_settings.video_filters.select_bit_depth (resolution.codec_settings.pixel_format.ten_bit_selected);
+                    BulkSettingsEdits.set_general (resolution.builder_settings, resolution.general_settings);
                     EncodeProfileSnapshot profile = resolution.to_profile ();
+                    yield validate_profile (profile, settings, capabilities, cancellable);
+                    yield validate_source (item, cancellable);
                     string desired = yield ConversionUtils.compute_output_path_from_profile_async (
                         item.path, output_folder, profile, settings.naming, cancellable, settings.runtime_options.ffprobe_path);
                     check_cancelled (cancellable);
                     item.output_path = desired;
                     if (!convert) {
-                        update_item (item, "ready", "Ready — " + rec.notes);
+                        update_item (item, "ready", "Optimized settings ready — " + BulkSettingsEdits.describe (resolution));
                         continue;
                     }
                     var config = new ConversionConfig ();
                     config.profile = profile;
+                    if (profile.codec_name == "SVT-AV1" && resolution.two_pass) {
+                        bool constant_quality = false;
+                        foreach (string arg in profile.codec_args)
+                            if (arg == "-crf" || arg == "-qp") constant_quality = true;
+                        if (constant_quality) {
+                            var capability = yield FfmpegRuntimeCapabilities.probe_svt_av1_crf_two_pass (
+                                settings.runtime_options.ffmpeg_path, cancellable);
+                            config.svt_crf_two_pass_status = capability.status;
+                            config.svt_crf_two_pass_reason = capability.reason;
+                            if (capability.status != SvtAv1CrfTwoPassCapabilityStatus.SUPPORTED)
+                                throw new IOError.NOT_SUPPORTED (capability.reason ?? "SVT-AV1 constant-quality two-pass is unavailable.");
+                        }
+                    }
                     config.runtime_options = settings.runtime_options.copy ();
                     config.seek_enabled = settings.timing.seek_enabled;
                     config.seek_timestamp = timestamp (start);
@@ -746,7 +868,7 @@ public class BulkConversionController : Object {
                     config.source_span_seconds = span;
                     config.video_source_span_seconds = span;
                     config.output_fps = ctx.output_fps;
-                    if (rec.pinned_axis == PinnedAxis.SIZE) {
+                    if (rec != null && !edited && rec.pinned_axis == PinnedAxis.SIZE) {
                         config.smart_requested_size_kib = rec.target_size_kib;
                         config.smart_planned_size_kib = rec.two_pass ? rec.expected_final_size_kib : 0;
                         config.smart_planning_uncertainty = rec.two_pass ? rec.expected_size_error_fraction : 0.0;
@@ -769,6 +891,11 @@ public class BulkConversionController : Object {
                     // collage work. Validate it independently of the stopped
                     // batch token, publish it, then stop further dispatch.
                     yield validate_source (item, new Cancellable ());
+                    if (item_watermark != null) {
+                        var current_watermark = FilterBuilder.snapshot_smart_image_watermark (general);
+                        if (current_watermark == null || current_watermark.file_identity != item_watermark.file_identity)
+                            throw new IOError.INVALID_DATA ("The watermark changed during conversion. Output was not published.");
+                    }
                     bool late_cancel = stop_requested || cancellable.is_cancelled ();
                     try {
                         string final_path = publish_staged_file (stage_path, desired, items);
@@ -826,7 +953,7 @@ public class BulkConversionController : Object {
                 if (item.state == "pending") {
                     update_item (item, "pending", stop_requested ? "Queued — processing was cancelled"
                         : destination_failed ? "Queued — the destination is unavailable or full" : "Queued — not processed");
-                } else if (item.state == "analyzing" || item.state == "converting") {
+                } else if (item.state == "analyzing" || item.state == "checking" || item.state == "converting") {
                     update_item (item, stop_requested ? "cancelled" : "skipped",
                         stop_requested ? "Cancelled before processing" : destination_failed
                             ? "Skipped because the destination is unavailable or full" : "Not processed");

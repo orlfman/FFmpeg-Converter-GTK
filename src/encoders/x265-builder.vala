@@ -178,7 +178,7 @@ public class X265Builder : Object, ICodecBuilder {
             double psy_rd = snapshot.psy_rd;
             params += "psy-rd=" + ConversionUtils.format_ffmpeg_double (psy_rd, "%.1f");
         } else {
-            params += "no-psy-rd";
+            params += "psy-rd=0";
         }
 
         if (!snapshot.cutree)

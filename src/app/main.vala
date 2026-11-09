@@ -135,6 +135,11 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         );
 
         bulk_controller = new BulkConversionController (status_area, console_tab, general_tab);
+        watch_bulk_edits (general_tab);
+        watch_bulk_edits (x264_tab);
+        watch_bulk_edits (x265_tab);
+        watch_bulk_edits (vp9_tab);
+        watch_bulk_edits (svt_tab);
         file_pickers.set_input_admission (() => {
             return is_effectively_idle () && combine_window == null && collage_window == null
                 && !general_tab.is_source_detection_active ();
@@ -149,7 +154,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
                 preview_bulk_folder.begin ();
         });
         controller.folder_optimizer_requested.connect ((codec, auto_convert) => {
-            start_bulk (codec, auto_convert);
+            start_bulk (codec, auto_convert, true);
         });
         bulk_controller.changed.connect (() => { render_bulk_items (bulk_controller.items); });
         bulk_controller.output_ready.connect ((result) => { controller.apply_operation_output (result); });
@@ -473,7 +478,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
             bulk_list.append (row);
         }
         bulk_summary.set_label (items.length == 0 ? "No supported videos in this folder. Subfolders are excluded."
-            : "%u videos · %u completed · %u ready · %u failed. Processed one at a time with Smart Optimizer.".printf (
+            : "%u videos · %u completed · %u ready · %u failed. Processed one at a time.".printf (
                 items.length, completed, ready, failed));
     }
 
@@ -487,18 +492,15 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         vp9_tab.set_sensitive (!locked);
     }
 
-    private void start_bulk (string codec, bool convert) {
-        BaseCodecTab? tab = bulk_codec_tab (codec);
-        if (file_pickers.kind != InputSourceKind.FOLDER || tab == null
-                || !can_start_primary_operation () || combine_window != null || collage_window != null) {
-            status_area.set_status ("Choose a codec tab and finish the current operation before processing a folder.",
-                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
-            return;
-        }
+    private BulkConversionSettings capture_bulk_settings (BaseCodecTab tab, string codec) {
         var settings = new BulkConversionSettings ();
         settings.codec = codec;
+        settings.two_pass = tab.get_two_pass ();
         settings.general_settings = general_tab.snapshot_settings (tab.snapshot_pixel_format_settings ());
         settings.codec_settings = tab.snapshot_settings (settings.general_settings);
+        settings.general_settings.pixel_format = settings.codec_settings.pixel_format.copy ();
+        settings.general_settings.video_filters.select_bit_depth (settings.codec_settings.pixel_format.ten_bit_selected);
+        settings.builder_settings = tab.get_codec_builder ().snapshot_settings (settings.general_settings);
         settings.codec_settings.audio_settings.preserve_all_audio_tracks = tab.audio_settings.get_keep_all_audio_requested ();
         settings.timing = general_tab.snapshot_timing_only ();
         settings.runtime_options = ConversionRuntimeOptions.capture_current ();
@@ -511,6 +513,43 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         settings.optimize_for_delivery = tab.get_optimize_for_delivery ();
         settings.strip_audio = tab.get_strip_audio_active ()
             || !tab.audio_settings.is_audio_enabled_for_output ();
+        return settings;
+    }
+
+    private bool bulk_edit_pending = false;
+
+    private void watch_bulk_edits (Widget widget) {
+        widget.notify.connect ((property) => {
+            string name = property.name;
+            if (name != "selected" && name != "value" && name != "active"
+                    && name != "enable-expansion" && name != "text") return;
+            if (bulk_edit_pending || file_pickers.kind != InputSourceKind.FOLDER
+                    || !is_effectively_idle ()) return;
+            bulk_edit_pending = true;
+            Idle.add (() => {
+                bulk_edit_pending = false;
+                if (file_pickers.kind == InputSourceKind.FOLDER && is_effectively_idle ()) {
+                    string codec = view_stack.visible_child_name ?? "";
+                    BaseCodecTab? tab = bulk_codec_tab (codec);
+                    if (tab != null)
+                        bulk_controller.observe_settings (capture_bulk_settings (tab, codec));
+                }
+                return Source.REMOVE;
+            });
+        });
+        for (Widget? child = widget.get_first_child (); child != null; child = child.get_next_sibling ())
+            watch_bulk_edits (child);
+    }
+
+    private void start_bulk (string codec, bool convert, bool optimize = false) {
+        BaseCodecTab? tab = bulk_codec_tab (codec);
+        if (file_pickers.kind != InputSourceKind.FOLDER || tab == null
+                || !can_start_primary_operation () || combine_window != null || collage_window != null) {
+            status_area.set_status ("Choose a codec tab and finish the current operation before processing a folder.",
+                StatusIcon.WARNING_ICON, StatusIcon.WARNING_CSS);
+            return;
+        }
+        var settings = capture_bulk_settings (tab, codec);
         uint64 operation_id;
         if (!reserve_pending_operation (ActiveOperation.BULK_CONVERTING, out operation_id))
             return;
@@ -519,9 +558,9 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         bulk_preview_generation++;
         activate_cancel (ActiveOperation.BULK_CONVERTING, operation_id);
         set_bulk_controls_locked (true);
-        bulk_destination.set_label ("%s · Output: %s · Settings apply to every file; each file is optimized separately.".printf (
+        bulk_destination.set_label ("%s · Output: %s · Files are processed one at a time.".printf (
             codec.up (), bulk_output_folder ()));
-        bulk_controller.run.begin (file_pickers.source_path, bulk_output_folder (), settings, convert, operation_id);
+        bulk_controller.run.begin (file_pickers.source_path, bulk_output_folder (), settings, convert, operation_id, optimize);
     }
 
     private bool complete_tracked_operation_with_close (ActiveOperation operation,
