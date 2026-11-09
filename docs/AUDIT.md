@@ -29,6 +29,8 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F7 | Medium / open | Unassigned | Size the VMAF reference budget from output dimensions and free space. |
 | SO-F8–SO-F10, SO-F12 | Low / open | Unassigned | See the report. |
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
+| SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
+| SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
 
@@ -42,6 +44,84 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### TASK-20261109-fractional-target-audit — Fractional target feasibility
+
+- **Agent/date/base:** Codex; 2026-11-09 15:55 America/Phoenix (UTC-07:00);
+  main at 031acf6, project worktree. Earlier local rounding-investigation
+  additions in both shared logs were preserved.
+- **Scope/result:** Read-only review of target controls, settings persistence,
+  optimizer numeric types, single-file snapshots, folder/trim flows, cache,
+  reporting and tests. Fractional targets are feasible with moderate integration
+  effort; the fit and budget math already support fractional sizes. Full manual
+  and Match Source support is estimated at 3–5 focused working days including
+  validation, not a delivery promise.
+- **Report:** [smart-optimizer-fractional-target-audit.md](smart-optimizer-fractional-target-audit.md).
+  Includes design alternatives, byte-based representation, settings migration,
+  bounds/unit decisions, code anchors, phased scope and acceptance criteria.
+- **SO-F13:** Remains open as an intentional design precision limitation.
+  The draft recommends exact requested bytes with decimal MiB controls, keeping
+  the present minimum initially. Final output-size uncertainty still applies.
+- **SO-F14 (medium, open, unassigned):** The early optimizer check accepts an
+  available video budget of 80 kbps, then Tiny/Small applies a 3% margin;
+  all four SmartCodecResolver branches clamp applied bitrate to at least
+  100 kbps. Confirmed by source at smart-optimizer-logic.vala:478,
+  smart-optimizer.vala:571 and smart-codec-resolver.vala:178/257/301/342.
+  A below-100 recommendation may therefore be raised when applied. Relevant
+  to smaller budgets but not the user's 543 kbps example. No failing output
+  reproduced. Next action: align planning/feasibility with the actually applied
+  rate, accounting for the margin, and test the boundary before widening bounds.
+- **Checks/limits:** Static source and history review plus arithmetic spot checks;
+  report references and whitespace checked. No application edits, build, test
+  suite or media access in this audit. The user subsequently requested
+  publication of the draft and its supporting audit/changelog records.
+
+### TASK-20261109-match-source-rounding — Small-file Match Source undershoot (SO-F13)
+
+- **Agent/date/base:** Codex; 2026-11-09 15:44 America/Phoenix (UTC-07:00);
+  main at 031acf6, clean at start.
+- **Severity/status/owner:** Medium; open, pre-existing; unassigned.
+- **Evidence:** User-provided SVT-AV1 Size Mode log requests 1024 KiB, plans
+  997 KiB and reports 948 KiB actual. A metadata-only stat of the named source
+  gives 1,572,679 bytes (1535.819 KiB, 1.499824 MiB), just 185 bytes below the
+  1.5 MiB rounding boundary. `match_source_target_mb` rounds to a whole MiB,
+  so this input becomes a 1 MiB target, already 33.3% below its source size.
+- **Affected code:** `src/optimizer/smart-optimizer-logic.vala:673`, including
+  the similarly rounded trimmed-window helper; `AppController` resolves the
+  source byte count through this helper before starting the optimizer.
+- **Attribution:** The untrimmed helper is identical at fe740b3 and 031acf6.
+  The recent VMAF and knee/flat-ladder changes run in Quality Mode, whereas
+  this log is Size Mode. The dominant loss is target rounding, not evidence
+  that calibration could not characterize this source.
+- **Remaining undershoot:** Tiny targeting reduces the available video
+  bitrate by 3%. The plan reserves 46 KiB of container overhead; the output
+  log implies roughly 7 KiB. The final 948 KiB is 7.4% under the rounded
+  request and 4.9% under the 997 KiB plan, within its stated +/-8% range.
+  Calibration verification itself differed from the model by only -0.2%.
+- **Next action:** Carry precise bytes or fractional KiB through Match Source
+  target resolution, budgeting, reporting and trimmed-window scaling. Keep
+  rounding only for display. Add boundary coverage around 1.5 MiB, small
+  sources and fractional trimmed targets; consider match-source versus hard
+  upload-limit safety margins separately.
+- **Checks/limits:** Read the supplied log, source and historical helper;
+  stat source metadata and recompute arithmetic. No media decoded, no encode,
+  build, test run or application-code change. Log does not independently
+  expose the Match Source toggle; user reports it was enabled. Documentation
+  findings are included with the fractional-target feasibility publication.
+
+- **Historical clarification (2026-11-09 15:47, Codex):** The rounding is intentional
+  and documented from the original Match Source feature, commit `6d07d59`
+  (2026-07-24). Its helper comment explicitly says the optimizer only accepts
+  integer MB targets. Before that commit, the solver already took `int
+  target_mb = 4`, the controls advanced in 1 MB steps, and the preference was
+  an integer. Match Source reused that existing target path. The original
+  README promised roughly the starting size and explicitly described nearest
+  whole-MB rounding; regression tests deliberately check both rounding up and
+  down. Thus SO-F13 describes a small-file precision limitation of the design,
+  not an accidental implementation regression. The supported rationale is
+  compatibility with the existing integer target model; no inspected commit
+  evidence attributes rounding to an encoder or quality requirement. Source
+  and historical diff inspection only; no implementation change.
 
 ### AUD-20261109-quality-floor-guard — Fix and verification for SO-F1
 

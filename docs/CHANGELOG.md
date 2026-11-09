@@ -27,6 +27,55 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-fractional-target-audit — Fractional target support assessment
+
+- **Agent/date/base:** Codex; 2026-11-09 15:55 America/Phoenix (UTC-07:00);
+  main at 031acf6, project worktree.
+- **Status/scope:** Requested draft complete, documentation only. Included in
+  the user-requested fractional-target audit publication with the rounding notes.
+  Added [feasibility audit](smart-optimizer-fractional-target-audit.md) and linked
+  findings in AUDIT.md; preserved the pre-existing local rounding notes.
+- **Conclusion:** Feasible, moderate effort. Existing floating-point budget and
+  curve math can stay; target precision must cross settings, controls, snapshots,
+  folder/trim and reports. Recommends exact bytes internally and decimal MiB
+  entry, with current minimum retained initially. Full scope estimate: 3–5
+  focused working days including validation; smaller Match Source-only option
+  and sub-1-MiB extension are assessed separately.
+- **Finding:** SO-F14 records an existing 80 kbps feasibility versus 100 kbps
+  application-floor mismatch; post-margin validation matters for small budgets.
+  Source-confirmed only, no runtime reproduction.
+- **Checks/limits:** Static review, arithmetic examples, reference and whitespace
+  checks. No application changes, build/test run or media access. Publication
+  was subsequently requested by the user; this commit includes the report and
+  both supporting investigation records.
+- **Handoff:** The report provides the implementation sequence and acceptance
+  tests. SO-F13/SO-F14 remain open; implementation has not started.
+
+### TASK-20261109-match-source-rounding — Explain a Match Source size undershoot
+
+- **Agent/date/base:** Codex; 2026-11-09 15:44 America/Phoenix (UTC-07:00);
+  main, project worktree, 031acf6.
+- **Status/scope:** Investigation complete; documentation only. Included in the
+  fractional-target audit publication. See SO-F13 in AUDIT.md; application
+  fix remains open.
+- **Finding:** The user's 1,572,679-byte source is 1.499824 MiB. Existing
+  whole-MiB rounding converts Match Source to a 1 MiB target. The supplied
+  log's 948 KiB final size reflects that smaller request plus conservative
+  budgeting and normal variance. This rounding predates the recent fixes.
+- **Validation:** Supplied log, metadata-only source stat, source inspection,
+  arithmetic and comparison with fe740b3. No media decoded or conversion,
+  build or test suite performed. Publication followed with the feasibility audit.
+- **Handoff:** Preserve source-size precision throughout target calculations;
+  test small-file and trimmed-window boundaries when implementing the fix.
+
+- **Historical follow-up (2026-11-09 15:47, Codex):** Traced rounding to the original
+  Match Source commit `6d07d59` (2026-07-24). Its code comment, README and
+  tests deliberately specify nearest whole-MB targets, reusing the existing
+  integer target API, preference and 1 MB UI steps. SO-F13 is a design
+  precision limitation for small files; no unintended regression was found.
+  See the attributed clarification in AUDIT.md. Documentation only; included
+  with the feasibility audit publication.
+
 ### TASK-20261109-publish — Commit and push of folder-conversion and optimizer work
 
 - **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 15:10
