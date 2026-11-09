@@ -12,6 +12,15 @@
 > It is not rare enough to ignore, though — when it fires it is silent and
 > writes files several times larger than intended.
 
+> **Follow-up 2026-11-09 (Claude Code, AUD-20261109-vmaf-threads-model):** a
+> flat curve of this kind was reproduced in about 20 seconds — 720p fixture,
+> `scale=3840:2160`, x264, Medium — and traced to timestamp pairing: reference
+> stream start 0.167 s, probe 0.042 s, 383 of 384 frames compared, 48.07
+> against 98.95 once both inputs were rebased. `measure_vmaf` now applies
+> `setpts=PTS-STARTPTS` to both (candidate 2 below). The range described here
+> was not re-run, so this document's own case is still unconfirmed.
+> `film-grain-denoise=1` was also tested and ruled out.
+
 ## Symptom
 
 Three-segment Crop & Trim export, SVT-AV1, Quality Ceiling = Ultra (VMAF 97),

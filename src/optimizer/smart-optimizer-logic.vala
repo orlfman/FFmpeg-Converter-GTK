@@ -3910,6 +3910,65 @@ namespace SmartOptimizerLogic {
         public bool     crf_at_max;
         public int      saturated_points_dropped;
         public double   fit_rmse;          // in VMAF points
+        /**
+         * True when the solve stopped short of the ceiling because lowering
+         * CRF further was predicted to gain less than
+         * VMAF_MIN_GAIN_PER_CRF. The ceiling is then out of reach for
+         * practical purposes and predicted_crf is the knee of the curve.
+         */
+        public bool     gain_limited;
+    }
+
+    // Below this predicted gain per CRF step, lowering CRF is not worth it.
+    // One step costs roughly a tenth of the file, so 0.1 VMAF per step is
+    // about ten percent more bytes for a tenth of a point — far under the
+    // metric's own repeatability. Without this bound a ceiling the source
+    // cannot reach sent the solve to the codec's minimum CRF: the recorded
+    // case is Ultra on 1080p animation, larger than its source for no
+    // visible gain over CRF 18.
+    public const double VMAF_MIN_GAIN_PER_CRF = 0.1;
+
+    // A ladder this wide whose scores move less than this is not a quality
+    // curve. Healthy sources move several points across ten CRF; the three
+    // recorded broken measurements moved 0.26, 0.30 and 0.47.
+    public const int    VMAF_FLAT_MIN_CRF_SPAN = 10;
+    public const double VMAF_FLAT_MAX_RANGE    = 1.0;
+
+    /**
+     * True when the measured ladder cannot be a real CRF↔VMAF response:
+     * the scores barely move across a wide CRF span while sitting below both
+     * the target and the saturation level.
+     *
+     * Compression cannot do that — a 20-point CRF swing changes real quality
+     * by several VMAF points — so the measurement itself is wrong (frame
+     * misalignment is the known cause). Solving against it walks to the
+     * codec floor and writes a file several times larger than intended, so
+     * callers must refuse the run instead.
+     *
+     * Saturated ladders are deliberately excluded: flat at 99.8 is a real,
+     * well-understood result with its own recovery path.
+     */
+    public bool quality_ladder_is_implausible (
+        int[]    crfs,
+        double[] vmafs,
+        double   target_vmaf
+    ) {
+        int n = int.min (crfs.length, vmafs.length);
+        if (n < VMAF_MIN_CALIBRATION_POINTS)
+            return false;
+
+        int crf_lo = crfs[0], crf_hi = crfs[0];
+        double v_lo = vmafs[0], v_hi = vmafs[0];
+        for (int i = 1; i < n; i++) {
+            crf_lo = int.min (crf_lo, crfs[i]);
+            crf_hi = int.max (crf_hi, crfs[i]);
+            v_lo = double.min (v_lo, vmafs[i]);
+            v_hi = double.max (v_hi, vmafs[i]);
+        }
+        return (crf_hi - crf_lo) >= VMAF_FLAT_MIN_CRF_SPAN
+            && (v_hi - v_lo) < VMAF_FLAT_MAX_RANGE
+            && v_hi < target_vmaf
+            && v_hi < VMAF_SATURATION_THRESHOLD;
     }
 
     /**
@@ -4029,9 +4088,34 @@ namespace SmartOptimizerLogic {
                 && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved) > target_vmaf) {
             solved++;
         }
+        // ...but only while each step still buys measurable quality. A
+        // ceiling above everything the curve can reach would otherwise pull
+        // the answer all the way down to crf_min.
         while (solved > crf_min
-                && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved - 1) <= target_vmaf) {
+                && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved - 1) <= target_vmaf
+                && (evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved - 1)
+                    - evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved))
+                    >= VMAF_MIN_GAIN_PER_CRF) {
             solved--;
+        }
+
+        // Still short of the ceiling with one lower CRF also short of it: the
+        // ceiling is out of reach here. Settle on the knee — the highest CRF
+        // before quality starts dropping by a meaningful amount per step —
+        // rather than wherever the search happened to stop on the plateau.
+        bool ceiling_out_of_reach = solved > crf_min
+            && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved - 1) <= target_vmaf;
+        if (ceiling_out_of_reach
+                || (solved == crf_min
+                    && evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved) < target_vmaf)) {
+            int before = solved;
+            while (solved < crf_max
+                    && (evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved)
+                        - evaluate_vmaf_at_crf (m.qa, m.qb, m.qc, solved + 1))
+                        < VMAF_MIN_GAIN_PER_CRF) {
+                solved++;
+            }
+            m.gain_limited = ceiling_out_of_reach || solved != before;
         }
 
         m.crf_at_min = solved <= crf_min;
@@ -4320,5 +4404,64 @@ namespace SmartOptimizerLogic {
             case QualityIntent.ULTRA:  return { 11, 18, 25 };
             default:                   return { 21, 27, 33 };
         }
+    }
+
+    // ── VMAF measurement policy ──────────────────────────────────────────────
+
+    // libvmaf scales well to roughly this many threads and flattens after;
+    // measured 22.9 s at 1 thread, 4.1 s at 8 and 3.2 s at 24 for 8 s of 4K.
+    public const int VMAF_MAX_THREADS = 16;
+
+    /**
+     * Threads for libvmaf, decided independently of the encoder's setting.
+     *
+     * The encoder's "0 = let it choose" must never reach libvmaf: its
+     * n_threads has no automatic mode, so a forwarded 0 became a single
+     * thread and every Quality Mode probe measured about seven times slower
+     * than it needed to.
+     */
+    public int vmaf_thread_count (int processors) {
+        return processors.clamp (1, VMAF_MAX_THREADS);
+    }
+
+    public const int    VMAF_4K_MIN_WIDTH     = 2560;
+    public const string VMAF_4K_MODEL_VERSION = "vmaf_4k_v0.6.1";
+
+    /**
+     * Whether frames of this width should be scored with the 4K model.
+     *
+     * @encoded_width is the width of the frames libvmaf actually compares —
+     * after the filter chain — not the source's. A 4K source downscaled to
+     * 1080p is HD material, and an upscale to 4K is 4K material.
+     */
+    public bool vmaf_wants_4k_model (int encoded_width) {
+        return encoded_width >= VMAF_4K_MIN_WIDTH;
+    }
+
+    /**
+     * Frame size from the first `showinfo` line in FFmpeg's log
+     * ("... sar:1/1 s:704x396 ..."). False when no such line is present.
+     */
+    public bool parse_showinfo_frame_size (string text, out int width, out int height) {
+        width = 0;
+        height = 0;
+        foreach (unowned string line in text.split ("\n")) {
+            if (!line.contains ("showinfo"))
+                continue;
+            int idx = line.index_of (" s:");
+            if (idx < 0)
+                continue;
+            string[] dims = line.substring (idx + 3).split (" ")[0].split ("x");
+            if (dims.length != 2)
+                continue;
+            int w = 0, h = 0;
+            if (int.try_parse (dims[0], out w) && int.try_parse (dims[1], out h)
+                    && w > 0 && h > 0) {
+                width = w;
+                height = h;
+                return true;
+            }
+        }
+        return false;
     }
 }

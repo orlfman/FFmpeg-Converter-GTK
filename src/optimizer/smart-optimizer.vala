@@ -239,6 +239,32 @@
 //     eliminating the 6-8 redundant decode+filter passes per run.
 //     Built lazily (skipped when the cache satisfies every point) and
 //     skipped with a warning when the estimated size exceeds 4 GiB.
+//
+// v14 improvements (Quality Mode measurement):
+//   - VMAF frame pairing fix: both libvmaf inputs are rebased with
+//     setpts=PTS-STARTPTS.  libvmaf pairs frames by timestamp, and the
+//     reference and the probe do not always report the same stream start;
+//     left alone that compared each frame with its neighbour and produced
+//     a flat curve (VMAF 48 at every CRF where the true scores were
+//     99/96/90), which sent the solve to the codec's minimum CRF.
+//   - libvmaf threading: VMAF gets its own thread count (logical cores,
+//     capped at 16) instead of inheriting the encoder's "0 = auto", which
+//     libvmaf treated as a single thread — about 7x slower per probe for
+//     identical scores.
+//   - VMAF model follows the encoded frame: a one-frame showinfo probe
+//     measures the width AFTER the filter chain, so a 4K source scaled to
+//     1080p is scored with the standard model and an upscale to 4K with
+//     the 4K model.  The model is requested by its built-in name
+//     (model=version=vmaf_4k_v0.6.1) rather than a distribution-specific
+//     file path, and is part of the Quality cache identity.
+//   - Flat-ladder rejection: a ladder spanning 10+ CRF whose scores move
+//     less than 1 VMAF while below the target is treated as a failed
+//     measurement.  The run returns an error recommendation, so nothing
+//     is applied or auto-converted from it.
+//   - Knee stop: when the ceiling is out of reach, the solve no longer
+//     lowers CRF once the fitted gain falls under 0.1 VMAF per step; it
+//     settles on the knee of the curve instead of the codec's minimum CRF
+//     and explains that in the notes.
 
 using GLib;
 using Json;
@@ -284,6 +310,13 @@ public class SmartOptimizer : GLib.Object {
      */
     private SmartOptimizerLogic.EncoderTuning? active_tuning = null;
     private SmartOptimizerLogic.TemporalTuning? active_temporal_tuning = null;
+    /**
+     * libvmaf model option for the Quality Mode run in progress, e.g.
+     * "model=version=vmaf_4k_v0.6.1"; "" selects libvmaf's default (HD) model.
+     * Per-run for the same reason as active_tuning: every probe of one run
+     * must be scored by the same model.
+     */
+    private string active_vmaf_model_arg = "";
     private FfmpegRuntimeCapabilities runtime_capabilities;
     private ConversionRuntimeOptions? captured_runtime_options;
 
@@ -1116,6 +1149,22 @@ public class SmartOptimizer : GLib.Object {
                 tw.encode_duration);
             int threads = encoder_threads_per_job (1);
 
+            // The metric model follows the frames libvmaf will compare, which
+            // are the FILTERED ones: a 4K source scaled to 1080p is HD
+            // material. Settled before the cache is created because the model
+            // is part of what a cached score means.
+            int encoded_width = yield probe_encoded_width (
+                input_file, positions.length > 0 ? positions[0] : tw.trim_start,
+                vf, info.width, cancellable);
+            active_vmaf_model_arg = yield resolve_vmaf_model_arg (
+                encoded_width, cancellable);
+            string vmaf_model_identity = active_vmaf_model_arg.length > 0
+                ? active_vmaf_model_arg : "model=default";
+            progress ("Scoring %d-pixel-wide frames with %s".printf (
+                encoded_width,
+                active_vmaf_model_arg.length > 0
+                    ? "the 4K VMAF model" : "the standard VMAF model"));
+
             // Cache keyed on everything that shapes a measurement. Preset is
             // part of that key and preset varies with intent, so switching
             // intent correctly misses — a different preset genuinely produces
@@ -1128,7 +1177,8 @@ public class SmartOptimizer : GLib.Object {
                 vf, tw.trim_start, tw.encode_duration,
                 tw.sample_segment_duration, positions, 1.0,
                 SmartOptimizerLogic.encoder_tuning_key (encoder_tuning)
-                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning),
+                    + "|" + SmartOptimizerLogic.temporal_tuning_key (temporal_tuning)
+                    + "|vmaf:" + vmaf_model_identity,
                 watermark_cache_identity (ctx.image_watermark));
 
             int[] crfs = SmartOptimizerLogic.pick_quality_calibration_crfs (
@@ -1165,7 +1215,7 @@ public class SmartOptimizer : GLib.Object {
                     var m = yield calibration_probe_with_vmaf (
                         preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
                         intermediate.path, tw.encode_duration, sample_duration,
-                        1.0, info.width, threads, temp_run_dir, cancellable);
+                        1.0, threads, temp_run_dir, cancellable);
                     if (!m.vmaf_measured)
                         continue;
                     measured_crfs += crf;
@@ -1190,6 +1240,31 @@ public class SmartOptimizer : GLib.Object {
             // explicit exception: their rule-based cap protects text.
             var m0 = SmartOptimizerLogic.solve_quality_crf (
                 measured_crfs, vmafs, target.target_vmaf, preferred_codec);
+            // A ladder that does not respond to CRF is a broken measurement,
+            // not a result. Refuse it here, before any further probing and
+            // before anything can be auto-converted from it.
+            if (SmartOptimizerLogic.quality_ladder_is_implausible (
+                    measured_crfs, vmafs, target.target_vmaf)) {
+                double flat_lo = vmafs[0], flat_hi = vmafs[0];
+                foreach (double v in vmafs) {
+                    flat_lo = double.min (flat_lo, v);
+                    flat_hi = double.max (flat_hi, v);
+                }
+                progress (("Measured VMAF stayed at %.2f–%.2f from CRF %d to "
+                    + "CRF %d — rejecting the measurement").printf (
+                        flat_lo, flat_hi, measured_crfs[0],
+                        measured_crfs[measured_crfs.length - 1]));
+                return make_error_rec (preferred_codec,
+                    ("Quality measurement is not trustworthy for this video.\n"
+                    + "VMAF stayed between %.2f and %.2f from CRF %d to CRF %d; "
+                    + "a real encode changes by several points over that range, "
+                    + "so the frames being compared are probably misaligned.\n"
+                    + "Nothing was applied and auto-convert was not started. "
+                    + "Use a size target or set the CRF manually for this file.")
+                    .printf (flat_lo, flat_hi, measured_crfs[0],
+                        measured_crfs[measured_crfs.length - 1]));
+            }
+
             bool refined = false;          // extra probes after saturation
             bool bracket_refined = false;  // extra probes to bracket the answer
             bool saturation_direct_solution = false;
@@ -1305,6 +1380,7 @@ public class SmartOptimizer : GLib.Object {
                     m0.qc = 0.0;
                 }
                 m0.predicted_crf = direct_crf;
+                m0.gain_limited = false;   // a measured bracket, not the fit
                 for (int i = 0; i < measured_crfs.length; i++) {
                     if (measured_crfs[i] == direct_crf) {
                         m0.predicted_vmaf = vmafs[i];
@@ -1423,7 +1499,7 @@ public class SmartOptimizer : GLib.Object {
                         var rm = yield calibration_probe_with_vmaf (
                             preferred_codec, crf, preset_idx, bit_depth.pix_fmt,
                             intermediate.path, tw.encode_duration, sample_duration,
-                            1.0, info.width, threads, temp_run_dir, cancellable);
+                            1.0, threads, temp_run_dir, cancellable);
                         if (!rm.vmaf_measured)
                             continue;
                         measured_crfs += crf;
@@ -1696,6 +1772,7 @@ public class SmartOptimizer : GLib.Object {
         } finally {
             active_tuning = null;
             active_temporal_tuning = null;
+            active_vmaf_model_arg = "";
             if (intermediate.path != null)
                 cleanup_file (intermediate.path);
             cleanup_temp_run_dir (temp_run_dir);
@@ -1981,6 +2058,15 @@ public class SmartOptimizer : GLib.Object {
                     + "the %.0f ceiling is unreachable for this source.\n").printf (
                         verification.verified_crf, verification.measured_vmaf,
                         target.target_vmaf));
+            } else if (model.gain_limited
+                    && verification.measured_vmaf < target.target_vmaf) {
+                n.append (("  The %.0f ceiling is out of practical reach for "
+                    + "this source: below CRF %d the measured curve gains "
+                    + "under %.1f VMAF per step, so the solve stopped at the "
+                    + "knee (VMAF %.2f) instead of spending bytes on it.\n")
+                    .printf (target.target_vmaf, model.predicted_crf,
+                        SmartOptimizerLogic.VMAF_MIN_GAIN_PER_CRF,
+                        verification.measured_vmaf));
             } else if (target.enforce_vmaf_ceiling && model.crf_at_min
                     && verification.measured_vmaf < target.target_vmaf) {
                 n.append (("  Codec minimum CRF still measured VMAF %.2f; this "
@@ -4229,8 +4315,10 @@ public class SmartOptimizer : GLib.Object {
     // target, so a few seconds of undershoot is normal.
     private const double TAIL_SEEK_TOLERANCE_SECONDS = 30.0;
 
+    // Fallback only, for libvmaf builds without built-in models. The model
+    // is normally selected by name (model=version=…), which needs no path and
+    // therefore behaves the same on every distribution.
     private const string VMAF_MODEL_4K_PATH  = "/usr/share/model/vmaf_4k_v0.6.1.json";
-    private const int    VMAF_4K_MIN_WIDTH   = 2560;
 
     /** One probe's measurements: extrapolated size plus perceptual score. */
     private class ProbeMeasurement {
@@ -4241,15 +4329,86 @@ public class SmartOptimizer : GLib.Object {
     }
 
     /**
-     * Model path for this frame size, or null to use libvmaf's built-in
-     * default. Only returns a path that actually exists.
+     * Width of the frames the encoder (and so libvmaf) will see: one source
+     * frame run through the output filter chain. Falls back to @fallback_width
+     * when the probe fails, which is the previous behaviour.
      */
-    private string? vmaf_model_path (int width) {
-        if (width >= VMAF_4K_MIN_WIDTH
-                && FileUtils.test (VMAF_MODEL_4K_PATH, FileTest.EXISTS)) {
-            return VMAF_MODEL_4K_PATH;
+    private async int probe_encoded_width (
+        string        input_file,
+        double        position,
+        string        vf,
+        int           fallback_width,
+        Cancellable?  cancellable
+    ) throws Error {
+        string ffmpeg = get_ffmpeg_path ();
+        string[] cmd = {
+            ffmpeg, "-hide_banner", "-v", "info", "-nostdin",
+            "-ss", ConversionUtils.format_ffmpeg_double (position, "%.2f"),
+            "-i", input_file,
+            "-vf", vf.length > 0 ? vf + ",showinfo" : "showinfo",
+            "-frames:v", "1", "-an", "-f", "null", "-"
+        };
+        try {
+            string log = yield run_subprocess_stderr (cmd, cancellable);
+            int width, height;
+            if (SmartOptimizerLogic.parse_showinfo_frame_size (
+                    log, out width, out height)) {
+                return width;
+            }
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            debug ("Smart Optimizer: encoded-size probe failed: %s", e.message);
         }
-        return null;
+        warning ("Smart Optimizer: could not measure the filtered frame size — "
+            + "choosing the VMAF model from the source width (%d)", fallback_width);
+        return fallback_width;
+    }
+
+    /**
+     * libvmaf model option for frames of @encoded_width, or "" for the
+     * default model.
+     *
+     * The 4K model is requested by its built-in name and checked once with a
+     * tiny synthetic comparison, so the choice does not depend on where a
+     * distribution installs model files. Builds without built-in models fall
+     * back to the file path when it exists, and otherwise to the default
+     * model with a warning.
+     */
+    private async string resolve_vmaf_model_arg (
+        int           encoded_width,
+        Cancellable?  cancellable
+    ) throws Error {
+        if (!SmartOptimizerLogic.vmaf_wants_4k_model (encoded_width))
+            return "";
+
+        string by_version = "model=version="
+            + SmartOptimizerLogic.VMAF_4K_MODEL_VERSION;
+        string ffmpeg = get_ffmpeg_path ();
+        string synthetic = "color=c=gray:s=320x240:r=5:d=0.4";
+        string[] cmd = {
+            ffmpeg, "-hide_banner", "-v", "error", "-nostdin",
+            "-f", "lavfi", "-i", synthetic,
+            "-f", "lavfi", "-i", synthetic,
+            "-lavfi", "[0:v][1:v]libvmaf=" + by_version,
+            "-f", "null", "-"
+        };
+        try {
+            yield run_subprocess_wait (cmd, cancellable);
+            return by_version;
+        } catch (IOError.CANCELLED e) {
+            throw e;
+        } catch (Error e) {
+            debug ("Smart Optimizer: built-in 4K VMAF model unavailable: %s",
+                e.message);
+        }
+
+        if (FileUtils.test (VMAF_MODEL_4K_PATH, FileTest.EXISTS))
+            return "model=path=" + VMAF_MODEL_4K_PATH;
+
+        warning ("Smart Optimizer: no 4K VMAF model available — scoring "
+            + "%d-pixel-wide frames with the default model", encoded_width);
+        return "";
     }
 
     /**
@@ -4270,8 +4429,6 @@ public class SmartOptimizer : GLib.Object {
     private async double measure_vmaf (
         string        distorted,
         string        reference,
-        int           width,
-        int           threads,
         string?       temp_run_dir,
         Cancellable?  cancellable
     ) throws Error {
@@ -4279,12 +4436,23 @@ public class SmartOptimizer : GLib.Object {
         string log = tmp_path ("vmaf", temp_run_dir) + ".json";
 
         var filter = new StringBuilder ();
-        filter.append ("[0:v][1:v]libvmaf=");
-        string? model = vmaf_model_path (width);
-        if (model != null)
-            filter.append ("model=path=%s:".printf (model));
+        // Both inputs are rebased to start at zero before libvmaf sees them.
+        // Its framesync pairs frames by TIMESTAMP, and the reference and the
+        // probe do not always report the same stream start (measured: 0.167 s
+        // against 0.042 s for a 4K pair cut from the same frames). Left
+        // alone, that pairs each frame with its neighbour and drops one —
+        // 383 of 384 frames compared, VMAF 48.07 at every CRF, where the
+        // rebased comparison scores 98.95. A flat curve like that sends the
+        // solver to the codec's minimum CRF.
+        filter.append ("[0:v]setpts=PTS-STARTPTS[dist];"
+            + "[1:v]setpts=PTS-STARTPTS[ref];[dist][ref]libvmaf=");
+        if (active_vmaf_model_arg.length > 0)
+            filter.append (active_vmaf_model_arg + ":");
+        // Never the encoder's thread setting: its 0 means "auto", and libvmaf
+        // has no auto — see SmartOptimizerLogic.vmaf_thread_count.
         filter.append ("n_threads=%d:log_fmt=json:log_path=%s".printf (
-            int.max (1, threads), log));
+            SmartOptimizerLogic.vmaf_thread_count (
+                (int) GLib.get_num_processors ()), log));
 
         string ffmpeg = get_ffmpeg_path ();
         string[] cmd = {
@@ -4373,7 +4541,7 @@ public class SmartOptimizer : GLib.Object {
             info, temp_run_dir, cancellable);
         var measured = yield calibration_probe_with_vmaf (
             codec, crf, preset_idx, pix_fmt, intermediate.path,
-            full_duration, sample_duration, 1.0, info.width,
+            full_duration, sample_duration, 1.0,
             encoder_threads, temp_run_dir, cancellable);
         if (measured.vmaf_measured && qcache != null)
             qcache.record_with_vmaf (crf, measured.size_kib, measured.vmaf);
@@ -4398,7 +4566,6 @@ public class SmartOptimizer : GLib.Object {
         double        full_duration,
         double        sample_duration,
         double        extrapolation_weight,
-        int           width,
         int           encoder_threads,
         string?       temp_run_dir,
         Cancellable?  cancellable
@@ -4438,8 +4605,7 @@ public class SmartOptimizer : GLib.Object {
 
         try {
             m.vmaf = yield measure_vmaf (
-                tmp, intermediate_path, width, encoder_threads,
-                temp_run_dir, cancellable);
+                tmp, intermediate_path, temp_run_dir, cancellable);
             m.vmaf_measured = (m.vmaf > 0.0);
         } catch (IOError.CANCELLED e) {
             cleanup_file (tmp);

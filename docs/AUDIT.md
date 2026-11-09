@@ -21,16 +21,106 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | ID | Severity / status | Owner | Next action |
 | --- | --- | --- | --- |
 | BASELINE-F1 | Medium / open, pre-existing | Unassigned | Investigate the mpv-backend timeout with appropriate local audio/runtime access. |
+| BASELINE-F2 | Low / open | Unassigned | Check the failing hamburger recent-menu test against the base revision. |
+| SO-F1 | High / fixed; knee stop awaiting real-media verification | Unassigned | Run Ultra on a source that cannot reach VMAF 97 (1080p animation) and confirm the knee stop. |
+| SO-F4 | Medium / open | Unassigned | Loosen the two-pass VBV cap and add a post-encode size correction. |
+| SO-F5 | Medium / open, design | Unassigned | Derive effort, preset, ladder and audio share from bitrate density, not megabytes. |
+| SO-F6 | Medium (run time) / open | Unassigned | Skip or shorten CRF calibration when two-pass is certain. |
+| SO-F7 | Medium / open | Unassigned | Size the VMAF reference budget from output dimensions and free space. |
+| SO-F8–SO-F10, SO-F12 | Low / open | Unassigned | See the report. |
+| SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
+
+`SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
 
 Historical quality/frame-alignment findings remain in
-`quality-mode-vmaf-measurement-findings.md`; their full-length failing-range
-scenario was not revalidated here. No application-wide audit is implied.
+`quality-mode-vmaf-measurement-findings.md`. A flat curve of the same kind was
+reproduced and fixed in AUD-20261109-vmaf-threads-model; the original
+full-length failing range itself has not been re-run. No application-wide audit is implied.
 
 When an issue is found, add its finding ID, severity, status, owner, next action
 and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261109-quality-floor-guard — Fix and verification for SO-F1
+
+- **Task/agent/date/base:** TASK-20261109-quality-floor-guard; Claude Code;
+  2026-11-09 15:15 America/Phoenix (UTC-07:00); main at fe740b3 with uncommitted changes.
+- **Flat-ladder rejection (verified):** with the timestamp rebase removed by an
+  FFmpeg wrapper, the 720p-to-4K run measured 48.07 / 47.97 / 47.60, stopped
+  after three probes and returned `is_impossible` with an explanatory message.
+  Before this change the same measurement solved CRF 8 at a 358 MiB projection.
+- **No regression (verified):** unfiltered 720p Medium still solves CRF 28 at
+  91.15; 720p-to-4K Medium still solves CRF 32 at 91.25; a heavy-noise Ultra
+  run reached its ceiling normally (CRF 17, 96.58).
+- **Knee stop (fixed, awaiting verification):** unit tests only — a plateau of
+  95.3 / 95.0 / 93.6 against a 97 target now solves inside CRF 14–20 instead
+  of CRF 8, a reachable target on the same curve is unchanged, and a steep
+  curve may still go below its window. No real run triggered it.
+- **Checks run:** development build; full suite 27 OK, 1 failing (BASELINE-F2);
+  the scratch harness from AUD-20261109-vmaf-threads-model, x264, isolated
+  directories.
+- **Limits:** one fixture, x264, 8-bit, no GUI run, thresholds not
+  corpus-calibrated. The low-CRF "must be near-transparent" bound and the
+  frame-count check from SO-F11 are still absent.
+
+### AUD-20261109-vmaf-threads-model — Fix and verification for SO-F2, SO-F3, SO-F11
+
+- **Task/agent/date/base:** TASK-20261109-vmaf-threads-model; Claude Code;
+  2026-11-09 14:45 America/Phoenix (UTC-07:00); main at fe740b3 with uncommitted changes.
+- **SO-F2 (verified):** every libvmaf invocation in three real Quality Mode
+  runs carried `n_threads=16` on a 24-thread machine; previously 1.
+- **SO-F3 (verified):** a 4K source scaled to 1280 wide was scored with the
+  standard model; a 720p source scaled to 3840 wide with
+  `model=version=vmaf_4k_v0.6.1`. Unfiltered 720p scores are unchanged
+  (96.71 / 92.18 / 84.12 at CRF 21 / 27 / 33 before and after).
+- **SO-F11 (partly fixed):** the 720p-to-4K run reproduced a flat curve before
+  the change: 48.07 / 47.97 / 47.60 at CRF 21 / 27 / 33, then CRF 8 at 48.19
+  and a 358 MiB projection. The retained pair showed stream start times of
+  0.167 s (reference) and 0.042 s (probe); libvmaf compared 383 of 384 frames.
+  Scoring that same pair by hand gave 48.07 as shipped and 98.95 with
+  `setpts=PTS-STARTPTS` on both inputs. After the change the run measured
+  98.95 / 95.66 / 90.24 and solved CRF 32 at 91.25 (predicted 91.27).
+- **Checks run:** development build; full suite 27 OK, 1 failing
+  (`hamburger-recent-menu-rebuild`, see BASELINE-F2); a scratch harness built
+  from the application sources calling `optimize_for_quality` (x264, Medium,
+  audio stripped) on `tests/testvideo-raptor.webm` and a 4K upscale of it,
+  with isolated XDG and temporary directories and an FFmpeg wrapper that
+  logged arguments.
+- **Limits:** one fixture, x264 only, 8-bit, no GUI run. Why the two stream
+  start times differ was not established, only that rebasing removes the
+  effect. The original gymnastics range was not available and not re-run, so
+  SO-F11 is not closed. Frame-count and sanity-bound checks are still absent.
+
+#### BASELINE-F2 — hamburger-recent-menu-rebuild fails on this desktop
+
+- **Severity/status/owner:** Low; open; unassigned.
+- **Evidence:** `/hamburger/recent-inputs/repeated-refresh-is-stable` aborts
+  with "clicking a recent-file slot promotes it in history expected
+  '…/recent-18.mkv' but got '…/recent-19.mkv'", three of three runs, on a live
+  Wayland session at fe740b3 plus working-tree changes.
+- **Next action:** Check against the base revision. It was not established
+  whether this predates TASK-20261109-vmaf-threads-model; the case does not
+  touch optimizer code.
+
+### AUD-20261109-smart-optimizer — Smart Optimizer design and code audit
+
+- **Task/agent/date/base:** TASK-20261109-smart-optimizer-audit; Claude Code;
+  2026-11-09 14:12 America/Phoenix (UTC-07:00); main at fe740b3 with the
+  uncommitted folder-conversion changes.
+- **Scope:** `src/optimizer/` in full, `smart-codec-resolver.vala`, the optimizer
+  call sites and two-pass builder arguments. Read-only; no source changed.
+- **Results:** Twelve findings, `SO-F1`–`SO-F12`, all open and unassigned. Report:
+  [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
+- **Checks run:** Four FFmpeg experiments on `tests/testvideo-raptor.webm`
+  (FFmpeg n9.0.2, SVT-AV1 4.2.0): libvmaf thread scaling (SO-F2), VMAF model
+  comparison (SO-F3), two-pass with and without the VBV cap (SO-F4), and
+  `film-grain-denoise=1` as a cause of the flat VMAF curve (ruled out, SO-F11).
+- **Limits:** No build, test suite or application run. No 4K, HDR or
+  multi-file corpus. SO-F1 and SO-F5–SO-F10 rest on reading the code and the
+  project's own records; SO-F12 was not reproduced. The historical failing
+  range in `quality-mode-vmaf-measurement-findings.md` was not re-run.
 
 ### AUD-20261102-bulk-actions-implementation — Implementation and verification
 

@@ -26,6 +26,72 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-quality-floor-guard — Quality Mode knee stop and flat-ladder rejection
+
+- **Agent/date/base:** Claude Code; 2026-11-09 15:15 America/Phoenix (UTC-07:00);
+  main at fe740b3 plus uncommitted work, project worktree.
+- **Status:** Complete, uncommitted. No commit, push, installation or version bump.
+- **Changes/why:** Fixes SO-F1. `smart-optimizer-logic.vala`:
+  `solve_quality_crf` no longer lowers CRF when the fitted gain is under
+  `VMAF_MIN_GAIN_PER_CRF` (0.1) and, when the ceiling is out of reach, settles
+  on the knee and sets `VmafModel.gain_limited`; new
+  `quality_ladder_is_implausible` (span of 10+ CRF, range under 1 VMAF, below
+  target and below saturation). `smart-optimizer.vala`: an implausible ladder
+  returns an error recommendation (`is_impossible`), which the existing
+  single-file, trim and folder gates already refuse to apply or convert; the
+  notes explain a knee stop. Two new logic tests; one existing test now skips
+  gain-limited solves.
+- **Decision:** the flat-ladder case reuses `is_impossible` rather than a new
+  flag, so no caller changed. A knee stop is still applied and auto-converted:
+  it is a valid answer, only a smaller one.
+- **Validation:** Development build, no new Vala warnings. Full suite 27 OK,
+  1 failing (BASELINE-F2, unchanged). Real runs in AUD-20261109-quality-floor-guard.
+- **Limits/handoff:** The knee stop is covered by unit tests only; no real
+  source that cannot reach its ceiling was available. Not run in the GUI.
+  The 0.1 and 1.0 thresholds are reasoned, not corpus-calibrated.
+
+### TASK-20261109-vmaf-threads-model — VMAF threads, model choice and frame pairing
+
+- **Agent/date/base:** Claude Code; 2026-11-09 14:45 America/Phoenix (UTC-07:00);
+  main at fe740b3 plus the uncommitted folder-conversion work, project worktree.
+- **Status:** Complete, uncommitted. No commit, push, installation or version bump.
+- **Changes/why:** Fixes SO-F2, SO-F3 and the timestamp half of SO-F11.
+  `smart-optimizer.vala`: libvmaf gets its own thread count instead of the
+  encoder's "0 = auto" (which became one thread); the VMAF model follows the
+  filtered frame width, measured with a one-frame `showinfo` probe, and is
+  requested as `model=version=vmaf_4k_v0.6.1` after a synthetic check, with the
+  old file path only as a fallback; the model is part of the Quality cache
+  identity; both libvmaf inputs are rebased with `setpts=PTS-STARTPTS`.
+  `smart-optimizer-logic.vala`: `vmaf_thread_count`, `vmaf_wants_4k_model`,
+  `parse_showinfo_frame_size`. Three new cases in the logic test.
+- **Unplanned addition:** the `setpts` change was not in the request. The
+  end-to-end check of the 4K model path reproduced the historical flat curve
+  (VMAF 48 at every CRF, solved CRF 8), so the model fix could not be verified
+  without it. See AUD-20261109-vmaf-threads-model.
+- **Validation:** Development build passes with no new Vala warnings. Full
+  suite: 27 OK, 1 failing — `hamburger-recent-menu-rebuild` (recent-file slot
+  order, three of three runs); it does not exercise the optimizer and was not
+  checked against the base revision. Real FFmpeg runs through
+  `optimize_for_quality` are recorded in the audit entry.
+- **Limits/handoff:** Not run in the GUI. The original failing range in
+  `quality-mode-vmaf-measurement-findings.md` was not re-run. Existing Quality
+  cache entries are not reused because the cache identity changed. SO-F1 and
+  SO-F4 onward remain open.
+
+### TASK-20261109-smart-optimizer-audit — Smart Optimizer audit
+
+- **Agent/date/base:** Claude Code; 2026-11-09 14:12 America/Phoenix (UTC-07:00);
+  main at fe740b3, /home/pieman/Files/Archive/projects/FFmpeg-Converter-GTK.
+- **Status:** Complete; documentation only, uncommitted. No source change, build,
+  test run, commit or installation.
+- **Changes/why:** The user asked for an audit of the Smart Optimizer. Added
+  [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md) and
+  indexed findings `SO-F1`–`SO-F12` in AUDIT.md (AUD-20261109-smart-optimizer).
+- **Validation:** Four standalone FFmpeg experiments on the repository fixture;
+  results and limits are in the report. Scratch outputs were deleted.
+- **Handoff:** All findings unassigned. Suggested order is at the end of the
+  report: SO-F2 and SO-F3 first (small and measured), then SO-F1.
+
 ### TASK-20261102-bulk-actions-implementation — Existing actions for folder conversion
 
 - **Agent/date/base:** Codex primary; 2026-11-02 21:18 America/Phoenix (UTC-07:00); main at fe740b3.

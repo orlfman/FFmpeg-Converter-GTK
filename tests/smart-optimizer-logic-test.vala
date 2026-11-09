@@ -607,7 +607,7 @@ void test_solve_treats_the_intent_as_a_ceiling () {
         foreach (unowned string codec in new string[] { "x265", "svt-av1" }) {
             var m = SmartOptimizerLogic.solve_quality_crf (
                 ANIME_CRFS, ANIME_VMAFS, t, codec);
-            if (m.degenerate || m.crf_at_min || m.crf_at_max)
+            if (m.degenerate || m.crf_at_min || m.crf_at_max || m.gain_limited)
                 continue;   // clamped: the ceiling was out of reach either way
             assert (m.predicted_vmaf <= t);
 
@@ -1061,6 +1061,91 @@ void test_intermediate_segment_budget () {
     // Unknown geometry yields 0 (caller treats as "cannot size it").
     assert (SmartOptimizerLogic.max_segments_for_intermediate_budget (
         0, 0, 0.0, 8, 8.0, SmartOptimizerLogic.INTERMEDIATE_MAX_BYTES) == 0);
+}
+
+void test_vmaf_thread_count_never_forwards_encoder_auto () {
+    // The encoder's "0 = auto" once reached libvmaf as a single thread.
+    assert (SmartOptimizerLogic.vmaf_thread_count (0) == 1);
+    assert (SmartOptimizerLogic.vmaf_thread_count (1) == 1);
+    assert (SmartOptimizerLogic.vmaf_thread_count (8) == 8);
+    assert (SmartOptimizerLogic.vmaf_thread_count (24)
+        == SmartOptimizerLogic.VMAF_MAX_THREADS);
+}
+
+void test_vmaf_model_follows_encoded_width () {
+    // A 4K source downscaled to 2112 wide is HD material for the metric.
+    assert (!SmartOptimizerLogic.vmaf_wants_4k_model (2112));
+    assert (!SmartOptimizerLogic.vmaf_wants_4k_model (1920));
+    assert (SmartOptimizerLogic.vmaf_wants_4k_model (2560));
+    assert (SmartOptimizerLogic.vmaf_wants_4k_model (3840));
+}
+
+void test_parse_showinfo_frame_size () {
+    int w, h;
+    string log = "Input #0, matroska\n"
+        + "[Parsed_showinfo_1 @ 0x7f] n:   0 pts:      0 pts_time:0 "
+        + "fmt:yuv420p cl:unspecified sar:1/1 s:704x396 i:P iskey:1\n"
+        + "[Parsed_showinfo_1 @ 0x7f] n:   1 pts: 42 sar:1/1 s:1x1 i:P\n";
+    assert (SmartOptimizerLogic.parse_showinfo_frame_size (log, out w, out h));
+    assert (w == 704 && h == 396);
+
+    assert (!SmartOptimizerLogic.parse_showinfo_frame_size (
+        "frame=    1 fps=0.0 q=-0.0 size=N/A s:12x34\n", out w, out h));
+    assert (!SmartOptimizerLogic.parse_showinfo_frame_size (
+        "[Parsed_showinfo_0 @ 0x1] config in time_base: 1/1000\n", out w, out h));
+    assert (w == 0 && h == 0);
+}
+
+void test_unreachable_ceiling_stops_at_the_knee_not_the_floor () {
+    // A plateau: the source tops out near 95.3 however low CRF goes. The
+    // solve used to walk to the codec minimum (CRF 8) chasing 97.
+    int[] crfs = { 11, 18, 25 };
+    double[] vmafs = { 95.3, 95.0, 93.6 };
+    var m = SmartOptimizerLogic.solve_quality_crf (crfs, vmafs, 97.0, "x265");
+    assert (!m.degenerate);
+    assert (m.gain_limited);
+    assert (!m.crf_at_min);
+    assert (m.predicted_crf >= 14 && m.predicted_crf <= 20);
+    // Within half a point of the best the curve offers anywhere.
+    assert (m.predicted_vmaf >= 95.3 - 0.5);
+
+    // The same curve with a reachable target is solved exactly as before.
+    var r = SmartOptimizerLogic.solve_quality_crf (crfs, vmafs, 94.0, "x265");
+    assert (!r.gain_limited);
+    assert (r.predicted_vmaf <= 94.0);
+    assert (SmartOptimizerLogic.evaluate_vmaf_at_crf (
+        r.qa, r.qb, r.qc, r.predicted_crf - 1) > 94.0);
+
+    // A steep curve whose target lies below the probed window is real,
+    // affordable quality: the floor remains reachable when each step pays.
+    int[] steep_crfs = { 20, 26, 32 };
+    double[] steep = { 90.0, 84.0, 76.0 };
+    var s = SmartOptimizerLogic.solve_quality_crf (steep_crfs, steep, 97.0, "x265");
+    assert (!s.gain_limited);
+    assert (s.predicted_crf < 20);
+}
+
+void test_flat_quality_ladder_is_rejected () {
+    // The three recorded broken measurements.
+    assert (SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 18, 28, 38 }, { 63.49, 63.42, 63.23 }, 97.0));
+    assert (SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 18, 28, 38 }, { 80.28, 80.22, 79.98 }, 97.0));
+    assert (SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 21, 27, 33 }, { 48.07, 47.97, 47.60 }, 92.0));
+
+    // A healthy ladder, a saturated one, a narrow one and a short one.
+    assert (!SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 21, 27, 33 }, { 96.71, 92.18, 84.12 }, 92.0));
+    assert (!SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 11, 18, 25 }, { 99.9, 99.8, 99.7 }, 97.0));
+    assert (!SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 20, 22, 24 }, { 90.2, 90.0, 89.6 }, 95.0));
+    assert (!SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 18, 38 }, { 63.4, 63.2 }, 97.0));
+    // Flat but already at the target: nothing is being chased.
+    assert (!SmartOptimizerLogic.quality_ladder_is_implausible (
+        { 18, 28, 38 }, { 93.4, 93.1, 92.8 }, 92.0));
 }
 
 void test_limit_positions_preserves_spread () {
@@ -2606,6 +2691,11 @@ void main (string[] args) {
     Test.add_func ("/smart-optimizer-logic/quality/limit-positions", test_limit_positions_preserves_spread);
     Test.add_func ("/smart-optimizer-logic/advisory/downscale", test_downscale_advisory);
     Test.add_func ("/smart-optimizer-logic/intermediate/size-estimate", test_intermediate_estimate);
+    Test.add_func ("/smart-optimizer-logic/vmaf/thread-count", test_vmaf_thread_count_never_forwards_encoder_auto);
+    Test.add_func ("/smart-optimizer-logic/quality/unreachable-ceiling-knee", test_unreachable_ceiling_stops_at_the_knee_not_the_floor);
+    Test.add_func ("/smart-optimizer-logic/quality/flat-ladder-rejected", test_flat_quality_ladder_is_rejected);
+    Test.add_func ("/smart-optimizer-logic/vmaf/model-follows-encoded-width", test_vmaf_model_follows_encoded_width);
+    Test.add_func ("/smart-optimizer-logic/vmaf/showinfo-frame-size", test_parse_showinfo_frame_size);
     Test.add_func ("/smart-optimizer-logic/cache/round-trip", test_calibration_cache_round_trip);
     Test.add_func ("/smart-optimizer-logic/cache/vmaf-samples", test_cache_stores_vmaf_and_stays_compatible);
     Test.add_func ("/smart-optimizer-logic/cache/legacy-samples", test_cache_reads_legacy_two_element_samples);
