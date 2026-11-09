@@ -8,8 +8,9 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-No active implementation tasks. Folder Convert/Optimize behavior is implemented
-and verified within the limits recorded below; changes remain uncommitted.
+No active implementation tasks. Folder Convert/Optimize behavior and the
+2026-11-09 Smart Optimizer fixes are committed and pushed to `origin/main`
+(`6d60a87`, `46daaca`); see the publication entry below.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -26,11 +27,40 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-publish — Commit and push of folder-conversion and optimizer work
+
+- **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 15:10
+  America/Phoenix (UTC-07:00); `main`, base fe740b3.
+- **Status:** Complete. `origin/main` moved fe740b3 → 46daaca; working tree clean.
+- **Commits:**
+  - `6d60a87` "Use existing Convert and Optimize actions for folder conversion":
+    the work of TASK-20261102-bulk-actions-implementation, -bulk-actions-plan and
+    -manual-bulk-plan (Codex), with the log entries as they stood before
+    2026-11-09, plus the empty `docs/README.md` at the user's request.
+    Co-authored trailer: Codex.
+  - `46daaca` "Fix Quality Mode VMAF measurement and stop solving to the codec
+    floor": TASK-20261109-smart-optimizer-audit, -vmaf-threads-model and
+    -quality-floor-guard, plus a v14 block in the `smart-optimizer.vala` header.
+    Co-authored trailer: Claude.
+- **Notes:** The earlier Codex entries below still read "uncommitted"; they are
+  left as written and superseded by this entry. The four DevTools scripts that
+  had lost their executable bit locally (`analyze-corpus.py`, `build-debug.sh`,
+  `corpus-report.py`, `fake-ffmpeg-hang.sh`) were restored with `chmod +x`;
+  they match the repository again, so nothing was committed for them. This
+  checkout has no Git `user.name`/`user.email`; the usual author identity was
+  passed per commit without changing Git settings.
+- **Validation:** None beyond the task entries below; no build or test was run
+  on the split commits individually. `6d60a87` was not built on its own.
+- **Handoff:** Open findings are indexed in AUDIT.md (SO-F4 onward, SO-F11
+  partly fixed, SO-F1 knee stop awaiting real-media verification, BASELINE-F1,
+  BASELINE-F2). This entry was committed separately, after the two above.
+
 ### TASK-20261109-quality-floor-guard — Quality Mode knee stop and flat-ladder rejection
 
 - **Agent/date/base:** Claude Code; 2026-11-09 15:15 America/Phoenix (UTC-07:00);
   main at fe740b3 plus uncommitted work, project worktree.
-- **Status:** Complete, uncommitted. No commit, push, installation or version bump.
+- **Status:** Complete; committed and pushed as `46daaca` (2026-11-09). No
+  installation or version bump.
 - **Changes/why:** Fixes SO-F1. `smart-optimizer-logic.vala`:
   `solve_quality_crf` no longer lowers CRF when the fitted gain is under
   `VMAF_MIN_GAIN_PER_CRF` (0.1) and, when the ceiling is out of reach, settles
@@ -54,7 +84,8 @@ Dependencies / blockers / next action:
 
 - **Agent/date/base:** Claude Code; 2026-11-09 14:45 America/Phoenix (UTC-07:00);
   main at fe740b3 plus the uncommitted folder-conversion work, project worktree.
-- **Status:** Complete, uncommitted. No commit, push, installation or version bump.
+- **Status:** Complete; committed and pushed as `46daaca` (2026-11-09). No
+  installation or version bump.
 - **Changes/why:** Fixes SO-F2, SO-F3 and the timestamp half of SO-F11.
   `smart-optimizer.vala`: libvmaf gets its own thread count instead of the
   encoder's "0 = auto" (which became one thread); the VMAF model follows the
@@ -82,7 +113,8 @@ Dependencies / blockers / next action:
 
 - **Agent/date/base:** Claude Code; 2026-11-09 14:12 America/Phoenix (UTC-07:00);
   main at fe740b3, /home/pieman/Files/Archive/projects/FFmpeg-Converter-GTK.
-- **Status:** Complete; documentation only, uncommitted. No source change, build,
+- **Status:** Complete; documentation only, committed and pushed in `46daaca`
+  (2026-11-09). No source change, build,
   test run, commit or installation.
 - **Changes/why:** The user asked for an audit of the Smart Optimizer. Added
   [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md) and
