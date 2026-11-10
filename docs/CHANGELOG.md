@@ -25,6 +25,57 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-vp9-settings-fix — VP9 tab shows what libvpx actually does
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("Yes,
+  fix all 4"); 2026-11-10 10:28–10:45 America/Phoenix (UTC-07:00); `main` at
+  cec0a59. Committed together with TASK-20261110-vp9-settings-check as "Make
+  the VP9 tab match what libvpx applies"; not pushed.
+- **Why:** AUD-20261110-vp9-settings found four settings that do less than the
+  tab says (VP9-F1 to VP9-F4). No encoder argument was wrong.
+- **Changed:**
+  - `src/encoders/vp9-tab.vala`: Alt-Ref and Lookahead dim while Two-Pass is
+    off; Speed's range follows the deadline (0–5 Good/Best, 0–8 Realtime);
+    Frame Parallel starts on (build and reset); subtitles for Speed, Content
+    Type, Lookahead, Alt-Ref and Frame Parallel say what applies.
+  - `src/encoders/vp9-builder.vala`: `max_speed_for_deadline` clamps
+    `-cpu-used`; Frame Parallel sends only `-frame-parallel 0` when off;
+    snapshot `frame_parallel` defaults to true.
+  - `src/encoders/smart-codec-resolver.vala`: `resolve_vp9` keeps frame
+    parallel on (libvpx's default, what it always encoded with).
+  - `src/encoders/codec-presets.vala`: `apply_smart_vp9` sets the deadline
+    before Speed, so the clamped widget value matches the resolver.
+  - `tests/combine-window-state-test.vala`: `/combine/vp9/speed-follows-deadline`,
+    `/combine/vp9/frame-parallel-off-is-sent`,
+    `/smart-codec/widgets/vp9-tab-follows-two-pass-and-deadline`; the
+    full-effort policy assertion now expects frame parallel on and no argument.
+- **Rejected:** not sending alt-ref/ARNR/lag in single pass (no output
+  difference, but it would change Smart Codec goldens); changing Smart
+  Optimizer's `VP9_CPU_USED` table (calibration and final already encode
+  identically); dropping Smart Codec's Screen choice (inert, harmless).
+- **Checks:** development build, same 3 pre-existing Vala warnings; new tests
+  pass; full suite 29 OK, 0 failing, 740 subtests, 137 skipped in headless
+  suites ("GTK could not initialize"; the new widget test ran in
+  `smart-codec-widgets`). Smart Codec golden digests unchanged.
+- **Not done:** the app window was not opened by hand; not pushed.
+
+### TASK-20261110-vp9-settings-check — Check that VP9 settings reach the encoder
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("check
+  vp9 now like you did for av1 and x265"); 2026-11-10 10:25 America/Phoenix
+  (UTC-07:00); `main` at cec0a59. Investigation only; no code changed.
+  Committed with TASK-20261110-vp9-settings-fix.
+- **Result:** every VP9 option reaches libvpx as labelled, but four settings
+  do less than the UI says. Recorded as open, unassigned findings in
+  AUD-20261110-vp9-settings: alt-ref, ARNR and lookahead are inert in
+  single-pass (VP9-F1); Frame Parallel Decoding cannot be turned off (VP9-F2);
+  Speed 6–8 equal 5 with Good (VP9-F3); Content Type Screen is inert with Good
+  (VP9-F4).
+- **Next steps:** VP9-F2 is a one-line builder fix (send `-frame-parallel 0`
+  when off), but it changes default output and Smart Codec goldens, so it
+  needs a decision on the default. VP9-F1, F3 and F4 are UI and labelling
+  decisions; no encoder argument is wrong.
+
 ### TASK-20261110-x265-calibration-tools — X265-F4 kept as a documented trade-off
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("fix

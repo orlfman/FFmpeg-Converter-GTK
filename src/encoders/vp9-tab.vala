@@ -122,7 +122,7 @@ public class Vp9Tab : BaseCodecTab {
         // Speed (cpu-used)
         var speed_row = new Adw.ActionRow ();
         speed_row.set_title ("Speed");
-        speed_row.set_subtitle ("Lower = better quality but much slower (0–8, recommended 1–4)");
+        speed_row.set_subtitle ("Lower = better quality but much slower (0–5 with Good/Best, up to 8 with Realtime; recommended 1–4)");
         speed_spin = new SpinButton.with_range (0, 8, 1);
         speed_spin.set_value (4);
         speed_spin.set_valign (Align.CENTER);
@@ -262,7 +262,7 @@ public class Vp9Tab : BaseCodecTab {
         // Tune Content
         var tune_row = new Adw.ActionRow ();
         tune_row.set_title ("Content Type");
-        tune_row.set_subtitle ("Optimize encoding decisions for specific content");
+        tune_row.set_subtitle ("Optimize encoding decisions for specific content — Screen only takes effect with the Realtime deadline");
         tune_content_combo = new DropDown (new StringList ({
             "Default", "Screen", "Film"
         }), null);
@@ -303,7 +303,7 @@ public class Vp9Tab : BaseCodecTab {
         // Lookahead (lag-in-frames)
         lookahead_expander = new Adw.ExpanderRow ();
         lookahead_expander.set_title ("Lookahead");
-        lookahead_expander.set_subtitle ("Frames to buffer for better rate control decisions (0–25)");
+        lookahead_expander.set_subtitle ("Frames to buffer for alt-ref decisions (0–25) — two-pass only");
         lookahead_expander.set_show_enable_switch (true);
         lookahead_expander.set_enable_expansion (false);
 
@@ -330,7 +330,7 @@ public class Vp9Tab : BaseCodecTab {
 
         altref_expander = new Adw.ExpanderRow ();
         altref_expander.set_title ("Enable Alt-Ref Frames");
-        altref_expander.set_subtitle ("Synthesized reference frames — best used with lookahead");
+        altref_expander.set_subtitle ("Synthesized reference frames — two-pass only; no effect in a single pass");
         altref_expander.set_show_enable_switch (true);
         altref_expander.set_enable_expansion (true);
 
@@ -380,10 +380,10 @@ public class Vp9Tab : BaseCodecTab {
         // Frame Parallel Decoding
         var fp_row = new Adw.ActionRow ();
         fp_row.set_title ("Frame Parallel Decoding");
-        fp_row.set_subtitle ("Enables parallel decode — slightly reduces compression efficiency");
+        fp_row.set_subtitle ("On by default — turn off for slightly smaller files that decode on fewer threads");
         frame_parallel_switch = new Switch ();
         frame_parallel_switch.set_valign (Align.CENTER);
-        frame_parallel_switch.set_active (false);
+        frame_parallel_switch.set_active (true);
         fp_row.add_suffix (frame_parallel_switch);
         fp_row.set_activatable_widget (frame_parallel_switch);
         group.add (fp_row);
@@ -549,6 +549,28 @@ public class Vp9Tab : BaseCodecTab {
                 lookahead_expander.set_enable_expansion (true);
             }
         });
+
+        two_pass_switch.notify["active"].connect (update_two_pass_dependents);
+        update_two_pass_dependents ();
+
+        quality_combo.notify["selected"].connect (update_speed_range);
+        update_speed_range ();
+    }
+
+    // libvpx 1.17 uses alt-ref frames, their ARNR filter and lag-in-frames
+    // only in two-pass encodes; single-pass output is byte-identical with or
+    // without them. Their values are kept, just shown as not applying.
+    private void update_two_pass_dependents () {
+        bool two_pass = two_pass_switch.active;
+        altref_expander.set_sensitive (two_pass);
+        lookahead_expander.set_sensitive (two_pass);
+    }
+
+    // Good and Best treat Speed above 5 as 5; the range follows the deadline
+    // so the value shown is the one libvpx uses (the builder clamps too).
+    private void update_speed_range () {
+        speed_spin.set_range (0, Vp9Builder.max_speed_for_deadline (
+            get_dropdown_text (quality_combo)));
     }
 
     private void update_rc_visibility () {
@@ -724,7 +746,7 @@ public class Vp9Tab : BaseCodecTab {
 
         // Advanced
         row_mt_switch.set_active (true);
-        frame_parallel_switch.set_active (false);
+        frame_parallel_switch.set_active (true);
         undershoot_expander.set_enable_expansion (false);
         undershoot_spin.set_value (25);
         overshoot_spin.set_value (25);

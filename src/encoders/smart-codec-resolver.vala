@@ -305,7 +305,8 @@ public class SmartCodecResolver : Object {
         snapshot.sharpness_enabled = rec.native_sharpness > 0;
         snapshot.sharpness = snapshot.sharpness_enabled ? int.min (7, rec.native_sharpness) : 1;
         snapshot.row_mt = true;
-        snapshot.frame_parallel = false;
+        // libvpx's default, which Smart Codec has always encoded with.
+        snapshot.frame_parallel = true;
         snapshot.altref_enabled = true;
         snapshot.aq_mode = rec.effort == EncodeEffort.MINIMAL ? "Automatic" : "Complexity";
         switch (rec.effort) {

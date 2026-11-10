@@ -47,6 +47,94 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261110-vp9-settings — Do the VP9 tab's settings reach the encoder and change it?
+
+- **Task/agent/date/base:** TASK-20261110-vp9-settings-check; Claude Code
+  (Opus 5.5), at the user's request; 2026-11-10 10:25 America/Phoenix
+  (UTC-07:00); main at cec0a59. Investigation only; no code changed.
+- **Method:** read `src/encoders/vp9-builder.vala`, `vp9-tab.vala`, the VP9
+  profile helpers in `codec-utils.vala` and `resolve_vp9`. Ran FFmpeg 9.0.2 /
+  libvpx 1.17.0 with the builder's argument strings at `-loglevel debug`,
+  which prints libvpx's final `vpx_codec_enc_cfg` and every `vpx_codec_control`
+  call. Settings that looked inert on a 1 s synthetic clip were re-run on 5 s
+  of `tests/testvideo-raptor.webm` (720p), comparing file size and
+  decoded-frame MD5, in single-pass and two-pass.
+- **Working as labelled:** CRF (`rc_end_usage 3` with `-b:v 0`), Constrained
+  Quality (2, with CQ level), VBR (0), CBR (1 via equal min/max rate); Rate
+  Tolerance (`rc_undershoot_pct`/`rc_overshoot_pct`; libvpx's default really is
+  25/25 as the subtitle says); deadlines good/best/realtime; Speed 0–5;
+  Content Type Film; AQ modes 1–4 (each changes output); sharpness; row-mt
+  on/off; tile columns/rows (libvpx clamps columns by width); threads;
+  keyframe interval (`kf_max_dist`); Profiles 0–3 with their pixel formats
+  (`g_profile`/`g_bit_depth`); alt-ref in two-pass. No libvpx errors.
+- **VP9-F1 (Medium, open):** in single-pass encodes, Alt-Ref Frames, ARNR
+  Filter Frames/Strength and Lookahead do nothing. On the 720p clip, CRF 31
+  with alt-ref off, ARNR 15/6, lag 0 and lag 10 were all byte-identical to the
+  default (1 366 339 bytes); single-pass VBR likewise. In two-pass, turning
+  alt-ref off changed the file (935 400 → 899 539 bytes). FFmpeg's own help
+  marks `-auto-alt-ref` "2-pass only". The app defaults to single-pass CRF, and
+  Smart Codec's per-effort ARNR values (7/5 to 15/6) only matter when it picks
+  two-pass. The tab's subtitles do not say this.
+- **VP9-F2 (Low, open):** Frame Parallel Decoding cannot be turned off. Off
+  sends nothing (`vp9-builder.vala:205`), and libvpx 1.17 already enables it:
+  the default output was byte-identical to `-frame-parallel 1`, while
+  `-frame-parallel 0` differed (1 366 339 → 1 360 467 bytes, −0.4%). The
+  subtitle promises a compression gain from leaving it off that never happens.
+- **VP9-F3 (Low, open):** with the Good deadline, Speed 6, 7 and 8 produce the
+  same encode as 5 (synthetic and real clips). The tab allows 0–8. Smart
+  Optimizer's `VP9_CPU_USED` table maps its four fastest steps to 8, 7, 6 and
+  5, so those are one encode; calibration uses the same values, so it is not a
+  calibration mismatch, only no speed gain. Realtime does use 6–8.
+- **VP9-F4 (Low, open):** Content Type "Screen" sends
+  `VP9E_SET_TUNE_CONTENT 1` but has no effect with the Good deadline: identical
+  output on the film clip, in two-pass, and on a synthetic screen-like source
+  with sharp text. With realtime it does change the encode (1 955 329 →
+  1 847 644 bytes). Smart Codec sets "Screen" for screencasts with Good, so
+  that choice is inert.
+- **Notes, not findings:** AQ "Automatic" sends nothing, which in libvpx is
+  no AQ (all four modes differ from it); the builder's "Disabled" branch is
+  unreachable from the tab, which has no such entry. `Vp9BuilderSnapshot`
+  class defaults (alt-ref off, tolerance 100/100, AQ "Disabled") differ from
+  the tab's, but `resolve_vp9` sets these fields explicitly.
+- **Limits:** one real clip and synthetic sources; two-pass covered only for
+  alt-ref, lookahead and Screen. CQ mode was not re-run for VP9-F1. The UI was
+  not run; arguments were reproduced from the builder code.
+- **Follow-up, 2026-11-10 10:40 America/Phoenix (Claude Code,
+  TASK-20261110-vp9-settings-fix): VP9-F1 to VP9-F4 fixed.**
+  - **Extra evidence first:** on 3 s of the same clip, single-pass CQ and CBR
+    were also byte-identical with alt-ref off and with lag 0, and VBR with lag
+    0. So VP9-F1 holds for every single-pass mode. With the Best deadline,
+    Speed 8 was byte-identical to 5, so VP9-F3 covers Best too.
+  - **VP9-F1:** the Alt-Ref and Lookahead rows are dimmed (insensitive)
+    whenever Two-Pass is off, which includes CRF, where the tab hides and
+    clears Two-Pass. Their subtitles say "two-pass only". The builder still
+    sends their values; they are inert in single pass, so Smart Codec's output
+    is unchanged.
+  - **VP9-F2:** the switch now starts on (build and reset), matching libvpx.
+    Only off is sent, as `-frame-parallel 0`. `Vp9BuilderSnapshot.frame_parallel`
+    defaults to true, and `resolve_vp9` sets true, so Smart Codec still sends
+    nothing and its output is unchanged. The
+    `/smart-codec/policy/full-effort-features` assertion that expected
+    `!frame_parallel` now expects true plus no `-frame-parallel` argument.
+  - **VP9-F3:** `Vp9Builder.max_speed_for_deadline` (5 for Good, Best or unset;
+    8 for Realtime) clamps `-cpu-used`, and the tab's Speed range follows the
+    deadline. `apply_smart_vp9` now sets the deadline before Speed so the
+    widget value and the resolver's arguments agree. Smart Optimizer's
+    `VP9_CPU_USED` table is unchanged: calibration still sends 8–6 for its
+    fastest steps, which libvpx encodes as 5, the same as the clamped final
+    argument.
+  - **VP9-F4:** the Content Type subtitle says Screen only takes effect with
+    Realtime. Smart Codec still picks Screen for screencasts; it is inert with
+    Good but harmless, and changing it would alter Smart Codec goldens for no
+    output difference.
+  - **Verification:** new tests `/combine/vp9/speed-follows-deadline`,
+    `/combine/vp9/frame-parallel-off-is-sent` and
+    `/smart-codec/widgets/vp9-tab-follows-two-pass-and-deadline` (real GTK
+    widgets: dimming follows Two-Pass, Speed range follows the deadline, a
+    cpu-used 8 Smart Codec recommendation lands as 5). The widget test ran,
+    not skipped, in this session. The argument effects were measured in the
+    audit runs above.
+
 ### AUD-20261110-x265-settings — Do the x265 tab's settings reach the encoder?
 
 - **Task/agent/date/base:** TASK-20261110-x265-settings-check; Claude Code

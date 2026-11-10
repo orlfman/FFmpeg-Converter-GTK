@@ -6543,6 +6543,73 @@ private void test_x265_default_psy_rd_and_deblock_leave_tune_alone () {
         "Smart Codec's high-effort psy-rd must be sent");
 }
 
+private void test_vp9_speed_follows_deadline () {
+    // libvpx 1.17 encodes Speed 6–8 exactly as 5 with Good and Best.
+    var snapshot = new Vp9BuilderSnapshot ();
+    snapshot.speed = 8;
+    snapshot.quality_deadline = "good";
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-cpu-used", "5", "Good sends Speed 8 as the 5 it encodes at");
+    snapshot.quality_deadline = "best";
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-cpu-used", "5", "Best sends Speed 8 as 5");
+    snapshot.quality_deadline = "realtime";
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-cpu-used", "8", "Realtime keeps Speed 8");
+    snapshot.speed = 3;
+    snapshot.quality_deadline = "good";
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-cpu-used", "3", "Speeds within the range are unchanged");
+    assert_true (Vp9Builder.max_speed_for_deadline ("") == 5,
+        "an unset deadline is FFmpeg's default, good");
+}
+
+private void test_vp9_frame_parallel_off_is_sent () {
+    // libvpx 1.17 already enables frame parallel decoding.
+    var snapshot = new Vp9BuilderSnapshot ();
+    assert_array_not_contains (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-frame-parallel", "the default leaves libvpx's frame parallel decoding on");
+    snapshot.frame_parallel = false;
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-frame-parallel", "0", "turning it off reaches libvpx");
+}
+
+private void test_smart_codec_widgets_vp9_tab_follows_two_pass_and_deadline () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    var tab = new Vp9Tab ();
+    assert_true (tab.frame_parallel_switch.active,
+        "Frame Parallel starts on, as libvpx does");
+    // CRF is single pass, where libvpx ignores alt-ref and lag-in-frames.
+    assert_false (tab.altref_expander.sensitive, "alt-ref is dimmed in single-pass CRF");
+    assert_false (tab.lookahead_expander.sensitive, "lookahead is dimmed in single-pass CRF");
+    CodecPresets.set_dropdown_by_label (tab.rc_mode_combo, RateControl.VBR);
+    tab.two_pass_switch.set_active (true);
+    assert_true (tab.altref_expander.sensitive, "alt-ref applies in two-pass");
+    assert_true (tab.lookahead_expander.sensitive, "lookahead applies in two-pass");
+    tab.two_pass_switch.set_active (false);
+    assert_false (tab.altref_expander.sensitive, "alt-ref dims again in single-pass VBR");
+
+    tab.speed_spin.set_value (8);
+    assert_true ((int) tab.speed_spin.get_value () == 5, "Good caps Speed at 5");
+    CodecPresets.set_dropdown_by_label (tab.quality_combo, "realtime");
+    tab.speed_spin.set_value (8);
+    assert_true ((int) tab.speed_spin.get_value () == 8, "Realtime allows Speed 8");
+    CodecPresets.set_dropdown_by_label (tab.quality_combo, "good");
+    assert_true ((int) tab.speed_spin.get_value () == 5,
+        "returning to Good clamps Speed to 5");
+
+    // Smart Codec applies the deadline before Speed, so its fastest step
+    // shows as the 5 that Good encodes, matching the resolver's arguments.
+    var rec = make_smart_codec_case_recommendation (21);
+    rec.preset = "cpu-used 8";
+    var applied = new Vp9Tab ();
+    applied.apply_smart_recommendation (rec);
+    assert_true ((int) applied.speed_spin.get_value () == 5,
+        "a cpu-used 8 recommendation applies as Speed 5 with Good");
+    assert_true (applied.altref_expander.sensitive == applied.two_pass_switch.active,
+        "alt-ref sensitivity follows the applied two-pass choice");
+}
+
 private void test_x265_reference_frames_auto_follows_preset () {
     var snapshot = x265_tab_default_snapshot ();
     assert_codec_param_key_absent (x265_params_for (snapshot, "x265 refs Auto"),
@@ -8247,8 +8314,10 @@ private void test_smart_codec_resolver_retains_complete_effort_policy () {
     if (vp9 == null) return;
     var vp9_settings = (Vp9BuilderSnapshot) vp9.builder_settings;
     assert_true (vp9_settings.altref_enabled && vp9_settings.arnr_maxframes == 15
-            && vp9_settings.arnr_strength == 6 && vp9_settings.row_mt && !vp9_settings.frame_parallel,
+            && vp9_settings.arnr_strength == 6 && vp9_settings.row_mt && vp9_settings.frame_parallel,
         "maximum VP9 effort preserves denoising and threading policy");
+    assert_array_not_contains (vp9.to_profile ().codec_args, "-frame-parallel",
+        "Smart Codec keeps libvpx's default frame parallel decoding");
     assert_string_equal (vp9_settings.aq_mode, "Complexity", "VP9 adaptive quantization is retained");
     assert_array_has_adjacent_pair (vp9.to_profile ().codec_args, "-arnr-maxframes", "15",
         "complete VP9 command retains alt-ref effort");
@@ -10610,6 +10679,12 @@ void main (string[] args) {
         test_x265_default_psy_rd_and_deblock_leave_tune_alone);
     Test.add_func ("/combine/x265/reference-frames-auto-follows-preset",
         test_x265_reference_frames_auto_follows_preset);
+    Test.add_func ("/combine/vp9/speed-follows-deadline",
+        test_vp9_speed_follows_deadline);
+    Test.add_func ("/combine/vp9/frame-parallel-off-is-sent",
+        test_vp9_frame_parallel_off_is_sent);
+    Test.add_func ("/smart-codec/widgets/vp9-tab-follows-two-pass-and-deadline",
+        test_smart_codec_widgets_vp9_tab_follows_two_pass_and_deadline);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",
