@@ -27,7 +27,9 @@ public class SmartOptimizerCache : GLib.Object {
 
     // 4: x265 calibration stopped sending psy-rd 2.0, so a tune can keep its
     // own psy-rd; v3 samples under the same tuning key measured other args.
-    private const int    CACHE_FORMAT_VERSION = 4;
+    // 5: VP9 calibration sends -frame-parallel 1 explicitly; on a libvpx
+    // whose default is off, v4 samples measured a different encode.
+    private const int    CACHE_FORMAT_VERSION = 5;
     private const int    MAX_ENTRIES = 32;
     private const string FIELD_SEP = "\x1f";
 

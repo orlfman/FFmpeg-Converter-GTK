@@ -25,6 +25,39 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-vp9-libvpx-independence — VP9 settings no longer assume libvpx 1.17
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("Yes,
+  fix both", then "Let libvpx decide"); 2026-11-10 10:42–10:46
+  America/Phoenix (UTC-07:00); `main` at 6bc1554 (pushed). Committed on its
+  own as "Stop VP9 settings depending on libvpx 1.17 defaults" and pushed.
+- **Why:** REV-F1 and REV-F2 from AUD-20261110-pre-push-review: Frame
+  Parallel "on" relied on libvpx's default, and the Speed cap hardcoded libvpx
+  1.17's Good/Best behaviour.
+- **Changed:**
+  - `src/encoders/vp9-builder.vala`: always sends `-frame-parallel 1` or `0`;
+    removed `max_speed_for_deadline` and the `-cpu-used` clamp.
+  - `src/encoders/vp9-tab.vala`: Speed range back to a fixed 0–8 with a
+    subtitle noting libvpx 1.17's behaviour; removed the deadline-dependent
+    range.
+  - `src/encoders/codec-presets.vala`: `apply_smart_vp9` back to its original
+    order (now identical to before TASK-20261110-vp9-settings-fix).
+  - `src/encoders/codec-utils.vala` (trim tab's direct Smart args) and
+    `src/optimizer/smart-optimizer.vala` (VP9 calibration): send
+    `-frame-parallel 1`. `smart-optimizer-cache.vala`: format version 4 → 5.
+  - `tests/combine-window-state-test.vala`: VP9 builder tests rewritten for
+    pass-through speed and explicit frame parallel; widget test renamed
+    `/smart-codec/widgets/vp9-tab-follows-two-pass`; policy assertion expects
+    `-frame-parallel 1`; VP9 golden digests 20–29 updated, each checked by
+    removing that argument pair to reproduce the digest it replaces.
+- **Rejected:** a startup probe of libvpx's speed behaviour (the user chose
+  simplicity; every current Arch user is on 1.17.0).
+- **Checks:** development build, same 3 pre-existing Vala warnings; full
+  suite 29 OK, 0 failing, 740 subtests, 137 headless skips ("GTK could not
+  initialize"); the widget tests, including golden parity, ran in the display
+  suites. Real encode logged `CPUUSED 8` and `FRAME_PARALLEL_DECODING 1`.
+- **Not done:** app window not opened by hand.
+
 ### TASK-20261110-pre-push-review — Review before pushing the x265 and VP9 fixes
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request;

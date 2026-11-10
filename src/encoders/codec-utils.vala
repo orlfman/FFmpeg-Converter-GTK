@@ -840,6 +840,10 @@ namespace CodecUtils {
             args += "good";
             args += "-row-mt";
             args += "1";
+            // Smart Codec's frame parallel choice, explicit so it does not
+            // depend on the installed libvpx's default.
+            args += "-frame-parallel";
+            args += "1";
 
             if (rec.content_type == ContentType.SCREENCAST) {
                 args += "-tune-content";

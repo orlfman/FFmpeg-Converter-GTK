@@ -20,7 +20,7 @@ public class Vp9BuilderSnapshot : Object {
     public int arnr_maxframes = 7;
     public int arnr_strength = 5;
     public bool row_mt = true;
-    // libvpx's own default; false sends -frame-parallel 0.
+    // libvpx 1.17's default, sent explicitly as -frame-parallel 1.
     public bool frame_parallel = true;
     public bool undershoot_enabled = false;
     public int undershoot = 100;
@@ -91,15 +91,6 @@ public class Vp9Builder : Object, ICodecBuilder {
         return build_codec_args_from_snapshot (snapshot_settings ());
     }
 
-    /**
-     * The highest cpu-used libvpx 1.17 honours for @deadline. Good and Best
-     * encode 6–8 exactly as 5 (byte-identical output); Realtime uses up to 8,
-     * the limit of FFmpeg's -cpu-used option.
-     */
-    public static int max_speed_for_deadline (string deadline) {
-        return deadline == "realtime" ? 8 : 5;
-    }
-
     public static string[] build_args_from_snapshot (Vp9BuilderSnapshot snapshot) {
         string[] args = {};
 
@@ -108,11 +99,10 @@ public class Vp9Builder : Object, ICodecBuilder {
         args += "libvpx-vp9";
 
         // ── Speed (cpu-used) ───────────────────────────────────────────────
-        // Clamped to what the deadline uses, so a Smart Codec speed of 6–8
-        // with Good reads as the 5 libvpx actually encodes at.
+        // Passed through unchanged: the installed libvpx applies its own
+        // per-deadline limit (1.17 encodes 6–8 as 5 with Good and Best).
         args += "-cpu-used";
-        args += int.min (snapshot.speed,
-            max_speed_for_deadline (snapshot.quality_deadline)).to_string ();
+        args += snapshot.speed.to_string ();
 
         // ── Quality Deadline ───────────────────────────────────────────────
         string deadline = snapshot.quality_deadline;
@@ -214,11 +204,10 @@ public class Vp9Builder : Object, ICodecBuilder {
         args += snapshot.row_mt ? "1" : "0";
 
         // ── Frame Parallel Decoding ────────────────────────────────────────
-        // libvpx enables it by default, so only turning it off is sent.
-        if (!snapshot.frame_parallel) {
-            args += "-frame-parallel";
-            args += "0";
-        }
+        // Always explicit: libvpx 1.17 defaults it on, but the switch should
+        // mean the same thing whatever libvpx build is installed.
+        args += "-frame-parallel";
+        args += snapshot.frame_parallel ? "1" : "0";
 
         // ── Rate Tolerance ─────────────────────────────────────────────────
         if (snapshot.undershoot_enabled) {

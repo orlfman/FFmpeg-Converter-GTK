@@ -31,9 +31,7 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
 | SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
 | SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
-| REV-F1 | Low / open | Unassigned | VP9 Frame Parallel "on" sends nothing and relies on libvpx's default being on; consider sending `-frame-parallel 1` (changes Smart Codec goldens, not output). See AUD-20261110-pre-push-review. |
-| REV-F2 | Low / open | Unassigned | `Vp9Builder.max_speed_for_deadline` hardcodes libvpx 1.17's Good/Best limit of 5; other libvpx versions may honour 6–8. |
-| REV-F3 | Low / open, design | Unassigned | Smart Optimizer's `VP9_CPU_USED` still has four steps (8–5) that encode identically in Good, and its notes report the unclamped speed. |
+| REV-F3 | Low / open, design | Unassigned | Smart Optimizer's `VP9_CPU_USED` still has four steps (8–5) that libvpx 1.17 encodes identically in Good. (The notes now match the arguments, since REV-F2 removed the clamp.) See AUD-20261110-pre-push-review. |
 | REV-F4 | Low / open | Unassigned | An x265 Level too low for the picture now fails the conversion with FFmpeg's generic encoder-open error; High tier cannot be chosen. |
 | REV-F5 | Low / open | Unassigned | VP9 alt-ref/lookahead dimming follows the tab's Two-Pass switch, not per-file two-pass decisions in folder mode. |
 | REV-F6 | Low / open, design | Unassigned | x265 psy-rd and deblock widgets show 2.0 and 0, 0 while a tune applies other values (documented trade-off of X265-F2). |
@@ -77,6 +75,34 @@ fixed, verified, deferred or reopened; retain the history below.
   behaviour; REV-F3 and REV-F6 are design follow-ups to accepted trade-offs;
   REV-F4 and REV-F5 are UX edges; REV-F7 is test coverage.
 - **Outcome:** none blocks publishing; pushed with these recorded.
+- **Follow-up, 2026-11-10 10:45 America/Phoenix (Claude Code,
+  TASK-20261110-vp9-libvpx-independence): REV-F1 and REV-F2 fixed.** The
+  installed libvpx is 1.17.0, the version Arch's `extra` repository ships.
+  The user chose to let libvpx decide the speed limit instead of probing it at
+  startup.
+  - **REV-F1:** Frame Parallel is always explicit: `-frame-parallel 1` or `0`
+    from the builder, `-frame-parallel 1` in the trim tab's direct Smart
+    arguments (`CodecUtils.build_smart_codec_args`) and in VP9 calibration, so
+    calibration and final still match on a libvpx whose default differs.
+    `SmartOptimizerCache` format version 4 → 5. On libvpx 1.17 the output is
+    unchanged (the audit run showed `-frame-parallel 1` byte-identical to the
+    default). All ten VP9 Smart Codec golden digests (cases 20–29) changed;
+    removing exactly that argument pair from each dumped profile reproduced
+    the digest it replaces, and no other codec changed. The table comment
+    records this second exception.
+  - **REV-F2:** removed `Vp9Builder.max_speed_for_deadline`, the builder
+    clamp, and the tab's deadline-dependent Speed range. Speed 0–8 is passed
+    through, and the installed libvpx applies its own limit. The subtitle now
+    says libvpx 1.17 encodes 6–8 as 5 with Good/Best. `apply_smart_vp9` is
+    back to its original order. This undoes the range part of the VP9-F3 fix;
+    VP9-F3 is now addressed by the subtitle only.
+  - **Verification:** `/combine/vp9/speed-passes-through-to-libvpx`,
+    `/combine/vp9/frame-parallel-is-explicit` and the reworked
+    `/smart-codec/widgets/vp9-tab-follows-two-pass` pass (the widget test ran,
+    not skipped); `/smart-codec/policy/full-effort-features` now expects
+    `-frame-parallel 1`. Real encode with the new default arguments and Speed 8
+    on Good: libvpx logged `VP8E_SET_CPUUSED: 8` and
+    `VP9E_SET_FRAME_PARALLEL_DECODING:1`, no errors.
 
 ### AUD-20261110-vp9-settings — Do the VP9 tab's settings reach the encoder and change it?
 

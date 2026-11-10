@@ -4857,6 +4857,8 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-crf");      cmd.add (crf.to_string ());
             cmd.add ("-b:v");      cmd.add ("0");
             cmd.add ("-row-mt");   cmd.add ("1");
+            // Matches Smart Codec's explicit final argument on any libvpx.
+            cmd.add ("-frame-parallel"); cmd.add ("1");
             if (temporal != null && temporal.lookahead_frames > 0) {
                 cmd.add ("-lag-in-frames");
                 cmd.add (temporal.lookahead_frames.to_string ());

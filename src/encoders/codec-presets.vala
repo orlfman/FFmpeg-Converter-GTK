@@ -198,9 +198,8 @@ public class CodecPresets : Object {
             if (resolution == null) return;
             var settings = resolution.builder_settings as Vp9BuilderSnapshot;
             assert (settings != null);
-            // Deadline first: it sets the Speed range the value is clamped to.
-            set_dropdown_by_label (tab.quality_combo, settings.quality_deadline);
             tab.speed_spin.set_value (settings.speed);
+            set_dropdown_by_label (tab.quality_combo, settings.quality_deadline);
             set_dropdown_by_label (tab.profile_combo, settings.profile);
             tab.apply_recommended_pixel_format (rec.recommended_pix_fmt);
             set_dropdown_by_label (tab.rc_mode_combo, settings.rc_mode);

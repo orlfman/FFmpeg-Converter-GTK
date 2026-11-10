@@ -6543,38 +6543,35 @@ private void test_x265_default_psy_rd_and_deblock_leave_tune_alone () {
         "Smart Codec's high-effort psy-rd must be sent");
 }
 
-private void test_vp9_speed_follows_deadline () {
-    // libvpx 1.17 encodes Speed 6–8 exactly as 5 with Good and Best.
+private void test_vp9_speed_passes_through_to_libvpx () {
+    // The installed libvpx applies its own per-deadline limit, so the app
+    // must not bake in one version's (1.17 encodes 6–8 as 5 with Good).
     var snapshot = new Vp9BuilderSnapshot ();
-    snapshot.speed = 8;
-    snapshot.quality_deadline = "good";
-    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
-        "-cpu-used", "5", "Good sends Speed 8 as the 5 it encodes at");
-    snapshot.quality_deadline = "best";
-    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
-        "-cpu-used", "5", "Best sends Speed 8 as 5");
-    snapshot.quality_deadline = "realtime";
-    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
-        "-cpu-used", "8", "Realtime keeps Speed 8");
-    snapshot.speed = 3;
-    snapshot.quality_deadline = "good";
-    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
-        "-cpu-used", "3", "Speeds within the range are unchanged");
-    assert_true (Vp9Builder.max_speed_for_deadline ("") == 5,
-        "an unset deadline is FFmpeg's default, good");
+    foreach (string deadline in new string[] { "good", "best", "realtime" }) {
+        snapshot.quality_deadline = deadline;
+        snapshot.speed = 8;
+        assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+            "-cpu-used", "8", "Speed 8 reaches libvpx unchanged with " + deadline);
+        snapshot.speed = 3;
+        assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+            "-cpu-used", "3", "Speed 3 reaches libvpx unchanged with " + deadline);
+    }
 }
 
-private void test_vp9_frame_parallel_off_is_sent () {
-    // libvpx 1.17 already enables frame parallel decoding.
+private void test_vp9_frame_parallel_is_explicit () {
+    // Explicit both ways, so the switch does not depend on the installed
+    // libvpx's default (1.17 defaults it on).
     var snapshot = new Vp9BuilderSnapshot ();
-    assert_array_not_contains (Vp9Builder.build_args_from_snapshot (snapshot),
-        "-frame-parallel", "the default leaves libvpx's frame parallel decoding on");
+    assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-frame-parallel", "1", "the default sends frame parallel decoding on");
     snapshot.frame_parallel = false;
     assert_array_has_adjacent_pair (Vp9Builder.build_args_from_snapshot (snapshot),
         "-frame-parallel", "0", "turning it off reaches libvpx");
+    assert_array_occurrence_count (Vp9Builder.build_args_from_snapshot (snapshot),
+        "-frame-parallel", 1, "frame parallel is sent once");
 }
 
-private void test_smart_codec_widgets_vp9_tab_follows_two_pass_and_deadline () {
+private void test_smart_codec_widgets_vp9_tab_follows_two_pass () {
     if (!ensure_gtk_widget_tests_available ()) return;
     var tab = new Vp9Tab ();
     assert_true (tab.frame_parallel_switch.active,
@@ -6589,23 +6586,20 @@ private void test_smart_codec_widgets_vp9_tab_follows_two_pass_and_deadline () {
     tab.two_pass_switch.set_active (false);
     assert_false (tab.altref_expander.sensitive, "alt-ref dims again in single-pass VBR");
 
+    // Speed is not capped by deadline; libvpx applies its own limit.
     tab.speed_spin.set_value (8);
-    assert_true ((int) tab.speed_spin.get_value () == 5, "Good caps Speed at 5");
-    CodecPresets.set_dropdown_by_label (tab.quality_combo, "realtime");
-    tab.speed_spin.set_value (8);
-    assert_true ((int) tab.speed_spin.get_value () == 8, "Realtime allows Speed 8");
-    CodecPresets.set_dropdown_by_label (tab.quality_combo, "good");
-    assert_true ((int) tab.speed_spin.get_value () == 5,
-        "returning to Good clamps Speed to 5");
+    assert_true ((int) tab.speed_spin.get_value () == 8, "Good keeps Speed 8 for libvpx");
 
-    // Smart Codec applies the deadline before Speed, so its fastest step
-    // shows as the 5 that Good encodes, matching the resolver's arguments.
+    // Smart Codec's fastest step reaches the tab unchanged, as it does the
+    // resolver's arguments.
     var rec = make_smart_codec_case_recommendation (21);
     rec.preset = "cpu-used 8";
     var applied = new Vp9Tab ();
     applied.apply_smart_recommendation (rec);
-    assert_true ((int) applied.speed_spin.get_value () == 5,
-        "a cpu-used 8 recommendation applies as Speed 5 with Good");
+    assert_true ((int) applied.speed_spin.get_value () == 8,
+        "a cpu-used 8 recommendation applies as Speed 8");
+    assert_true (applied.frame_parallel_switch.active,
+        "Smart Codec keeps frame parallel decoding on");
     assert_true (applied.altref_expander.sensitive == applied.two_pass_switch.active,
         "alt-ref sensitivity follows the applied two-pass choice");
 }
@@ -7984,6 +7978,12 @@ private void test_encode_profile_composition_without_general_uses_defaults () {
 // digest was checked by putting exactly those values back into its
 // -x265-params and reproducing the legacy digest it replaces; no other
 // field differed. Cases 16–19 and the other codecs are unchanged.
+//
+// Second deliberate exception (TASK-20261110-vp9-libvpx-independence,
+// REV-F1): VP9 cases 20–29 now send -frame-parallel 1 explicitly instead of
+// relying on libvpx's default. Each new digest was checked by removing exactly
+// that argument pair and reproducing the digest it replaces; nothing else
+// differed, and the other codecs are unchanged.
 private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
     // x264
     "e35e995894090fc338f6dd3ae0da0e715c5986f3f000c82f5330ede974c56bed",
@@ -8008,16 +8008,16 @@ private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
     "796ceed22cae4223cd45fc29273be906a8c7cb250be9b74d3db2bd138c5a2404",
     "e4fbee7bcf2c5aded6f557c4264aed07afe4d52f51a38195b0c9e378af6eb943",
     // VP9
-    "f78cb8456b4951f89f8684c5d1d5ad2e3783446a3e28a64888feb9f8a70782f5",
-    "445b0ba6a1404d0a09813476e45deb7814c4e3f78b5015771c45fe97da9400f3",
-    "056ef2c9800038797cd2e38d4cad20618cefcf0e86f1f9c79b8e272cbe72ff8b",
-    "d04d03ada317b4b897278c694b6858614a1193e7dfad492aea90944c99a538b9",
-    "93358514b3cf4cd30e0349b199cbcaf399f26afeeffa0ee25d4c896be42c8a49",
-    "6b55a1ed1b6d78f95ef73fc1f5e625931f44702a36307efafad309ee0942b1c7",
-    "859f620fbeaf23922a2bcae32f7eb43277dc8d954518499bfb0d029fd0286d33",
-    "d6ee7b88e8e92734ded957e67c40cb2ba1667de832561f96d21235a7ea468198",
-    "a6528bc4d205e4831c574a807a56f184cba9f5dc9e145db1043b52d9dc02c863",
-    "375906a09401d866801ad9ead3652255aa9ff5dc819f88a8e3a54a3161ccaabb",
+    "04101675b5a8e828b9c4145f4d230babec08407ac346c9308a84698d6b74d2de",
+    "7fb7614c97687d75434230cc45b913eb04741fa1d03b645a463e704393a92f58",
+    "2c7e9cf27c7bd92e68568d1447d179275c8b2823957aeb93cefe92353d9c8852",
+    "eadffa0df16fb1ac0d7ff2c9558f84a3fd209104c6d635cf004f83c5f50769c8",
+    "7d74b235277aee4454ec9739318ec334e158d2ca7bdf2348d901f396b3a0fff5",
+    "65036a074bd43cfb7c7b564ec3be27fa9bda79335a46b9e1981f4e73b0604697",
+    "dd5e27e051182ba2083c6ec28aa36e5a9df7ad5d551cd247566951df28f76d59",
+    "ce8130a2ff8e33af552454ceb5cecfb6eebadcdd35821391c295c86e92e9ddd4",
+    "57590b4511225d2bfedb350a39eb15364a861332d0b97a4c412d9185e391067b",
+    "8b13de8c63db4d4bb45b78e7da9229abae645e2a2f06c2aecb9b91baf72e727a",
     // SVT-AV1
     "605d1685ba990aa77118fc81970351f98743177da6d0701b8f30a09bafdff7af",
     "679d97fb99da56df3df4f73b328388fec22ffdcc9f47d845b67284747b78cef2",
@@ -8316,8 +8316,8 @@ private void test_smart_codec_resolver_retains_complete_effort_policy () {
     assert_true (vp9_settings.altref_enabled && vp9_settings.arnr_maxframes == 15
             && vp9_settings.arnr_strength == 6 && vp9_settings.row_mt && vp9_settings.frame_parallel,
         "maximum VP9 effort preserves denoising and threading policy");
-    assert_array_not_contains (vp9.to_profile ().codec_args, "-frame-parallel",
-        "Smart Codec keeps libvpx's default frame parallel decoding");
+    assert_array_has_adjacent_pair (vp9.to_profile ().codec_args, "-frame-parallel", "1",
+        "Smart Codec sends frame parallel decoding on explicitly");
     assert_string_equal (vp9_settings.aq_mode, "Complexity", "VP9 adaptive quantization is retained");
     assert_array_has_adjacent_pair (vp9.to_profile ().codec_args, "-arnr-maxframes", "15",
         "complete VP9 command retains alt-ref effort");
@@ -10679,12 +10679,12 @@ void main (string[] args) {
         test_x265_default_psy_rd_and_deblock_leave_tune_alone);
     Test.add_func ("/combine/x265/reference-frames-auto-follows-preset",
         test_x265_reference_frames_auto_follows_preset);
-    Test.add_func ("/combine/vp9/speed-follows-deadline",
-        test_vp9_speed_follows_deadline);
-    Test.add_func ("/combine/vp9/frame-parallel-off-is-sent",
-        test_vp9_frame_parallel_off_is_sent);
-    Test.add_func ("/smart-codec/widgets/vp9-tab-follows-two-pass-and-deadline",
-        test_smart_codec_widgets_vp9_tab_follows_two_pass_and_deadline);
+    Test.add_func ("/combine/vp9/speed-passes-through-to-libvpx",
+        test_vp9_speed_passes_through_to_libvpx);
+    Test.add_func ("/combine/vp9/frame-parallel-is-explicit",
+        test_vp9_frame_parallel_is_explicit);
+    Test.add_func ("/smart-codec/widgets/vp9-tab-follows-two-pass",
+        test_smart_codec_widgets_vp9_tab_follows_two_pass);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",

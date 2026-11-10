@@ -122,7 +122,7 @@ public class Vp9Tab : BaseCodecTab {
         // Speed (cpu-used)
         var speed_row = new Adw.ActionRow ();
         speed_row.set_title ("Speed");
-        speed_row.set_subtitle ("Lower = better quality but much slower (0–5 with Good/Best, up to 8 with Realtime; recommended 1–4)");
+        speed_row.set_subtitle ("Lower = better quality but much slower (0–8, recommended 1–4; libvpx 1.17 encodes 6–8 as 5 with Good/Best)");
         speed_spin = new SpinButton.with_range (0, 8, 1);
         speed_spin.set_value (4);
         speed_spin.set_valign (Align.CENTER);
@@ -552,9 +552,6 @@ public class Vp9Tab : BaseCodecTab {
 
         two_pass_switch.notify["active"].connect (update_two_pass_dependents);
         update_two_pass_dependents ();
-
-        quality_combo.notify["selected"].connect (update_speed_range);
-        update_speed_range ();
     }
 
     // libvpx 1.17 uses alt-ref frames, their ARNR filter and lag-in-frames
@@ -564,13 +561,6 @@ public class Vp9Tab : BaseCodecTab {
         bool two_pass = two_pass_switch.active;
         altref_expander.set_sensitive (two_pass);
         lookahead_expander.set_sensitive (two_pass);
-    }
-
-    // Good and Best treat Speed above 5 as 5; the range follows the deadline
-    // so the value shown is the one libvpx uses (the builder clamps too).
-    private void update_speed_range () {
-        speed_spin.set_range (0, Vp9Builder.max_speed_for_deadline (
-            get_dropdown_text (quality_combo)));
     }
 
     private void update_rc_visibility () {
