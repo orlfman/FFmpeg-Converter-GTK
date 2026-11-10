@@ -6426,10 +6426,10 @@ private string[] svt_av1_params_for_aq_mode (string aq_mode, int strength) {
         "SVT-AV1 AQ " + aq_mode).split (":");
 }
 
-private void assert_svt_param_key_absent (string[] svt_params,
-                                          string key,
-                                          string context) {
-    foreach (string param in svt_params) {
+private void assert_codec_param_key_absent (string[] codec_params,
+                                            string key,
+                                            string context) {
+    foreach (string param in codec_params) {
         if (param.has_prefix (key + "=")) {
             Test.fail_printf ("%s did not expect '%s'", context, param);
             return;
@@ -6446,28 +6446,115 @@ private void test_svt_av1_aq_variance_enables_variance_boost () {
         "Variance enables Variance Boost");
     assert_array_contains (variance, "variance-boost-strength=3",
         "Variance carries the AQ Strength");
-    assert_svt_param_key_absent (variance, "aq-mode",
+    assert_codec_param_key_absent (variance, "aq-mode",
         "Variance keeps the rate-control aq-mode");
 
     string[] automatic = svt_av1_params_for_aq_mode ("Automatic", 3);
-    assert_svt_param_key_absent (automatic, "aq-mode",
+    assert_codec_param_key_absent (automatic, "aq-mode",
         "Automatic leaves aq-mode to the encoder");
-    assert_svt_param_key_absent (automatic, "enable-variance-boost",
+    assert_codec_param_key_absent (automatic, "enable-variance-boost",
         "Automatic leaves Variance Boost off");
-    assert_svt_param_key_absent (automatic, "variance-boost-strength",
+    assert_codec_param_key_absent (automatic, "variance-boost-strength",
         "Automatic sends no boost strength");
 
     string[] disabled = svt_av1_params_for_aq_mode ("Disabled", 3);
     assert_array_contains (disabled, "aq-mode=0",
         "Disabled turns adaptive quantization off");
-    assert_svt_param_key_absent (disabled, "enable-variance-boost",
+    assert_codec_param_key_absent (disabled, "enable-variance-boost",
         "Disabled leaves Variance Boost off");
 
     string[] complexity = svt_av1_params_for_aq_mode ("Complexity", 3);
     assert_array_contains (complexity, "aq-mode=2",
         "Complexity selects delta-q AQ");
-    assert_svt_param_key_absent (complexity, "enable-variance-boost",
+    assert_codec_param_key_absent (complexity, "enable-variance-boost",
         "Complexity leaves Variance Boost off");
+}
+
+/** An x265 snapshot holding the tab's defaults, not the class defaults. */
+private X265BuilderSnapshot x265_tab_default_snapshot () {
+    var snapshot = new X265BuilderSnapshot ();
+    snapshot.ref_frames = "Auto";
+    snapshot.deblock_enabled = true;
+    snapshot.psy_rd_enabled = true;
+    snapshot.psy_rd = 2.0;
+    // A thread count keeps -x265-params present for every case.
+    snapshot.threads = "2";
+    return snapshot;
+}
+
+/** The x265-params list the builder produces for @snapshot, split on ':'. */
+private string[] x265_params_for (X265BuilderSnapshot snapshot, string context) {
+    return get_argv_value_after (X265Builder.build_args_from_snapshot (snapshot),
+        "-x265-params", context).split (":");
+}
+
+private void test_x265_level_reaches_encoder_in_main_tier () {
+    // libx265 ignores FFmpeg's generic -level; x265 4.3 kept the automatic
+    // level for every choice until it was sent as level-idc.
+    var snapshot = x265_tab_default_snapshot ();
+    snapshot.level = "4.1";
+    assert_array_not_contains (X265Builder.build_args_from_snapshot (snapshot),
+        "-level:v", "x265 Level does not use FFmpeg's ignored -level");
+    string[] level = x265_params_for (snapshot, "x265 Level 4.1");
+    assert_array_contains (level, "level-idc=4.1", "x265 Level reaches x265");
+    assert_array_contains (level, "high-tier=0",
+        "x265 Level stays in the widely decodable Main tier");
+
+    snapshot.level = "Auto";
+    string[] automatic = x265_params_for (snapshot, "x265 Level Auto");
+    assert_codec_param_key_absent (automatic, "level-idc",
+        "x265 Level Auto leaves the level to the encoder");
+    assert_codec_param_key_absent (automatic, "high-tier",
+        "x265 Level Auto leaves the tier to the encoder");
+}
+
+private void test_x265_default_psy_rd_and_deblock_leave_tune_alone () {
+    // -x265-params is applied after -tune, so sending x265's defaults undid
+    // what psnr, ssim, grain, animation and fastdecode set.
+    var snapshot = x265_tab_default_snapshot ();
+    snapshot.tune = "animation";
+    string[] defaults = x265_params_for (snapshot, "x265 tab defaults");
+    assert_codec_param_key_absent (defaults, "psy-rd",
+        "default psy-rd leaves the tune's value");
+    assert_codec_param_key_absent (defaults, "deblock",
+        "default deblock leaves the tune's offsets");
+    assert_codec_param_key_absent (defaults, "no-deblock",
+        "default deblock stays enabled");
+
+    snapshot.psy_rd = 3.0;
+    snapshot.deblock_alpha = -1;
+    snapshot.deblock_beta = -1;
+    string[] chosen = x265_params_for (snapshot, "x265 chosen values");
+    assert_array_contains (chosen, "psy-rd=3.0", "a chosen psy-rd still applies");
+    assert_array_contains (chosen, "deblock=-1,-1", "chosen deblock offsets still apply");
+
+    snapshot.psy_rd_enabled = false;
+    snapshot.deblock_enabled = false;
+    string[] disabled = x265_params_for (snapshot, "x265 disabled filters");
+    assert_array_contains (disabled, "psy-rd=0", "disabled psy-rd turns it off");
+    assert_array_contains (disabled, "no-deblock=1", "disabled deblock turns it off");
+
+    // Calibration shares this rule, so it measures what the encode sends.
+    assert_false (X265Builder.psy_rd_differs_from_default (2.0),
+        "psy-rd 2.0 is x265's default");
+    assert_true (X265Builder.psy_rd_differs_from_default (2.5),
+        "psy-rd 2.5 must be sent");
+    assert_true (X265Builder.psy_rd_differs_from_default (3.5),
+        "Smart Codec's high-effort psy-rd must be sent");
+}
+
+private void test_x265_reference_frames_auto_follows_preset () {
+    var snapshot = x265_tab_default_snapshot ();
+    assert_codec_param_key_absent (x265_params_for (snapshot, "x265 refs Auto"),
+        "ref", "Auto references follow the preset");
+
+    snapshot.ref_frames = "";
+    assert_codec_param_key_absent (x265_params_for (snapshot, "x265 refs unset"),
+        "ref", "unset references follow the preset");
+
+    snapshot.ref_frames = "5";
+    assert_array_contains (x265_params_for (snapshot, "x265 refs 5"),
+        "ref=5", "a chosen reference count still applies");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -7823,6 +7910,13 @@ private void test_encode_profile_composition_without_general_uses_defaults () {
 // Captured from LegacyCodecPresets (pre-extraction implementation) using
 // actual GTK widgets on 2026-11-02. Case order: codec x effort x pass.
 // These values must not be regenerated from the resolver under test.
+//
+// Deliberate exception (TASK-20261110-x265-settings-fix, X265-F2): x265
+// cases 10–15 (efforts 0–2) no longer send x265's default deblock=0,0 and,
+// where it was 2.0, psy-rd=2.0, so a tune keeps its own values. Each new
+// digest was checked by putting exactly those values back into its
+// -x265-params and reproducing the legacy digest it replaces; no other
+// field differed. Cases 16–19 and the other codecs are unchanged.
 private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
     // x264
     "e35e995894090fc338f6dd3ae0da0e715c5986f3f000c82f5330ede974c56bed",
@@ -7836,12 +7930,12 @@ private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
     "5bc50196dbbf58a078ba0f789f09661ea6ba2637eecdc5e5896dd29d0f8d8ba6",
     "9954489d4fd18565131c2e2f9543ea1260e5b4473c4806dcdb06c8ac97b698a2",
     // x265
-    "d1f41b6e0daf5bcb92ce33c82688113fb9deea6f7cf75bf49361d2b1a89711f9",
-    "519aa4097a49c55fa4188ea88f112e5263d8720650187e288ed5a45df2ef4a8b",
-    "7f109c7c6a627194cc30c73a8edfb09973bbc124c4fbb2907e1a47f85bd86ea6",
-    "0472c45904b116adfd204f6a5906b4d9c8e3e17c24b31a4b9679899547bb3cd0",
-    "eed1a2d41b6d150753c671f216510229e365374c4bcf7b4b81a40928e5bb43c0",
-    "520ecd28cf2dee99f21673c12534a0245b36e5e3c114b1caf159867079a9d6ca",
+    "4f4c4cad70273d94cb5ad7bcc7704c29f3e2b1f0f954da9ae737a95d2ee948b6",
+    "a6aa5f30150c544ae12b34846044bbd8aeaa3ddd89cb9b57eefe2730ec723465",
+    "3a10ef8e1df3caa6ab8bf477e21ad961d3e26f9feb878cf460585535304c2a02",
+    "880ffa6333ac90e7a081bc300d4679fb63251b31f398613b45fcabd486da06db",
+    "e6fae69bb489e19d63347cfe54a68b1ef87c03a075d11b36d68b5a3fe143572d",
+    "3993adb84ac0bb377c98e5a7a9697b8e1139cdcdc1593302cb18e35afeac6d5f",
     "310da3878c190ac1c74f311c294052dc7666e06622b6a3eda4e19023cfc7a82e",
     "e02c417be205ec7485e77304cf993be7a1ed9c5c18ac186889f2b23011e30d94",
     "796ceed22cae4223cd45fc29273be906a8c7cb250be9b74d3db2bd138c5a2404",
@@ -10510,6 +10604,12 @@ void main (string[] args) {
         test_svt_av1_crf_two_pass_backstop_fails_fast);
     Test.add_func ("/combine/svt-av1/aq-variance-enables-variance-boost",
         test_svt_av1_aq_variance_enables_variance_boost);
+    Test.add_func ("/combine/x265/level-reaches-encoder-in-main-tier",
+        test_x265_level_reaches_encoder_in_main_tier);
+    Test.add_func ("/combine/x265/default-psy-rd-and-deblock-leave-tune-alone",
+        test_x265_default_psy_rd_and_deblock_leave_tune_alone);
+    Test.add_func ("/combine/x265/reference-frames-auto-follows-preset",
+        test_x265_reference_frames_auto_follows_preset);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",

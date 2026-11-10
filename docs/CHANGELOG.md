@@ -25,6 +25,59 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-x265-settings-fix — x265 Level, Tune and Reference Frames apply as labelled
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("fix all
+  3"); 2026-11-10 09:55–10:20 America/Phoenix (UTC-07:00); `main` at 5cc5052.
+  Committed together with TASK-20261110-x265-settings-check as "Fix x265
+  Level, Tune and Reference Frames settings"; not pushed.
+- **Why:** AUD-20261110-x265-settings found that Level was ignored (X265-F1),
+  Tune was partly undone by always-sent psy-rd and deblock (X265-F2), and
+  Reference Frames always overrode the preset (X265-F3).
+- **Changed:**
+  - `src/encoders/x265-builder.vala`: Level is sent as `level-idc=N:high-tier=0`
+    and `-level:v` is gone. Deblock and psy-rd are sent only when changed from
+    x265's defaults or turned off (new `psy_rd_differs_from_default`).
+    Reference Frames "Auto" or unset sends no `ref`.
+  - `src/encoders/x265-tab.vala`: "Auto" is first in Reference Frames and is the
+    default on build and reset; the Reference Frames, Deblock and Psy-RD
+    subtitles explain the defaults.
+  - `src/optimizer/smart-optimizer.vala`: x265 calibration uses the same psy-rd
+    rule, so it measures the final arguments.
+    `src/optimizer/smart-optimizer-cache.vala`: format version 3 → 4.
+  - `tests/combine-window-state-test.vala`: three `/combine/x265/` tests; the
+    SVT helper renamed to `assert_codec_param_key_absent`; Smart Codec golden
+    digests for x265 cases 10–15 updated, with the check that explains them
+    recorded beside the table.
+- **Behaviour changes to know:** a level too low for the picture now fails the
+  encode with x265's own error instead of being ignored. Smart Codec anime at
+  low effort now gets the animation tune's psy-rd and deblock, and fastdecode
+  gets its deblock-off. Cached optimizer samples from v3 are not reused.
+- **Rejected:** a three-state Auto control for psy-rd and deblock (more UI for
+  little gain), and changing `X265BuilderSnapshot` field defaults (an existing
+  folder test relies on them, and no live path uses them unedited).
+- **Checks:** development build, same 3 pre-existing Vala warnings in the app;
+  new tests pass; full suite 29 OK, 0 failing, 735 subtests, 136 skipped in
+  headless suites ("GTK could not initialize"); real x265 4.3 encode with the
+  new defaults confirmed level, tier, preset references and the tune's
+  psy-rd/deblock. x264 `-level:v` confirmed working, left unchanged.
+- **Not done:** UI not run; not pushed. X265-F4 (calibration lacks Smart
+  Codec's references, PMode and deblock offsets) recorded, unassigned.
+
+### TASK-20261110-x265-settings-check — Check that x265 settings reach the encoder
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("do a
+  check of x265 to make sure its settings work"); 2026-11-10 09:50
+  America/Phoenix (UTC-07:00); `main` at 5cc5052. Investigation only; no code
+  changed. Committed with TASK-20261110-x265-settings-fix.
+- **Result:** most settings apply as labelled. Three issues are recorded as
+  open, unassigned findings in AUD-20261110-x265-settings: Level is ignored
+  (X265-F1), Tune is partly overridden by the always-sent psy-rd and deblock
+  values (X265-F2), and Reference Frames always overrides the preset (X265-F3).
+- **Next steps:** X265-F1 has a tested replacement (`level-idc=N:high-tier=0`).
+  X265-F2 and X265-F3 need a decision on when the app should send these values
+  before changing the builder.
+
 ### TASK-20261110-svt-variance-boost — SVT-AV1 "Variance" AQ now enables Variance Boost
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("make the

@@ -337,12 +337,12 @@ public class X265Tab : BaseCodecTab {
         // Ref Frames
         var ref_row = new Adw.ActionRow ();
         ref_row.set_title ("Reference Frames");
-        ref_row.set_subtitle ("More = better compression, slower encoding");
+        ref_row.set_subtitle ("More = better compression, slower encoding — Auto follows the preset");
         ref_frames_combo = new DropDown (new StringList (
-            { "1", "2", "3", "4", "5" }
+            { "Auto", "1", "2", "3", "4", "5" }
         ), null);
         ref_frames_combo.set_valign (Align.CENTER);
-        ref_frames_combo.set_selected (2);
+        ref_frames_combo.set_selected (0);
         ref_row.add_suffix (ref_frames_combo);
         group.add (ref_row);
 
@@ -360,7 +360,7 @@ public class X265Tab : BaseCodecTab {
         // Deblock Filter (ExpanderRow with alpha/beta)
         deblock_expander = new Adw.ExpanderRow ();
         deblock_expander.set_title ("Deblock Filter");
-        deblock_expander.set_subtitle ("Reduce blockiness — negative values preserve detail");
+        deblock_expander.set_subtitle ("Reduce blockiness — negative values preserve detail; at 0, 0 the Tune decides");
         deblock_expander.set_show_enable_switch (true);
         deblock_expander.set_enable_expansion (true);
 
@@ -403,6 +403,7 @@ public class X265Tab : BaseCodecTab {
 
         var psy_rd_row = new Adw.ActionRow ();
         psy_rd_row.set_title ("Strength");
+        psy_rd_row.set_subtitle ("Default 2.0 — at 2.0 the Tune decides");
         psy_rd_spin = new SpinButton.with_range (0.0, 5.0, 0.1);
         psy_rd_spin.set_digits (1);
         psy_rd_spin.set_value (2.0);
@@ -702,7 +703,7 @@ public class X265Tab : BaseCodecTab {
 
         // Advanced
         sao_switch.set_active (true);
-        ref_frames_combo.set_selected (2);
+        ref_frames_combo.set_selected (0);
         weightp_switch.set_active (true);
         deblock_expander.set_enable_expansion (true);
         deblock_alpha_spin.set_value (0);

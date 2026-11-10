@@ -4902,7 +4902,10 @@ public class SmartOptimizer : GLib.Object {
                 if (tuning.tune.length > 0) {
                     cmd.add ("-tune"); cmd.add (tuning.tune);
                 }
-                if (tuning.psy_rd > 0.0)
+                // Same rule as X265Builder: at x265's default the tune keeps
+                // its own psy-rd, so calibration measures the final encode.
+                if (tuning.psy_rd > 0.0
+                        && X265Builder.psy_rd_differs_from_default (tuning.psy_rd))
                     p.add ("psy-rd=%s".printf (
                         ConversionUtils.format_ffmpeg_double (tuning.psy_rd, "%.2f")));
             }

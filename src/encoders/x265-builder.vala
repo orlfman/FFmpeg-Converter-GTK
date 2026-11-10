@@ -33,6 +33,18 @@ public class X265BuilderSnapshot : Object {
 
 public class X265Builder : Object, ICodecBuilder {
 
+    /** x265's own psy-rd default, as the builder formats it. */
+    private const string X265_DEFAULT_PSY_RD = "2.0";
+
+    /**
+     * Whether psy-rd @value differs from x265's default and so must be sent.
+     * At the default the selected -tune keeps its own psy-rd. Calibration
+     * uses the same rule so it measures the arguments the encode will use.
+     */
+    public static bool psy_rd_differs_from_default (double value) {
+        return ConversionUtils.format_ffmpeg_double (value, "%.1f") != X265_DEFAULT_PSY_RD;
+    }
+
     private weak X265Tab tab;
 
     public X265Builder (X265Tab tab) {
@@ -136,13 +148,6 @@ public class X265Builder : Object, ICodecBuilder {
             args += tune;
         }
 
-        // ── Level ──────────────────────────────────────────────────────────
-        string level = snapshot.level;
-        if (level != "Auto" && level.length > 0) {
-            args += "-level:v";
-            args += level;
-        }
-
         // ── Keyframe Interval ──────────────────────────────────────────────
         string keyint = snapshot.keyint_text;
         if (keyint != "Auto" && keyint != "Custom" && keyint.length > 0) {
@@ -153,32 +158,46 @@ public class X265Builder : Object, ICodecBuilder {
         // ── x265-params ────────────────────────────────────────────────────
         string[] params = {};
 
+        // libx265 ignores FFmpeg's generic -level, so the level goes to x265
+        // itself. Without high-tier=0 x265 may pick High tier, which many
+        // decoders reject, defeating the point of choosing a level.
+        string level = snapshot.level;
+        if (level != "Auto" && level.length > 0) {
+            params += "level-idc=" + level;
+            params += "high-tier=0";
+        }
+
         if (!snapshot.sao)
             params += "sao=0";
 
+        // Auto (or unset) leaves the reference count to the preset.
         string ref_val = snapshot.ref_frames;
-        if (ref_val.length > 0)
+        if (ref_val != "Auto" && ref_val.length > 0)
             params += "ref=" + ref_val;
 
         if (!snapshot.weightp)
             params += "weightp=0";
 
-        if (snapshot.deblock_enabled) {
+        // Deblock and psy-rd are sent only when they differ from x265's
+        // defaults (deblock 0,0; psy-rd 2.0). -x265-params is applied after
+        // -tune, so always sending them undid what psnr, ssim, grain,
+        // animation and fastdecode set.
+        if (!snapshot.deblock_enabled) {
+            params += "no-deblock=1";
+        } else if (snapshot.deblock_alpha != 0 || snapshot.deblock_beta != 0) {
             int alpha = snapshot.deblock_alpha;
             int beta  = snapshot.deblock_beta;
             params += @"deblock=$alpha,$beta";
-        } else {
-            params += "no-deblock=1";
         }
 
         if (snapshot.pmode)
             params += "pmode=1";
 
-        if (snapshot.psy_rd_enabled) {
-            double psy_rd = snapshot.psy_rd;
-            params += "psy-rd=" + ConversionUtils.format_ffmpeg_double (psy_rd, "%.1f");
-        } else {
+        if (!snapshot.psy_rd_enabled) {
             params += "psy-rd=0";
+        } else if (psy_rd_differs_from_default (snapshot.psy_rd)) {
+            params += "psy-rd="
+                + ConversionUtils.format_ffmpeg_double (snapshot.psy_rd, "%.1f");
         }
 
         if (!snapshot.cutree)

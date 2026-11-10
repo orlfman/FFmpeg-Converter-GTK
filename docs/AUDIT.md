@@ -31,6 +31,7 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
 | SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
 | SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
+| X265-F4 | Low / open, pre-existing | Unassigned | Decide whether x265 calibration should use Smart Codec's reference count, PMode and deblock offsets; see AUD-20261110-x265-settings. |
 | SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
@@ -45,6 +46,103 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261110-x265-settings — Do the x265 tab's settings reach the encoder?
+
+- **Task/agent/date/base:** TASK-20261110-x265-settings-check; Claude Code
+  (Opus 5.5), at the user's request; 2026-11-10 09:50 America/Phoenix
+  (UTC-07:00); main at 5cc5052. Investigation only; no code changed.
+- **Method:** read `src/encoders/x265-builder.vala` and `x265-tab.vala`, then
+  ran FFmpeg 9.0.2 / x265 4.3 on a 1 s synthetic `testsrc2` clip with the
+  argument strings the builder produces, reading x265's startup summary for
+  each setting. Some cases were also run with no app arguments for comparison.
+- **Working as labelled:** preset; profile Main / Main10 (with matching
+  `-pix_fmt`); CRF; QP (`CQP-30`); ABR with VBV (buffer = max-rate = bitrate);
+  CBR (VBV plus `strict-cbr=1`, accepted; the summary does not print it);
+  keyframe interval (`-g 60` → max 60); SAO off; weighted prediction off;
+  deblock off and custom offsets (`deblock(tC=-1:B=-1)`); psy-rd strength and
+  off; cutree off; lookahead up to 250; AQ modes 1–4 with strength; AQ
+  "Disabled" (shown as mode 1, strength 0.0, x265's form of no AQ while
+  cutree is on); threads (`pools`) and frame threads. No x265 errors.
+- **X265-F1 (Medium, open):** Level never applies. The builder sends
+  `-level:v N` (`x265-builder.vala:142`), but libx265 has no level option
+  and does not read FFmpeg's generic one. All 13 choices from 1 to 6.2 gave the
+  automatic `Level-2.1` on the test clip. `-x265-params level-idc=4.1` works
+  but can select High tier (`Level-4.1 (High tier)`), which many players do
+  not support. `level-idc=4.1:high-tier=0` gave `Level-4.1 (Main tier)` and
+  capped VBV at the Main-tier limit (20000 kbps; 40000 for 5.1). x265 warns
+  that a level under CRF turns on VBV; that is expected.
+- **X265-F2 (Medium, open, design):** Tune is partly undone. The builder always
+  sends `psy-rd` (2.0 by default, or 0) and `deblock=0,0` / `no-deblock=1`
+  (`x265-builder.vala:166–182`), and `-x265-params` is applied after the tune.
+  Tune alone versus with the app's defaults: psnr and ssim turn psy-rd off →
+  app restores 2.00; grain sets psy-rd 4.00 → 2.00; animation sets psy-rd 0.40
+  and `deblock(tC=1:B=1)` → 2.00 and plain deblock; fastdecode turns deblock
+  off → app turns it back on. zerolatency is unaffected.
+- **X265-F3 (Low, open, design):** Reference Frames has no Auto, so `ref=3` (the
+  default) is always sent (`x265-builder.vala:161`) and overrides the preset.
+  Presets alone use 1 (ultrafast), 2 (veryfast), 4 (slow) and 5 (veryslow)
+  references. Smart Codec sets references per effort on purpose, so it is not
+  affected.
+- **Notes, not findings:** PMode still works in x265 4.3 (`+ pmode`), but
+  x265's help marks it "Deprecated from release 4.1". `X265BuilderSnapshot`
+  field defaults differ from the tab's (deblock and psy-rd off, `ref` empty,
+  lookahead 20). No path was found where an unedited default snapshot reaches
+  an encode: `main.vala:549` snapshots the tab, and Smart Codec sets these
+  fields explicitly.
+- **Limits:** builder output was reproduced by reading the code, not captured
+  from the running app; two-pass x265 and `Custom` keyframe modes were not
+  exercised. The existing `bulk-conversion` x265 tests cover two-pass runs.
+- **Follow-up, 2026-11-10 10:10 America/Phoenix (Claude Code,
+  TASK-20261110-x265-settings-fix): X265-F1, X265-F2 and X265-F3 fixed and
+  verified at the builder and encoder level.**
+  - **X265-F1:** Level is now sent as `-x265-params level-idc=N:high-tier=0`,
+    and `-level:v` is gone. A level too low for the picture now stops the
+    encode with x265's own error ("picture dimensions are out of range for
+    specified level"; Level 1 and 2 at 640x360). Before, it was silently
+    ignored. x264 was checked as well: libx264 does apply `-level:v` (3.1, 4.1
+    and 5.1 gave stream levels 31, 41 and 51), so it is unchanged.
+  - **X265-F2:** deblock and psy-rd are sent only when they differ from x265's
+    defaults (deblock 0,0; psy-rd 2.0) or are turned off. At the defaults the
+    tune and preset decide. Trade-off: exactly 2.0 / 0,0 cannot be forced on top
+    of a tune that changes them. The Psy-RD and Deblock subtitles say so. Smart
+    Optimizer calibration (`smart-optimizer.vala`) now uses the same rule
+    through `X265Builder.psy_rd_differs_from_default`, so it still measures the
+    final arguments. This changes Smart Codec output only where an x265 tune
+    sets its own values while effort is low: anime at MINIMAL/LOW effort now
+    gets animation's psy-rd 0.4, and anime or fastdecode at MINIMAL–MEDIUM
+    gets the tune's deblock. `SmartOptimizerCache` format version 3 → 4, so
+    cached samples measured with the old arguments are not reused.
+  - **X265-F3:** Reference Frames gains "Auto" (first, and the default on build
+    and reset), which sends no `ref`. Presets restore this dropdown by label,
+    so the new first entry does not shift saved choices. Smart Codec still
+    sets references per effort.
+  - **Verification:** new tests `/combine/x265/level-reaches-encoder-in-main-tier`,
+    `/combine/x265/default-psy-rd-and-deblock-leave-tune-alone` and
+    `/combine/x265/reference-frames-auto-follows-preset` pass. They need the new
+    `psy_rd_differs_from_default` helper, so they were not run against the old
+    builder. Real x265 4.3 encode with the new defaults (`-preset slow -crf 28
+    -tune animation -x265-params level-idc=4.1:high-tier=0`) reported
+    `Level-4.1 (Main tier)`, 4 references, `psy-rd=0.40` and
+    `deblock(tC=1:B=1)`.
+  - **Smart Codec golden digests:** the first full run failed
+    `smart-codec-resolver`, `smart-codec-widgets` and `combine-window-state` on
+    `/smart-codec/golden/all-four-codecs` (case 15 reported). Dumping all 40
+    serialized profiles showed exactly six changed: x265 cases 10–15 (efforts
+    0–2), whose `-x265-params` no longer carry `deblock=0,0` and, where it was
+    2.0, `psy-rd=2.0`. Putting those values back reproduced each stored legacy
+    digest exactly, so no other field changed. Those six digests were updated
+    with a comment recording the exception to the "must not be regenerated"
+    rule. Cases 16–19 (psy-rd 3.0/3.5, deblock −1,−1) and the other codecs did
+    not change.
+  - **Not covered:** the UI was not run.
+- **X265-F4 (Low, open, pre-existing; found during the fix):** x265 calibration
+  in `append_video_codec_args` sends only preset, CRF, tune, psy-rd and
+  lookahead. Smart Codec's final x265 arguments also set references (3–5 by
+  effort), PMode at MEDIUM and above, and deblock `-1,-1` at HIGH and above, so
+  calibration samples are not encoded with the final settings. Not changed
+  here; needs a decision on whether calibration should mirror them, given
+  their encode-time cost. Unassigned.
 
 ### AUD-20261110-svt-variance-boost — SVT-AV1 "Variance" AQ never enabled Variance Boost
 
