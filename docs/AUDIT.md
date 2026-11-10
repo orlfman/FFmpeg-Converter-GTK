@@ -81,6 +81,17 @@ fixed, verified, deferred or reopened; retain the history below.
   constant QP. Unassigned; needs a product decision rather than a mechanical fix.
 - **Limits:** The UI was not run; the builder was tested through its snapshot
   path. Checked against SVT-AV1 4.2.0 and FFmpeg 9.0.2 only.
+- **Follow-up, 2026-11-10 09:38 America/Phoenix (Claude Code, from the user's
+  pasted conversion log):** the user rebuilt the app and ran one SVT-AV1
+  conversion from its window with AQ Mode "Variance". The clip was a 1.4 s
+  720x1280 H.264 file from their own library; paths are omitted. The logged
+  command carried
+  `-svtav1-params enable-variance-boost=1:variance-boost-strength=2` with no
+  `aq-mode`. SVT-AV1 4.2.0 reported `AQ mode / Variance Boost strength / octile /
+  curve : 2 / 2 / 5 / 0`, printed no segmentation or "disabling Variance Boost"
+  warning, and the conversion completed. This covers the UI-to-encoder path
+  for "Variance" under CRF (preset 8, CRF 28). User-run; the agent checked the
+  log, not the output file. QP and VBR were not run from the UI.
 
 ### AUD-20261109-user-bulk-testing — User-reported manual desktop testing
 

@@ -48,7 +48,10 @@ Dependencies / blockers / next action:
   widget subtests skipped in headless suites with "GTK could not initialize";
   the display suites ran). Real FFmpeg/SVT-AV1 encodes confirmed the boost is
   active with the new arguments.
-- **Not done:** UI not run; not pushed. SVT-F2 (QP + "Complexity" behaves
+- **In-app check (follow-up):** the user's own conversion from the rebuilt app
+  with "Variance" (CRF) showed the boost active and no warnings; see the
+  follow-up in AUD-20261110-svt-variance-boost.
+- **Not done:** QP and VBR not run from the UI; not pushed. SVT-F2 (QP + "Complexity" behaves
   as CRF) recorded, unassigned, not changed.
 
 ### TASK-20261109-user-bulk-testing — User-reported manual testing of folder features
