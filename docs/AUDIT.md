@@ -31,6 +31,7 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
 | SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
 | SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
+| SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
 
@@ -44,6 +45,42 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261110-svt-variance-boost — SVT-AV1 "Variance" AQ never enabled Variance Boost
+
+- **Task/agent/date/base:** TASK-20261110-svt-variance-boost; Claude Code
+  (Opus 5.5); 2026-11-10 09:10 America/Phoenix (UTC-07:00); main at e278ace.
+  Found while advising the user on settings for a real conversion.
+- **SVT-F1 (Medium, verified):** AQ Mode "Variance" sent `aq-mode=1` together
+  with `enable-variance-boost=1` and the AQ Strength
+  (`src/encoders/svt-av1-builder.vala`). SVT-AV1 4.2.0 warns that segment-based
+  `aq-mode=1` is for "demos, experimentation", logs "Variance AQ based on
+  segmentation with Variance Boost not supported, disabling Variance Boost", and
+  reports `AQ mode / Variance Boost : 1 / 0`. So the choice selected an
+  experimental mode, dropped the boost, and ignored AQ Strength. On an 8 s
+  1080p clip, output with and without the boost under `aq-mode=1` was
+  byte-identical.
+  - **Fix:** "Variance" now sends only `enable-variance-boost=1` and
+    `variance-boost-strength=N`, leaving `aq-mode` at the rate-control default.
+    "Disabled" (`aq-mode=0`), "Complexity" (`aq-mode=2`) and "Automatic"
+    (nothing) are unchanged. The UI label stays "Variance" because the tab,
+    builder and Smart Codec resolver compare these strings.
+  - **Why no `aq-mode=2`:** on a synthetic clip, Variance Boost changed the
+    output under CRF, QP (where FFmpeg selects `aq-mode=0`) and VBR without any
+    `aq-mode`. Forcing `aq-mode=2` under `-qp 30` produced output byte-identical
+    to `-crf 30`, so QP would silently become CRF.
+  - **Verification:** new test
+    `/combine/svt-av1/aq-variance-enables-variance-boost` fails on the old
+    builder ("did not expect 'aq-mode=1'") and passes on the fix. A real
+    encode of `tests/testvideo-raptor.webm` (first 3 s, preset 10, CRF 30) with
+    the new arguments reports `AQ mode / Variance Boost strength / octile /
+    curve : 2 / 2 / 5 / 0` with no warning; the old arguments report `1 / 0`.
+- **SVT-F2 (Low, open, pre-existing, not changed):** "Complexity" sends
+  `aq-mode=2` in every rate-control mode. Under QP that is SVT-AV1's CRF, as the
+  identical-output result above shows, so QP + Complexity does not encode at a
+  constant QP. Unassigned; needs a product decision rather than a mechanical fix.
+- **Limits:** The UI was not run; the builder was tested through its snapshot
+  path. Checked against SVT-AV1 4.2.0 and FFmpeg 9.0.2 only.
 
 ### AUD-20261109-user-bulk-testing — User-reported manual desktop testing
 

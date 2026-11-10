@@ -183,19 +183,20 @@ public class SvtAv1Builder : Object, ICodecBuilder {
             svt_params += "lookahead=%d".printf (snapshot.lookahead);
         }
 
+        // "Variance" means Variance Boost, not aq-mode=1. SVT-AV1 treats
+        // segment-based aq-mode=1 as experimental and turns Variance Boost
+        // off when the two are combined, so leave aq-mode at the rate-control
+        // default (2 for CRF/VBR, 0 for QP). Boost works with both, and
+        // forcing aq-mode=2 would quietly turn QP into CRF.
         string aq = snapshot.aq_mode;
-        if (aq != "Automatic") {
-            int aq_val = 0;
-            if (aq == "Disabled")       aq_val = 0;
-            else if (aq == "Variance")  aq_val = 1;
-            else if (aq == "Complexity") aq_val = 2;
-            svt_params += "aq-mode=%d".printf (aq_val);
-
-            if (aq == "Variance") {
-                svt_params += "enable-variance-boost=1";
-                svt_params += "variance-boost-strength=%d".printf (
-                    snapshot.aq_strength);
-            }
+        if (aq == "Disabled") {
+            svt_params += "aq-mode=0";
+        } else if (aq == "Complexity") {
+            svt_params += "aq-mode=2";
+        } else if (aq == "Variance") {
+            svt_params += "enable-variance-boost=1";
+            svt_params += "variance-boost-strength=%d".printf (
+                snapshot.aq_strength);
         }
 
         if (snapshot.grain_enabled) {

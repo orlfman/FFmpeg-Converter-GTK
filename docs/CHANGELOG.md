@@ -25,6 +25,32 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-svt-variance-boost — SVT-AV1 "Variance" AQ now enables Variance Boost
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("make the
+  change / fix"); 2026-11-10 09:10 America/Phoenix (UTC-07:00); `main` at
+  e278ace, on the checked-out branch as the user chose. Committed on its own
+  as "Make SVT-AV1 "Variance" AQ enable Variance Boost"; not pushed.
+- **Why:** AQ Mode "Variance" sent `aq-mode=1` plus Variance Boost. SVT-AV1 4.2
+  turns the boost off in that combination and treats `aq-mode=1` as
+  experimental, so the option gave neither what it promised nor a working AQ
+  Strength. Details and evidence: AUD-20261110-svt-variance-boost (SVT-F1).
+- **Changed:** `src/encoders/svt-av1-builder.vala`: "Variance" sends only
+  `enable-variance-boost=1:variance-boost-strength=N`; other AQ choices
+  unchanged. `tests/combine-window-state-test.vala`: new test
+  `/combine/svt-av1/aq-variance-enables-variance-boost` covering all four
+  choices.
+- **Rejected:** sending `aq-mode=2` with the boost. It turns QP mode into CRF
+  (byte-identical output in testing). Also kept the "Variance" label, which
+  other code compares by text.
+- **Checks:** development build with no new Vala warnings; the new test fails
+  on the old builder and passes on the fix; full suite 29 OK, 0 failing (136
+  widget subtests skipped in headless suites with "GTK could not initialize";
+  the display suites ran). Real FFmpeg/SVT-AV1 encodes confirmed the boost is
+  active with the new arguments.
+- **Not done:** UI not run; not pushed. SVT-F2 (QP + "Complexity" behaves
+  as CRF) recorded, unassigned, not changed.
+
 ### TASK-20261109-user-bulk-testing — User-reported manual testing of folder features
 
 - **Agent/date/base:** Recorded by Claude Code from the user's statement;

@@ -6414,6 +6414,62 @@ private void test_svt_av1_crf_two_pass_backstop_fails_fast () {
     }
 }
 
+/** The SVT-AV1 parameter list for one AQ Mode choice, split on ':'. */
+private string[] svt_av1_params_for_aq_mode (string aq_mode, int strength) {
+    var snapshot = new SvtAv1BuilderSnapshot ();
+    snapshot.aq_mode = aq_mode;
+    snapshot.aq_strength = strength;
+    // A thread count keeps -svtav1-params present for every AQ choice.
+    snapshot.threads = "2";
+    string[] args = SvtAv1Builder.build_args_from_snapshot (snapshot);
+    return get_argv_value_after (args, "-svtav1-params",
+        "SVT-AV1 AQ " + aq_mode).split (":");
+}
+
+private void assert_svt_param_key_absent (string[] svt_params,
+                                          string key,
+                                          string context) {
+    foreach (string param in svt_params) {
+        if (param.has_prefix (key + "=")) {
+            Test.fail_printf ("%s did not expect '%s'", context, param);
+            return;
+        }
+    }
+}
+
+private void test_svt_av1_aq_variance_enables_variance_boost () {
+    // SVT-AV1 4.2 logs "Variance AQ based on segmentation with Variance
+    // Boost not supported, disabling Variance Boost" for aq-mode=1, so the
+    // Variance choice must add the boost without selecting aq-mode=1.
+    string[] variance = svt_av1_params_for_aq_mode ("Variance", 3);
+    assert_array_contains (variance, "enable-variance-boost=1",
+        "Variance enables Variance Boost");
+    assert_array_contains (variance, "variance-boost-strength=3",
+        "Variance carries the AQ Strength");
+    assert_svt_param_key_absent (variance, "aq-mode",
+        "Variance keeps the rate-control aq-mode");
+
+    string[] automatic = svt_av1_params_for_aq_mode ("Automatic", 3);
+    assert_svt_param_key_absent (automatic, "aq-mode",
+        "Automatic leaves aq-mode to the encoder");
+    assert_svt_param_key_absent (automatic, "enable-variance-boost",
+        "Automatic leaves Variance Boost off");
+    assert_svt_param_key_absent (automatic, "variance-boost-strength",
+        "Automatic sends no boost strength");
+
+    string[] disabled = svt_av1_params_for_aq_mode ("Disabled", 3);
+    assert_array_contains (disabled, "aq-mode=0",
+        "Disabled turns adaptive quantization off");
+    assert_svt_param_key_absent (disabled, "enable-variance-boost",
+        "Disabled leaves Variance Boost off");
+
+    string[] complexity = svt_av1_params_for_aq_mode ("Complexity", 3);
+    assert_array_contains (complexity, "aq-mode=2",
+        "Complexity selects delta-q AQ");
+    assert_svt_param_key_absent (complexity, "enable-variance-boost",
+        "Complexity leaves Variance Boost off");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  FILTERBUILDER DRAWTEXT TESTS
 // ═════════════════════════════════════════════════════════════════════════════
@@ -10452,6 +10508,8 @@ void main (string[] args) {
         test_svt_av1_crf_two_pass_capability_updates_visibility);
     Test.add_func ("/combine/svt-av1/crf-two-pass-backstop-fails-fast",
         test_svt_av1_crf_two_pass_backstop_fails_fast);
+    Test.add_func ("/combine/svt-av1/aq-variance-enables-variance-boost",
+        test_svt_av1_aq_variance_enables_variance_boost);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",
