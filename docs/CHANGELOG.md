@@ -25,6 +25,26 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-release-2.1.0 — Version 2.1.0 release
+
+- **Agent/date/base:** Claude Code, at the user's request ("if you deem it in a
+  good state for a release, bump version number, push release to git / aur");
+  2026-11-09 20:30 America/Phoenix (UTC-07:00); `main`, base baa9504.
+- **Status:** Version bumped 2.0.1 → 2.1.0 in `meson.build` and
+  `src/util/constants.vala` (kept in sync). This commit is tagged `v2.1.0`;
+  the GitHub release and the AUR update follow from the tag.
+- **Readiness checks (before the bump, at baa9504):** development build with
+  no Vala errors; full suite 29 OK, 0 failing; `git archive HEAD` configured
+  with `arch-meson`, compiled and installed to a scratch destination
+  (binary, desktop file, icon).
+- **Known limits carried into the release:** open findings in AUDIT.md, none
+  blocking: SO-F1's knee stop is unit-tested only; SO-F11 is partly fixed and
+  its original failing range was not re-run; bulk playback has had no manual
+  desktop or screen-reader pass; SO-F4 to SO-F14 are design or tuning items.
+- **Contents since v2.0.1:** folder conversion, per-file Smart Optimizer
+  settings, folder history, bulk playback, and the Quality Mode measurement
+  fixes.
+
 ### TASK-20261109-resources-screenshot-history — Consolidate the screenshot commits
 
 - **Agent/date/base:** Codex, 2026-11-09 20:00 America/Phoenix (UTC-07:00), main at 500388d.

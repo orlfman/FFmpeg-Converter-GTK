@@ -5,7 +5,7 @@
 // ── Application Version ─────────────────────────────────────────────────────
 
 namespace AppVersion {
-    public const string VERSION = "2.0.1";
+    public const string VERSION = "2.1.0";
 }
 
 // ── Application Identity ────────────────────────────────────────────────────
