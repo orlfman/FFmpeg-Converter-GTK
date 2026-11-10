@@ -25,10 +25,25 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-pre-push-review — Review before pushing the x265 and VP9 fixes
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request;
+  2026-11-10 10:36 America/Phoenix (UTC-07:00); `main` at f149e7d, reviewing
+  `origin/main..main`. Committed on its own as "Record the pre-push review of
+  the x265 and VP9 fixes", then `main` pushed to GitHub.
+- **Result:** no bug in the shipped configuration; seven low-severity
+  findings, REV-F1 to REV-F7, recorded in AUD-20261110-pre-push-review.
+- **Also corrected:** the TASK-20261110-vp9-settings-fix time range and its
+  audit follow-up timestamp, which were written ahead of the real clock; they
+  now match the 10:33 commit.
+- **Next steps:** REV-F1 (explicit `-frame-parallel 1`) and REV-F2 (speed cap
+  tied to libvpx version) are the most worthwhile if the app must support
+  other libvpx builds.
+
 ### TASK-20261110-vp9-settings-fix — VP9 tab shows what libvpx actually does
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("Yes,
-  fix all 4"); 2026-11-10 10:28–10:45 America/Phoenix (UTC-07:00); `main` at
+  fix all 4"); 2026-11-10 10:28–10:33 America/Phoenix (UTC-07:00); `main` at
   cec0a59. Committed together with TASK-20261110-vp9-settings-check as "Make
   the VP9 tab match what libvpx applies"; not pushed.
 - **Why:** AUD-20261110-vp9-settings found four settings that do less than the

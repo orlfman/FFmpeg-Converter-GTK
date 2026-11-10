@@ -31,6 +31,13 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
 | SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
 | SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
+| REV-F1 | Low / open | Unassigned | VP9 Frame Parallel "on" sends nothing and relies on libvpx's default being on; consider sending `-frame-parallel 1` (changes Smart Codec goldens, not output). See AUD-20261110-pre-push-review. |
+| REV-F2 | Low / open | Unassigned | `Vp9Builder.max_speed_for_deadline` hardcodes libvpx 1.17's Good/Best limit of 5; other libvpx versions may honour 6–8. |
+| REV-F3 | Low / open, design | Unassigned | Smart Optimizer's `VP9_CPU_USED` still has four steps (8–5) that encode identically in Good, and its notes report the unclamped speed. |
+| REV-F4 | Low / open | Unassigned | An x265 Level too low for the picture now fails the conversion with FFmpeg's generic encoder-open error; High tier cannot be chosen. |
+| REV-F5 | Low / open | Unassigned | VP9 alt-ref/lookahead dimming follows the tab's Two-Pass switch, not per-file two-pass decisions in folder mode. |
+| REV-F6 | Low / open, design | Unassigned | x265 psy-rd and deblock widgets show 2.0 and 0, 0 while a tune applies other values (documented trade-off of X265-F2). |
+| REV-F7 | Low / open, test coverage | Unassigned | No test reads the real X265Tab defaults (Reference Frames Auto, psy-rd/deblock); tests mirror them by hand. |
 | X265-F4 | Low / deferred, documented trade-off kept by the user | Unassigned | None unless calibration gets cheaper; max effort measured +2.7% size / +0.57 VMAF for ×1.5 probe time. See AUD-20261110-x265-settings. |
 | SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
@@ -46,6 +53,30 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261110-pre-push-review — Review of the unpushed x265 and VP9 fixes
+
+- **Task/agent/date/base:** TASK-20261110-pre-push-review; Claude Code (Opus
+  5.5), at the user's request ("audit your fixes, and if everything looks good,
+  push"); 2026-11-10 10:36 America/Phoenix (UTC-07:00); range
+  `origin/main..main` = 123cb61, cec0a59, f149e7d. Review only; no code changed.
+- **Method:** line-by-line read of every changed hunk and its enclosing
+  function; callers of each changed function (bulk merge and copy, Smart
+  Codec appliers, trim tab's direct args, two-pass runner, calibration);
+  removed behaviour (always-present `-x265-params`, `-level:v`,
+  `frame_parallel=false`).
+- **Checked and fine:** x265 two-pass uses FFmpeg's `-pass`/`-passlogfile`,
+  not `-x265-params`, so an empty or absent `-x265-params` is safe. Folder
+  copy and merge (`merge_builder`) carry every changed field (`ref_frames`,
+  `level`, `frame_parallel`, `speed`, `quality_deadline`). The folder summary
+  reports the clamped VP9 speed. Every target that compiles the optimizer
+  also compiles `x265-builder.vala`. No bug was found in the shipped
+  configuration (libvpx 1.17, x265 4.3).
+- **Findings (all Low, open, unassigned):** REV-F1 to REV-F7, as in the index
+  above. REV-F1 and REV-F2 make two VP9 fixes depend on libvpx 1.17's
+  behaviour; REV-F3 and REV-F6 are design follow-ups to accepted trade-offs;
+  REV-F4 and REV-F5 are UX edges; REV-F7 is test coverage.
+- **Outcome:** none blocks publishing; pushed with these recorded.
 
 ### AUD-20261110-vp9-settings — Do the VP9 tab's settings reach the encoder and change it?
 
@@ -99,7 +130,7 @@ fixed, verified, deferred or reopened; retain the history below.
 - **Limits:** one real clip and synthetic sources; two-pass covered only for
   alt-ref, lookahead and Screen. CQ mode was not re-run for VP9-F1. The UI was
   not run; arguments were reproduced from the builder code.
-- **Follow-up, 2026-11-10 10:40 America/Phoenix (Claude Code,
+- **Follow-up, 2026-11-10, committed 10:33 America/Phoenix (Claude Code,
   TASK-20261110-vp9-settings-fix): VP9-F1 to VP9-F4 fixed.**
   - **Extra evidence first:** on 3 s of the same clip, single-pass CQ and CBR
     were also byte-identical with alt-ref off and with lag 0, and VBR with lag
