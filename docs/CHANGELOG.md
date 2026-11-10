@@ -25,10 +25,34 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261110-x265-calibration-tools — X265-F4 kept as a documented trade-off
+
+- **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("fix
+  that now"), then the user's decision ("keep the trade off"); 2026-11-10
+  10:00–10:15 America/Phoenix (UTC-07:00); `main` at 123cb61. Committed on
+  its own as "Keep x265 calibration trade-off and record re-measurement";
+  not pushed.
+- **What happened:** before implementing, the `EncoderTuning` doc comment
+  turned out to record leaving reference count out of calibration as a
+  measured decision, which X265-F4 had missed. A re-measurement (one clip,
+  details in AUD-20261110-x265-settings) put medium and high effort inside the
+  documented ±2%, and max effort at +2.7% size / +0.57 VMAF for ×1.5 probe
+  encode time. The user chose to keep the trade-off.
+- **Changed:** comment only, in `src/optimizer/smart-optimizer-logic.vala`
+  (re-measurement and decision). `docs/AUDIT.md`: X265-F4 corrected and set
+  to deferred. No behaviour change.
+- **Also corrected:** the TASK-20261110-x265-settings-fix time range and
+  its audit follow-up timestamp, which had been written ahead of the real
+  clock; they now match the 10:09 commit.
+- **Checks:** development build after the comment edit: exit 0, the same 3
+  pre-existing Vala warnings, no errors. Tests not re-run (comment-only code
+  change).
+- **Status:** done; nothing remains for X265-F4 unless calibration cost changes.
+
 ### TASK-20261110-x265-settings-fix — x265 Level, Tune and Reference Frames apply as labelled
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("fix all
-  3"); 2026-11-10 09:55–10:20 America/Phoenix (UTC-07:00); `main` at 5cc5052.
+  3"); 2026-11-10 09:55–10:09 America/Phoenix (UTC-07:00); `main` at 5cc5052.
   Committed together with TASK-20261110-x265-settings-check as "Fix x265
   Level, Tune and Reference Frames settings"; not pushed.
 - **Why:** AUD-20261110-x265-settings found that Level was ignored (X265-F1),

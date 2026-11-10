@@ -31,7 +31,7 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | SO-F11 | Medium / partly fixed | Unassigned | Timestamp rebasing is in; re-run the original failing range, then add the frame-count and sanity checks. |
 | SO-F13 | Medium / open, design limitation | Unassigned | Fractional targets are feasible; see [feasibility audit](smart-optimizer-fractional-target-audit.md) before implementation. |
 | SO-F14 | Medium / open, pre-existing | Unassigned | Align the optimizer’s 80 kbps feasibility floor and post-margin recommendation with the resolver’s 100 kbps minimum; see the fractional-target audit. |
-| X265-F4 | Low / open, pre-existing | Unassigned | Decide whether x265 calibration should use Smart Codec's reference count, PMode and deblock offsets; see AUD-20261110-x265-settings. |
+| X265-F4 | Low / deferred, documented trade-off kept by the user | Unassigned | None unless calibration gets cheaper; max effort measured +2.7% size / +0.57 VMAF for ×1.5 probe time. See AUD-20261110-x265-settings. |
 | SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
@@ -93,7 +93,7 @@ fixed, verified, deferred or reopened; retain the history below.
 - **Limits:** builder output was reproduced by reading the code, not captured
   from the running app; two-pass x265 and `Custom` keyframe modes were not
   exercised. The existing `bulk-conversion` x265 tests cover two-pass runs.
-- **Follow-up, 2026-11-10 10:10 America/Phoenix (Claude Code,
+- **Follow-up, 2026-11-10, committed 10:09 America/Phoenix (Claude Code,
   TASK-20261110-x265-settings-fix): X265-F1, X265-F2 and X265-F3 fixed and
   verified at the builder and encoder level.**
   - **X265-F1:** Level is now sent as `-x265-params level-idc=N:high-tier=0`,
@@ -143,6 +143,26 @@ fixed, verified, deferred or reopened; retain the history below.
   calibration samples are not encoded with the final settings. Not changed
   here; needs a decision on whether calibration should mirror them, given
   their encode-time cost. Unassigned.
+  - **Correction and re-measurement, 2026-11-10 10:15 America/Phoenix (Claude
+    Code, TASK-20261110-x265-calibration-tools):** the finding above missed that
+    the `EncoderTuning` doc comment (`smart-optimizer-logic.vala`) already
+    records leaving reference count out of calibration as a measured decision
+    (x265 psy-rd 2.5 + ref 4: size +1.7%, VMAF +0.05). This is a documented
+    trade-off, not an oversight. Re-measured on `tests/testvideo-raptor.webm`
+    (20 s from 10 s, 720p, CRF 24, one clip), calibration args against Smart
+    Codec's final args at each effort's base preset:
+
+    | Effort (preset) | Final adds | Size | VMAF | Probe encode time |
+    | --- | --- | --- | --- | --- |
+    | Medium (fast) | ref 4, PMode | −1.8% | −0.00 | ×1.11 |
+    | High (fast) | ref 5, PMode, deblock −1,−1 | −0.7% | −0.05 | ×1.22 |
+    | Max (faster, preset ref 2) | ref 5, PMode, deblock −1,−1 | +2.7% | +0.57 | ×1.50 |
+
+    Medium and high stay inside the documented ±2%. Max is slightly outside,
+    because the `faster` preset's 2 references differ most from Smart Codec's 5.
+    **Decision (user, 2026-11-10):** keep the trade-off; the accuracy gain at max
+    effort is not worth the extra calibration time. Status → deferred. The doc
+    comment now records this re-measurement. No behaviour changed.
 
 ### AUD-20261110-svt-variance-boost — SVT-AV1 "Variance" AQ never enabled Variance Boost
 

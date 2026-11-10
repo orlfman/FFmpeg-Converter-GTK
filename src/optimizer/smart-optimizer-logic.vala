@@ -2340,6 +2340,12 @@ namespace SmartOptimizerLogic {
      * not repaid. That is a measured
      * judgement, not an oversight; re-measure before assuming it still holds
      * if those settings change substantially.
+     *
+     * Re-measured 2026-11-10 for x265 references, PMode and deblock −1,−1
+     * (AUD-20261110-x265-settings, X265-F4), probe vs applied at CRF 24:
+     * medium −1.8% / VMAF −0.00, high −0.7% / −0.05, both inside ±2%. Max
+     * effort's "faster" preset (2 refs vs Smart Codec's 5) gave +2.7% /
+     * +0.57 for ×1.5 probe encode time; kept excluded by choice.
      */
     public struct EncoderTuning {
         /** x264/x265 -tune value; "" for none. Only ONE tune is possible. */
