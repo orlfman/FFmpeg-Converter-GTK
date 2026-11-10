@@ -45,6 +45,25 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261109-user-bulk-testing — User-reported manual desktop testing
+
+- **Task/agent/date/base:** TASK-20261109-user-bulk-testing; recorded by Claude
+  Code from the user's statement; 2026-11-09 20:40 America/Phoenix (UTC-07:00);
+  main at a4bcaaa (v2.1.0).
+- **Report:** Heavy manual folder-conversion testing by the user on their own
+  desktop "worked great", including bulk input/output playback and folders in
+  Recently Opened.
+- **What it addresses:** the "no manual desktop pass" limit recorded in
+  TASK-20261109-bulk-playback-implementation, AUD-20261109-bulk-playback-review
+  and AUD-20261109-bulk-playback-fixes, and the same limit for folder history.
+  Treat hands-on use of these features as done by the user.
+- **What it does not close:** RECENT-F1 (a request for permanent regression
+  tests, not for manual use); screen-reader, network-storage and installed-
+  release checks; SO-F1's knee stop, unless a tested video could not reach its
+  quality ceiling, which the report does not say.
+- **Evidence standing:** User-reported. No agent observed the runs; no logs,
+  counts or build identity were supplied.
+
 ### AUD-20261109-bulk-playback-fixes — Fix and verification for BPLAY-F2 to BPLAY-F5
 
 - **Task/agent/date/base:** TASK-20261109-bulk-playback-fixes; Claude Code;

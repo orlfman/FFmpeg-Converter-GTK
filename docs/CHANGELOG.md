@@ -25,6 +25,18 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-user-bulk-testing — User-reported manual testing of folder features
+
+- **Agent/date/base:** Recorded by Claude Code from the user's statement;
+  2026-11-09 20:40 America/Phoenix (UTC-07:00); `main` at a4bcaaa (v2.1.0).
+- **Status:** Record only; documentation, committed and pushed on its own. No code change.
+- **Report:** The user has done heavy manual testing of folder (bulk)
+  conversion on their desktop and reports that it worked well, including the
+  new input and output playback and folders in Recently Opened.
+- **Standing:** User-reported, not agent-verified. No counts, media details,
+  build identity or steps were given, and none are inferred here. See
+  AUD-20261109-user-bulk-testing for what this does and does not close.
+
 ### TASK-20261109-release-2.1.0 — Version 2.1.0 release
 
 - **Agent/date/base:** Claude Code, at the user's request ("if you deem it in a
