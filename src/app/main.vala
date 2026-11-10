@@ -30,7 +30,9 @@ private enum AudioCopyUnknownPreflightResult {
     CANCELLED
 }
 
+#if !BULK_PLAYBACK_TEST_BUILD
 private bool stale_managed_temp_cleanup_started = false;
+#endif
 
 private class MainWindowToastFolderBinding : Object {
     public string folder_path = "";
@@ -49,7 +51,19 @@ private class MainWindowToastFolderBinding : Object {
 //  MainWindow — Application window layout and user action handlers
 // ═══════════════════════════════════════════════════════════════════════════════
 
+private class BulkPlaybackFeedback : Object {
+    private WeakRef window;
+    public BulkPlaybackFeedback (MainWindow window) { this.window = WeakRef (window); }
+    public void report (string message) {
+        var target = window.get () as MainWindow;
+        if (target != null && target.get_visible ()) target.report_bulk_playback_error (message);
+    }
+}
+
 public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
+    internal void report_bulk_playback_error (string message) {
+        toast_overlay.add_toast (new Adw.Toast ("Could not play video: " + message));
+    }
     private FilePickers file_pickers;
     private SvtAv1Tab svt_tab;
     private X265Tab x265_tab;
@@ -61,7 +75,9 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     private BulkConversionController bulk_controller;
     private Box bulk_box;
     private Label bulk_summary;
-    private ListBox bulk_list;
+    private ListView bulk_list;
+    private BulkPlaybackModel bulk_playback = new BulkPlaybackModel ();
+    private BulkPlaybackDialog? bulk_playback_dialog;
     private Button bulk_rescan;
     private Label bulk_destination;
     private Cancellable? bulk_preview_cancel = null;
@@ -156,12 +172,23 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         controller.folder_optimizer_requested.connect ((codec, auto_convert) => {
             start_bulk (codec, auto_convert, true);
         });
-        bulk_controller.changed.connect (() => { render_bulk_items (bulk_controller.items); });
+        bulk_controller.queue_replaced.connect (() => { render_bulk_items (bulk_controller.items); });
+        bulk_controller.item_changed.connect (bulk_playback.update);
+        bulk_playback.changed.connect (update_bulk_summary);
+        bulk_playback.reset.connect (() => { close_bulk_playback (); });
+        hamburger.bulk_playback_requested.connect (show_bulk_playback);
+        // A row whose file check failed stays unavailable until someone looks
+        // again; returning to the window is when a missing file is most
+        // likely to have been put back.
+        notify["is-active"].connect (() => {
+            if (is_active && file_pickers.kind == InputSourceKind.FOLDER)
+                bulk_playback.recheck_unavailable.begin ();
+        });
         bulk_controller.output_ready.connect ((result) => { controller.apply_operation_output (result); });
         bulk_controller.finished.connect ((operation_id) => {
             if (complete_tracked_operation (ActiveOperation.BULK_CONVERTING, operation_id, false)) {
                 set_bulk_controls_locked (false);
-                render_bulk_items (bulk_controller.items);
+                update_bulk_summary ();
                 maybe_finish_close_after_cancellation ();
             }
         });
@@ -380,6 +407,10 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
         // ── Close-request guard: prevent orphaned FFmpeg processes ────────
         close_request.connect (on_close_request);
+        ((Gtk.Widget) this).destroy.connect (() => {
+            bulk_playback.shutdown ();
+            if (bulk_preview_cancel != null) bulk_preview_cancel.cancel ();
+        });
     }
 
     private static bool is_single_file_page (string? page) {
@@ -422,6 +453,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     private async void preview_bulk_folder () {
+        bulk_playback.clear ();
+        hamburger.set_bulk_playback_available (false, false);
         if (bulk_preview_cancel != null)
             bulk_preview_cancel.cancel ();
         var cancellable = new Cancellable ();
@@ -434,8 +467,10 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         try {
             var items = yield BulkConversionController.scan_folder (folder, bulk_output_folder (), cancellable);
             if (!cancellable.is_cancelled () && generation == bulk_preview_generation
-                    && file_pickers.kind == InputSourceKind.FOLDER && is_effectively_idle ())
+                    && file_pickers.kind == InputSourceKind.FOLDER && is_effectively_idle ()) {
+                bulk_preview_cancel = null;
                 render_bulk_items (items);
+            }
         } catch (Error e) {
             if (!cancellable.is_cancelled () && generation == bulk_preview_generation)
                 bulk_summary.set_label ("Could not scan folder: " + e.message);
@@ -445,42 +480,53 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     private void render_bulk_items (GenericArray<BulkItem> items) {
-        Widget? child;
-        while ((child = bulk_list.get_first_child ()) != null)
-            bulk_list.remove (child);
-        uint completed = 0, ready = 0, failed = 0;
-        for (int i = 0; i < items.length; i++) {
-            var item = items[i];
-            if (item.state == "completed") completed++;
-            if (item.state == "ready") ready++;
-            if (item.state == "failed") failed++;
-            var row = new Box (Orientation.VERTICAL, 2);
-            row.set_margin_top (6);
-            row.set_margin_bottom (6);
-            row.set_margin_start (12);
-            row.set_margin_end (12);
-            var name = new Label (Path.get_basename (item.path));
-            name.set_xalign (0);
-            name.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
-            row.append (name);
-            var detail = new Label (item.status);
-            detail.set_xalign (0);
-            detail.set_wrap (true);
-            detail.add_css_class ("dim-label");
-            row.append (detail);
-            if (item.output_path.length > 0) {
-                var output = new Label ("Output: " + item.output_path);
-                output.set_xalign (0);
-                output.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
-                output.set_tooltip_text (item.output_path);
-                row.append (output);
-            }
-            bulk_list.append (row);
-        }
-        bulk_summary.set_label (items.length == 0 ? "No supported videos in this folder. Subfolders are excluded."
-            : "%u videos · %u completed · %u ready · %u failed. Processed one at a time.".printf (
-                items.length, completed, ready, failed));
+        bulk_playback.replace (items);
+        update_bulk_summary ();
     }
+
+    private void update_bulk_summary () {
+        if (bulk_preview_cancel != null) return;
+        uint total = bulk_playback.entries.get_n_items ();
+        bulk_summary.set_label (total == 0 ? "No supported videos in this folder. Subfolders are excluded."
+            : "%u videos · %u completed · %u ready · %u failed. Processed one at a time.".printf (
+                total, bulk_playback.completed, bulk_playback.ready, bulk_playback.failed)
+                + (bulk_playback.outputs == 0 ? " Output playback becomes available after completion." : ""));
+        hamburger.set_bulk_playback_available (bulk_playback.inputs > 0, bulk_playback.outputs > 0);
+    }
+
+    private void close_bulk_playback () {
+        if (bulk_playback_dialog != null) {
+            bulk_playback_dialog.stop ();
+            bulk_playback_dialog.force_close ();
+            bulk_playback_dialog = null;
+        }
+    }
+
+    private void show_bulk_playback (bool output) {
+        if (file_pickers.kind != InputSourceKind.FOLDER) return;
+        bulk_playback.recheck_unavailable.begin ();
+        if (bulk_playback_dialog != null && bulk_playback_dialog.is_output () != output)
+            close_bulk_playback ();
+        if (bulk_playback_dialog == null) {
+            var dialog = new BulkPlaybackDialog (bulk_playback, output);
+            bulk_playback_dialog = dialog;
+            dialog.dismissed.connect ((closed) => {
+                if (bulk_playback_dialog == closed) bulk_playback_dialog = null;
+            });
+        }
+        bulk_playback_dialog.present (this);
+    }
+
+#if BULK_PLAYBACK_TEST_BUILD
+    internal FilePickers playback_pickers_for_test () { return file_pickers; }
+    internal BulkConversionController playback_controller_for_test () { return bulk_controller; }
+    internal void playback_convert_for_test () { start_bulk ("x264", true, false); }
+    internal BulkPlaybackModel playback_model_for_test () { return bulk_playback; }
+    internal BulkPlaybackDialog? playback_dialog_for_test () { return bulk_playback_dialog; }
+    internal void playback_items_for_test (GenericArray<BulkItem> items) { render_bulk_items (items); }
+    internal bool playback_bulk_visible_for_test () { return bulk_box.visible; }
+    internal bool playback_trim_sensitive_for_test () { return view_stack.get_child_by_name ("trim").sensitive; }
+#endif
 
     private void set_bulk_controls_locked (bool locked) {
         file_pickers.set_operation_locked (locked);
@@ -680,11 +726,13 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         bulk_destination.set_xalign (0);
         bulk_destination.set_ellipsize (Pango.EllipsizeMode.MIDDLE);
         bulk_box.append (bulk_destination);
-        bulk_list = new ListBox ();
-        bulk_list.set_selection_mode (SelectionMode.NONE);
+        var feedback = new BulkPlaybackFeedback (this);
+        bulk_list = new ListView (new NoSelection (bulk_playback.entries),
+            BulkPlaybackRow.factory (true, false, bulk_playback, feedback.report));
         bulk_list.add_css_class ("boxed-list");
         var bulk_scroll = new ScrolledWindow ();
         bulk_scroll.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
+        bulk_scroll.set_min_content_height (48);
         bulk_scroll.set_max_content_height (150);
         bulk_scroll.set_propagate_natural_height (true);
         bulk_scroll.set_child (bulk_list);
@@ -2224,6 +2272,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         }
 
         close_after_cancellation = false;
+        bulk_playback.shutdown ();
+        if (bulk_preview_cancel != null) bulk_preview_cancel.cancel ();
         cancel_collage_for_close ();
         destroy ();
     }
@@ -2479,6 +2529,8 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         }
 
         if (current_operation == ActiveOperation.IDLE && !smart_optimizer_active) {
+            bulk_playback.shutdown ();
+            if (bulk_preview_cancel != null) bulk_preview_cancel.cancel ();
             trim_tab.close_popout ();
             audio_tab.cleanup_player ();
             cancel_collage_for_close ();
@@ -2600,6 +2652,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 //  window and just present it, rather than spawning a duplicate.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#if !BULK_PLAYBACK_TEST_BUILD
 int main (string[] args) {
     var app = new Adw.Application (AppIdentity.APP_ID, ApplicationFlags.DEFAULT_FLAGS);
 
@@ -2639,3 +2692,5 @@ private void on_application_activate (GLib.Application app) {
     win.present ();
     start_managed_temp_cleanup_if_needed ();
 }
+
+#endif

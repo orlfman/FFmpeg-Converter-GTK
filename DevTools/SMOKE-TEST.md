@@ -107,7 +107,8 @@ Never overwrite source media or remove existing outputs to make a check pass.
 - Enable Recently Opened in Preferences. Open a file and a bulk folder; check the
   folder is labelled “(Folder)” with its full path in the tooltip. Reopen each
   from the menu and restart the app to check persistence. A folder must restore
-  bulk mode with input playback disabled. Clear History and disable history;
+  bulk mode with a searchable input-playback list after scanning (never pass the
+  folder itself to a player). Clear History and disable history;
   both files and folders must disappear. Deleted folders must be pruned.
 - During analysis/encoding, attempt another Optimize, Convert, Combine, recent-file
   or recent-folder selection and input drop. They cannot replace the active input or launch competing work.
@@ -117,6 +118,31 @@ Never overwrite source media or remove existing outputs to make a check pass.
   starts, subprocesses/passlogs/staging are released, and completed videos remain.
 - Close while processing and confirm cancellation waits for cleanup. Check unavailable
   or full destinations stop dispatch while source-specific failures allow later items.
+
+### Bulk playback and large lists
+
+- Use 200 or more synthetic source entries. Open **View Input Video**, search by
+  filename, clear search, select with the keyboard, and play without changing the
+  folder input. Check Unicode, long filenames, full-path tooltips and narrow layout.
+- Scroll before a status update; the list must keep its position and selection.
+  **Play Input** on a recycled row must play that row's current source exactly once.
+- Before any conversion completes, **View Output Video** and row output buttons
+  are disabled. During conversion, completed videos appear live in the output
+  dialog without clearing search, focus or an existing selection.
+- Exercise both per-row output buttons and the dialog. Confirm the actual published
+  filename plays after a collision rename, and a generated collage is not offered
+  as the video. An old file at a desired destination is not completion evidence.
+- Cancel after one success: that output remains playable and unfinished items do
+  not. Playback must leave the queue, settings and disabled editing tabs unchanged.
+- Delete a target and attempt playback: show feedback without launching another
+  item or cancelling conversion. Close the dialog using its close button/Escape
+  while a lookup is pending; no delayed player should appear.
+- Rescan, change folder, switch to a single file and close the main window. Old
+  dialogs/selections must close and pending file checks must be cancelled.
+- Verify ffplay and the desktop-default route, including fallback when ffplay is
+  missing or cannot start. Use isolated preferences/default-handler registrations.
+- Check accessible names and keyboard/screen-reader navigation on the target
+  desktop. Automated signal-driven checks do not replace an assistive-technology pass.
 
 Automated synthetic tests cover these areas partially; this checklist also requires
 an actual desktop pass. Timed-logo calibration fixes and remaining long-range VMAF alignment

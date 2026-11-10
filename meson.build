@@ -81,6 +81,8 @@ sources = files(
   'src/ui/general-tab.vala',
   'src/app/converter.vala',
   'src/app/bulk-conversion.vala',
+  'src/ui/bulk-playback-model.vala',
+  'src/ui/bulk-playback-view.vala',
   'src/app/bulk-settings.vala',
   'src/ui/file-pickers.vala',
   'src/ui/path-breadcrumb.vala',
@@ -110,6 +112,7 @@ sources = files(
   'src/util/update-checker.vala',
   'src/player/playback-launcher-logic.vala',
   'src/ui/hamburger-menu.vala',
+  'src/player/playback-launcher.vala',
   'src/player/video-player.vala',
   'src/ui/crop-overlay.vala',
   'src/ui/trim-tab.vala',
@@ -601,6 +604,7 @@ if fs.exists('tests/trim-subtitles-state-test.vala')
       'src/util/update-checker.vala',
       'src/player/playback-launcher-logic.vala',
       'src/ui/hamburger-menu.vala',
+      'src/player/playback-launcher.vala',
       'src/player/video-player.vala',
       'src/ui/crop-overlay.vala',
       'src/ui/trim-tab.vala',
@@ -686,6 +690,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/util/update-checker.vala',
       'src/player/playback-launcher-logic.vala',
       'src/ui/hamburger-menu.vala',
+      'src/player/playback-launcher.vala',
       'src/player/video-player.vala',
       'src/ui/crop-overlay.vala',
       'src/ui/trim-tab.vala',
@@ -870,6 +875,7 @@ if fs.exists('tests/audio-reorder-state-test.vala')
       'src/util/update-checker.vala',
       'src/player/playback-launcher-logic.vala',
       'src/ui/hamburger-menu.vala',
+      'src/player/playback-launcher.vala',
       'src/player/video-player.vala',
       'src/ui/crop-overlay.vala',
       'src/ui/trim-tab.vala',
@@ -939,4 +945,21 @@ if fs.exists('tests/smart-optimizer-logic-test.vala')
   )
 
   test('smart-optimizer-logic', smart_optimizer_logic_test)
+endif
+
+# Includes the actual MainWindow/AppController; no component-only substitute.
+# Guarded like every other test: release archives omit tests/ (.gitattributes
+# export-ignore), and an unguarded target makes `meson setup` fail there.
+if fs.exists('tests/bulk-playback-test.vala')
+  bulk_playback_test = executable(
+    'bulk-playback-test',
+    sources,
+    'tests/bulk-playback-test.vala',
+    dependencies : dependencies,
+    vala_args : ['--define=BULK_PLAYBACK_TEST_BUILD'],
+    link_args : ['-lm'],
+    build_by_default : false,
+  )
+  test('bulk-playback', bulk_playback_test,
+    env : display_gtk_test_env, is_parallel : false, timeout : 90)
 endif

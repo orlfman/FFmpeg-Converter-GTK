@@ -211,7 +211,7 @@ Relevant suites include:
 | Preview backend and timing | `mpv-backend-state`, `mpv-render-timing`, `mpv-player-display-state` |
 | Player controls and window lifetime | `player-speed-selection`, `preview-fullscreen-state` |
 | Optimizer and logo detection | `smart-optimizer-logic`, `logo-detector-logic` |
-| Folder processing and prepared profiles | `bulk-conversion`, `bulk-conversion-widgets`, `prepared-conversion`, `prepared-conversion-widgets`, `encode-profile-snapshot`, `smart-codec-resolver`, `smart-codec-widgets` |
+| Folder processing and prepared profiles | `bulk-conversion`, `bulk-conversion-widgets`, `prepared-conversion`, `prepared-conversion-widgets`, `encode-profile-snapshot`, `smart-codec-resolver`, `smart-codec-widgets`, `bulk-playback` |
 | Other utilities and menus | `playback-launcher-logic`, `update-checker`, `heap-trim-policy`, `hamburger-recent-menu-rebuild` |
 
 After code changes, build with no new warnings and run the relevant regression

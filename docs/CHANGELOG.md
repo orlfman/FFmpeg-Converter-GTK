@@ -25,6 +25,134 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-bulk-playback-publish — Commit and push of bulk playback with its review fixes
+
+- **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 19:40
+  America/Phoenix (UTC-07:00); `main`, base e11be84.
+- **Status:** Complete. One commit on `origin/main`, "Add searchable playback
+  for bulk inputs and outputs", which also adds this entry.
+- **Contents:** TASK-20261109-bulk-playback-design, -plan and -implementation
+  (Codex) together with TASK-20261109-bulk-playback-review and -fixes (Claude
+  Code). The fixes edit the same new files as the implementation, so the two
+  were not split; the commit carries both co-author trailers.
+- **Notes:** Codex's three entries below still read "uncommitted" and are left
+  as written; this entry supersedes that. Author identity was passed per
+  commit, as before, without changing Git settings.
+- **Validation:** The committed tree is the one validated in
+  AUD-20261109-bulk-playback-fixes (full suite 29 OK, archive simulation,
+  scratch run). Nothing was re-run after staging.
+
+### TASK-20261109-bulk-playback-fixes — Fixes for the bulk playback review findings
+
+- **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 19:35
+  America/Phoenix (UTC-07:00); main at e11be84 plus Codex's uncommitted
+  TASK-20261109-bulk-playback-implementation.
+- **Status:** Complete; committed and pushed with the implementation (see
+  TASK-20261109-bulk-playback-publish). No installation or version bump.
+- **Changes/why (BPLAY-F2 to BPLAY-F5):**
+  - `meson.build`: the `bulk-playback-test` target is guarded with `fs.exists`
+    so archives without `tests/` configure again.
+  - `bulk-conversion.vala`: a run that reuses its queue emits `queue_replaced`,
+    so the window's list holds the controller's items again after a preview
+    replaced them.
+  - `bulk-playback-model.vala`: new `recheck_unavailable ()` re-examines only
+    rows that failed a file check. `main.vala` calls it when the window becomes
+    active in folder mode and when a playback dialog is opened.
+  - `playback-launcher.vala`: the two fallback warnings are back.
+  - `bulk-playback-view.vala`: status text wraps again; row buttons are
+    labelled "Input" and "Output"; Enter in the search field plays the top
+    match when nothing is selected.
+  - `AGENTS.md`: `bulk-playback` added to the test table.
+  - `tests/bulk-playback-test.vala`: regression steps for the reused queue,
+    the recheck, Enter-to-play and the fallback warnings.
+- **Decision:** unavailable rows are still removed from the lists on a failed
+  check, as Codex designed; they are rechecked rather than left playable.
+- **Validation:** Development build; full suite 29 OK, 0 failing; details in
+  AUD-20261109-bulk-playback-fixes.
+- **Limits/handoff:** No manual desktop pass. Wrapped status text was not seen
+  rendered with a long message. The implementation and these fixes are both
+  uncommitted and belong in one commit or two adjacent ones.
+
+### TASK-20261109-bulk-playback-review — Independent review of bulk playback
+
+- **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 19:16
+  America/Phoenix (UTC-07:00); main at e11be84 plus Codex's uncommitted
+  TASK-20261109-bulk-playback-implementation.
+- **Status:** Review complete; only AUDIT.md and this entry changed. Committed
+  and pushed with TASK-20261109-bulk-playback-publish. No source, test or
+  build-file change in this task.
+- **Result:** Build and the 29-suite run reproduce. Four findings recorded as
+  BPLAY-F2 to BPLAY-F5 in AUD-20261109-bulk-playback-review. BPLAY-F2 (release
+  archives fail to configure because the new test target is unguarded) and
+  BPLAY-F3 (list goes stale after the output field is edited and restored)
+  should be fixed before this work is committed or released.
+- **Handoff:** Findings unassigned. The implementation task's own entry below
+  is unchanged and still reads "no unresolved functional defect"; this entry
+  and the audit entry supersede that for the two items above.
+
+### TASK-20261109-bulk-playback-implementation — Searchable playback for bulk inputs and outputs
+
+- **Agent/date/base:** Codex; 2026-11-09 19:04 America/Phoenix (UTC-07:00);
+  main, project worktree, e11be84. Preserved the existing uncommitted plan/design notes.
+- **Status:** Implementation and automated validation complete; local/uncommitted.
+  No installation, version bump, commit or push. Native assistive-technology and
+  network-storage checks remain manual limits, recorded in the plan and AUDIT.md.
+- **Behavior:** Existing input/output playback actions open a bounded searchable
+  dialog in folder mode. Each bulk row offers direct input/output playback;
+  completed primary videos appear live and remain playable after cancellation.
+  Existing ffplay/default-player preference and fallback are shared with single-file
+  playback. No input switch or queue/settings mutation occurs when a video plays.
+- **Implementation:** New shared launcher, batch presentation model and reusable
+  row/dialog modules. MainWindow consumes explicit queue/item signals and uses
+  Gtk.ListView instead of rebuilding every row. Counts and notifications are
+  coalesced; async file checks are cancelled by batch changes and close/Escape.
+  Updated Meson sources/target, README, smoke checklist and both bulk plans.
+- **Validation:** Development build succeeds (same three existing Vala warnings).
+  Full suite 29 OK, zero failures. Final tooltip/close refinements then passed the
+  development build and three relevant suites again. New six-case bulk-playback
+  suite has real MainWindow, synthetic x264 cancellation/output retention and
+  actual ffplay/desktop fallback coverage, all running on Wayland without skips.
+- **Scale/layout:** 1,000 entries use 205 reusable rows in both lists; a single
+  update creates no rows. Selection/scroll persistence and narrow dialog rendering
+  pass. Search at 200 entries measured 57–115 ms including 50 ms typing delay;
+  sub-100-ms latency is a tuning target, not a consistent guarantee under load.
+- **Handoff/evidence:** See [battleplan](bulk-playback-battleplan.md) and the matching
+  audit entry for scope and limits. Logs: /tmp/ffgtk-bulk-playback-full-suite.log,
+  /tmp/ffgtk-bulk-playback-final-build.log, /tmp/ffgtk-bulk-playback-final-tests.log.
+  Rendered layout evidence: /tmp/ffgtk-bulk-playback-visuals/. All media/settings/
+  cache/temp/desktop-handler fixtures isolated. RECENT-F1 remains open for its
+  recent-folder-specific cases; new playback coverage does not close those.
+
+### TASK-20261109-bulk-playback-plan — Scalable bulk playback battleplan
+
+- **Agent/date/base:** Codex; 2026-11-09 18:22 America/Phoenix (UTC-07:00);
+  main, project worktree, e11be84.
+- **Status/scope:** Requested Markdown plan complete; documentation only,
+  uncommitted. Preserved the preceding uncommitted playback-design records.
+- **Deliverable:** [Bulk playback battleplan](bulk-playback-battleplan.md) specifies
+  the searchable input/output dialog, direct row playback, stable model updates,
+  reusable rows, lifecycle/eligibility rules, six implementation phases and
+  acceptance tests for 200-video batches plus a 1,000-entry stress check.
+- **Checks/limits:** Compared integration points with current sources; checked
+  local document links and whitespace. No application changes, build, tests,
+  installation or publication. Performance targets are proposed, not measured.
+- **Handoff:** Implementation has not started. See the plan's checklists and
+  matching AUDIT.md entry; preserve the existing launcher behavior and queue state.
+
+### TASK-20261109-bulk-playback-design — Bulk input/output playback feasibility
+
+- **Agent/date/base:** Codex; 2026-11-09 18:19 America/Phoenix (UTC-07:00);
+  main, project worktree, e11be84.
+- **Status/scope:** Design investigation complete; shared notes only, uncommitted.
+  No playback implementation or publication requested/performed in this task.
+- **Recommendation:** Let users play an individual bulk item's input or completed
+  video through the existing ffplay/default-player launcher. Per-row controls are
+  the simplest mapping; existing View Input/Output menu actions could open a file
+  chooser list scoped to the batch. Preserve folder selection and conversion state.
+- **Evidence/limits:** Source review only; no new build/runtime tests. See the
+  matching AUDIT.md entry for readiness checks, output-artifact distinctions and
+  follow-up test cases. Modest UI/state integration, with no encoder redesign.
+
 ### TASK-20261109-recent-folders-publish — Publish folder history and its audit
 
 - **Agent/date/base:** Codex; 2026-11-09 18:11 America/Phoenix (UTC-07:00);

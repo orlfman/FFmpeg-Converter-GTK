@@ -16,6 +16,17 @@ Convert now uses manual settings or retained per-file settings, and only Optimiz
 runs analysis. No mode selector was added. Original implementation notes below
 remain as historical context.
 
+## Follow-up: bulk playback — 2026-11-09
+
+Implemented under `TASK-20261109-bulk-playback-implementation`; see
+[bulk-playback-battleplan.md](bulk-playback-battleplan.md) and the matching shared
+logs for results and limits. Existing input/output playback actions now open a
+searchable batch dialog, and each row has direct playback controls. Only confirmed
+completed video results qualify for output playback. GTK model-based lists reuse
+rows and update individual entries, replacing the previous full-row rebuilds.
+Crop & Trim/Audio/Subtitles remain disabled; external playback does not change the
+folder input or conversion state. Rescan/folder replacement clears playback context.
+
 ## Implementation progress — 2026-11-02
 
 - **Done: phase 1a.** Added deep-copy support for nested General/filter/codec/
@@ -64,7 +75,9 @@ Smart Optimizer functionality, and General settings.
   input row. The earlier separate Bulk Conversion window/menu proposal is
   superseded by this folder-based design.
 - **Crop & Trim, Audio and Subtitles tabs are disabled while a folder is
-  selected.** Their source-specific editing and playback are unavailable.
+  selected.** Their embedded source-specific editing and playback are unavailable.
+  Individual bulk inputs/completed outputs can play externally through the bulk
+  rows or existing playback menu actions.
 - General and the four codec tabs remain available for configuration before
   starting. Smart Optimizer's audio handling, including No Audio, remains
   available through the codec settings.
@@ -448,7 +461,9 @@ These paths are local testing configuration, not hardcoded application defaults.
   unreadable folder, mixed extensions, duplicate aliases, deterministic ordering,
   cancellation during scanning and stale results after switching input.
 - UI: exact disabled-tab behavior and restoration; no directory media probing or
-  preview. Recently Opened may store a distinctly labelled folder entry and
+  preview. External playback must target an individual input or confirmed completed
+  output through the batch list/dialog, without replacing the folder selection.
+  Recently Opened may store a distinctly labelled folder entry and
   reopen it in bulk mode; reject folder selection while other work is active;
   guarded programmatic tab navigation preserves audio choices and General locks;
   General values retained; Match Source uses per-item sizes;

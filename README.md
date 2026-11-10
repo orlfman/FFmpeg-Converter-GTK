@@ -32,6 +32,14 @@ receive a numeric suffix, even if ordinary single-file overwrite is enabled.
 Publication requires a destination filesystem supporting hard links; unsupported
 filesystems fail safely. Cancel stops further dispatch and keeps completed outputs.
 
+Play an individual source or completed video using the **Play Input** and
+**Play Output** buttons on its queue row. The hamburger menu's **View Input Video**
+and **View Output Video** open searchable lists in folder mode, with live counts
+and completed outputs appearing as the batch runs. Playback uses your existing
+ffplay/default-player preference and leaves the folder and queue unchanged.
+Only completed videos are offered as outputs; cancelled batches retain their
+completed videos. Rescan or changing the folder starts a fresh playback list.
+
 Queue rows summarize each video's saved settings. Changes to codec or General
 controls after optimization override the edited fields for unfinished files while
 preserving their other optimized values. Editing settings clears old size/quality

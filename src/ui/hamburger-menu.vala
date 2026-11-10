@@ -22,6 +22,24 @@ public class HamburgerMenu {
     private bool recent_submenu_enabled = false;
     private uint recent_refresh_idle_id = 0;
     private string last_output_file = "";
+    private bool bulk_inputs_available = false;
+    private bool bulk_outputs_available = false;
+    public signal void bulk_playback_requested (bool output);
+
+    public void set_bulk_playback_available (bool inputs, bool outputs) {
+        bulk_inputs_available = inputs;
+        bulk_outputs_available = outputs;
+        update_playback_actions ();
+    }
+    private void update_playback_actions () {
+        bool folder = file_pickers.kind == InputSourceKind.FOLDER;
+        view_input_action.set_enabled (folder ? bulk_inputs_available
+            : file_pickers.kind == InputSourceKind.FILE
+                && FileUtils.test (file_pickers.source_path, FileTest.IS_REGULAR));
+        view_output_action.set_enabled (folder ? bulk_outputs_available
+            : file_pickers.kind == InputSourceKind.RESOLVING ? false
+            : last_output_file.length > 0 && FileUtils.test (last_output_file, FileTest.IS_REGULAR));
+    }
     private string last_output_folder = "";
 
     public HamburgerMenu (Gtk.Window parent_window, FilePickers file_pickers) {
@@ -140,12 +158,10 @@ public class HamburgerMenu {
             : output_result.primary_file_path;
         last_output_folder = output_result.get_open_folder_target ();
 
-        bool file_exists = last_output_file.length > 0
-            && FileUtils.test (last_output_file, FileTest.EXISTS);
         bool folder_exists = last_output_folder.length > 0
             && FileUtils.test (last_output_folder, FileTest.IS_DIR);
 
-        view_output_action.set_enabled (file_exists);
+        update_playback_actions ();
         open_output_folder_action.set_enabled (folder_exists);
     }
 
@@ -338,61 +354,8 @@ public class HamburgerMenu {
 
     private static void open_with_default_player (string path) {
         if (path.length == 0) return;
-
-        var settings = AppSettings.get_default ();
-        string ffplay = settings.ffplay_path;
-        string? resolved = ffplay.contains ("/")
-            ? ffplay : Environment.find_program_in_path (ffplay);
-        var route = PlaybackLauncherLogic.resolve_route (
-            settings.play_with_ffplay, ffplay, resolved);
-        if (settings.play_with_ffplay && route
-                == PlaybackLauncherLogic.Route.DESKTOP_DEFAULT) {
-            warning ("ffplay playback requested but '%s' is not on PATH — "
-                + "falling back to the default player", ffplay);
-        }
-        if (route == PlaybackLauncherLogic.Route.FFPLAY
-                && launch_in_ffplay (path, ffplay)) {
-            return;
-        }
-
-        try {
-            var file = File.new_for_path (path);
-            AppInfo.launch_default_for_uri (file.get_uri (), null);
-        } catch (Error e) {
-            warning ("Failed to open video: %s", e.message);
-        }
-    }
-
-    /**
-     * Play @path in ffplay. Returns false if it could not be started, so the
-     * caller can fall back to the desktop handler rather than leaving the user
-     * with a menu item that silently does nothing — ffplay is a separate
-     * package from ffmpeg on several distros and may simply be absent.
-     *
-     * Spawned detached: ffplay owns its own window and must outlive the
-     * calling context, and its exit is not something to report on.
-     */
-    private static bool launch_in_ffplay (string path, string ffplay) {
-        try {
-            Pid pid;
-            Process.spawn_async (
-                null,
-                PlaybackLauncherLogic.build_ffplay_argv (ffplay, path),
-                null,
-                SpawnFlags.SEARCH_PATH | SpawnFlags.STDOUT_TO_DEV_NULL
-                    | SpawnFlags.STDERR_TO_DEV_NULL | SpawnFlags.DO_NOT_REAP_CHILD,
-                null,
-                out pid);
-            // DO_NOT_REAP_CHILD without a watch would leave a zombie.
-            ChildWatch.add (pid, (child_pid, status) => {
-                Process.close_pid (child_pid);
-            });
-            return true;
-        } catch (SpawnError e) {
-            warning ("Failed to launch ffplay (%s) — falling back to the "
-                + "default player", e.message);
-            return false;
-        }
+        try { PlaybackLauncher.launch (path); }
+        catch (Error e) { warning ("Failed to open video: %s", e.message); }
     }
 
     private static void open_in_file_manager (string path) {
@@ -424,12 +387,18 @@ public class HamburgerMenu {
     }
 
     private void on_view_input_action_activate (GLib.Variant? parameter) {
-        if (file_pickers.kind == InputSourceKind.FILE)
+        if (file_pickers.kind == InputSourceKind.FOLDER) {
+            if (bulk_inputs_available) bulk_playback_requested (false);
+        } else if (file_pickers.kind == InputSourceKind.FILE)
             open_with_default_player (file_pickers.source_path);
     }
 
     private void on_view_output_action_activate (GLib.Variant? parameter) {
-        open_with_default_player (last_output_file);
+        if (file_pickers.kind == InputSourceKind.FOLDER) {
+            if (bulk_outputs_available) bulk_playback_requested (true);
+        } else if (file_pickers.kind != InputSourceKind.RESOLVING) {
+            open_with_default_player (last_output_file);
+        }
     }
 
     private void on_open_output_folder_action_activate (GLib.Variant? parameter) {
@@ -458,7 +427,7 @@ public class HamburgerMenu {
             && FileUtils.test (path, FileTest.IS_REGULAR);
         bool is_folder = file_pickers.kind == InputSourceKind.FOLDER && path.length > 0
             && FileUtils.test (path, FileTest.IS_DIR);
-        view_input_action.set_enabled (is_file);
+        update_playback_actions ();
         // Only accepted selections enter history. RESOLVING/INVALID and input
         // changes refused during an operation must not promote a recent item.
         if (is_file || is_folder)

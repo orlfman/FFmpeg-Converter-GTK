@@ -27,6 +27,8 @@ public class BulkConversionController : Object {
     public GenericArray<BulkItem> items { get; private set; default = new GenericArray<BulkItem> (); }
     public bool is_running { get; private set; default = false; }
     public signal void changed ();
+    public signal void queue_replaced ();
+    public signal void item_changed (BulkItem item);
     public signal void finished (uint64 operation_id);
     public signal void output_ready (OperationOutputResult result);
 
@@ -54,6 +56,7 @@ public class BulkConversionController : Object {
                 user_edits.foreach ((key, value) => { edited.edited_fields.insert (key, value); });
                 item.status = "Settings ready — " + BulkSettingsEdits.describe (
                     BulkSettingsEdits.apply (item.prepared, item.prepared_request, edited));
+                item_changed (item);
             }
         }
         changed ();
@@ -89,6 +92,7 @@ public class BulkConversionController : Object {
         observed_settings = null;
         user_edits.remove_all ();
         items = new GenericArray<BulkItem> ();
+        queue_replaced ();
         changed ();
     }
 
@@ -308,6 +312,7 @@ public class BulkConversionController : Object {
     private void update_item (BulkItem item, string state, string status) {
         item.state = state;
         item.status = status;
+        item_changed (item);
         changed ();
     }
 
@@ -608,12 +613,22 @@ public class BulkConversionController : Object {
                 queued_output = "";
                 status_area.set_status ("Scanning folder…", StatusIcon.SEARCH_ICON, StatusIcon.SEARCH_CSS);
                 items = new GenericArray<BulkItem> ();
+                queue_replaced ();
                 changed ();
                 items = yield scan_folder (folder, output_folder, cancellable);
+                queue_replaced ();
                 optimized_codec = "";
                 queued_folder = folder_key;
                 queued_output = output_key;
                 changed ();
+            } else {
+                // The queue is being reused, but the window may have replaced
+                // its list with a folder preview since the last run (editing
+                // the output field does that). Announce the queue again so
+                // views hold THESE items; updates for items a view does not
+                // hold are dropped, which left the list at "Waiting" for the
+                // whole run.
+                queue_replaced ();
             }
             if (items.length == 0)
                 throw new IOError.NOT_FOUND ("No supported video files were found in this folder.");

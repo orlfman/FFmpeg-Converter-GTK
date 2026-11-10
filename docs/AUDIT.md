@@ -45,6 +45,216 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261109-bulk-playback-fixes — Fix and verification for BPLAY-F2 to BPLAY-F5
+
+- **Task/agent/date/base:** TASK-20261109-bulk-playback-fixes; Claude Code;
+  2026-11-09 19:35 America/Phoenix (UTC-07:00); main at e11be84 with uncommitted changes.
+- **BPLAY-F2 (verified):** the tree without `tests/`, `DevTools/` and
+  `Screenshots/` now configures (3 targets) and compiles the application.
+  Before the fix the same tree stopped at configure.
+- **BPLAY-F3 (verified):** the scratch program from the review, unchanged,
+  now reports 2 completed, 2 outputs, row status "Completed" and View Output
+  Video enabled after the edit-and-restore sequence; before the fix it
+  reported 0 / 0 / "Waiting" / disabled. The same sequence is now part of
+  `/bulk-playback/window/real-conversion-cancellation`.
+- **BPLAY-F4 (verified by test):** a removed output stays unavailable after a
+  recheck, and becomes eligible and counted again once the file is restored.
+  The window-focus and dialog-open triggers are wiring only and were not
+  exercised.
+- **BPLAY-F5 (verified by test or inspection):** the two fallback warnings are
+  asserted with `Test.expect_message`; Enter-to-play is asserted for one match
+  and for none; labelled row buttons were inspected in a rendered
+  `main-1000.png`; the `AGENTS.md` table lists the suite. Wrapped status text
+  was not seen rendered with a long message.
+- **Checks run:** development build; full suite 29 OK, 0 failing; the six
+  `bulk-playback` cases with no skips on Wayland; archive simulation;
+  scratch program with two real x264 runs.
+- **Limits:** No manual desktop pass, screen reader or installed build.
+
+### AUD-20261109-bulk-playback-review — Independent review of the bulk playback implementation
+
+- **Task/agent/date/base:** TASK-20261109-bulk-playback-review; Claude Code;
+  2026-11-09 19:16 America/Phoenix (UTC-07:00); main at e11be84 plus Codex's
+  uncommitted TASK-20261109-bulk-playback-implementation. Read-only for source.
+- **Scope:** `playback-launcher.vala`, `bulk-playback-model.vala`,
+  `bulk-playback-view.vala`, the diffs to `main.vala`, `bulk-conversion.vala`,
+  `hamburger-menu.vala` and `meson.build`, and `tests/bulk-playback-test.vala`.
+  Commits 7242896 and e11be84 were not reviewed.
+- **Reproduced from the implementation's record:** development build succeeds;
+  full suite 29 OK, 0 failing; all six `bulk-playback` cases pass on Wayland
+  without skips. The dialog lifecycle, generation/cancellation guards in
+  `BulkPlaybackModel.play` and the row recycling read as described.
+- **Checks run:** build and full suite; a configure of a simulated release
+  archive and of `git archive HEAD`; a scratch program built from the
+  `bulk-playback-test` source list driving the real MainWindow through two
+  real x264 folder runs. Isolated XDG and temporary directories.
+- **Limits:** No manual desktop pass, no screen reader, no installed build.
+  Codex's three screenshots were inspected; `dialog-200.png` was captured
+  mid-animation and shows little. BPLAY-F4 and BPLAY-F5 are by reading only.
+  The test's default-handler registration was checked not to touch the user's
+  `~/.config/mimeapps.list` in this run.
+
+#### BPLAY-F2 — Release archives fail to configure
+
+- **Severity/status/owner:** High; open; unassigned.
+- **Where:** `meson.build`, the `bulk_playback_test` target at the end of the file.
+- **Evidence:** `.gitattributes` marks `tests/` as `export-ignore`, and every
+  other test target is wrapped in `if fs.exists(...)`. This one is not. With
+  `tests/` removed, `meson setup` stops with "meson.build:951:21: ERROR: File
+  tests/bulk-playback-test.vala does not exist." The same configure on
+  `git archive HEAD` succeeds (3 targets). A GitHub release tarball, and
+  therefore the AUR package built from it, would not build.
+- **Next action:** Wrap the target and its `test()` in the same guard.
+
+#### BPLAY-F3 — Folder list stops following the queue after the output field is edited and restored
+
+- **Severity/status/owner:** Medium; open; unassigned. Regression from this change.
+- **Where:** `main.vala`: `output_entry.changed` starts `preview_bulk_folder`
+  without resetting the controller's queue, and the list is now rebuilt only on
+  `queue_replaced`. `BulkConversionController.run` reuses its queue when the
+  folder and output keys are unchanged, so no `queue_replaced` follows and
+  `BulkPlaybackModel.update` ignores items it does not hold.
+- **Evidence (measured):** two real files; run 1 cancelled after the first
+  completes (model: 1 completed). Output field set to "x" and back to empty:
+  the list now holds preview items. Run 2 converts the second file
+  (controller: completed / completed) while the model reports 0 completed,
+  0 outputs, row status "Waiting", and View Output Video stays disabled.
+  Previously every `changed` re-rendered from the controller's items, which
+  corrected the list on the first update; that is by reading the old code,
+  not a run of it.
+- **Impact:** display only. Files are converted and published correctly; the
+  list, counts and output playback are wrong for that run.
+- **Next action:** Re-render from `bulk_controller.items` when a run starts on
+  an existing queue (or emit `queue_replaced` there), and add this sequence to
+  the playback suite.
+
+#### BPLAY-F4 — A failed file check disables a row until Rescan
+
+- **Severity/status/owner:** Low; open; unassigned. By reading.
+- **Where:** `BulkPlaybackModel.play` sets `input_available`/`output_available`
+  to false on any non-cancellation error; `BulkPlaybackEntry.refresh` only
+  re-enables the output flag when the video path changes, and never the input.
+- **Impact:** a transient failure (network or removable storage, a file moved
+  back) leaves Play Input greyed for that row, and can disable the menu action
+  when it was the last one, until Rescan or a folder change.
+
+#### BPLAY-F5 — Small items
+
+- **Severity/status/owner:** Low; open; unassigned. By reading.
+- `PlaybackLauncher` drops the two `warning ()` messages the menu code logged
+  when ffplay was requested but missing or failed to start; the fallback is
+  now silent.
+- Row status text changed from wrapped to middle-ellipsised; long failure
+  reasons are now only readable in the tooltip.
+- In the dialog, Enter in the search field does nothing until a row is
+  selected, even with a single match.
+- The two row buttons are icon-only (a play triangle and a camera); which is
+  input and which is output is only in the tooltip.
+- `AGENTS.md`'s test table does not list `bulk-playback`.
+
+### TASK-20261109-bulk-playback-implementation — Playback implementation and final review
+
+- **Agent/date/base:** Codex; 2026-11-09 19:04 America/Phoenix (UTC-07:00);
+  main at e11be84 plus local implementation. Scope: shared player launcher,
+  bulk presentation model, row/dialog lifecycle, MainWindow/menu/controller wiring,
+  source lists, permanent tests and user documentation.
+- **Result:** No unresolved functional defect identified in this scope. Playback
+  resolves a selected source or confirmed completed primary video, validates file
+  type asynchronously and rejects stale generation/request results. Existing
+  desired destinations, in-progress outputs and collage artifacts cannot be
+  selected as completed videos. Folder/queue state is unchanged by playback.
+- **BPLAY-F1 (verified, introduced and fixed during implementation; owner Codex):**
+  The custom filter closure retained its dialog. stop() now clears the filter's
+  model/function and disconnects subscriptions; close/Escape cancel before closing
+  animation. MainWindow's error callback uses a tracked weak reference. The
+  repeated-close test uses GLib.WeakRef and proves dialog destruction over four
+  cycles; pending-close and reset cases prove no late launch. No follow-up needed.
+  A minimum-height overflow exposed by the real-conversion desktop test was also
+  corrected by allowing the bulk scroll area to shrink; final fatal-warning tests
+  and 420-pixel dialog render succeed.
+- **Permanent coverage:** Six bulk-playback cases exercise eligibility/missing
+  files/cancellation, Unicode filtering/live results/scale/selection/scroll,
+  recycled-row targets, actual MainWindow actions/reset/file-folder transitions,
+  a real x264 batch cancelled after one success, and real ffplay/desktop handoff.
+  The real batch's completed video remains playable while the next item is stopped.
+  Failed/missing ffplay executables fall back to a temporary desktop handler.
+  Final close/Escape paths and displayed status tooltips are included.
+- **Results:** Full suite 29 OK, zero failures. Final development build plus
+  playback-launcher-logic, hamburger-recent-menu-rebuild and bulk-playback pass
+  after the last tooltip/close refinements. New suite executes all six cases with
+  no skips on Wayland. Headless GTK skips in other suites are not counted as
+  display coverage. Build retains the three existing application Vala warnings;
+  generated C has compiler diagnostics typical of the existing Vala build.
+- **Scale evidence:** Core Ultra 7 270K Plus, GTK 4.24.1, libadwaita 1.10.0.
+  Dialog and main list create 205 reusable row widgets for 1,000 entries; a single
+  item update creates none. Search-to-filtered-list processing at 200 entries
+  measured 57–115 ms including the 50 ms search delay. The initial under-100-ms
+  target is not consistently achieved under load; treat it as future tuning,
+  not an asserted performance guarantee. No full 200-video encoding benchmark.
+- **Limits:** Rendered desktop images inspected, including narrow dialog and
+  1,000-item main list. No physical keyboard/mouse or screen-reader pass, network/
+  removable filesystem check or installed-release run. Partial artifact-publication
+  failures remain conservatively unavailable for output playback. Source/model
+  tests do not eliminate the ordinary race between final stat and external open.
+  RECENT-F1 remains open: the new full-window playback tests do not replace its
+  requested recent-folder reopening/rename/late-lock cases.
+- **Evidence/status:** [Battleplan](bulk-playback-battleplan.md); logs under
+  /tmp/ffgtk-bulk-playback-{full-suite,final-build,final-tests}.log and screenshots
+  under /tmp/ffgtk-bulk-playback-visuals/. The first full-suite launch was not
+  executed because automatic approval review reached a usage limit; after the
+  user's continuation, the normal approval path succeeded and the suite ran.
+  No bypass, user-media access, preference changes, installation or publication.
+  Application, tests and documentation remain uncommitted.
+
+### TASK-20261109-bulk-playback-plan — Large-batch playback design review
+
+- **Agent/date/base:** Codex; 2026-11-09 18:22 America/Phoenix (UTC-07:00);
+  main at e11be84; existing design notes preserved.
+- **Scope/result:** [Battleplan](bulk-playback-battleplan.md) captures the requested
+  scalable playback UX and source-informed integration steps. No new functional
+  defect asserted. MainWindow currently rebuilds bulk rows on controller updates;
+  the plan replaces that pattern with stable model entries and reusable views.
+- **Design checks:** Explicitly covers preview items before queue ownership,
+  completed primary videos versus desired paths/collage artifacts, batch generation
+  guards, async existence checks, recycled-row callbacks and selection during live
+  filtering. Partial artifact-publication failures are conservatively excluded
+  from output playback unless future result reporting explicitly supports them.
+- **Verification/status:** Local source/reference review and documentation checks
+  only. No runtime or performance measurements, application changes or publication.
+  RECENT-F1 remains open; planned full-window tests are not completed evidence.
+  Document is ready for implementation planning; no implementation started.
+
+### TASK-20261109-bulk-playback-design — Playback in folder mode
+
+- **Agent/date/base:** Codex; 2026-11-09 18:19 America/Phoenix (UTC-07:00);
+  main at e11be84; application read-only.
+- **Result:** Feasible using existing playback launch logic; no new defect alleged.
+  HamburgerMenu permits input playback only for FILE. Multi-output results favor
+  opening a folder, and the bulk list has no selected row or playback controls.
+  A specific video must be chosen before either action has an unambiguous target.
+- **Available data:** BulkItem.path identifies each source; completed items have
+  result.primary_file_path identifying the video even when result.output_paths
+  also contains a collage. output_path is assigned a desired destination before
+  conversion finishes, so existence of that path alone is not proof of success
+  and could identify an older conflicting output. Use completed state plus result
+  and recheck the final regular file at activation.
+- **Proposed UX:** Add Play Input/Play Output controls on each bulk row; optionally
+  route existing menu actions to a batch-scoped choice of playable inputs or
+  completed videos. Reuse the ffplay/default-player preference. Keep folder input
+  and editing-tab restrictions unchanged, and retain Open Output Folder. Input
+  playback can be available before conversion; completed videos can be played
+  while later items run or after cancellation. Never launch staging files or
+  collage artifacts as output videos.
+- **Implementation/tests:** Share the existing private playback helper; pass a
+  chosen path without request_input or controller state changes. Reset any menu
+  selection on folder/queue replacement and keep it stable across row rebuilds.
+  Test before/after completion, partial cancellation, deleted files, collision
+  renaming, collateral image outputs and folder/file transitions. Existing bulk
+  rows are rebuilt on updates, so menu/dialog snapshots need activation-time
+  validation. Full-window coverage would also address relevant parts of RECENT-F1.
+- **Limits/status:** Source inspection only, no runtime verification or estimate
+  benchmark. No application changes. Shared documentation remains uncommitted.
+
 ### TASK-20261109-recent-folders-publish — Publication follow-up
 
 - **Agent/date/base:** Codex; 2026-11-09 18:11 America/Phoenix (UTC-07:00);
