@@ -579,8 +579,9 @@ public class AppSettings : Object {
     }
 
     /**
-     * Return a newest-first, de-duplicated and bounded recent-file list.
-     * Missing files are discarded when `require_existing` is true.
+     * Return a newest-first, de-duplicated and bounded input history.
+     * Files and bulk folders share the existing settings key and 20-item limit.
+     * Missing locations are discarded when `require_existing` is true.
      */
     internal static string[] sanitize_recent_input_files (
         string[] paths,
@@ -595,7 +596,7 @@ public class AppSettings : Object {
             string canonical = Filename.canonicalize (
                 path, Environment.get_current_dir ());
             if (require_existing
-                    && !FileUtils.test (canonical, FileTest.IS_REGULAR)) {
+                    && !is_recent_input_location (canonical)) {
                 continue;
             }
 
@@ -617,14 +618,22 @@ public class AppSettings : Object {
         return clean;
     }
 
-    /** Record an existing input file and move it to the front of the list. */
+    /** Existing file or folder; follow symlinks just as FilePickers does. */
+    internal static bool is_recent_input_location (string path) {
+        return FileUtils.test (path, FileTest.IS_REGULAR)
+            || FileUtils.test (path, FileTest.IS_DIR);
+    }
+
+    /** Record an accepted input location and move it to the front of the list.
+     * The legacy method/key names are retained for settings compatibility.
+     */
     public void record_recent_input_file (string path) {
         if (path.length == 0 || !recently_opened_enabled)
             return;
 
         string canonical = Filename.canonicalize (
             path, Environment.get_current_dir ());
-        if (!FileUtils.test (canonical, FileTest.IS_REGULAR))
+        if (!is_recent_input_location (canonical))
             return;
 
         bool changed = false;
@@ -646,7 +655,7 @@ public class AppSettings : Object {
             save_internal (true);
     }
 
-    /** Remove missing files from history and persist the cleaned list. */
+    /** Remove missing locations from history and persist the cleaned list. */
     public bool prune_recent_input_files () {
         bool changed = false;
         mutex.lock ();

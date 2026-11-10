@@ -447,8 +447,9 @@ These paths are local testing configuration, not hardcoded application defaults.
 - Input: file/folder chooser and drops, a folder named `example.mp4`, empty/missing/
   unreadable folder, mixed extensions, duplicate aliases, deterministic ordering,
   cancellation during scanning and stale results after switching input.
-- UI: exact disabled-tab behavior and restoration; no directory probing/preview/
-  recent-video entry; reject folder selection while other work is active;
+- UI: exact disabled-tab behavior and restoration; no directory media probing or
+  preview. Recently Opened may store a distinctly labelled folder entry and
+  reopen it in bulk mode; reject folder selection while other work is active;
   guarded programmatic tab navigation preserves audio choices and General locks;
   General values retained; Match Source uses per-item sizes;
   programmatic/recent selection cannot replace an active batch.

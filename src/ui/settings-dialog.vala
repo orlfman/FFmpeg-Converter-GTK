@@ -362,15 +362,15 @@ public class SettingsDialog : Adw.PreferencesDialog {
         page.add (generated_outputs_group);
 
         var history_group = new Adw.PreferencesGroup ();
-        history_group.set_title ("Recent Files");
+        history_group.set_title ("Recently Opened");
         history_group.set_description (
-            "Control whether input-file history is stored and shown in the hamburger menu."
+            "Control whether input-file and bulk-folder history is stored and shown in the hamburger menu."
         );
 
         recently_opened_switch = new Adw.SwitchRow ();
-        recently_opened_switch.set_title ("Remember Recently Opened Files");
+        recently_opened_switch.set_title ("Remember Recently Opened Files and Folders");
         recently_opened_switch.set_subtitle (
-            "Keep up to 20 input files for quick reopening. Turning this off clears stored history and hides the menu."
+            "Keep up to 20 files and folders for quick reopening. Turning this off clears stored history and hides the menu."
         );
         history_group.add (recently_opened_switch);
         page.add (history_group);

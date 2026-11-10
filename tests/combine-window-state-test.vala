@@ -6904,7 +6904,11 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
         for (int i = 0; i < 22; i++) {
             string path = Path.build_filename (
                 temp_dir, "video-%02d.mkv".printf (i));
-            FileUtils.set_contents (path, "test");
+            if (i % 2 == 0)
+                FileUtils.set_contents (path, "test");
+            else
+                assert_true (DirUtils.create (path, 0700) == 0,
+                    "create a folder with a media-looking name");
             files += path;
         }
 
@@ -6914,7 +6918,7 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
 
         string[] clean = AppSettings.sanitize_recent_input_files (candidates);
         assert_true (clean.length == AppSettings.MAX_RECENT_INPUT_FILES,
-            "recent history retains at most 20 files");
+            "recent history retains at most 20 files and folders");
         assert_string_equal (clean[0], files[0],
             "recent history preserves newest-first order");
         assert_string_equal (clean[1], files[1],
@@ -6922,7 +6926,7 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
         assert_string_equal (clean[19], files[19],
             "the 20-item boundary is deterministic");
 
-        FileUtils.remove (files[5]);
+        DirUtils.remove (files[5]);
         string[] pruned = AppSettings.sanitize_recent_input_files (clean);
         assert_true (pruned.length == 19,
             "a deleted recent input is removed during refresh");
@@ -6933,10 +6937,66 @@ private void test_recent_input_history_is_bounded_deduplicated_and_pruned () {
     } catch (Error e) {
         error ("Recent input history test setup failed: %s", e.message);
     } finally {
-        foreach (unowned string path in files)
-            FileUtils.remove (path);
+        foreach (unowned string path in files) {
+            if (FileUtils.test (path, FileTest.IS_DIR)) DirUtils.remove (path);
+            else FileUtils.remove (path);
+        }
         if (temp_dir.length > 0)
             DirUtils.remove (temp_dir);
+    }
+}
+
+private void test_recent_input_folders_persist_and_obey_history_preference () {
+    string? root = null;
+    try {
+        root = DirUtils.make_tmp ("recent-folders-setting-XXXXXX");
+        string folder = Path.build_filename (root, "Batch café; videos.mp4");
+        string video = Path.build_filename (root, "single.mkv");
+        string missing = Path.build_filename (root, "missing");
+        assert_true (DirUtils.create (folder, 0700) == 0, "create bulk folder");
+        FileUtils.set_contents (video, "test");
+        var settings = AppSettings.create_for_test (root);
+        settings.record_recent_input_file (folder);
+        assert_true (settings.recent_input_files.length == 0,
+            "history remains off by default for folders too");
+        settings.recently_opened_enabled = true;
+        settings.record_recent_input_file (folder);
+        settings.record_recent_input_file (video);
+        settings.record_recent_input_file (missing);
+        settings.record_recent_input_file (Path.build_filename (folder, "."));
+        assert_true (settings.recent_input_files.length == 2,
+            "mixed history canonicalizes duplicates and excludes missing paths");
+        assert_string_equal (settings.recent_input_files[0], folder,
+            "reopening a folder promotes it without duplication");
+        var loaded = AppSettings.create_for_test (root);
+        assert_true (loaded.recent_input_files.length == 2,
+            "both file and folder survive persisted settings reload");
+        assert_string_equal (loaded.recent_input_files[0], folder, "folder keeps its order");
+        assert_string_equal (loaded.recent_input_files[1], video, "file remains in history");
+
+        DirUtils.remove (folder);
+        var pruned = AppSettings.create_for_test (root);
+        assert_true (pruned.recent_input_files.length == 1,
+            "loading settings prunes a deleted bulk folder");
+        assert_true (DirUtils.create (folder, 0700) == 0, "recreate bulk folder");
+        pruned.record_recent_input_file (folder);
+        pruned.recently_opened_enabled = false;
+        pruned.save ();
+        pruned.record_recent_input_file (folder);
+        var disabled = AppSettings.create_for_test (root);
+        assert_true (!disabled.recently_opened_enabled && disabled.recent_input_files.length == 0,
+            "disabling history removes both types from disk and stops recording");
+        disabled.recently_opened_enabled = true;
+        disabled.record_recent_input_file (folder);
+        disabled.record_recent_input_file (video);
+        disabled.clear_recent_input_files ();
+        var cleared = AppSettings.create_for_test (root);
+        assert_true (cleared.recent_input_files.length == 0,
+            "Clear History persists removal of files and folders");
+    } catch (Error e) {
+        Test.fail_printf ("recent folder history setup failed: %s", e.message);
+    } finally {
+        if (root != null) cleanup_exec_test_dir (root);
     }
 }
 
@@ -7120,6 +7180,10 @@ private void test_recent_input_menu_repeated_refresh_is_stable () {
                 files[AppSettings.MAX_RECENT_INPUT_FILES - 2],
                 "recent-file button retains its current complete path");
             second_recent.clicked ();
+            assert_true (spin_main_context_until_deadline (() => {
+                return file_pickers.kind == InputSourceKind.FILE
+                    && settings.recent_input_files[0] == files[AppSettings.MAX_RECENT_INPUT_FILES - 2];
+            }, 3000), "recent file resolves before promotion is inspected");
             assert_string_equal (file_pickers.input_entry.get_text (),
                 files[AppSettings.MAX_RECENT_INPUT_FILES - 2],
                 "clicking a recent-file slot selects its current path");
@@ -7147,6 +7211,71 @@ private void test_recent_input_menu_repeated_refresh_is_stable () {
             spin_main_context_until (() => { return true; }, 2);
         }
 
+        // Select a folder normally, then reopen it through the actual menu
+        // slot. Files and directories share history but only files can play.
+        string folder = Path.build_filename (temp_root, "Batch café; videos.mp4");
+        assert_true (DirUtils.create (folder, 0700) == 0, "create recent bulk folder");
+        file_pickers.request_input (folder);
+        assert_true (spin_main_context_until_deadline (() => {
+            return file_pickers.kind == InputSourceKind.FOLDER;
+        }, 3000), "accepted folder selection resolves into bulk input mode");
+        assert_string_equal (settings.recent_input_files[0], folder,
+            "folder selection automatically records its location");
+        var folder_button = hamburger.get_recent_input_button_for_widget_test (0);
+        assert_true (folder_button != null, "folder appears in a stable recent slot");
+        if (folder_button != null) {
+            assert_string_equal (folder_button.get_label (), "Batch café; videos.mp4 (Folder)",
+                "folder marker distinguishes a directory with a media extension");
+            assert_string_equal (folder_button.get_tooltip_text () ?? "", folder,
+                "folder tooltip preserves the literal complete path");
+        }
+        var playback = app.lookup_action ("view-input") as GLib.SimpleAction;
+        assert_true (playback != null && !playback.get_enabled (),
+            "a folder is never offered to the video player");
+        file_pickers.request_input (files[0]);
+        assert_true (spin_main_context_until_deadline (() => {
+            return file_pickers.kind == InputSourceKind.FILE;
+        }, 3000), "can return from folder to file mode");
+        folder_button = hamburger.get_recent_input_button_for_widget_test (1);
+        assert_true (folder_button != null, "folder remains available after opening a file");
+        if (folder_button != null) {
+            file_pickers.set_operation_locked (true);
+            folder_button.clicked ();
+            assert_string_equal (file_pickers.source_path, files[0],
+                "recent folder cannot replace an input during conversion");
+            assert_string_equal (settings.recent_input_files[0], files[0],
+                "blocked folder selection is not promoted");
+            file_pickers.set_operation_locked (false);
+            file_pickers.set_input_admission (() => { return false; });
+            folder_button.clicked ();
+            assert_string_equal (file_pickers.source_path, files[0],
+                "recent folder respects controller admission for other operations");
+            file_pickers.set_input_admission (() => { return true; });
+            folder_button.clicked ();
+            assert_true (spin_main_context_until_deadline (() => {
+                return file_pickers.kind == InputSourceKind.FOLDER;
+            }, 3000), "clicking recent folder reenters bulk input mode");
+            assert_string_equal (file_pickers.source_path, folder,
+                "recent folder reopens the exact location");
+            assert_string_equal (settings.recent_input_files[0], folder,
+                "accepted recent folder moves to the front");
+        }
+        assert_true (playback != null && !playback.get_enabled (),
+            "reopened folder keeps playback disabled");
+        file_pickers.request_input (files[0]);
+        assert_true (spin_main_context_until_deadline (() => {
+            return file_pickers.kind == InputSourceKind.FILE;
+        }, 3000), "file mode returns after a recent folder");
+        assert_true (playback != null && playback.get_enabled (),
+            "file playback becomes available again");
+        folder_button = hamburger.get_recent_input_button_for_widget_test (1);
+        DirUtils.remove (folder);
+        if (folder_button != null) folder_button.clicked ();
+        assert_string_equal (file_pickers.source_path, files[0],
+            "stale folder slot does not replace the selected file");
+        assert_array_not_contains (settings.recent_input_files, folder,
+            "deleted folder is pruned when its stale menu slot is clicked");
+
         var clear_action =
             app.lookup_action ("clear-recent-inputs") as GLib.SimpleAction;
         assert_true (clear_action != null,
@@ -7161,7 +7290,7 @@ private void test_recent_input_menu_repeated_refresh_is_stable () {
                 "clear-history keeps the first custom slot bound");
             if (cleared_first != null) {
                 assert_string_equal (cleared_first.get_label (),
-                    "No Recent Files",
+                    "No Recent Files or Folders",
                     "settings signal refreshes the cleared menu once");
                 assert_false (cleared_first.get_sensitive (),
                     "cleared-history placeholder is disabled");
@@ -7189,7 +7318,7 @@ private void test_recent_input_menu_repeated_refresh_is_stable () {
         assert_true (empty_recent != null,
             "empty-history slot binds after popover replacement");
         if (empty_recent != null) {
-            assert_string_equal (empty_recent.get_label (), "No Recent Files",
+            assert_string_equal (empty_recent.get_label (), "No Recent Files or Folders",
                 "rebuilt empty history exposes its placeholder");
             assert_false (empty_recent.get_sensitive (),
                 "rebuilt empty-history placeholder is disabled");
@@ -9975,6 +10104,8 @@ void main (string[] args) {
         test_file_pickers_combine_lock_clears_and_disables_input);
     Test.add_func ("/app-settings/recent-inputs/bounded-deduplicated-pruned",
         test_recent_input_history_is_bounded_deduplicated_and_pruned);
+    Test.add_func ("/app-settings/recent-inputs/folders-persist-and-clear",
+        test_recent_input_folders_persist_and_obey_history_preference);
     Test.add_func ("/app-settings/bit-depth-warning/dialog-preference-persists",
         test_bit_depth_warning_dialog_preference_persists);
     Test.add_func ("/app-settings/smart-optimizer/quality-ceiling-persists",

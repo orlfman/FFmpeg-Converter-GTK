@@ -109,6 +109,7 @@ lasts for this session.
 - Generate Collage — pick any video and get a contact sheet out of it: twelve frames from 8% to 96% of the runtime, tiled into one 4×3 PNG saved next to the source file. Same image Preferences can write automatically after an encode, except this one works on files you already have and doesn't re-encode anything. Size is selectable in Preferences → General at 720p, 1080p, 2K or 4K — note that a 4×3 grid of 16:9 frames is a 64:27 picture, so 1080p means 1920×810 rather than 1920×1080.
 - Audio codec support for AAC, FLAC, MP3, Opus, WAV, and Vorbis, with an option to keep all audio tracks or only the default track
 - Live console output for debugging, and detailed information tab for video metadata
+- Optional Recently Opened history remembers up to 20 input files and bulk folders together. Folder entries are marked “(Folder)” and reopen in bulk mode. Enable it in Preferences; disabling it clears history.
 - Extensive color and light correction and alteration. Full RGB manipulation.
 - Subtitles tab to reorder, remove, add, and extract subtitles.
 - Crop & Trim tab that supports cutting, trimming, scrubbing, re-encoding, copy, creating individual and concatenate segments, and interactive cropping. Even cropping on a per segment basis + concatenate. The video player allows you to select regions within the video to select and crop. Also now has a Chapter Extraction mode to split chapters out of videos!

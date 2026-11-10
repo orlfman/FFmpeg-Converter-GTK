@@ -115,8 +115,8 @@ public class HamburgerMenu {
         // ── Track input file changes to enable/disable action ────────────────
         file_pickers.input_selection_changed.connect (on_input_entry_changed);
 
-        // Prune files deleted since the last opening immediately before the
-        // menu is shown, then update the stable recent-file button slots.
+        // Prune locations deleted since the last opening immediately before the
+        // menu is shown, then update the stable file/folder button slots.
         menu_button.notify["active"].connect (() => {
             if (menu_button.get_active ())
                 refresh_recent_inputs_menu ();
@@ -231,12 +231,12 @@ public class HamburgerMenu {
             var button = recent_input_menu_buttons[i];
             if (i < files.length) {
                 string path = files[i];
-                button.set_label (Path.get_basename (path));
+                button.set_label (recent_input_label (path));
                 button.set_tooltip_text (path);
                 button.set_sensitive (true);
                 button.set_visible (true);
             } else if (files.length == 0 && i == 0) {
-                button.set_label ("No Recent Files");
+                button.set_label ("No Recent Files or Folders");
                 button.set_tooltip_text (null);
                 button.set_sensitive (false);
                 button.set_visible (true);
@@ -283,8 +283,14 @@ public class HamburgerMenu {
         open_recent_input_path (path);
     }
 
+    private static string recent_input_label (string path) {
+        string name = Path.get_basename (path);
+        return FileUtils.test (path, FileTest.IS_DIR)
+            ? "%s (Folder)".printf (name) : name;
+    }
+
     internal static Gtk.Button create_recent_input_button (string path) {
-        var button = new Gtk.Button.with_label (Path.get_basename (path));
+        var button = new Gtk.Button.with_label (recent_input_label (path));
         button.set_tooltip_text (path);
         button.set_hexpand (true);
         button.set_halign (Gtk.Align.FILL);
@@ -434,7 +440,7 @@ public class HamburgerMenu {
         if (!AppSettings.get_default ().recently_opened_enabled)
             return;
 
-        if (FileUtils.test (path, FileTest.IS_REGULAR)) {
+        if (AppSettings.is_recent_input_location (path)) {
             file_pickers.request_input (path);
         } else {
             AppSettings.get_default ().prune_recent_input_files ();
@@ -448,10 +454,14 @@ public class HamburgerMenu {
 
     private void on_input_entry_changed () {
         string path = file_pickers.source_path;
-        bool exists = file_pickers.kind == InputSourceKind.FILE && path.length > 0
+        bool is_file = file_pickers.kind == InputSourceKind.FILE && path.length > 0
             && FileUtils.test (path, FileTest.IS_REGULAR);
-        view_input_action.set_enabled (exists);
-        if (exists)
+        bool is_folder = file_pickers.kind == InputSourceKind.FOLDER && path.length > 0
+            && FileUtils.test (path, FileTest.IS_DIR);
+        view_input_action.set_enabled (is_file);
+        // Only accepted selections enter history. RESOLVING/INVALID and input
+        // changes refused during an operation must not promote a recent item.
+        if (is_file || is_folder)
             AppSettings.get_default ().record_recent_input_file (path);
     }
 }

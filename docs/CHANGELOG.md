@@ -8,9 +8,7 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-No active implementation tasks. Folder Convert/Optimize behavior and the
-2026-11-09 Smart Optimizer fixes are committed and pushed to `origin/main`
-(`6d60a87`, `46daaca`); see the publication entry below.
+No active work.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -26,6 +24,75 @@ Dependencies / blockers / next action:
 ```
 
 ## History
+
+### TASK-20261109-recent-folders-publish — Publish folder history and its audit
+
+- **Agent/date/base:** Codex; 2026-11-09 18:11 America/Phoenix (UTC-07:00);
+  main, project worktree, base 7242896.
+- **Scope/status:** User requested commit and push of the completed folder-history
+  implementation, tests, documentation and audit. All nine reviewed files are
+  included in the accompanying feature commit. This publication follow-up
+  supersedes the earlier entries' local-only status; their original evidence stays.
+- **Checks:** Refreshed origin/main; it matched the base with no divergence.
+  Whitespace and change-scope checks passed, with no file-mode changes. Application
+  sources have not changed since the recorded 28-suite pass and 29-assertion audit;
+  those checks were not rerun solely for publication.
+- **Handoff:** RECENT-F1 remains a low-priority permanent-test improvement, not a
+  reproduced functional defect. No installation or version bump. The requested
+  destination is origin/main; the final publication response records the commit
+  and the result of the push/remote-head verification.
+
+### TASK-20261109-recent-folders-audit — Review recent-folder support
+
+- **Agent/date/base:** Codex; 2026-11-09 17:38 America/Phoenix (UTC-07:00);
+  main, project worktree, 7242896 plus existing recent-folder changes.
+- **Status/scope:** Audit complete, documentation only and uncommitted. Preserved
+  the application and permanent tests exactly as found. No installation/publication.
+- **Result:** No functional regression found. Recorded RECENT-F1 (low, permanent
+  test coverage) in AUDIT.md and explicitly corrected the earlier overstatement
+  about main-window coverage from component tests, preserving historical evidence.
+- **Checks:** Static review plus a disposable full-application harness on Wayland:
+  29 assertions passed for bulk-panel/tab/playback state, reopening, rapid input
+  changes, locking during resolution, child deletion, renamed folders, symlink
+  reopening/pruning, type replacement and disabled history. Synthetic media and
+  isolated settings/cache/temp only. Reviewed the previous 28-suite pass; did not
+  rerun the whole suite without source changes. Whitespace check passed.
+- **Limits/handoff:** No new network-mount or native chooser/mouse check. Retain
+  the full-window and asynchronous edge checks in a maintained test target when
+  addressing RECENT-F1. Evidence and detailed limitations are in AUDIT.md and
+  /tmp/ffgtk-recent-audit-v3yuj81_/. Feature implementation remains uncommitted.
+
+### TASK-20261109-recent-folders — Recently Opened supports bulk folders
+
+- **Agent/date/base:** Codex; 2026-11-09 17:28 America/Phoenix (UTC-07:00);
+  main at 7242896, project worktree, clean at start.
+- **Status:** Complete, local and uncommitted. No installation or publication.
+- **Behavior:** Files and folders share the existing optional 20-entry history.
+  Folders appear as `basename (Folder)` with full-path tooltips and reopen through
+  FilePickers' normal asynchronous selection into folder mode. Playback remains
+  file-only. Accepted selections promote history; operation/admission locks
+  block reopening without promoting the rejected item. Missing folders are
+  pruned. Clear/disable history removes both types; history remains off by default.
+- **Implementation:** app-settings.vala accepts regular files and directories;
+  legacy API names and persisted recent_files/input_files key remain compatible.
+  hamburger-menu.vala records accepted folders and routes recent entries through
+  guarded request_input. settings-dialog.vala explains mixed history. README,
+  smoke checklist and bulk plan updated.
+- **Tests:** Mixed history bounds/deduplication/pruning; folder persistence,
+  disabled recording and clearing; actual GTK menu activation, folder/file mode,
+  playback gating, literal paths, blocked selection and stale-folder cleanup.
+  Corrected BASELINE-F2: the existing menu test now waits for asynchronous input
+  acceptance before asserting promotion, matching production semantics.
+- **Validation:** Development build succeeds with the same three application
+  Vala warnings. Focused suites pass; full suite 28 OK, zero failures. The
+  dedicated fatal-warning menu test and bulk widget suite execute on Wayland
+  without skips. Headless combine-window-state has 108 intentional widget skips;
+  its two recent-history data cases pass, and the dedicated menu run supplies
+  the relevant display coverage. No native chooser/mouse or installed-app check.
+- **Evidence/handoff:** TASK-20261109-recent-folders in AUDIT.md. Local logs:
+  /tmp/ffgtk-recent-folders-build.log, /tmp/ffgtk-recent-folders-tests.log,
+  /tmp/ffgtk-recent-folders-full-suite.log. Settings/cache/temp roots isolated;
+  no user preferences or media changed.
 
 ### TASK-20261109-fractional-target-audit — Fractional target support assessment
 

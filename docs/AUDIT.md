@@ -20,8 +20,8 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 
 | ID | Severity / status | Owner | Next action |
 | --- | --- | --- | --- |
+| RECENT-F1 | Low / open, test coverage | Unassigned | Keep the main-window recent-folder integration and async/monitor edge checks in a permanent regression target; see TASK-20261109-recent-folders-audit. |
 | BASELINE-F1 | Medium / open, pre-existing | Unassigned | Investigate the mpv-backend timeout with appropriate local audio/runtime access. |
-| BASELINE-F2 | Low / open | Unassigned | Check the failing hamburger recent-menu test against the base revision. |
 | SO-F1 | High / fixed; knee stop awaiting real-media verification | Unassigned | Run Ultra on a source that cannot reach VMAF 97 (1080p animation) and confirm the knee stop. |
 | SO-F4 | Medium / open | Unassigned | Loosen the two-pass VBV cap and add a post-encode size correction. |
 | SO-F5 | Medium / open, design | Unassigned | Derive effort, preset, ladder and audio share from bitrate density, not megabytes. |
@@ -44,6 +44,103 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### TASK-20261109-recent-folders-publish — Publication follow-up
+
+- **Agent/date/base:** Codex; 2026-11-09 18:11 America/Phoenix (UTC-07:00);
+  main at 7242896 plus the reviewed changes.
+- **Status:** The user subsequently requested publication of the folder-history
+  feature and audit. Both are included in the accompanying commit; earlier
+  local-only status statements describe the state when those checks ran.
+- **Scope/limits:** No new application changes or audit conclusions. RECENT-F1
+  remains open. Checked the final diff and remote base; prior runtime results
+  remain the validation evidence. See the matching changelog publication entry.
+
+### TASK-20261109-recent-folders-audit — Review of folder history
+
+- **Agent/date/base:** Codex; 2026-11-09 17:38 America/Phoenix (UTC-07:00);
+  main at 7242896 plus the uncommitted recent-folder implementation.
+- **Scope/result:** Reviewed all implementation/test/documentation changes,
+  settings load/save and pruning, stable menu slots and monitors, input admission,
+  asynchronous classification, and MainWindow/AppController folder handling.
+  No functional regression found within the reviewed and exercised scope.
+  Existing file history remains compatible; directory classification happens
+  before media-extension checks, and only accepted inputs enter history.
+- **Fresh runtime evidence:** A disposable build using the current application
+  sources, including the real MainWindow and AppController, passed 29 assertions
+  on the local Wayland display. Scratch copies only renamed the entry point and
+  exposed inspection helpers; repository application/test sources were unchanged.
+  Checked recent-folder activation and completed rescan, visible bulk panel,
+  disabled trim/playback, return to file mode, child deletion retaining its parent,
+  two rapid selections recording only the latest, a lock applied during resolution
+  preventing acceptance/promotion, symlink labels and reopening, automatic pruning
+  after rename (including a broken symlink), and a former directory replaced by a
+  regular file being reclassified correctly. Disable-history clearing also passed.
+- **RECENT-F1 (low, open, test coverage; owner unassigned):** The checked-in
+  recent-menu test constructs FilePickers/HamburgerMenu in an application window;
+  its Meson target excludes main.vala and app-controller.vala. It therefore cannot
+  protect MainWindow's bulk-panel/tab wiring. The extra rapid-selection, late-lock,
+  rename/symlink and type-replacement cases above also remain audit-only checks.
+  All passed here; this finding concerns future regression protection, not a
+  demonstrated product failure. Affected: meson.build:645 and
+  tests/combine-window-state-test.vala:7214, at the base plus local changes.
+  **Next action:** Add a maintained full-window smoke target and retain the useful
+  async/monitor cases as focused regression tests; no urgent application fix needed.
+- **Coverage correction (Codex):** The earlier implementation entry's statement
+  that the bulk widget suite verifies main-window behavior was too broad. That
+  suite covers component/controller behavior, not the actual MainWindow. The
+  fresh scratch run above now supplies direct integration evidence for this audit,
+  but does not close the permanent-coverage gap. Earlier evidence is preserved.
+- **Previous checks distinguished:** The implementation's development build and
+  full suite (28 OK, zero failures) were inspected, not rerun for this read-only
+  review. The dedicated recent-menu test ran without skips; 108 headless combined
+  widget skips remain excluded from desktop coverage.
+- **Limits/design choices:** No network/removable filesystem or native chooser/
+  mouse validation. Existing synchronous existence checks can wait on slow mounts;
+  unavailable paths are pruned like missing files. Symlink aliases remain distinct
+  lexical history entries, and older binaries prune folders from the shared key.
+  These are existing policies or unmeasured limits, not new reproduced failures.
+- **Artifacts/status:** /tmp/ffgtk-recent-audit-v3yuj81_/audit.vala, sources.json,
+  compile.log and run.log. The scratch build had three existing application Vala
+  warnings plus one unused renamed-entry-point warning; runtime emitted local
+  Vulkan-driver notices. Settings/cache/temp and the synthetic video were isolated.
+  No user media/preferences changed, no installation, commit or push. Audit complete;
+  only shared documentation changed during this review.
+
+### TASK-20261109-recent-folders — Folder history implementation and validation
+
+- **Agent/date/base:** Codex; 2026-11-09 17:28 America/Phoenix (UTC-07:00);
+  main at 7242896 plus this task's local changes.
+- **Scope:** Optional recent-input storage/validation, stable hamburger slots,
+  guarded folder reopening, preference wording, persistence/pruning and tests.
+- **Result:** Files and directories share history without a settings migration.
+  Folder paths reach FilePickers.request_input and its async filesystem-type
+  classifier; existing folder-mode handlers do the rest. Only accepted FILE or
+  FOLDER states are recorded. Folder entries cannot enable video playback or
+  bypass input locking. No additional unresolved defect identified in this scope.
+- **BASELINE-F2 follow-up (verified test fix):** Existing recent-menu assertion
+  inspected MRU history immediately after clicked(), before query_info_async
+  accepted the new source. Added a bounded wait for FILE acceptance and promotion.
+  Both the focused run and full-suite dedicated GTK run now pass; production
+  file-history behavior was not changed to make the test synchronous. The original
+  failure and investigation entry below are retained for evidence.
+- **Checks:** Development build succeeds with three existing Vala warnings;
+  focused combine-window-state, bulk-conversion-widgets and
+  hamburger-recent-menu-rebuild pass. Full suite: 28 OK, zero failures. Mixed
+  history and persistence/disable/clear data cases pass. Dedicated menu and bulk
+  GTK tests have no skips; 108 headless combined-suite widget skips are not
+  counted as desktop coverage.
+- **Desktop evidence:** Actual mapped GTK menu with fatal warnings enabled;
+  button signals drive folder reopening, return to file mode, playback gating,
+  blocked operation/admission paths and deleted-folder rejection. Folder fixture
+  includes spaces, Unicode, a semicolon and a media-looking extension. Existing
+  bulk widget suite verifies main-window folder behavior. No native mouse/chooser
+  or installed release smoke run is claimed.
+- **Limits/status:** Local uncommitted implementation. Original settings keys
+  retained; older binaries still prune directories according to their old rules.
+  Network-filesystem monitoring and symlink alias deduplication were not newly
+  tested. Test settings isolated; no external media accessed or preferences changed.
+  BASELINE-F1's suite passes here, but its historical root cause was not investigated.
 
 ### TASK-20261109-fractional-target-audit — Fractional target feasibility
 

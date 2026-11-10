@@ -104,8 +104,13 @@ Never overwrite source media or remove existing outputs to make a check pass.
   explain that Optimize is needed. Replace a source/watermark and check stale settings
   are rejected. Switching codec uses the new codec and clears incompatible saved settings.
 - Retry skips completed rows; Rescan includes them and clears recommendations.
+- Enable Recently Opened in Preferences. Open a file and a bulk folder; check the
+  folder is labelled “(Folder)” with its full path in the tooltip. Reopen each
+  from the menu and restart the app to check persistence. A folder must restore
+  bulk mode with input playback disabled. Clear History and disable history;
+  both files and folders must disappear. Deleted folders must be pruned.
 - During analysis/encoding, attempt another Optimize, Convert, Combine, recent-file
-  selection and input drop. They cannot replace the active input or launch competing work.
+  or recent-folder selection and input drop. They cannot replace the active input or launch competing work.
 - Pre-create output names and sidecars, including source aliases. Verify bytes are
   unchanged and new outputs get suffixes. Verify the default `Converted` folder.
 - Cancel during analysis, each encoding pass and optional collage. Check no next file
