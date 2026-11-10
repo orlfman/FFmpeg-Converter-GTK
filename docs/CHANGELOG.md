@@ -25,6 +25,39 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261109-resources-screenshot-history — Consolidate the screenshot commits
+
+- **Agent/date/base:** Codex, 2026-11-09 20:00 America/Phoenix (UTC-07:00), main at 500388d.
+- **Change:** With the user's approval, combined the two screenshot commits
+  into one gallery addition containing the newer capture. The original
+  screenshot blob is absent from the replacement commit's ancestry.
+- **Validation:** Checked the replacement tree and its parent, confirmed the
+  gallery image matches the supplied replacement, and checked whitespace.
+  The entries below preserve the record of the initial addition and swap.
+
+### TASK-20261109-resources-screenshot-swap — Replace the conversion resource screenshot
+
+- **Agent/date/base:** Codex, 2026-11-09 19:56 America/Phoenix (UTC-07:00), main at 91caa5c.
+- **Change:** Replaced the gallery image with the newer capture supplied by the
+  user. The gallery continues to use the same asset path and caption.
+- **Validation:** Inspected the PNG, compared the replacement byte for byte,
+  and verified the README reference. Documentation change packaged in the
+  accompanying commit for origin/main.
+
+### TASK-20261109-resources-screenshot — Conversion resource-usage screenshot
+
+- **Agent/date/base:** Codex; 2026-11-09 19:53 America/Phoenix (UTC-07:00);
+  main, project worktree, f073661; clean at start.
+- **Scope/status:** User requested adding the supplied screenshot to GitHub's
+  screenshot section. Added Screenshots/Screenshot-System-Resources-Conversion.png
+  and a labelled README gallery cell with descriptive alt text, caption and
+  full-size image link. Included in this documentation commit for origin/main.
+- **Validation:** Inspected the supplied image; copied it byte-for-byte without
+  alteration. Verified README paths, whitespace and remote-base alignment.
+  No application changes or build/tests needed for this documentation-only update.
+- **Handoff:** No outstanding implementation work; final response records the
+  commit and push verification. Original screenshot remains unchanged.
+
 ### TASK-20261109-bulk-playback-publish — Commit and push of bulk playback with its review fixes
 
 - **Agent/date/base:** Claude Code, at the user's request; 2026-11-09 19:40

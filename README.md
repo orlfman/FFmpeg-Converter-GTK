@@ -100,6 +100,7 @@ lasts for this session.
     </tr>
     <tr>
       <td align="center"><b>Audio Tab</b><br><img src="Screenshots/Screenshot-Audio-Tab.png" width="400"></td>
+      <td align="center"><b>System Resources During Conversion</b><br><a href="Screenshots/Screenshot-System-Resources-Conversion.png"><img src="Screenshots/Screenshot-System-Resources-Conversion.png" alt="CPU, memory and GPU monitoring while FFmpeg converts a video" width="400"></a><br>CPU, memory and GPU monitoring during conversion.</td>
     </tr>
   </table>
 
