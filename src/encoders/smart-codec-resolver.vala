@@ -189,6 +189,12 @@ public class SmartCodecResolver : Object {
         snapshot.psy_rd_enabled = true;
         snapshot.b_adapt = 2;
         snapshot.psy_rd = 1.0;
+        // Psy-trellis and the deblock offset come from the shared tuning so
+        // calibration measures the same values; with animation or stillimage
+        // they stay at x264's defaults and the tune decides.
+        snapshot.psy_trellis = tuning.x264_psy_trellis;
+        snapshot.deblock_alpha = tuning.x264_deblock_offset;
+        snapshot.deblock_beta = tuning.x264_deblock_offset;
         switch (rec.effort) {
             case EncodeEffort.MINIMAL:
                 snapshot.ref_frames = "3";
@@ -196,7 +202,6 @@ public class SmartCodecResolver : Object {
                 snapshot.me = "hex";
                 snapshot.subme = 7;
                 snapshot.me_range = 16;
-                snapshot.psy_trellis = 0.0;
                 break;
             case EncodeEffort.LOW:
                 snapshot.ref_frames = "4";
@@ -204,7 +209,6 @@ public class SmartCodecResolver : Object {
                 snapshot.me = "hex";
                 snapshot.subme = 8;
                 snapshot.me_range = 16;
-                snapshot.psy_trellis = 0.1;
                 break;
             case EncodeEffort.MEDIUM:
                 snapshot.ref_frames = "5";
@@ -212,7 +216,6 @@ public class SmartCodecResolver : Object {
                 snapshot.me = "umh";
                 snapshot.subme = 9;
                 snapshot.me_range = 24;
-                snapshot.psy_trellis = 0.15;
                 break;
             case EncodeEffort.HIGH:
                 snapshot.ref_frames = "6";
@@ -220,9 +223,6 @@ public class SmartCodecResolver : Object {
                 snapshot.me = "umh";
                 snapshot.subme = 10;
                 snapshot.me_range = 32;
-                snapshot.deblock_alpha = -1;
-                snapshot.deblock_beta = -1;
-                snapshot.psy_trellis = 0.2;
                 snapshot.open_gop = true;
                 break;
             case EncodeEffort.MAXIMUM:
@@ -231,9 +231,6 @@ public class SmartCodecResolver : Object {
                 snapshot.me = "umh";
                 snapshot.subme = 11;
                 snapshot.me_range = 32;
-                snapshot.deblock_alpha = -1;
-                snapshot.deblock_beta = -1;
-                snapshot.psy_trellis = 0.25;
                 snapshot.open_gop = true;
                 break;
         }

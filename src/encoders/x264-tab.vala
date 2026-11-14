@@ -187,7 +187,7 @@ public class X264Tab : BaseCodecTab {
         // CRF value
         crf_row = new Adw.ActionRow ();
         crf_row.set_title ("CRF Value");
-        crf_row.set_subtitle ("Lower = better quality (0–51, default 23)");
+        crf_row.set_subtitle ("Lower = better quality (0–51, default 23) — 0 is lossless for 8-bit output only: needs Profile Auto or High444 and is written as High 4:4:4 Predictive, which few players support. For 10-bit lossless use QP 0");
         crf_spin = new SpinButton.with_range (0, 51, 1);
         crf_spin.set_value (23);
         crf_spin.set_valign (Align.CENTER);
@@ -197,7 +197,7 @@ public class X264Tab : BaseCodecTab {
         // QP value
         qp_row = new Adw.ActionRow ();
         qp_row.set_title ("QP Value");
-        qp_row.set_subtitle ("Fixed quantization parameter (0–69, default 23)");
+        qp_row.set_subtitle ("Fixed quantization parameter (0–69, default 23) — 0 is lossless at 8 and 10 bit: needs Profile Auto or High444 and is written as High 4:4:4 Predictive");
         qp_spin = new SpinButton.with_range (0, 69, 1);
         qp_spin.set_value (23);
         qp_spin.set_valign (Align.CENTER);
@@ -266,7 +266,7 @@ public class X264Tab : BaseCodecTab {
         // Tune
         var tune_row = new Adw.ActionRow ();
         tune_row.set_title ("Tune");
-        tune_row.set_subtitle ("Optimize for specific content types");
+        tune_row.set_subtitle ("Optimize for specific content types — Advanced settings left at their defaults follow the tune");
         tune_combo = new DropDown (new StringList ({
             "Auto", "film", "animation", "grain", "stillimage",
             "psnr", "ssim", "fastdecode", "zerolatency"
@@ -279,13 +279,14 @@ public class X264Tab : BaseCodecTab {
         // Level
         var level_row = new Adw.ActionRow ();
         level_row.set_title ("Level");
-        level_row.set_subtitle ("Constrains resolution, bitrate, and buffers for compatibility");
+        level_row.set_subtitle ("Written into the stream for player compatibility — x264 warns but still encodes if the video exceeds the level");
         level_combo = new DropDown (new StringList ({
             "Auto", "1", "1.1", "1.2", "1.3",
             "2", "2.1", "2.2",
             "3", "3.1", "3.2",
             "4", "4.1", "4.2",
-            "5", "5.1", "5.2"
+            "5", "5.1", "5.2",
+            "6", "6.1", "6.2"
         }), null);
         level_combo.set_valign (Align.CENTER);
         level_combo.set_selected (0);
@@ -347,7 +348,7 @@ public class X264Tab : BaseCodecTab {
         // ME Algorithm
         var me_row = new Adw.ActionRow ();
         me_row.set_title ("Algorithm");
-        me_row.set_subtitle ("Higher quality algorithms are slower but find better matches");
+        me_row.set_subtitle ("Higher quality algorithms are slower but find better matches — hex leaves the choice to the preset");
         me_combo = new DropDown (new StringList ({
             "dia", "hex", "umh", "esa", "tesa"
         }), null);
@@ -359,7 +360,7 @@ public class X264Tab : BaseCodecTab {
         // ME Range
         var mer_row = new Adw.ActionRow ();
         mer_row.set_title ("Search Range");
-        mer_row.set_subtitle ("Pixel radius for motion search (4–64, default 16)");
+        mer_row.set_subtitle ("Pixel radius for motion search (4–64, default 16) — above 16 needs umh, esa or tesa");
         me_range_spin = new SpinButton.with_range (4, 64, 1);
         me_range_spin.set_value (16);
         me_range_spin.set_valign (Align.CENTER);
@@ -369,7 +370,7 @@ public class X264Tab : BaseCodecTab {
         // Subpixel Refinement
         var subme_row = new Adw.ActionRow ();
         subme_row.set_title ("Subpixel Refinement");
-        subme_row.set_subtitle ("Higher = sharper motion compensation, slower (0–11)");
+        subme_row.set_subtitle ("Higher = sharper motion compensation, slower (0–11) — 7 follows the preset; 10 and 11 also turn on trellis 2 and need AQ on");
         subme_combo = new DropDown (new StringList ({
             "0 — Fullpel only",
             "1 — QPel SAD",
@@ -403,19 +404,19 @@ public class X264Tab : BaseCodecTab {
         // Reference Frames
         var ref_row = new Adw.ActionRow ();
         ref_row.set_title ("Reference Frames");
-        ref_row.set_subtitle ("More = better compression, slower encoding (1–16)");
+        ref_row.set_subtitle ("More = better compression, slower encoding (1–16) — Auto follows the preset and tune");
         ref_frames_combo = new DropDown (new StringList (
-            { "1", "2", "3", "4", "5", "6", "8", "12", "16" }
+            { "Auto", "1", "2", "3", "4", "5", "6", "8", "12", "16" }
         ), null);
         ref_frames_combo.set_valign (Align.CENTER);
-        ref_frames_combo.set_selected (2);   // 3 — x264 default
+        ref_frames_combo.set_selected (0);   // Auto — the preset decides
         ref_row.add_suffix (ref_frames_combo);
         group.add (ref_row);
 
         // B-Frames
         var bf_row = new Adw.ActionRow ();
         bf_row.set_title ("B-Frames");
-        bf_row.set_subtitle ("Consecutive bidirectional frames (0–16, default 3)");
+        bf_row.set_subtitle ("Consecutive bidirectional frames (0–16) — at 3 the preset and tune decide");
         bframes_spin = new SpinButton.with_range (0, 16, 1);
         bframes_spin.set_value (3);
         bframes_spin.set_valign (Align.CENTER);
@@ -425,7 +426,7 @@ public class X264Tab : BaseCodecTab {
         // B-Frame Adaptation
         var ba_row = new Adw.ActionRow ();
         ba_row.set_title ("B-Frame Adaptation");
-        ba_row.set_subtitle ("How the encoder decides where to place B-frames");
+        ba_row.set_subtitle ("How the encoder decides where to place B-frames — Fast leaves the choice to the preset");
         b_adapt_combo = new DropDown (new StringList ({
             "Disabled", "Fast", "Optimal"
         }), null);
@@ -448,7 +449,7 @@ public class X264Tab : BaseCodecTab {
         // Deblock Filter (ExpanderRow with alpha/beta)
         deblock_expander = new Adw.ExpanderRow ();
         deblock_expander.set_title ("Deblock Filter");
-        deblock_expander.set_subtitle ("Reduce blockiness — negative values preserve detail");
+        deblock_expander.set_subtitle ("Reduce blockiness — negative values preserve detail; at 0, 0 the tune decides");
         deblock_expander.set_show_enable_switch (true);
         deblock_expander.set_enable_expansion (true);
 
@@ -474,7 +475,7 @@ public class X264Tab : BaseCodecTab {
         // Psy-RD (ExpanderRow with RD + Trellis)
         psy_rd_expander = new Adw.ExpanderRow ();
         psy_rd_expander.set_title ("Psychovisual Optimization");
-        psy_rd_expander.set_subtitle ("Tunes decisions for perceptual quality rather than raw metrics");
+        psy_rd_expander.set_subtitle ("Tunes decisions for perceptual quality rather than raw metrics — at 1.0 and 0.0 the tune decides");
         psy_rd_expander.set_show_enable_switch (true);
         psy_rd_expander.set_enable_expansion (true);
 
@@ -929,7 +930,7 @@ public class X264Tab : BaseCodecTab {
         subme_combo.set_selected (7);
 
         // Advanced
-        ref_frames_combo.set_selected (2);
+        ref_frames_combo.set_selected (0);
         bframes_spin.set_value (3);
         b_adapt_combo.set_selected (1);
         weightp_switch.set_active (true);

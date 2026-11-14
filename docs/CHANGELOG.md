@@ -25,6 +25,132 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261114-x264-publish — Commit and push of the x264 audit, fixes and reviews
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("commit
+  and push"); 2026-11-14 America/Phoenix (UTC-07:00); `main` at 4760b73.
+- **What:** one commit, "Make the x264 tab's settings apply as labelled", then
+  `main` pushed to GitHub. It holds TASK-20261114-x264-settings-check,
+  -settings-fix and -crf0-subtitle (Claude Code) and the log entries of
+  TASK-20261114-x264-independent-review and -crf0-recheck (Codex, GPT-6).
+- **Checks before committing:** read Codex's recheck entry (no new findings);
+  `git diff --check` clean. No version bump, no AUR change.
+
+### TASK-20261114-x264-crf0-recheck — Verify the corrected lossless guidance
+
+- **Agent/date/base:** Codex (GPT-6), 2026-11-14 America/Phoenix; main at
+  4760b73 with the existing uncommitted changes preserved.
+- **Result:** reviewed Fable’s TASK-20261114-x264-crf0-subtitle; no new
+  findings. X264-REV-F1 independently verified fixed through seven synthetic
+  bit-depth/profile checks and decoded sample hashes. Details in
+  AUD-20261114-x264-crf0-recheck.
+- **Scope/status:** completed; shared review logs only, no implementation
+  edits or commits. Diff check passes. No repeat build/suite run for the
+  wording-only correction, and no manual visual inspection.
+
+### TASK-20261114-x264-crf0-subtitle — CRF 0 is lossless at 8 bit only
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request
+  (pointing to Codex's review); 2026-11-14 America/Phoenix (UTC-07:00);
+  `main` at 4760b73 plus the uncommitted x264 changes. Uncommitted.
+- **Why:** X264-REV-F1 from AUD-20261114-x264-independent-review. Reproduced:
+  10-bit CRF 0 stays ordinary CRF and is lossy; 10-bit QP 0 is lossless.
+- **Changed:** `src/encoders/x264-tab.vala`, CRF and QP subtitles only.
+  `docs/AUDIT.md`: follow-up under the review entry; X264-REV-F1 removed from
+  the unresolved index.
+- **Checks:** development build exit 0, same 3 Vala warnings; three focused
+  suites pass. Subtitle not viewed in the running app.
+- **Status:** done. Nothing committed.
+
+### TASK-20261114-x264-independent-review — Review of Fable 5.2’s x264 work
+
+- **Agent/date/base:** Codex (GPT-6), 2026-11-14 America/Phoenix; main at
+  4760b73, main checkout with Fable’s uncommitted changes preserved.
+- **Result:** one Medium finding, X264-REV-F1: CRF 0 is lossy at 10 bit,
+  contrary to the new subtitle. Four synthetic control encodes and decoded
+  sample hashes establish the distinction from QP 0. Details and correction
+  to the prior audit claim are in AUD-20261114-x264-independent-review.
+- **Checks:** focused suites 4 OK / 0 failures, including real GTK execution
+  of the x264 defaults test; application build up to date; seven additional
+  synthetic encoder checks passed; diff whitespace check passed. Full suite,
+  VMAF measurements and manual visual checks not repeated.
+- **Changes/status:** only review entries in the two shared logs; no source
+  edits or commits. Review complete; next action is correcting the CRF
+  guidance and its audit documentation, then checking the resulting text.
+
+### TASK-20261114-x264-settings-fix — x264 settings apply as labelled
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("Fix
+  all 8"); 2026-11-14 15:21–15:30 America/Phoenix (UTC-07:00) by the system
+  clock; `main` at 4760b73. Uncommitted, together with
+  TASK-20261114-x264-settings-check.
+- **Why:** AUD-20261114-x264-settings, X264-F1 to X264-F8.
+- **Changed:**
+  - `src/encoders/x264-builder.vala`: `cabac=0` / `mbtree=0` replace the
+    valueless flags; `ref`, `bframes`, `b-adapt`, `deblock`, `me` and `psy-rd`
+    are sent only when changed from x264's defaults or turned off; subme 10
+    and 11 add `trellis=2`; new `psy_differs_from_default` and
+    `smart_tuning_params`.
+  - `src/encoders/x264-tab.vala`: Reference Frames "Auto" (default on build
+    and reset); Level 6, 6.1, 6.2; subtitles for CRF, QP, Tune, Level, ME
+    algorithm, Search Range, Subpixel Refinement, Reference Frames, B-Frames,
+    B-Frame Adaptation, Deblock and Psy.
+  - `src/optimizer/smart-optimizer-logic.vala`: `EncoderTuning` carries x264
+    psy-trellis, deblock offset and subme 10/11; `x264_psy_trellis_for_effort`;
+    tuning key and doc comment updated.
+  - `src/encoders/smart-codec-resolver.vala`: `resolve_x264` takes psy-trellis
+    and deblock from the tuning. `src/encoders/codec-utils.vala` (trim direct
+    args) and `src/optimizer/smart-optimizer.vala` (calibration) send the
+    same tuning parameters. `smart-optimizer-cache.vala`: version 5 → 6.
+  - `tests/combine-window-state-test.vala`: five x264 tests; x264 golden
+    digests 0–9 updated and each checked against its legacy digest; the
+    effort-policy assertion expects `trellis=2` beside `subme=11`.
+- **Behaviour changes to know:** an untouched x264 tab now follows the preset
+  and tune exactly. Smart Codec anime and screencast encodes keep the tune's
+  psy and deblock. High and maximum effort calibration probes for x264 take
+  about twice as long, in exchange for about 1.5–2.5% size drift instead of
+  about 7%. Cached optimizer samples from v5 are not reused.
+- **Rejected:** Auto entries for B-frames, adaptation and ME (more UI; the
+  x265 fix set the same precedent); subtitle-only for subme 10/11 (Smart
+  Codec's top two efforts would stay identical to subme 9); blocking lossless
+  or out-of-level encodes in the app (x264 already reports both).
+- **Checks:** development build exit 0, the same 3 pre-existing Vala
+  warnings; full suite 27 OK / 2 failing, then 28 / 1 on re-running the two:
+  `bulk-playback` passed the second time, `preview-fullscreen-state` also
+  fails at 4760b73 in a clean worktree (BASELINE-F2). The new widget test ran,
+  not skipped. Real x264 encodes confirmed each new argument string.
+- **Not done:** app window not opened; not committed or pushed. A release
+  would need the AUR package only after a version bump, which was not asked
+  for.
+
+### TASK-20261114-x264-settings-check — Check that x264 settings reach the encoder
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("audit
+  x264 tab settings like how av1, x265, and vp9 was done"); 2026-11-14
+  15:01–15:06 America/Phoenix (UTC-07:00) by the system clock; `main` at
+  4760b73. Investigation only; no code changed. Uncommitted: this entry and
+  AUD-20261114-x264-settings in `docs/AUDIT.md`.
+- **Result:** most settings apply as labelled. Eight findings are recorded as
+  open and unassigned in AUD-20261114-x264-settings:
+  - X264-F1 (High): CABAC off, MB-Tree off, Profile Baseline and Tune
+    fastdecode send a valueless `no-cabac` / `no-mbtree`, which either stops
+    FFmpeg from starting or silently drops that flag and the next parameter.
+  - X264-F2, X264-F3 (Medium): the always-sent tab defaults undo most of what
+    presets and tunes change; zerolatency gets B-frames back.
+  - X264-F4 (Medium): Smart Codec's final x264 arguments differ from what
+    calibration measured (−18% to +10% size on one clip).
+  - X264-F5 to X264-F8 (Low): subme 10/11, search range above 16, Level and
+    lossless do less than, or something other than, the tab says.
+- **Checks:** FFmpeg 9.0.2 / x264 core 165 runs only, reading x264's applied
+  option line. No build and no tests were run (no code changed). The app was
+  not opened.
+- **Next steps:** X264-F1 has a tested replacement (`cabac=0`, `mbtree=0`) and
+  needs a builder test. X264-F2 and X264-F3 need the same decision x265 got in
+  TASK-20261110-x265-settings-fix (send a value only when it differs from the
+  encoder default, or add Auto entries); that changes Smart Codec x264 golden
+  digests and needs an optimizer cache version bump. Re-measure X264-F4 after
+  that. X264-F5 to X264-F8 are subtitle or range changes.
+
 ### TASK-20261110-vp9-libvpx-independence — VP9 settings no longer assume libvpx 1.17
 
 - **Agent/date/base:** Claude Code (Opus 5.5), at the user's request ("Yes,

@@ -2346,6 +2346,16 @@ namespace SmartOptimizerLogic {
      * medium −1.8% / VMAF −0.00, high −0.7% / −0.05, both inside ±2%. Max
      * effort's "faster" preset (2 refs vs Smart Codec's 5) gave +2.7% /
      * +0.57 for ×1.5 probe encode time; kept excluded by choice.
+     *
+     * x264 re-measured 2026-11-14 (AUD-20261114-x264-settings, X264-F4). The
+     * tab used to send psy-rd 1.0 and deblock 0,0 on top of the tune, so the
+     * final encode drifted −18% (stillimage) to +10% (animation) from the
+     * probe. The tune now keeps its own psy and deblock, and psy-trellis,
+     * the deblock offset and subme 10/11 (which need trellis 2) are carried
+     * here. Remaining drift from references, B-frames and motion search,
+     * probe vs applied at CRF 23: −2.5% to +2.4% size across efforts and
+     * tunes on one clip. subme 10/11 roughly doubles probe encode time at
+     * high and maximum effort; without it those efforts drift about −7%.
      */
     public struct EncoderTuning {
         /** x264/x265 -tune value; "" for none. Only ONE tune is possible. */
@@ -2359,13 +2369,20 @@ namespace SmartOptimizerLogic {
         public int    fast_decode_level;
         /** VP9/SVT-AV1 native sharpness; 0 = disabled. */
         public int    native_sharpness;
+        /** x264 psy-trellis; 0 leaves the encoder default or the tune's. */
+        public double x264_psy_trellis;
+        /** x264 deblock alpha and beta offset; 0 leaves the default or the tune's. */
+        public int    x264_deblock_offset;
+        /** x264 subme when it changes rate noticeably (10, 11); 0 = not carried. */
+        public int    x264_subme;
     }
 
     /** Stable identity for a tuning, for use in the calibration cache key. */
     public string encoder_tuning_key (EncoderTuning t) {
-        return "%s|%d|%d|%.2f|%d|%d".printf (
+        return "%s|%d|%d|%.2f|%d|%d|%.2f|%d|%d".printf (
             t.tune, t.film_grain ? 1 : 0, t.film_grain_strength,
-            t.psy_rd, t.fast_decode_level, t.native_sharpness);
+            t.psy_rd, t.fast_decode_level, t.native_sharpness,
+            t.x264_psy_trellis, t.x264_deblock_offset, t.x264_subme);
     }
 
     // ── Temporal tuning: decoded-pixel signals, never source GOP metadata ───
@@ -2622,6 +2639,17 @@ namespace SmartOptimizerLogic {
         return int.min (requested, cap);
     }
 
+    /** x264 psy-trellis by effort; resolve_x264 and calibration both use it. */
+    public double x264_psy_trellis_for_effort (EncodeEffort effort) {
+        switch (effort) {
+            case EncodeEffort.LOW:     return 0.1;
+            case EncodeEffort.MEDIUM:  return 0.15;
+            case EncodeEffort.HIGH:    return 0.2;
+            case EncodeEffort.MAXIMUM: return 0.25;
+            default:                   return 0.0;
+        }
+    }
+
     /** x265 psy-rd by effort, mirroring apply_smart_x265. */
     public double psy_rd_for_effort (EncodeEffort effort) {
         switch (effort) {
@@ -2663,7 +2691,8 @@ namespace SmartOptimizerLogic {
     ) {
         var t = EncoderTuning () {
             tune = "", film_grain = false, film_grain_strength = 0,
-            psy_rd = 0.0, fast_decode_level = 0, native_sharpness = 0
+            psy_rd = 0.0, fast_decode_level = 0, native_sharpness = 0,
+            x264_psy_trellis = 0.0, x264_deblock_offset = 0, x264_subme = 0
         };
         bool grain = grain_warranted (grain_score, content_type, source_bit_depth);
 
@@ -2673,6 +2702,18 @@ namespace SmartOptimizerLogic {
             if (fast_decode)                                 t.tune = "fastdecode";
             else if (content_type == ContentType.ANIME)      t.tune = "animation";
             else if (content_type == ContentType.SCREENCAST) t.tune = "stillimage";
+            // animation and stillimage set their own psy and deblock; adding
+            // the effort values on top would undo the tune. fastdecode turns
+            // deblock off and leaves psy alone.
+            bool tune_owns_psy = (t.tune == "animation" || t.tune == "stillimage");
+            if (!tune_owns_psy)
+                t.x264_psy_trellis = x264_psy_trellis_for_effort (effort);
+            if (t.tune.length == 0 && effort >= EncodeEffort.HIGH)
+                t.x264_deblock_offset = -1;
+            // subme 10 and 11 bring trellis 2 with them and move size by
+            // several percent, so calibration has to carry them.
+            if (effort == EncodeEffort.HIGH)         t.x264_subme = 10;
+            else if (effort == EncodeEffort.MAXIMUM) t.x264_subme = 11;
         } else if (codec == "x265") {
             if (fast_decode)                            t.tune = "fastdecode";
             else if (content_type == ContentType.ANIME) t.tune = "animation";

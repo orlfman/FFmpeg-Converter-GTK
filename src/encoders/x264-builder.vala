@@ -38,6 +38,45 @@ public class X264BuilderSnapshot : Object {
 
 public class X264Builder : Object, ICodecBuilder {
 
+    private const int X264_DEFAULT_BFRAMES = 3;
+    private const int X264_DEFAULT_B_ADAPT = 1;
+    private const string X264_DEFAULT_ME = "hex";
+    private const string X264_DEFAULT_PSY_RD = "psy-rd=1.0,0.00";
+    private const int X264_SUBME_NEEDS_TRELLIS_2 = 10;
+
+    private static string format_psy_rd (double psy_rd, double psy_trellis) {
+        return "psy-rd=%s,%s".printf (
+            ConversionUtils.format_ffmpeg_double (psy_rd, "%.1f"),
+            ConversionUtils.format_ffmpeg_double (psy_trellis, "%.2f"));
+    }
+
+    /**
+     * Whether psy-rd/psy-trellis differ from x264's defaults (1.0, 0.0).
+     * At the defaults the selected -tune keeps its own values.
+     */
+    public static bool psy_differs_from_default (double psy_rd, double psy_trellis) {
+        return format_psy_rd (psy_rd, psy_trellis) != X264_DEFAULT_PSY_RD;
+    }
+
+    /**
+     * The x264 parameters Smart Codec's EncoderTuning decides, written the
+     * way build_args_from_snapshot writes them. Calibration and the trim
+     * tab's direct arguments use this so they encode what the tab will.
+     */
+    public static string[] smart_tuning_params (int deblock_offset, int subme,
+                                                double psy_trellis) {
+        string[] params = {};
+        if (deblock_offset != 0)
+            params += @"deblock=$deblock_offset,$deblock_offset";
+        if (subme > 0 && subme != 7)
+            params += "subme=" + subme.to_string ();
+        if (subme >= X264_SUBME_NEEDS_TRELLIS_2)
+            params += "trellis=2";
+        if (psy_differs_from_default (1.0, psy_trellis))
+            params += format_psy_rd (1.0, psy_trellis);
+        return params;
+    }
+
     private weak X264Tab tab;
 
     public X264Builder (X264Tab tab) {
@@ -165,34 +204,37 @@ public class X264Builder : Object, ICodecBuilder {
         string[] params = {};
         bool fast_decode = (snapshot.tune == "fastdecode");
 
+        // ref, bframes, b-adapt, deblock, me and psy-rd are sent only when
+        // they differ from x264's own defaults. -x264-params is applied after
+        // -preset and -tune, so sending a default would undo what they chose.
         string ref_val = snapshot.ref_frames;
-        if (ref_val.length > 0)
+        if (ref_val.length > 0 && ref_val != "Auto")
             params += "ref=" + ref_val;
 
-        int bframes = snapshot.bframes;
-        if (profile == "Baseline")
-            bframes = 0;
-        params += "bframes=" + bframes.to_string ();
-
-        int b_adapt = snapshot.b_adapt;
-        if (profile == "Baseline")
-            b_adapt = 0;
-        params += "b-adapt=" + b_adapt.to_string ();
+        if (profile == "Baseline") {
+            params += "bframes=0";
+            params += "b-adapt=0";
+        } else {
+            if (snapshot.bframes != X264_DEFAULT_BFRAMES)
+                params += "bframes=" + snapshot.bframes.to_string ();
+            if (snapshot.b_adapt != X264_DEFAULT_B_ADAPT)
+                params += "b-adapt=" + snapshot.b_adapt.to_string ();
+        }
 
         if (!snapshot.weightp)
             params += "weightp=0";
 
         bool deblock_enabled = snapshot.deblock_enabled && !fast_decode;
-        if (deblock_enabled) {
+        if (!deblock_enabled) {
+            params += "no-deblock=1";
+        } else if (snapshot.deblock_alpha != 0 || snapshot.deblock_beta != 0) {
             int alpha = snapshot.deblock_alpha;
             int beta  = snapshot.deblock_beta;
             params += @"deblock=$alpha,$beta";
-        } else {
-            params += "no-deblock=1";
         }
 
         string me = snapshot.me;
-        if (me.length > 0)
+        if (me.length > 0 && me != X264_DEFAULT_ME)
             params += "me=" + me;
 
         int mer = snapshot.me_range;
@@ -202,23 +244,23 @@ public class X264Builder : Object, ICodecBuilder {
         int subme = snapshot.subme;
         if (subme != 7)
             params += "subme=" + subme.to_string ();
+        // x264 lowers subme 10 and 11 to 9 unless trellis is 2.
+        if (subme >= X264_SUBME_NEEDS_TRELLIS_2)
+            params += "trellis=2";
 
-        if (snapshot.psy_rd_enabled) {
-            double psy_rd = snapshot.psy_rd;
-            double psy_trellis = snapshot.psy_trellis;
-            params += "psy-rd=%s,%s".printf (
-                ConversionUtils.format_ffmpeg_double (psy_rd, "%.1f"),
-                ConversionUtils.format_ffmpeg_double (psy_trellis, "%.2f")
-            );
-        } else {
+        if (!snapshot.psy_rd_enabled) {
             params += "psy=0";
+        } else if (psy_differs_from_default (snapshot.psy_rd, snapshot.psy_trellis)) {
+            params += format_psy_rd (snapshot.psy_rd, snapshot.psy_trellis);
         }
 
+        // FFmpeg's -x264-params needs key=value. A bare "no-cabac" is either
+        // rejected or swallows the parameter after it.
         if (profile == "Baseline" || fast_decode || !snapshot.cabac)
-            params += "no-cabac";
+            params += "cabac=0";
 
         if (!snapshot.mbtree)
-            params += "no-mbtree";
+            params += "mbtree=0";
 
         if (snapshot.lookahead_enabled) {
             int la = snapshot.lookahead;

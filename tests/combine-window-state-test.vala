@@ -6619,6 +6619,199 @@ private void test_x265_reference_frames_auto_follows_preset () {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  X264 BUILDER TESTS (AUD-20261114-x264-settings)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** A snapshot with the values an untouched X264Tab produces. */
+private X264BuilderSnapshot x264_tab_default_snapshot () {
+    var snapshot = new X264BuilderSnapshot ();
+    snapshot.ref_frames = "Auto";
+    snapshot.me = "hex";
+    snapshot.deblock_enabled = true;
+    snapshot.psy_rd_enabled = true;
+    return snapshot;
+}
+
+private string[] x264_params_for (X264BuilderSnapshot snapshot) {
+    string[] args = X264Builder.build_args_from_snapshot (snapshot);
+    for (int i = 0; i + 1 < args.length; i++) {
+        if (args[i] == "-x264-params")
+            return args[i + 1].split (":");
+    }
+    return {};
+}
+
+private void assert_x264_params_are_key_value (string[] params, string context) {
+    foreach (string param in params) {
+        if (!param.contains ("=") || param.has_suffix ("="))
+            Test.fail_printf ("%s sent '%s', which FFmpeg's -x264-params cannot parse",
+                context, param);
+    }
+}
+
+private void test_x264_cabac_and_mbtree_off_are_key_value () {
+    // A bare "no-cabac" makes FFmpeg reject -x264-params when it is last and
+    // swallow the next parameter otherwise.
+    var snapshot = x264_tab_default_snapshot ();
+    snapshot.cabac = false;
+    snapshot.mbtree = false;
+    snapshot.lookahead_enabled = true;
+    string[] params = x264_params_for (snapshot);
+    assert_x264_params_are_key_value (params, "CABAC and MB-Tree off");
+    assert_array_contains (params, "cabac=0", "CABAC off reaches x264");
+    assert_array_contains (params, "mbtree=0", "MB-Tree off reaches x264");
+    assert_array_contains (params, "rc-lookahead=40",
+        "the parameter after the switches survives");
+
+    var baseline = x264_tab_default_snapshot ();
+    baseline.profile = "Baseline";
+    params = x264_params_for (baseline);
+    assert_x264_params_are_key_value (params, "Baseline");
+    assert_array_contains (params, "cabac=0", "Baseline turns CABAC off");
+    assert_array_contains (params, "bframes=0", "Baseline has no B-frames");
+
+    var fast_decode = x264_tab_default_snapshot ();
+    fast_decode.tune = "fastdecode";
+    fast_decode.threads = "4";
+    params = x264_params_for (fast_decode);
+    assert_x264_params_are_key_value (params, "fastdecode");
+    assert_array_contains (params, "cabac=0", "fastdecode turns CABAC off");
+    assert_array_contains (params, "threads=4", "threads survive after fastdecode");
+}
+
+private void test_x264_defaults_leave_preset_and_tune_alone () {
+    // -x264-params is applied after -preset and -tune, so the tab's defaults
+    // must not be sent: ref=3, bframes=3, b-adapt=1, deblock=0,0, me=hex and
+    // psy-rd=1.0,0.00 used to undo veryslow, animation, zerolatency and others.
+    var snapshot = x264_tab_default_snapshot ();
+    snapshot.preset = "veryslow";
+    snapshot.tune = "animation";
+    assert_array_occurrence_count (X264Builder.build_args_from_snapshot (snapshot),
+        "-x264-params", 0, "untouched settings send no x264 parameters");
+
+    snapshot.ref_frames = "";
+    assert_codec_param_key_absent (x264_params_for (snapshot), "ref",
+        "unset references follow the preset");
+
+    snapshot.ref_frames = "5";
+    snapshot.bframes = 5;
+    snapshot.b_adapt = 2;
+    snapshot.me = "umh";
+    snapshot.deblock_alpha = -1;
+    snapshot.deblock_beta = -2;
+    snapshot.psy_trellis = 0.15;
+    string[] params = x264_params_for (snapshot);
+    assert_array_contains (params, "ref=5", "a chosen reference count applies");
+    assert_array_contains (params, "bframes=5", "a chosen B-frame count applies");
+    assert_array_contains (params, "b-adapt=2", "a chosen B-frame adaptation applies");
+    assert_array_contains (params, "me=umh", "a chosen ME algorithm applies");
+    assert_array_contains (params, "deblock=-1,-2", "chosen deblock offsets apply");
+    assert_array_contains (params, "psy-rd=1.0,0.15", "a chosen psy-trellis applies");
+
+    var off = x264_tab_default_snapshot ();
+    off.deblock_enabled = false;
+    off.psy_rd_enabled = false;
+    params = x264_params_for (off);
+    assert_array_contains (params, "no-deblock=1", "deblock off still applies");
+    assert_array_contains (params, "psy=0", "psy off still applies");
+}
+
+private void test_x264_subme_10_and_11_send_trellis_2 () {
+    // x264 lowers subme 10 and 11 to 9 unless trellis is 2.
+    var snapshot = x264_tab_default_snapshot ();
+    snapshot.subme = 9;
+    assert_codec_param_key_absent (x264_params_for (snapshot), "trellis",
+        "subme 9 leaves trellis to the preset");
+    foreach (int subme in new int[] { 10, 11 }) {
+        snapshot.subme = subme;
+        string[] params = x264_params_for (snapshot);
+        assert_array_contains (params, "subme=%d".printf (subme), "subme reaches x264");
+        assert_array_contains (params, "trellis=2", "subme 10 and 11 bring trellis 2");
+    }
+}
+
+private void test_x264_smart_tuning_matches_final_arguments () {
+    // Calibration and the trim tab's direct arguments use
+    // X264Builder.smart_tuning_params; every one of those parameters must
+    // also be in the arguments Smart Codec's resolver produces.
+    for (int index = 0; index < 10; index++) {
+        var rec = make_smart_codec_case_recommendation (index);
+        var result = SmartCodecResolver.resolve (rec,
+            make_smart_codec_case_requested (index), make_smart_codec_case_general (index));
+        assert_true (result != null, "x264 recommendation resolves");
+        if (result == null) return;
+        string[] final_args = result.to_profile ().codec_args;
+        string[] final_params = {};
+        for (int i = 0; i + 1 < final_args.length; i++) {
+            if (final_args[i] == "-x264-params")
+                final_params = final_args[i + 1].split (":");
+        }
+        assert_x264_params_are_key_value (final_params, "Smart Codec x264");
+
+        var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+            "x264", rec.effort, rec.content_type, rec.grain_score,
+            rec.detail_score, rec.source_bit_depth, rec.fast_decode);
+        foreach (string param in X264Builder.smart_tuning_params (
+                tuning.x264_deblock_offset, tuning.x264_subme, tuning.x264_psy_trellis)) {
+            assert_array_contains (final_params, param,
+                "calibration parameter is in the final arguments, case %d".printf (index));
+        }
+        if (tuning.tune == "animation" || tuning.tune == "stillimage") {
+            assert_codec_param_key_absent (final_params, "psy-rd",
+                "the tune keeps its own psy-rd");
+            assert_codec_param_key_absent (final_params, "deblock",
+                "the tune keeps its own deblock");
+        }
+
+        string[] direct = CodecUtils.build_smart_codec_args (rec);
+        string direct_params = "";
+        for (int i = 0; i + 1 < direct.length; i++) {
+            if (direct[i] == "-x264-params")
+                direct_params = direct[i + 1];
+        }
+        foreach (string param in direct_params.split (":")) {
+            if (param.length > 0)
+                assert_array_contains (final_params, param,
+                    "trim direct parameter is in the final arguments, case %d".printf (index));
+        }
+    }
+}
+
+private void test_smart_codec_widgets_x264_tab_defaults_follow_preset () {
+    if (!ensure_gtk_widget_tests_available ()) return;
+    var tab = new X264Tab ();
+    assert_string_equal (CodecUtils.get_dropdown_text (tab.ref_frames_combo), "Auto",
+        "Reference Frames starts on Auto");
+    string[] args = tab.get_codec_builder ().get_codec_args ();
+    assert_array_occurrence_count (args, "-x264-params", 0,
+        "an untouched x264 tab sends no x264 parameters");
+
+    CodecPresets.set_dropdown_by_label (tab.level_combo, "6.2");
+    assert_string_equal (CodecUtils.get_dropdown_text (tab.level_combo), "6.2",
+        "Level offers 6.2");
+
+    tab.cabac_switch.set_active (false);
+    tab.mbtree_switch.set_active (false);
+    tab.subme_combo.set_selected (11);
+    args = tab.get_codec_builder ().get_codec_args ();
+    assert_array_has_adjacent_pair (args, "-x264-params",
+        "subme=11:trellis=2:cabac=0:mbtree=0",
+        "edited switches reach x264 as key=value");
+
+    tab.reset_defaults ();
+    assert_string_equal (CodecUtils.get_dropdown_text (tab.ref_frames_combo), "Auto",
+        "reset returns Reference Frames to Auto");
+    assert_array_occurrence_count (tab.get_codec_builder ().get_codec_args (),
+        "-x264-params", 0, "reset returns to no x264 parameters");
+
+    // Smart Codec still sets references per effort.
+    var applied = new X264Tab ();
+    applied.apply_smart_recommendation (make_smart_codec_case_recommendation (8));
+    assert_string_equal (CodecUtils.get_dropdown_text (applied.ref_frames_combo), "8",
+        "Smart Codec's reference count lands on the tab");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  FILTERBUILDER DRAWTEXT TESTS
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -7984,18 +8177,26 @@ private void test_encode_profile_composition_without_general_uses_defaults () {
 // relying on libvpx's default. Each new digest was checked by removing exactly
 // that argument pair and reproducing the digest it replaces; nothing else
 // differed, and the other codecs are unchanged.
+//
+// Third deliberate exception (TASK-20261114-x264-settings-fix, X264-F1 to
+// X264-F5): x264 cases 0–9 no longer send x264's defaults (bframes=3,
+// deblock=0,0, me=hex, psy-rd=1.0,0.00), leave psy and deblock to the
+// animation and stillimage tunes, send cabac=0 instead of the valueless
+// no-cabac, and add trellis=2 beside subme 10 and 11. Each new digest was
+// checked by putting the legacy -x264-params string back and reproducing the
+// digest it replaces; no other field differed, and cases 10–39 are unchanged.
 private const string[] SMART_CODEC_GOLDEN_DIGESTS = {
     // x264
-    "e35e995894090fc338f6dd3ae0da0e715c5986f3f000c82f5330ede974c56bed",
-    "ea6e97466f45ccb612046fb47fcdefec8ec1027ee675996d79d508f3777df2b8",
-    "7ef6cec52b87c69c831bf2c83aa93e3f6746a445b0fce83e9a457df23b1f11db",
-    "3275d8f304b6bd551008595181241134728d29971813dd17c2ddc63592563753",
-    "90317aba6c8681ff0acef52ab53e88001a3d2a8dcc2b67970f353ac1e6913c2e",
-    "c8c617cfa48d9f58bb4e8d4478ee94a9b5ea26c95116d32e50b22dd214ee3c4c",
-    "804569cf4d8f3d7cdeee5002674b94e7a425271baea4bed90dd3be2d51a81fd9",
-    "d2977e7d3742aa5c2b15c197a2035e28b744fd20145a5b4a4bb1e0ef46d6f2f8",
-    "5bc50196dbbf58a078ba0f789f09661ea6ba2637eecdc5e5896dd29d0f8d8ba6",
-    "9954489d4fd18565131c2e2f9543ea1260e5b4473c4806dcdb06c8ac97b698a2",
+    "331565427926931d12a60a3a81bd6c3b4bdb4db51ba6677de6b9c71adadc239b",
+    "2079073faf38c88501c4cf9895a893fe0a85cf2e6fd2d8ceb96dc6e4171fd63e",
+    "8db3447d4406b668aab8ce6ad0293de5927effe682ec5cf8690300713ebb01d2",
+    "927e44df02ba17abadafa27a6b37a61bdda6bbebed16c5a73bb60265f6ce2aa7",
+    "547d4d0ad3c9ddaeac3b77697a30c3a9de9bbb00e3ec08bb9bc35fb78e94ec4f",
+    "2fa81bd7aaf29dc2cd738068637d35a7be5d43dcb2e1c312291d197f4cef8837",
+    "b888c0d401c0aeb548a8480c7dbdb954524195f40a6c6c4bc2d4018e10414f1a",
+    "27b80b3f6a6f3ae6b9e331b489d755bc94ad2c4b6b21e5b588e7ba19b4152094",
+    "e850a90f7f13bc28dcc41c457fae7c50809d14263fb8a980cbdcf1e94c7b9211",
+    "2c078d0df95d5143ca806728134ddc6262b5ca9e6d305e4ae42a6702464a1ece",
     // x265
     "4f4c4cad70273d94cb5ad7bcc7704c29f3e2b1f0f954da9ae737a95d2ee948b6",
     "a6aa5f30150c544ae12b34846044bbd8aeaa3ddd89cb9b57eefe2730ec723465",
@@ -8290,7 +8491,7 @@ private void test_smart_codec_resolver_retains_complete_effort_policy () {
         "maximum x264 effort preserves psy, open GOP and entropy decisions");
     string[] x264_args = x264.to_profile ().codec_args;
     assert_contains (get_argv_value_after (x264_args, "-x264-params", "x264 complete parameters"),
-        "ref=8:bframes=8:b-adapt=2:deblock=-1,-1:me=umh:merange=32:subme=11:psy-rd=1.0,0.25",
+        "ref=8:bframes=8:b-adapt=2:deblock=-1,-1:me=umh:merange=32:subme=11:trellis=2:psy-rd=1.0,0.25",
         "complete x264 command includes effort policy omitted by the trim shortcut");
 
     var x265 = SmartCodecResolver.resolve (make_smart_codec_case_recommendation (18),
@@ -10685,6 +10886,16 @@ void main (string[] args) {
         test_vp9_frame_parallel_is_explicit);
     Test.add_func ("/smart-codec/widgets/vp9-tab-follows-two-pass",
         test_smart_codec_widgets_vp9_tab_follows_two_pass);
+    Test.add_func ("/combine/x264/cabac-and-mbtree-off-are-key-value",
+        test_x264_cabac_and_mbtree_off_are_key_value);
+    Test.add_func ("/combine/x264/defaults-leave-preset-and-tune-alone",
+        test_x264_defaults_leave_preset_and_tune_alone);
+    Test.add_func ("/combine/x264/subme-10-and-11-send-trellis-2",
+        test_x264_subme_10_and_11_send_trellis_2);
+    Test.add_func ("/combine/x264/smart-tuning-matches-final-arguments",
+        test_x264_smart_tuning_matches_final_arguments);
+    Test.add_func ("/smart-codec/widgets/x264-tab-defaults-follow-preset",
+        test_smart_codec_widgets_x264_tab_defaults_follow_preset);
 
     // FilterBuilder drawtext tests
     Test.add_func ("/combine/drawtext/basic-drawtext-output",

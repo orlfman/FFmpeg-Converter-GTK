@@ -4927,12 +4927,22 @@ public class SmartOptimizer : GLib.Object {
             cmd.add ("-preset"); cmd.add (preset_idx >= 0
                 ? X264_PRESETS[preset_idx] : "ultrafast");
             cmd.add ("-crf");    cmd.add (crf.to_string ());
-            if (tuning != null && tuning.tune.length > 0) {
-                cmd.add ("-tune"); cmd.add (tuning.tune);
+            string[] p = {};
+            if (tuning != null) {
+                if (tuning.tune.length > 0) {
+                    cmd.add ("-tune"); cmd.add (tuning.tune);
+                }
+                // Written by X264Builder so the probe carries exactly what
+                // the final encode will for these settings.
+                p = X264Builder.smart_tuning_params (
+                    tuning.x264_deblock_offset, tuning.x264_subme,
+                    tuning.x264_psy_trellis);
             }
-            if (temporal != null && temporal.lookahead_frames > 0) {
+            if (temporal != null && temporal.lookahead_frames > 0)
+                p += "rc-lookahead=%d".printf (temporal.lookahead_frames);
+            if (p.length > 0) {
                 cmd.add ("-x264-params");
-                cmd.add ("rc-lookahead=%d".printf (temporal.lookahead_frames));
+                cmd.add (string.joinv (":", p));
             }
         }
     }

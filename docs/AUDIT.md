@@ -37,6 +37,9 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | REV-F6 | Low / open, design | Unassigned | x265 psy-rd and deblock widgets show 2.0 and 0, 0 while a tune applies other values (documented trade-off of X265-F2). |
 | REV-F7 | Low / open, test coverage | Unassigned | No test reads the real X265Tab defaults (Reference Frames Auto, psy-rd/deblock); tests mirror them by hand. |
 | X265-F4 | Low / deferred, documented trade-off kept by the user | Unassigned | None unless calibration gets cheaper; max effort measured +2.7% size / +0.57 VMAF for ×1.5 probe time. See AUD-20261110-x265-settings. |
+| X264-F4 | Medium / fixed; residual drift measured on one clip | Unassigned | Re-measure on real anime and screen content; calibration now carries psy-trellis, deblock offset and subme 10/11. See AUD-20261114-x264-settings. |
+| X264-F7, X264-F8 | Low / addressed by subtitles only | Unassigned | None unless the app should block a level the picture exceeds or lossless with an 8-bit profile; both still reach x264 as before. |
+| BASELINE-F2 | Low / open, pre-existing | Unassigned | `preview-fullscreen-state` fails `/combine/widgets/preview-fullscreen-window-state` ("leaving fullscreen restores a compact picture allocation") on this desktop at 4760b73 as well; see the X264 fix follow-up. |
 | SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
@@ -51,6 +54,268 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261114-x264-crf0-recheck — Review of Fable’s lossless subtitle correction
+
+- **Task/agent/date/base:** TASK-20261114-x264-crf0-recheck; Codex (GPT-6),
+  2026-11-14 America/Phoenix; main at 4760b73 plus the uncommitted x264
+  changes. Scope: TASK-20261114-x264-crf0-subtitle, the follow-up to
+  X264-REV-F1. Review only.
+- **Result:** no new findings. X264-REV-F1 independently verified fixed.
+  The CRF subtitle now limits the lossless claim to 8-bit output and directs
+  10-bit users to QP 0. The QP subtitle correctly covers both depths and
+  states the Auto/High444 profile requirement. The audit follow-up explicitly
+  corrects the earlier inaccurate claim while preserving its history.
+- **Fresh verification:** seven 12-frame synthetic encodes, decoded sample
+  hashes compared with the source converted to the same pixel format:
+  8-bit Auto CRF 0 matches; 8-bit High CRF 0 is rejected; 10-bit High10
+  CRF 0 differs; 10-bit Auto QP 0 matches; High10 QP 0 is rejected;
+  High444 with 10-bit 4:4:4 QP 0 matches and CRF 0 differs. Artifacts:
+  `/tmp/x264-crf0-recheck-f5sktm7l`. `git diff --check` passes.
+- **Limits:** this follow-up changes wording only. Build and regression
+  suites were not repeated for this recheck; prior results remain separately
+  attributed. The subtitle layout was not inspected in a running app.
+  No implementation changes or commits made.
+
+### AUD-20261114-x264-independent-review — Independent review of Fable 5.2’s changes
+
+- **Task/agent/date/base:** TASK-20261114-x264-independent-review; Codex
+  (GPT-6), 2026-11-14 America/Phoenix; main at 4760b73 plus Fable’s ten
+  uncommitted changed files. Review requested by the user. Documentation-only
+  additions by this reviewer; implementation left intact.
+- **X264-REV-F1 — Medium / open, owner unassigned:** the new CRF subtitle
+  (`src/encoders/x264-tab.vala:190`) incorrectly promises that CRF 0 is
+  lossless regardless of bit depth. With 10-bit 4:2:0, FFmpeg 9.0.2 / x264
+  core 165 r3222 reports `rc=crf crf=0.0`, profile High 10, and decoded
+  samples differ from the input. QP 0 on the same 10-bit source reports
+  `rc=cqp qp=0`, High 4:4:4 Predictive, and identical decoded samples.
+  Both CRF 0 and QP 0 are lossless in the 8-bit control. A user selecting
+  Auto plus 10-bit can therefore follow the new guidance and unknowingly
+  create a lossy archival copy. Qualify the CRF guidance by bit depth and
+  direct users to QP 0 for 10-bit lossless. The original X264-F8 statement
+  and its claimed subtitle fix are superseded by this evidence; the QP
+  subtitle itself passed these checks.
+- **Reproduction:** encode 12 frames of `testsrc2=s=320x240:r=24` using
+  `-pix_fmt yuv420p10le -c:v libx264 -crf 0`, decode to yuv420p10le and
+  compare FFmpeg `-f hash` output with the synthetic source converted to
+  that same format. Repeat with `-qp 0` and with yuv420p for controls.
+  Disposable artifacts: `/tmp/x264-review-9qohap51`.
+- **Independently verified:** `meson compile -C builddir-dev` succeeds
+  (up to date). Focused suites `smart-codec-resolver`, `smart-codec-widgets`,
+  `smart-optimizer-logic`, `combine-window-state`: 4 OK, 0 failures. The
+  dedicated widget suite executes the new x264 defaults test; headless
+  suites still skip display-dependent tests. Fresh synthetic encodes confirm
+  CABAC/MB-Tree off, Baseline, fastdecode with Threads 4, subme 11 with
+  trellis 2, and the unmodified veryslow/animation/zerolatency settings.
+  `git diff --check` passes. Read the changed builder, tab, resolver,
+  calibration, trim, cache and test code and their relevant callers.
+- **Assessment/limits:** no additional actionable regression found in this
+  scope. The inability to force values reused as Auto sentinels is explicitly
+  documented by Fable and not counted as an undisclosed defect. The stated
+  calibration size/VMAF results remain Fable’s measurements on one clip;
+  this review did not remeasure them or certify broader content coverage.
+  The full 29-suite run, baseline fullscreen comparison and manual visual
+  inspection were not repeated. No fixes or commits made by this review.
+- **Follow-up, 2026-11-14 America/Phoenix (Claude Code, Fable 5.2,
+  TASK-20261114-x264-crf0-subtitle): X264-REV-F1 reproduced and fixed.
+  Uncommitted.**
+  - **Reproduced** with the reviewer's method (12 frames of
+    `testsrc2=s=320x240:r=24`, decoded-frame SHA-256 against the source):
+    8-bit CRF 0 and QP 0 are both `rc=cqp qp=0`, High 4:4:4 Predictive, and
+    match the source. 10-bit CRF 0 is `rc=crf crf=0.0`, High 10, and does not
+    match, with Profile Auto, High10 and High444 alike. 10-bit QP 0 is
+    `rc=cqp qp=0`, High 4:4:4 Predictive, and matches with Auto and High444;
+    with High10 x264 refuses ("high10 profile doesn't support lossless").
+    The mistake was mine: the X264-F8 run showed `rc=crf` for High10 CRF 0
+    and I did not carry that into the subtitle.
+  - **Fix:** `src/encoders/x264-tab.vala` CRF subtitle now says 0 is lossless
+    for 8-bit output only and points to QP 0 for 10-bit lossless; the QP
+    subtitle says 0 is lossless at 8 and 10 bit. Text only; no argument
+    changed. X264-F8's statement that CRF 0 is lossless holds for 8-bit only.
+  - **Verification:** development build exit 0, same 3 pre-existing Vala
+    warnings; `combine-window-state`, `smart-codec-widgets` and
+    `smart-codec-resolver` pass. No test reads the subtitle text, and the
+    tab was not looked at on screen.
+
+### AUD-20261114-x264-settings — Do the x264 tab's settings reach the encoder and do what the tab says?
+
+- **Task/agent/date/base:** TASK-20261114-x264-settings-check; Claude Code
+  (Fable 5.2), at the user's request ("audit x264 tab settings like how av1,
+  x265, and vp9 was done"); 2026-11-14 15:01–15:06 America/Phoenix (UTC-07:00)
+  by the system clock; main at 4760b73. Investigation only; no code changed.
+- **Method:** read `src/encoders/x264-builder.vala`, `x264-tab.vala`,
+  `resolve_x264`, `apply_smart_x264`, the trim tab's direct Smart arguments
+  (`CodecUtils.build_smart_codec_args`) and x264 calibration
+  (`smart-optimizer.vala:4925`). Ran FFmpeg 9.0.2 / x264 core 165 r3222 with
+  the argument strings the builder produces on a 2 s 640x360 `testsrc2` clip,
+  and read back the option line x264 writes into the stream (its own record of
+  what it applied) plus FFprobe's profile, level and pixel format. Presets and
+  tunes were run alone and with the tab's defaults. The Smart Codec comparison
+  used 20 s from 10 s of `tests/testvideo-raptor.webm` (720p) with libvmaf.
+- **Working as labelled:** preset name; profiles Main, High, High10, High422
+  and High444 in 8 and 10 bit with their pixel formats (FFprobe profile
+  matches); Baseline's profile itself (Constrained Baseline); CRF 0–51; QP
+  0–69; ABR; CBR (`rc=cbr`, `nal_hrd=cbr`, also in MP4, 1968 kbps for a 2000
+  target); two-pass ABR (`rc=2pass`); all 16 levels as stream labels (10 to
+  52); keyframe interval (`-g 60` → `keyint=60`) and the fixed-time custom
+  mode; reference frames 1–16; B-frames 0–16; B-frame adaptation 0–2; weighted
+  prediction off; deblock off and custom offsets; psy-rd strength, psy-trellis
+  and psy off; lookahead 0–250; AQ modes 1–3 with strength; AQ Disabled;
+  all five ME algorithms; search range with umh; subpixel refinement 0–9;
+  Open GOP; threads.
+- **X264-F1 (High, open):** turning CABAC or MB-Tree off breaks the encode.
+  The builder sends them as `no-cabac` and `no-mbtree` with no value
+  (`x264-builder.vala:217–221`), and FFmpeg's `-x264-params` needs
+  `key=value`. When the flag is the last parameter FFmpeg refuses to start
+  ("Error setting option x264-params", exit 234). When something follows it,
+  FFmpeg joins the two into one bad key, logs "Error parsing option
+  'no-cabac:rc-lookahead = 60'" and carries on, so the flag **and the next
+  parameter** are both lost: CABAC stayed on (`cabac=1`), MB-Tree stayed on,
+  and the lookahead, `aq-mode`, `open-gop`, `threads` or `vbv-maxrate` after
+  it was dropped. Four routes reach this: the CABAC switch, the MB-Tree
+  switch, Profile Baseline and Tune fastdecode (the last two add `no-cabac`
+  themselves). Baseline with otherwise default settings fails to start;
+  Baseline with Threads 4 encoded but ignored the thread count. Smart
+  Optimizer's delivery option (`optimize_for_delivery`) picks fastdecode for
+  x264, so it is affected too. Baseline and fastdecode still get CAVLC from
+  the profile and tune. `cabac=0` and `mbtree=0` were tested and work.
+- **X264-F2 (Medium, open, design):** the preset is partly undone. The builder
+  always sends `ref=3`, `bframes=3`, `b-adapt=1`, `deblock=0,0` and `me=hex`
+  (the tab's defaults), and `-x264-params` is applied after the preset.
+
+  | Preset | Preset alone | With the tab's defaults | Size |
+  | --- | --- | --- | --- |
+  | ultrafast | ref 1, no B-frames, no deblock, dia | ref 3, 3 B-frames, deblock, hex | −10.2% |
+  | superfast | ref 1, dia | ref 3, hex | −4.6% |
+  | veryfast | ref 1 | ref 3 | −3.8% |
+  | faster, fast | ref 2 | ref 3 | −1.3% |
+  | slow | ref 5 | ref 3 | +1.2% |
+  | slower | ref 8, umh, b-adapt 2 | ref 3, hex, b-adapt 1 | +4.2% |
+  | veryslow | ref 16, 8 B-frames, umh, range 24, b-adapt 2 | ref 3, 3 B-frames, hex, range 16, b-adapt 1 | +7.2% |
+  | placebo | ref 16, 16 B-frames, tesa, range 24 | as veryslow's row | +7.4% |
+
+  Subpixel refinement and search range are only sent when they differ from 7
+  and 16, so those two follow the preset while the other five do not. Smart
+  Codec sets these per effort on purpose and is not affected.
+- **X264-F3 (Medium, open, design):** Tune is partly undone, for the same
+  reason plus the always-sent `psy-rd=1.0,0.00`. film loses its deblock
+  −1,−1 and psy-trellis 0.15; animation loses deblock 1,1, psy-rd 0.4, 6
+  references and 5 B-frames (its AQ strength 0.6 survives); grain loses
+  deblock −2,−2 and psy-trellis 0.25; stillimage loses deblock −3,−3 and
+  psy-rd 2.0:0.7. zerolatency gets its B-frames back (`bframes=3`), which
+  defeats the tune; its lookahead and MB-Tree changes survive. psnr and ssim
+  are unaffected (psy stays off, AQ stays as the tune set it).
+- **X264-F4 (Medium, open):** because of X264-F3 and the per-effort settings,
+  Smart Codec's final x264 arguments are not what calibration measured.
+  Calibration and the trim tab's direct Smart arguments send only preset, CRF,
+  tune and lookahead. Final against calibration, preset medium, CRF 23, one
+  live-action clip:
+
+  | Tune | Minimal effort | Medium effort | Maximum effort |
+  | --- | --- | --- | --- |
+  | none | −1.5% / VMAF +0.03 | +3.0% / +0.34 | +4.8% / +0.46 |
+  | animation | +4.3% / +0.20 | +8.5% / +0.49 | +10.0% / +0.60 |
+  | stillimage (screencasts) | −18.0% / −0.77 | −14.1% / −0.47 | −12.4% / −0.33 |
+
+  The `EncoderTuning` comment records ±2% as the accepted drift; only the
+  untuned minimal case is inside it. The tune was added to calibration because
+  animation moved size by a third, but the builder then undoes most of that
+  tune in the final encode. Not measured on real anime or screen content.
+- **X264-F5 (Low, open):** Subpixel Refinement 10 and 11 encode as 9 unless
+  trellis is 2 and AQ is on. The tab has no trellis control, and only presets
+  slow and beyond set trellis 2, so with medium or faster the two top entries
+  are silently reduced (`subme=11` → `subme=9` on medium; kept on slow). Smart
+  Codec sets 10 and 11 at high and maximum effort.
+- **X264-F6 (Low, open):** Search Range above 16 does nothing with the default
+  hex algorithm (or dia): `merange=64` gave `me_range=16` and a byte-identical
+  file. It applies with umh, esa and tesa. The subtitle says 4–64.
+- **X264-F7 (Low, open):** Level does not constrain anything by itself. x264
+  writes the level into the stream and prints warnings, but still encodes:
+  Level 1 at 640x360 produced a file labelled level 1.0 that is far outside
+  it. The subtitle says it "constrains resolution, bitrate, and buffers". The
+  list also stops at 5.2; x264 accepts 6, 6.1 and 6.2.
+- **X264-F8 (Low, open):** CRF 0 or QP 0 is lossless, which x264 only allows
+  in High 4:4:4 Predictive. With Profile High the encode fails ("high profile
+  doesn't support lossless"); with Auto the output silently becomes High 4:4:4
+  Predictive, which most hardware players cannot decode. The CRF and QP
+  subtitles do not mention it.
+- **Notes, not findings:** ABR with "Enable VBV" sets max rate and buffer equal
+  to the bitrate, which x264 itself reports as `rc=cbr`; it differs from the
+  CBR mode only by `nal-hrd` (491 869 against 492 103 bytes). Smart Codec's
+  two-pass uses this (see SO-F4). AQ Disabled shows as `aq=1:0.00`, x264's
+  form of no AQ while MB-Tree is on. Lookahead 0 also turns MB-Tree off.
+  Two-pass first passes use x264's fast first-pass settings. With no tune and
+  preset medium the tab's default arguments are byte-identical to sending
+  none.
+- **Limits:** builder output was reproduced by reading the code, not captured
+  from the running app; the UI was not run. Synthetic clip for per-setting
+  checks; one real clip for X264-F4. The fps-based custom keyframe modes were
+  not exercised.
+- **Follow-up, 2026-11-14 15:21–15:30 America/Phoenix (Claude Code, Fable
+  5.2, TASK-20261114-x264-settings-fix): X264-F1 to X264-F8 fixed or
+  addressed, at the user's request ("Fix all 8"). Uncommitted.**
+  - **X264-F1:** the builder sends `cabac=0` and `mbtree=0`. Verified with
+    x264: CABAC and MB-Tree off with a lookahead after them, Baseline with
+    default settings, and fastdecode with Threads 4 all encode, and x264
+    reports `cabac=0`, `mbtree=0` and `threads=4`.
+  - **X264-F2, X264-F3:** `ref`, `bframes`, `b-adapt`, `deblock`, `me` and
+    `psy-rd` are sent only when they differ from x264's defaults (3, 1, 0,0,
+    hex, 1.0/0.0) or are turned off; Reference Frames gains "Auto" (first,
+    default on build and reset). An untouched tab now sends no
+    `-x264-params`. Verified: veryslow reports 16 references, 8 B-frames, umh
+    and b-adapt 2 (171 194 bytes, identical to the preset alone); ultrafast,
+    animation and zerolatency are byte-identical to the preset or tune alone,
+    and zerolatency has no B-frames. Trade-off, as for x265: exactly 3
+    B-frames, Fast adaptation, hex, deblock 0,0 or psy 1.0/0.0 cannot be
+    forced on top of a preset or tune that changes them; the subtitles say so.
+  - **X264-F4:** `EncoderTuning` gains `x264_psy_trellis`,
+    `x264_deblock_offset` and `x264_subme`. `decide_encoder_tuning` leaves
+    psy and deblock to the animation and stillimage tunes and otherwise sets
+    psy-trellis by effort and deblock −1,−1 at high and maximum effort;
+    `resolve_x264` reads those values instead of its own copies. Calibration
+    and the trim tab's direct arguments write them through
+    `X264Builder.smart_tuning_params`. `SmartOptimizerCache` format version
+    5 → 6 and the tuning key gained the three fields. Final against
+    calibration after the fix, CRF 23, same clip:
+
+    | Case | Minimal | Low | Medium | High | Maximum |
+    | --- | --- | --- | --- | --- | --- |
+    | no tune, medium | −1.5% / +0.03 | +0.1% / +0.08 | +0.2% / +0.08 | −1.5% / +0.03 | −2.5% / −0.00 |
+    | no tune, faster | −1.1% / +0.11 | −0.5% / +0.42 | −0.4% / +0.45 | −1.0% / +0.06 | −1.6% / +0.05 |
+    | animation, medium | +1.1% / +0.11 | not run | −0.3% / +0.15 | not run | −0.6% / +0.08 |
+    | stillimage, medium | −1.3% / +0.05 | not run | +2.4% / +0.05 | not run | −2.2% / −0.01 |
+
+    Cost: carrying subme 10/11 with trellis 2 makes a probe encode about
+    ×1.9 (high) to ×2.4 (maximum) slower at those two efforts (1.3 s → 2.5 s
+    and 3.1 s on the 20 s clip). Leaving it out kept probes fast but drifted
+    −7.3% (high) and −7.1% (maximum). Smart Codec output changes: anime and
+    screencast encodes keep the tune's psy and deblock at every effort, and
+    high and maximum effort really use subme 10/11 (see X264-F5).
+  - **X264-F5:** the builder adds `trellis=2` beside subme 10 and 11.
+    Verified on preset medium: `subme=11 trellis=2` (was `subme=9`). AQ off
+    still lowers it to 9; the subtitle says both.
+  - **X264-F6, X264-F7, X264-F8:** subtitles only. Search Range says above 16
+    needs umh, esa or tesa; Level says it is written into the stream and that
+    x264 warns but still encodes; CRF and QP say 0 is lossless, needs Profile
+    Auto or High444 and is written as High 4:4:4 Predictive. Level gains 6,
+    6.1 and 6.2. The encoder behaviour itself is unchanged.
+  - **Smart Codec golden digests:** x264 cases 0–9 changed. For each, putting
+    the legacy `-x264-params` string back into the dumped profile reproduced
+    the digest it replaces; cases 10–39 were byte-identical. The table comment
+    records this third exception.
+  - **Verification:** new tests `/combine/x264/cabac-and-mbtree-off-are-key-value`,
+    `/combine/x264/defaults-leave-preset-and-tune-alone`,
+    `/combine/x264/subme-10-and-11-send-trellis-2`,
+    `/combine/x264/smart-tuning-matches-final-arguments` and
+    `/smart-codec/widgets/x264-tab-defaults-follow-preset` pass; the widget
+    test ran with real GTK widgets in `smart-codec-widgets`. Full suite: 27
+    OK, 2 failing on the first run, 28 OK and 1 failing on re-running those
+    two. `bulk-playback` (`/bulk-playback/launcher/real-player-and-fallback`)
+    failed once and passed on the re-run. `preview-fullscreen-state` fails
+    the same assertion in an untouched worktree at 4760b73, so it is
+    pre-existing here; recorded as BASELINE-F2.
+  - **Not covered:** the app window was not opened; the new subtitles were
+    not looked at on screen. X264-F4 was measured on one live-action clip.
 
 ### AUD-20261110-pre-push-review — Review of the unpushed x265 and VP9 fixes
 

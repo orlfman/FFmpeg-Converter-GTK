@@ -29,7 +29,9 @@ public class SmartOptimizerCache : GLib.Object {
     // own psy-rd; v3 samples under the same tuning key measured other args.
     // 5: VP9 calibration sends -frame-parallel 1 explicitly; on a libvpx
     // whose default is off, v4 samples measured a different encode.
-    private const int    CACHE_FORMAT_VERSION = 5;
+    // 6: x264 calibration carries psy-trellis, the deblock offset and subme
+    // 10/11 with trellis 2, and the tuning key gained those fields.
+    private const int    CACHE_FORMAT_VERSION = 6;
     private const int    MAX_ENTRIES = 32;
     private const string FIELD_SEP = "\x1f";
 

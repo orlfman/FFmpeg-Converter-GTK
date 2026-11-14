@@ -779,31 +779,24 @@ namespace CodecUtils {
             args += "-preset";
             args += rec.preset;
 
-            // Content-aware tune. Precedence mirrors
-            // SmartOptimizerLogic.decide_encoder_tuning: only one -tune is
-            // possible, and an explicit delivery request wins over the
-            // content-derived choice.
-            if (rec.fast_decode) {
+            // One tuning decision shared with calibration and the x264 tab
+            // (SmartOptimizerLogic.decide_encoder_tuning).
+            var tuning = SmartOptimizerLogic.decide_encoder_tuning (
+                "x264", rec.effort, rec.content_type, rec.grain_score,
+                rec.detail_score, rec.source_bit_depth, rec.fast_decode);
+            if (tuning.tune.length > 0) {
                 args += "-tune";
-                args += "fastdecode";
-            } else {
-                switch (rec.content_type) {
-                    case ContentType.ANIME:
-                        args += "-tune";
-                        args += "animation";
-                        break;
-                    case ContentType.SCREENCAST:
-                        args += "-tune";
-                        args += "stillimage";
-                        break;
-                    default:
-                        break;
-                }
+                args += tuning.tune;
             }
 
-            if (rec.lookahead_frames > 0) {
+            string[] x264_params = X264Builder.smart_tuning_params (
+                tuning.x264_deblock_offset, tuning.x264_subme,
+                tuning.x264_psy_trellis);
+            if (rec.lookahead_frames > 0)
+                x264_params += "rc-lookahead=%d".printf (rec.lookahead_frames);
+            if (x264_params.length > 0) {
                 args += "-x264-params";
-                args += "rc-lookahead=%d".printf (rec.lookahead_frames);
+                args += string.joinv (":", x264_params);
             }
 
         } else if (rec.codec == "vp9") {
