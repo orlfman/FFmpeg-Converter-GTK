@@ -58,6 +58,20 @@ fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
 
+### AUD-20261114-release-2.1.1 — Release readiness
+
+- **Task/agent/date/base:** TASK-20261114-release-2.1.1, Codex (GPT-6),
+  2026-11-14 America/Phoenix; main at 0195cf5 plus version/notes changes.
+- **Checks:** synchronized version 2.1.1, development build successful,
+  full suite 30 OK / 0 failures. The Combine naming race and probe timeout
+  suites pass. Source export without tests/ or DevTools/ builds with Arch
+  settings and stages its binary, desktop entry and icon correctly.
+  `git diff --check` passes. No new release-blocking findings identified.
+- **Limits:** existing unresolved audit findings are retained, including the
+  lack of an end-to-end cancelled segment-copy check and broader media
+  calibration measurements. No new manual UI/performance pass. Package
+  verification against the published tag will follow before AUR publication.
+
 ### AUD-20261114-health-fix-recheck — Independent review of the two follow-up fixes
 
 - **Task/agent/date/base:** TASK-20261114-health-fix-recheck; Codex (GPT-6),

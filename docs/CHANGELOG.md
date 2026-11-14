@@ -8,7 +8,7 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-No active work.
+TASK-20261114-release-2.1.1 — Codex (GPT-6), 2026-11-14 America/Phoenix; main at 0195cf5, main checkout. Prepare and publish 2.1.1 to GitHub and AUR, as requested. Owns version constants, release notes, shared logs and AUR package metadata. In progress; build/tests passed, next: publish GitHub tag/release and build/publish AUR package.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -24,6 +24,24 @@ Dependencies / blockers / next action:
 ```
 
 ## History
+
+### TASK-20261114-release-2.1.1 — Version 2.1.1
+
+- **Agent/date/base:** Codex (GPT-6), 2026-11-14 America/Phoenix; main at
+  0195cf5. User requested a version bump and release to Git and AUR, with
+  simple, human release notes for end users. Selected a patch release.
+- **Prepared:** version 2.1.0 → 2.1.1 in `meson.build` and
+  `src/util/constants.vala`; user-facing notes in
+  [release-notes-2.1.1.md](release-notes-2.1.1.md). Covers all changes since
+  v2.1.0: codec settings, startup memory, crash fixes and responsiveness.
+- **Validation:** development build succeeds with the same three Vala
+  warnings; full suite 30 OK / 0 failures (headless widget skips remain).
+  Source archive, with version files overlaid before tagging, builds with
+  `arch-meson` and installs to a temporary staging directory, with the
+  release binary, desktop entry and icon present. Diff check passes.
+- **Publication:** this version commit is intended for tag v2.1.1. GitHub
+  release and AUR 2.1.1-1 publication follow; completion recorded below.
+  No installation to the user's system or settings changes.
 
 ### TASK-20261114-health-publish — Commit and push of the health audit, fixes and reviews
 
