@@ -25,6 +25,126 @@ Dependencies / blockers / next action:
 
 ## History
 
+### TASK-20261114-health-publish — Commit and push of the health audit, fixes and reviews
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("Commit
+  and push"); 2026-11-14 America/Phoenix (UTC-07:00); `main` at 791ef42.
+- **What:** one commit, "Fix a launch-failure crash, cut idle memory and
+  unblock the window", then `main` pushed to GitHub. It holds
+  TASK-20261114-app-health-audit, -app-health-fix and -health-review-fixes
+  (Claude Code) and the log entries of
+  TASK-20261114-health-independent-review and -health-fix-recheck (Codex,
+  GPT-6).
+- **Checks before committing:** read Codex's recheck entry (no new
+  findings); `git diff --check` clean. No version bump, no AUR change; the
+  installed 2.1.0 keeps HEALTH-F7 until a release.
+
+### TASK-20261114-health-fix-recheck — Verify the cancellation and Combine fixes
+
+- **Agent/date/base:** Codex (GPT-6), 2026-11-14 America/Phoenix; main at
+  791ef42 plus Fable’s uncommitted changes, preserved.
+- **Result:** no new findings in TASK-20261114-health-review-fixes. Partial
+  segment cleanup corrected by source inspection; captured Combine launch
+  settings verified by the real GTK race test. See
+  AUD-20261114-health-fix-recheck for evidence and limits.
+- **Checks:** three focused suites pass, including `combine-launch-snapshot`;
+  application build up to date; diff check clean. No automated end-to-end
+  cancellation check or full-suite repeat performed.
+- **Status:** review complete; shared logs only changed by this reviewer,
+  no source edits or commits.
+
+### TASK-20261114-health-review-fixes — Fix the two findings from Codex's review
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request
+  (pointing to Codex's review); 2026-11-14 16:40–16:49 America/Phoenix
+  (UTC-07:00); `main` at 791ef42 plus the uncommitted health fixes.
+  Uncommitted.
+- **Why:** HEALTH-REV-F1 (cancelled or failed segment copies left their
+  partial file and temp directory behind) and HEALTH-REV-F2 (Metadata naming
+  yielded before the combine launch request was captured) from
+  AUD-20261114-health-independent-review. Both were introduced or exposed by
+  TASK-20261114-app-health-fix.
+- **Changed:** `src/ui/trim-tab.vala` (unlink the segment on every early exit
+  of the copy step); `src/ui/combine-window.vala` (request captured at the
+  click, naming from a frozen container); `tests/combine-window-state-test.vala`
+  (one widget test); `meson.build` (display suite `combine-launch-snapshot`).
+- **Checks:** the new test fails against a pre-fix variant and passes with
+  the fix; full suite 30 OK / 0 failing; build with the same 3 warnings.
+- **Not done:** HEALTH-REV-F1 has no automated test and was not driven
+  through the app. Nothing committed.
+
+### TASK-20261114-health-independent-review — Audit the stability and memory fixes
+
+- **Agent/date/base:** Codex (GPT-6), 2026-11-14 America/Phoenix; main at
+  791ef42 with Fable’s uncommitted health fixes preserved.
+- **Result:** two Medium findings, HEALTH-REV-F1 (cancelled segment copy
+  leaves partial media behind) and HEALTH-REV-F2 (Combine captures mutable
+  settings after asynchronous metadata naming). Evidence and next actions
+  in AUD-20261114-health-independent-review. These are source-level findings;
+  the affected UI sequences were not exercised manually.
+- **Checks:** full suite 29 OK / 0 failures; application build up to date;
+  diff whitespace check passes. No independent performance measurements.
+- **Status:** review complete; only shared logs changed by this reviewer,
+  uncommitted. Next: fix cleanup on every segment-copy exit and snapshot
+  Combine settings before naming yields, with targeted regression coverage.
+
+### TASK-20261114-app-health-fix — Stability, memory and start-up fixes
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("do
+  f1, f2, f3, f4, f5, and f6. all of them"); 2026-11-14 16:22–16:36
+  America/Phoenix (UTC-07:00); `main` at 791ef42. Uncommitted, together with
+  TASK-20261114-app-health-audit.
+- **Why:** AUD-20261114-app-health, HEALTH-F1 to HEALTH-F6, and HEALTH-F7
+  found while testing the fix for F3.
+- **Changed:**
+  - `src/util/constants.vala`: `SubprocessCompat.spawnv` binding gains
+    `array_length = false` (HEALTH-F7: failed launches segfaulted).
+  - `src/app/main.vala`: non-homogeneous view stack; tabs join their page on
+    first visit; heap trim requested when an operation or the Smart Optimizer
+    ends.
+  - `src/ui/trim-tab.vala`: asynchronous, cancellable segment copy.
+  - `src/util/ffprobe-utils.vala`: `run_capture_with_timeout`;
+    `run_ffprobe_sync` uses it. `src/runners/subtitles-runner.vala`: both
+    probes use it; four thread starts report failure.
+  - `src/ui/combine-window.vala`: Metadata naming resolves asynchronously;
+    heap trim after the preview closes.
+  - `src/ui/general-tab.vala`, `src/ui/subtitles-tab.vala`,
+    `src/util/heap-trim.vala`: thread starts report failure.
+  - `meson.build`: `heap-trim.vala` added to the combine-window test target.
+  - `tests/ffprobe-utils-test.vala`: two capture tests.
+- **Results:** idle private memory 136 → 103 MB and RSS 305 → 255 MB with a
+  warm shader cache; start-up about 0.9 → 0.73 s. A nonexistent FFmpeg path
+  no longer crashes the app.
+- **Rejected:** building the codec tabs on first use (would save about
+  8.6 MB each, but every builder, preset, folder and trim path that reads
+  their widgets would have to cope with an unbuilt tab); a watchdog thread
+  per probe (the private main context needs no extra thread).
+- **Checks:** development build, same 3 Vala warnings; full suite 29 OK / 0
+  failing, twice; real launches with isolated settings for memory, start-up
+  and the bad-path case. Details and limits in the audit follow-up.
+- **Not done:** nothing exercised by hand in the window; not committed. The
+  installed 2.1.0 still has HEALTH-F7 until a release is cut.
+
+### TASK-20261114-app-health-audit — Stability, memory and performance audit
+
+- **Agent/date/base:** Claude Code (Fable 5.2), at the user's request;
+  2026-11-14 16:10–16:18 America/Phoenix (UTC-07:00); `main` at 791ef42.
+  Investigation only; no code changed. Uncommitted: this entry and
+  AUD-20261114-app-health in `docs/AUDIT.md`.
+- **Result:** the app is idle-quiet (no CPU while idle, about 0.9 s to start)
+  and most process, console and shutdown handling is sound. Six findings,
+  HEALTH-F1 to HEALTH-F6: a main-thread blocking FFmpeg copy in Crop & Trim's
+  Smart export (Medium); 131 MB of idle heap from building every tab at
+  startup (Medium, design); four Low items.
+- **Checks:** the existing development binary was run with isolated XDG and
+  temp directories and closed again; no build, no tests. No detailed report
+  file was written; everything is in the audit entry.
+- **Next steps:** HEALTH-F1 is a contained change (run the copy through an
+  asynchronous subprocess with the export's cancellable). HEALTH-F2 needs a
+  per-tab measurement before choosing between building tabs on first visit
+  and building only the dropdown-heavy groups late. Loaded-file, playback and
+  encode-time memory still need measuring by hand.
+
 ### TASK-20261114-x264-publish — Commit and push of the x264 audit, fixes and reviews
 
 - **Agent/date/base:** Claude Code (Fable 5.2), at the user's request ("commit

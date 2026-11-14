@@ -721,6 +721,9 @@ namespace SubprocessCompat {
     [CCode (cname = "ffcg_subprocess_launcher_spawnv_compat")]
     public extern static Subprocess spawnv (
         SubprocessLauncher launcher,
-        [CCode (array_null_terminated = true)] string[] argv
+        // array_length = false is required: without it Vala also passes the
+        // array length, which the three-parameter C function receives as its
+        // GError** and dereferences when a spawn fails.
+        [CCode (array_length = false, array_null_terminated = true)] string[] argv
     ) throws Error;
 }

@@ -198,6 +198,7 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         // starting primary operations through is_effectively_idle().
         controller.smart_optimizer_running.connect ((running) => {
             smart_optimizer_active = running;
+            if (!running) HeapTrim.request (true);
 
             // Auto-convert now queues while optimization is active, so drain
             // it as soon as the optimizer returns to an effectively idle state.
@@ -627,6 +628,10 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     //  class doesn't reach into StatusArea's internal widget structure.
     // ═════════════════════════════════════════════════════════════════════════
 
+    // Page holder (ScrolledWindow or Adw.Bin) → the tab it will show.
+    private HashTable<Widget, Widget> deferred_page_content =
+        new HashTable<Widget, Widget> (direct_hash, direct_equal);
+
     private void create_components () {
         file_pickers = new FilePickers ();
         general_tab  = new GeneralTab ();
@@ -673,6 +678,10 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
 
         view_stack = new Adw.ViewStack ();
         view_stack.set_vexpand (true);
+        // Size the stack from the visible page only, so hidden pages are not
+        // measured at startup.
+        view_stack.set_hhomogeneous (false);
+        view_stack.set_vhomogeneous (false);
 
         add_scrolled_page (view_stack, general_tab, "general",  "General",      "preferences-system-symbolic");
         add_scrolled_page (view_stack, svt_tab,     "svt-av1",  "SVT-AV1",     "video-x-generic-symbolic");
@@ -683,10 +692,19 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         add_scrolled_page (view_stack, audio_tab,   "audio",    "Audio",       "audio-x-generic-symbolic");
         add_scrolled_page (view_stack, subtitles_tab, "subtitles", "Subtitles", "media-view-subtitles-symbolic");
 
-        var info_page = view_stack.add_titled (info_tab, "info", "Information");
+        var info_holder = new Adw.Bin ();
+        deferred_page_content.insert (info_holder, info_tab);
+        var info_page = view_stack.add_titled (info_holder, "info", "Information");
         info_page.set_icon_name ("dialog-information-symbolic");
 
         add_scrolled_page (view_stack, console_tab, "console",  "Console",     "utilities-terminal-symbolic");
+
+        // Attach the page that is showing now, and each other page when it
+        // is first selected (by the user or by set_visible_child_name).
+        attach_deferred_page_content (view_stack.get_visible_child ());
+        view_stack.notify["visible-child"].connect (() => {
+            attach_deferred_page_content (view_stack.get_visible_child ());
+        });
 
         var view_switcher = new Adw.ViewSwitcher ();
         view_switcher.set_stack (view_stack);
@@ -873,9 +891,29 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
         var scrolled = new ScrolledWindow ();
         scrolled.set_vexpand (true);
         scrolled.set_policy (PolicyType.NEVER, PolicyType.AUTOMATIC);
-        scrolled.set_child (child);
+        deferred_page_content.insert (scrolled, child);
         var page = stack.add_titled (scrolled, name, title);
         page.set_icon_name (icon);
+    }
+
+    /**
+     * Put a page's tab into the window the first time the page is shown.
+     *
+     * Every tab is built at startup, because the tabs, the controller and the
+     * folder workflow read each other's widgets. A tab that is not yet in the
+     * window costs only its construction: GTK does not style, measure or
+     * realize it. Attaching all ten up front cost about 30 MB of heap and
+     * most of the start-up layout work for pages the user may never open.
+     */
+    private void attach_deferred_page_content (Widget? holder) {
+        if (holder == null) return;
+        Widget? content = deferred_page_content.lookup (holder);
+        if (content == null) return;
+        deferred_page_content.remove (holder);
+        if (holder is ScrolledWindow)
+            ((ScrolledWindow) holder).set_child (content);
+        else if (holder is Adw.Bin)
+            ((Adw.Bin) holder).set_child (content);
     }
 
     /** Build the Cancel + Convert button row. */
@@ -2253,6 +2291,11 @@ public class MainWindow : Adw.ApplicationWindow, IOperationStateSource {
     }
 
     private void reset_tracked_operation_state () {
+        // An operation that just ended has dropped its buffers (and, for the
+        // Smart Optimizer, its sample data). Coalesced, and a no-op below the
+        // RSS gate.
+        if (current_operation != ActiveOperation.IDLE)
+            HeapTrim.request (true);
         current_operation = ActiveOperation.IDLE;
         active_operation_id = 0;
         operation_launch_pending = false;

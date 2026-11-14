@@ -1206,6 +1206,9 @@ public class CombineWindow : Adw.Window {
             preview_header = null;
             preview_window = null;
             preview_player = null;
+            // The preview's mpv instance has just been torn down. The
+            // request coalesces and does nothing below the RSS gate.
+            HeapTrim.request (true);
         }
     }
 
@@ -1245,25 +1248,52 @@ public class CombineWindow : Adw.Window {
 
         // ── Compute output path from the shared MainWindow output folder ───
         string out_folder = get_current_output_folder ();
-        string computed_output;
+        ICodecBuilder builder;
+        ICodecTab codec_tab;
 
         if (is_copy) {
             string ext = files[0].extension.has_prefix (".")
                 ? files[0].extension.substring (1) : files[0].extension;
-            var codec_tab = new CombineCodecTab (ext);
-            var builder = codec_tab.get_codec_builder ();
-            computed_output = ConversionUtils.compute_output_path (
-                files[0].path, out_folder, builder, codec_tab);
+            codec_tab = new CombineCodecTab (ext);
+            builder = codec_tab.get_codec_builder ();
         } else {
             int sel = (int) codec_choice.get_selected ();
-            ICodecBuilder builder;
-            ICodecTab codec_tab;
             get_selected_codec (sel, out builder, out codec_tab);
-            computed_output = ConversionUtils.compute_output_path (
-                files[0].path, out_folder, builder, codec_tab);
         }
 
-        CombineLaunchRequest request = build_launch_request (computed_output, is_copy);
+        // Capture the whole launch request now, before anything can yield.
+        // The reservation blocks the file list and the Combine button, but
+        // not the codec choice, the codec tab or the crossfade controls, so
+        // the name and the launch must both come from this one snapshot.
+        CombineLaunchRequest request = build_launch_request ("", is_copy);
+        ICodecTab naming_tab = is_copy
+            ? codec_tab
+            : new CombineCodecTab (codec_tab.get_container ());
+
+        // Only the Metadata naming mode has to run ffprobe for a title. That
+        // must not block the window, so it takes the asynchronous route; every
+        // other mode resolves instantly and stays synchronous.
+        if (AppSettings.get_default ().output_name_mode == OutputNameMode.METADATA) {
+            string first_input = files[0].path;
+            ConversionUtils.compute_output_path_async.begin (
+                first_input, out_folder, builder, naming_tab, null, (obj, res) => {
+                    string resolved = ConversionUtils.compute_output_path_async.end (res);
+                    // The reservation may have been cancelled or replaced
+                    // while the title was being probed.
+                    if (active_operation_id != op_id) return;
+                    continue_combine_with_output (op_id, request, resolved);
+                });
+            return;
+        }
+
+        continue_combine_with_output (op_id, request,
+            ConversionUtils.compute_output_path (files[0].path, out_folder, builder, naming_tab));
+    }
+
+    private void continue_combine_with_output (uint64 op_id,
+                                               CombineLaunchRequest request,
+                                               string computed_output) {
+        request.output_path = computed_output;
 
         // ── Overwrite check ─────────────────────────────────────────────────
         var settings = AppSettings.get_default ();

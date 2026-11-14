@@ -100,6 +100,44 @@ private class ScriptedFfprobeCapture : Object {
     }
 }
 
+private void test_sync_capture_returns_output_and_status () {
+    string stdout_text;
+    string stderr_text;
+    int status = FfprobeUtils.run_capture_with_timeout (
+        { "sh", "-c", "printf out; printf err >&2" }, out stdout_text, out stderr_text);
+    assert_true (status == 0, "a successful command reports status 0");
+    assert_true (stdout_text == "out", "stdout is captured");
+    assert_true (stderr_text == "err", "stderr is captured");
+
+    status = FfprobeUtils.run_capture_with_timeout (
+        { "sh", "-c", "exit 3" }, out stdout_text, out stderr_text);
+    assert_true (status == 3, "a failing command reports its exit status");
+
+    status = FfprobeUtils.run_capture_with_timeout (
+        { "/nonexistent/ffprobe-for-test" }, out stdout_text, out stderr_text);
+    assert_true (status == -1, "a command that cannot start reports -1");
+    assert_true (stdout_text == "" && stderr_text == "",
+        "a command that cannot start leaves empty output");
+}
+
+private void test_sync_capture_gives_up_after_timeout () {
+    // A probe on a stalled mount used to block its thread forever. The
+    // child must be killed and the call must return soon after the limit.
+    string stdout_text;
+    string stderr_text;
+    int64 started = get_monotonic_time ();
+    int status = FfprobeUtils.run_capture_with_timeout (
+        { "sleep", "30" }, out stdout_text, out stderr_text, 200);
+    int64 elapsed_ms = (get_monotonic_time () - started) / 1000;
+    assert_true (status == -1, "a timed-out command reports -1");
+    assert_true (elapsed_ms < 5000, "the call returns shortly after the limit");
+
+    // The caller's own main context must be untouched: the wait runs on a
+    // private context and pops it again.
+    assert_true (MainContext.get_thread_default () == null,
+        "the private main context is popped again");
+}
+
 private void test_primary_audio_probe_parser_uses_ffprobe_csv_order () {
     AudioStreamProbeResult result =
         FfprobeUtils.parse_primary_audio_stream_output_for_test ("pcm_s24le,s32,1,24\n");
@@ -487,6 +525,14 @@ void main (string[] args) {
     Test.add_func (
         "/ffprobe-utils/keyframe-scanner-matches-line-split-counting",
         test_keyframe_scanner_matches_line_split_counting
+    );
+    Test.add_func (
+        "/ffprobe-utils/sync-capture-returns-output-and-status",
+        test_sync_capture_returns_output_and_status
+    );
+    Test.add_func (
+        "/ffprobe-utils/sync-capture-gives-up-after-timeout",
+        test_sync_capture_gives_up_after_timeout
     );
 
     Test.run ();

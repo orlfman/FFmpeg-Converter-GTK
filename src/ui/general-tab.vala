@@ -1464,9 +1464,17 @@ public class GeneralTab : Box {
         uint gen = crop_detect_gen;
         active_source_detections++;
         source_detection_activity_changed ();
-        new Thread<void> ("crop-detect-thread", () => {
-            perform_crop_detection (input_file, console_tab, gen);
-        });
+        try {
+            new Thread<void>.try ("crop-detect-thread", () => {
+                perform_crop_detection (input_file, console_tab, gen);
+            });
+        } catch (Error e) {
+            active_source_detections--;
+            source_detection_activity_changed ();
+            crop_value.set_text ("Detection error");
+            console_tab.add_line ("Crop detection failed: could not start a worker thread: " + e.message);
+            detect_crop_button.sensitive = !folder_input_mode;
+        }
     }
 
     private void perform_crop_detection (string input_file, ConsoleTab console_tab, uint gen) {
@@ -1863,9 +1871,17 @@ public class GeneralTab : Box {
         uint generation = ++delogo_detect_gen;
         active_source_detections++;
         source_detection_activity_changed ();
-        new Thread<void> ("logo-detect-thread", () => {
-            perform_logo_detection (input_file, console_tab, generation, moving);
-        });
+        try {
+            new Thread<void>.try ("logo-detect-thread", () => {
+                perform_logo_detection (input_file, console_tab, generation, moving);
+            });
+        } catch (Error e) {
+            active_source_detections--;
+            source_detection_activity_changed ();
+            set_logo_detect_buttons_sensitive (true);
+            row.set_subtitle ("Detection could not start");
+            console_tab.add_line ("Watermark detection failed: could not start a worker thread: " + e.message);
+        }
     }
 
     private void set_logo_detect_buttons_sensitive (bool sensitive) {

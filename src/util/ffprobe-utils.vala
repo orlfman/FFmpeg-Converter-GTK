@@ -104,20 +104,104 @@ namespace FfprobeUtils {
         }
     }
 
+    /** Longest a synchronous probe may run before it is killed. */
+    public const uint SYNC_PROBE_TIMEOUT_MS = 120000;
+    private const uint SYNC_PROBE_KILL_GRACE_MS = 2000;
+
+    /**
+     * Run a command to completion on the calling thread and capture its
+     * output, giving up after timeout_ms.
+     *
+     * A plain Process.spawn_sync waits forever when the source sits on a
+     * stalled mount. This runs the child on a private main context, so a timer
+     * can cancel the wait without touching the caller's main loop; it is safe
+     * on worker threads and on the main thread.
+     *
+     * Returns the exit status, or -1 when the command could not be started,
+     * did not exit normally or timed out.
+     */
+    public int run_capture_with_timeout (string[] cmd,
+                                         out string stdout_text,
+                                         out string stderr_text,
+                                         uint timeout_ms = SYNC_PROBE_TIMEOUT_MS) {
+        stdout_text = "";
+        stderr_text = "";
+        string? captured_out = null;
+        string? captured_err = null;
+        Error? failure = null;
+        bool timed_out = false;
+        int status = -1;
+
+        var context = new MainContext ();
+        context.push_thread_default ();
+        try {
+            var loop = new MainLoop (context, false);
+            var cancel = new Cancellable ();
+            var launcher = new SubprocessLauncher (
+                SubprocessFlags.STDOUT_PIPE | SubprocessFlags.STDERR_PIPE);
+            Subprocess proc = SubprocessCompat.spawnv (launcher, cmd);
+
+            var timer = new TimeoutSource (timeout_ms);
+            timer.set_callback (() => {
+                timed_out = true;
+                cancel.cancel ();
+                return Source.REMOVE;
+            });
+            timer.attach (context);
+
+            proc.communicate_utf8_async.begin (null, cancel, (obj, res) => {
+                try {
+                    proc.communicate_utf8_async.end (res, out captured_out, out captured_err);
+                } catch (Error e) {
+                    failure = e;
+                }
+                loop.quit ();
+            });
+            loop.run ();
+            timer.destroy ();
+
+            if (failure != null) {
+                // Kill the child and give it a moment to be reaped; a child
+                // stuck in uninterruptible I/O is left behind rather than
+                // waited on forever.
+                proc.force_exit ();
+                var grace = new TimeoutSource (SYNC_PROBE_KILL_GRACE_MS);
+                grace.set_callback (() => {
+                    loop.quit ();
+                    return Source.REMOVE;
+                });
+                grace.attach (context);
+                proc.wait_async.begin (null, (obj, res) => {
+                    try {
+                        proc.wait_async.end (res);
+                    } catch (Error wait_error) {
+                        debug ("FfprobeUtils: child cleanup: %s", wait_error.message);
+                    }
+                    loop.quit ();
+                });
+                loop.run ();
+                grace.destroy ();
+                log_ffprobe_debug (
+                    timed_out ? "sync probe timed out" : "sync probe failed to communicate",
+                    cmd, failure.message);
+            } else if (proc.get_if_exited ()) {
+                status = proc.get_exit_status ();
+            }
+        } catch (Error e) {
+            log_ffprobe_debug ("sync spawn failed", cmd, e.message);
+        } finally {
+            context.pop_thread_default ();
+        }
+
+        if (captured_out != null) stdout_text = captured_out;
+        if (captured_err != null) stderr_text = captured_err;
+        return status;
+    }
+
     private bool run_ffprobe_sync (string[] cmd,
                                    out string stdout_text,
                                    out string stderr_text) {
-        stdout_text = "";
-        stderr_text = "";
-        int status = -1;
-
-        try {
-            Process.spawn_sync (null, cmd, null, SpawnFlags.SEARCH_PATH,
-                                null, out stdout_text, out stderr_text, out status);
-        } catch (Error e) {
-            log_ffprobe_debug ("sync spawn failed", cmd, e.message);
-            return false;
-        }
+        int status = run_capture_with_timeout (cmd, out stdout_text, out stderr_text);
 
         if (status != 0) {
             string stderr_summary = summarize_ffprobe_text (stderr_text);

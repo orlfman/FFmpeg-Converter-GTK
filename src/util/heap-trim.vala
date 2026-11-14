@@ -154,20 +154,26 @@ namespace HeapTrim {
         // runs off the main loop. It is thread-safe; the main thread blocks
         // only if it happens to allocate from an arena the trim currently
         // holds, rather than for the whole walk.
-        new Thread<void> ("heap-trim", () => {
-            int64 started = get_monotonic_time ();
-            malloc_trim (0);
-            int64 elapsed_ms = (get_monotonic_time () - started) / 1000;
-            int64 after = current_rss_bytes ();
+        try {
+            new Thread<void>.try ("heap-trim", () => {
+                int64 started = get_monotonic_time ();
+                malloc_trim (0);
+                int64 elapsed_ms = (get_monotonic_time () - started) / 1000;
+                int64 after = current_rss_bytes ();
 
-            Idle.add (() => {
-                trim_in_flight = false;
-                debug ("HeapTrim: RSS %s MiB -> %s MiB in %s ms",
-                       (before / (1024 * 1024)).to_string (),
-                       (after / (1024 * 1024)).to_string (),
-                       elapsed_ms.to_string ());
-                return Source.REMOVE;
+                Idle.add (() => {
+                    trim_in_flight = false;
+                    debug ("HeapTrim: RSS %s MiB -> %s MiB in %s ms",
+                           (before / (1024 * 1024)).to_string (),
+                           (after / (1024 * 1024)).to_string (),
+                           elapsed_ms.to_string ());
+                    return Source.REMOVE;
+                });
             });
-        });
+        } catch (Error e) {
+            // Trimming is only an optimisation; skip this round.
+            trim_in_flight = false;
+            debug ("HeapTrim: could not start the trim thread: %s", e.message);
+        }
     }
 }

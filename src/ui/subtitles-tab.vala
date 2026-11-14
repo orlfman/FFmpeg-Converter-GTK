@@ -1034,21 +1034,32 @@ public class SubtitlesTab : Box {
 
         // Run probe on background thread, update UI via Idle.add
         string probe_path = file_path;
-        new Thread<void> ("subtitle-probe", () => {
-            GenericArray<SubtitleStream> streams = runner.probe_sync (probe_path);
-            Idle.add (() => {
-                if (request_generation != probe_generation || current_input_file != probe_path) {
-                    return Source.REMOVE;
-                }
+        try {
+            new Thread<void>.try ("subtitle-probe", () => {
+                GenericArray<SubtitleStream> streams = runner.probe_sync (probe_path);
+                Idle.add (() => {
+                    if (request_generation != probe_generation || current_input_file != probe_path) {
+                        return Source.REMOVE;
+                    }
 
-                detected_streams = streams;
-                rebuild_detected_group ();
-                rebuild_extract_combo ();
-                rebuild_burn_track_combo ();
-                update_ui_state ();
-                return Source.REMOVE;
+                    detected_streams = streams;
+                    rebuild_detected_group ();
+                    rebuild_extract_combo ();
+                    rebuild_burn_track_combo ();
+                    update_ui_state ();
+                    return Source.REMOVE;
+                });
             });
-        });
+        } catch (Error e) {
+            // Show the tab as it is with no detected streams instead of a
+            // spinner that never ends.
+            warning ("SubtitlesTab: could not start the probe thread: %s", e.message);
+            detected_streams = new GenericArray<SubtitleStream> ();
+            rebuild_detected_group ();
+            rebuild_extract_combo ();
+            rebuild_burn_track_combo ();
+            update_ui_state ();
+        }
     }
 
     public void cancel_operation () {

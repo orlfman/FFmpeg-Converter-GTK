@@ -1686,6 +1686,71 @@ private void test_pending_overwrite_real_dialog_dismiss_returns_cancel_response 
     }
 }
 
+private void test_combine_metadata_naming_launches_request_captured_at_click () {
+    if (!ensure_gtk_widget_tests_available ())
+        return;
+
+    // HEALTH-REV-F2: Metadata naming probes the title asynchronously. The
+    // codec choice stays editable during that wait, so the launch must use
+    // the request captured at the click, not the widgets as they are when the
+    // probe returns.
+    var settings = AppSettings.get_default ();
+    bool previous_overwrite_enabled = settings.overwrite_enabled;
+    OutputNameMode previous_output_name_mode = settings.output_name_mode;
+    string temp_dir = "";
+    var harness = new CombineWindowHarness ();
+
+    try {
+        settings.overwrite_enabled = true;
+        settings.output_name_mode = OutputNameMode.METADATA;
+
+        temp_dir = DirUtils.make_tmp ("combine-metadata-naming-XXXXXX");
+        harness.output_folder = temp_dir;
+
+        harness.window.load_files_for_widget_test ({
+            "/tmp/first.mkv",
+            "/tmp/second.mkv"
+        });
+        harness.window.set_copy_mode_switch_active_for_widget_test (false);
+        harness.window.set_codec_choice_selected_for_widget_test (3);   // VP9
+        harness.window.enable_launch_capture_for_widget_test ();
+
+        harness.window.click_combine_for_widget_test ();
+        assert_true (
+            harness.window.get_last_launched_profile_for_widget_test () == null,
+            "Metadata naming does not launch before the title probe returns");
+
+        // The user picks another codec while the probe is still running.
+        harness.window.set_codec_choice_selected_for_widget_test (2);   // x264
+
+        assert_true (
+            spin_main_context_until (() => {
+                return harness.window.get_last_launched_profile_for_widget_test () != null;
+            }),
+            "the combine launches once the title probe returns");
+
+        EncodeProfileSnapshot? profile =
+            harness.window.get_last_launched_profile_for_widget_test ();
+        if (profile == null) return;
+        string output = harness.window.get_last_launched_output_for_widget_test ();
+        assert_true (profile.codec_name.down ().contains ("vp9"),
+            "the launch keeps the codec chosen at the click, got " + profile.codec_name);
+        assert_true (output.has_suffix ("." + profile.container),
+            "the output name and the launch profile agree on the container: " + output);
+        assert_true (output.down ().contains ("vp9"),
+            "the output name carries the codec chosen at the click: " + output);
+    } catch (Error e) {
+        Test.fail_printf ("metadata naming widget test setup failed: %s", e.message);
+    } finally {
+        harness.window.close ();
+        settings.overwrite_enabled = previous_overwrite_enabled;
+        settings.output_name_mode = previous_output_name_mode;
+        if (temp_dir != "") {
+            cleanup_exec_test_dir (temp_dir);
+        }
+    }
+}
+
 private void test_probe_completion_updates_reordered_file_row () {
     if (!ensure_gtk_widget_tests_available ())
         return;
@@ -10886,6 +10951,8 @@ void main (string[] args) {
         test_vp9_frame_parallel_is_explicit);
     Test.add_func ("/smart-codec/widgets/vp9-tab-follows-two-pass",
         test_smart_codec_widgets_vp9_tab_follows_two_pass);
+    Test.add_func ("/combine/widgets/metadata-naming-launches-request-captured-at-click",
+        test_combine_metadata_naming_launches_request_captured_at_click);
     Test.add_func ("/combine/x264/cabac-and-mbtree-off-are-key-value",
         test_x264_cabac_and_mbtree_off_are_key_value);
     Test.add_func ("/combine/x264/defaults-leave-preset-and-tune-alone",

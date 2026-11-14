@@ -40,6 +40,9 @@ within the recorded test scope in `AUD-20261102-bulk-final`. Remaining items:
 | X264-F4 | Medium / fixed; residual drift measured on one clip | Unassigned | Re-measure on real anime and screen content; calibration now carries psy-trellis, deblock offset and subme 10/11. See AUD-20261114-x264-settings. |
 | X264-F7, X264-F8 | Low / addressed by subtitles only | Unassigned | None unless the app should block a level the picture exceeds or lossless with an 8-bit profile; both still reach x264 as before. |
 | BASELINE-F2 | Low / open, pre-existing | Unassigned | `preview-fullscreen-state` fails `/combine/widgets/preview-fullscreen-window-state` ("leaving fullscreen restores a compact picture allocation") on this desktop at 4760b73 as well; see the X264 fix follow-up. |
+| HEALTH-F1 | Medium / fixed, not exercised on screen | Unassigned | Run a multi-segment Crop & Trim Smart export on a large source and confirm the window stays responsive and Cancel stops the segment copy. See AUD-20261114-app-health. |
+| HEALTH-F2 | Medium / partly fixed | Unassigned | Tabs now join the window on first visit (idle private memory 136 → 103 MB). The remaining lever is building the four codec tabs on first use (about 8.6 MB each); it needs every reader of their widgets to cope with an unbuilt tab. |
+| HEALTH-F6 | Low / fixed, effect unmeasured | Unassigned | Measure RSS after closing a combine preview and after a Smart Optimizer run on a large source. |
 | SVT-F2 | Low / open, pre-existing | Unassigned | Decide whether SVT-AV1 AQ Mode "Complexity" should still send `aq-mode=2` in QP mode, where it turns QP into CRF; see AUD-20261110-svt-variance-boost. |
 
 `SO-*` details: [smart-optimizer-audit-20261109.md](smart-optimizer-audit-20261109.md).
@@ -54,6 +57,272 @@ and a link to its detailed entry below. Keep this index current as findings are
 fixed, verified, deferred or reopened; retain the history below.
 
 ## Audit history
+
+### AUD-20261114-health-fix-recheck — Independent review of the two follow-up fixes
+
+- **Task/agent/date/base:** TASK-20261114-health-fix-recheck; Codex (GPT-6),
+  2026-11-14 America/Phoenix; main at 791ef42 plus the uncommitted health
+  changes. Scope: Fable’s TASK-20261114-health-review-fixes. Review only.
+- **Result:** no new findings in this follow-up. HEALTH-REV-F1 is corrected
+  by source inspection: the segment is unlinked in the exception path before
+  either cancellation breaks or another error continues, and in the nonzero
+  copy-exit path. The helper kills/reaps the copy before returning an error;
+  the final directory removal can now succeed after those early exits.
+  End-to-end cancellation remains untested in this recheck.
+- **HEALTH-REV-F2 independently verified:** launch request capture now
+  precedes the first async yield, including files, codec arguments and
+  crossfade settings. Naming gets a separate fixed container holder; its
+  builder’s codec name is constant. The continuation updates only the output
+  path and preserves the captured request. Existing operation-ID guards and
+  overwrite handling remain in place.
+- **Checks:** `combine-launch-snapshot`, `combine-window-state` and
+  `trim-subtitles-state`: 3 OK / 0 failures. Confirmed the dedicated
+  `/combine/widgets/metadata-naming-launches-request-captured-at-click` test
+  actually ran with GTK rather than skipping. It changes the codec after
+  clicking and checks the captured codec, suffix and container. Broad
+  headless suites still have their expected widget skips. Application build
+  succeeds (up to date); `git diff --check` passes.
+- **Limits/status:** no full-suite repeat, performance remeasurement or
+  manual app walkthrough for this focused follow-up. No implementation
+  changes or commits. Retain the cancellation integration-test gap already
+  documented by Fable; no additional corrective code identified.
+
+### AUD-20261114-health-independent-review — Review of Fable’s stability fixes
+
+- **Task/agent/date/base:** TASK-20261114-health-independent-review; Codex
+  (GPT-6), 2026-11-14 America/Phoenix; main at 791ef42 plus Fable’s
+  uncommitted TASK-20261114-app-health-fix changes. Review only; source and
+  tests preserved. Two Medium findings, both open and unassigned.
+- **HEALTH-REV-F1:** cancelling a Smart Crop & Trim export during the new
+  asynchronous segment copy leaves the partial `seg_N.mkv` behind.
+  `src/ui/trim-tab.vala:1041–1045` breaks out of the segment loop before
+  `FileUtils.unlink (tmp_seg)` at line 1184. The subsequent
+  `DirUtils.remove (tmp_dir)` cannot remove a nonempty directory and its
+  failure is ignored. This new cancellation route therefore retains the
+  copied bytes (potentially gigabytes) and its `smart-opt-*` directory.
+  Contrast the existing optimizer cancellation handler, which explicitly
+  unlinks the segment before breaking. Fix with per-segment finally cleanup
+  or unlink before breaking, after the child has exited; also cover failing
+  copy exits, which already bypassed cleanup before this patch. Reproduction
+  scenario: cancel while FFmpeg is copying a long segment after it has
+  created the output, then inspect the temporary directory. Established by
+  control-flow inspection; not driven through the app in this review.
+- **HEALTH-REV-F2:** Metadata naming now yields before Combine captures its
+  launch request (`src/ui/combine-window.vala:1267–1288`). Naming uses the
+  initially selected codec/tab, but `build_launch_request` later rereads
+  `codec_choice`, codec settings and crossfade settings. The reservation
+  blocks file-list edits and the Combine button, but does not disable these
+  controls. Start a VP9/WebM combine with a slow metadata probe and select
+  x264 before it returns: the pending name still ends in `.webm` while the
+  launch profile uses libx264, which the WebM muxer rejects. Crossfade can
+  likewise be changed after its initial validation. Capture one immutable
+  request/profile before yielding and use it for both naming and launch,
+  or lock all relevant settings throughout the pending operation. The
+  operation-ID guard only rejects cancelled/replaced reservations; it cannot
+  detect changes to settings within the same reservation. Established from
+  the naming, sensitivity and launch paths; no GUI race reproduction run.
+- **Independent checks:** full `meson test -C builddir-dev --print-errorlogs`
+  run: 29 OK / 0 failures, including the new capture success, missing-program
+  and timeout tests. Display-dependent tests in headless suites retain their
+  expected skips. `meson compile -C builddir-dev` succeeds (up to date);
+  `git diff --check` passes. Reviewed all changed source hunks (ignoring
+  whitespace for the large subtitle thread indentation change), operation
+  reservation/cancellation, profile naming, temporary-file cleanup, and the
+  three-argument subprocess C bridge. The binding correction is consistent
+  with the C signature and covered by the missing-program regression test.
+- **Limits:** the passing suite does not exercise these two newly identified
+  paths. Memory/startup measurements and first-visit tab rendering remain
+  Fable’s evidence; no independent performance measurements or manual UI
+  walkthrough were done. No implementation fixes or commits made.
+- **Follow-up, 2026-11-14 16:40–16:49 America/Phoenix (Claude Code, Fable
+  5.2, TASK-20261114-health-review-fixes): HEALTH-REV-F1 and HEALTH-REV-F2
+  confirmed by reading the code and fixed. Uncommitted.**
+  - **HEALTH-REV-F1:** confirmed. `run_segment_copy_async` waits for the
+    killed child before it throws, so the partial file is safe to remove.
+    `trim-tab.vala` now unlinks `tmp_seg` on all three early exits of the
+    copy step: cancellation, a spawn or wait error, and a non-zero exit. The
+    last two skipped cleanup before today's change as well, as the reviewer
+    noted. No automated test: the Smart export loop needs the trim tab, a
+    real source and the optimizer; not driven through the app either.
+  - **HEALTH-REV-F2:** confirmed. `on_combine_clicked` now builds the launch
+    request before anything can yield, and names the output from a frozen
+    `CombineCodecTab` holding the container read at the click, so the name
+    and the launch come from one snapshot. `continue_combine_with_output`
+    only fills in the output path. The synchronous naming modes use the same
+    order, with no behaviour change.
+  - **Test:** `/combine/widgets/metadata-naming-launches-request-captured-at-click`
+    selects VP9, clicks Combine with Metadata naming, switches to x264 while
+    the title probe runs and checks the launched profile and name. Against a
+    temporary variant that rebuilt the request after the probe it failed
+    ("…/first-vp9.webm" with an x264 launch profile); with the fix it passes.
+    The headless `combine-window-state` suite skips it, so `meson.build`
+    gains a display suite, `combine-launch-snapshot`, that runs only this
+    test.
+  - **Verification:** development build exit 0, same 3 pre-existing Vala
+    warnings; full suite 30 OK, 0 failing; `git diff --check` clean.
+
+### AUD-20261114-app-health — Application stability, memory use and performance
+
+- **Task/agent/date/base:** TASK-20261114-app-health-audit; Claude Code
+  (Fable 5.2), at the user's request ("audit to see a way to improve
+  application overall stability, ram consumption, and performance");
+  2026-11-14 16:10–16:18 America/Phoenix (UTC-07:00); main at 791ef42.
+  Investigation only; no code changed.
+- **Method:** ran the existing `builddir-dev/ffmpeg-converter-gtk-devel` with
+  isolated `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `TMPDIR`, no input loaded,
+  and read `/proc/<pid>/smaps`, `status`, `stat` and per-thread CPU. Compared
+  against a bare `Adw.ApplicationWindow` and against test windows holding 300
+  rows, 150 dropdowns or 110 spin buttons (PyGObject, same GTK 4.24 /
+  libadwaita). Then searched `src/` for blocking process calls, thread
+  creation, timers, nested main loops, synchronous file access, signal
+  connections to the settings singleton, per-use windows and large buffers,
+  and read each hit's caller to see which thread it runs on. Earlier memory
+  work (`input-load-memory-spike-findings.md`, the mpv findings) was read
+  first and not repeated.
+- **Measured, idle with no input (GTK's default Vulkan renderer, radv):**
+
+  | | App | Bare libadwaita window |
+  | --- | --- | --- |
+  | RSS | 332 MB | 152 MB |
+  | PSS | 214 MB | 79 MB |
+  | Heap (`[heap]`) | 131 MB | 18 MB |
+  | Threads | 15 | 13 |
+
+  CPU while idle: 0 ticks and 1 voluntary context switch in 20 s. Startup:
+  0.85–0.98 s from launch to the last CPU activity, 0.75–0.95 s of CPU, one
+  `ffmpeg` capability probe. `GSK_RENDERER=ngl` gave PSS 243 MB and 28
+  threads; `cairo` gave PSS 155 MB and 13 threads (heap still about 120 MB),
+  so the renderer is not where the app's own memory is.
+- **Healthy, no finding:** no idle wakeups or polling timers; no libmpv
+  threads until a player is used; the console batches output and caps its
+  buffer at 200 000 characters; the main window asks before closing during
+  an operation and cancels it; `GSubprocess` and `spawn_sync` give FFmpeg
+  `/dev/null` as stdin, so a terminal cannot stall it; progress comes from
+  `-progress pipe:2`, so stderr lines stay short; folder scans, stale
+  temp-directory cleanup and the Information tab's probes are asynchronous or
+  on worker threads; `CombineCodecTab` is a plain object, not a widget; the
+  optimizer cache is capped.
+- **HEALTH-F1 (Medium, open):** `TrimTab.run_smart_then_export`
+  (`trim-tab.vala:828`) is an async method on the main thread, and for every
+  segment it runs `Process.spawn_sync` on an FFmpeg stream copy
+  (`trim-tab.vala:1015`). The window cannot repaint or take input until each
+  copy finishes, and Cancel cannot interrupt it. A long segment of a large
+  source on a slow disk freezes the window for the whole copy. Read from the
+  code; not reproduced on screen.
+- **HEALTH-F2 (Medium, open, design):** the app's own heap at idle is about
+  113 MB above an empty window. `create_components` (`main.vala:630`) builds
+  all ten tabs, including four codec tabs with their own audio and filter
+  groups, before the window appears. In the test windows a `Gtk.DropDown`
+  cost about 200 kB of heap, a `Gtk.SpinButton` about 115 kB and an
+  `Adw.ActionRow` about 8 kB; the source has 90 `DropDown` and 110
+  `SpinButton` construction sites, several inside groups that are created
+  once per codec tab. `malloc_trim` on the idle process returned about 25 MB,
+  so roughly 105 MB is live. Which tab costs what was not measured.
+- **HEALTH-F3 (Low, open):** the synchronous probes
+  (`FfprobeUtils.run_ffprobe_sync`, `SubtitlesRunner.probe_sync` and
+  `probe_duration`) have no timeout and take no cancellable. They run on
+  worker threads, so the window stays responsive, but a source on a stalled
+  network mount leaves the thread and the operation waiting with no way to
+  cancel; the pre-encode probes in `converter.vala:448–468` are the common
+  path.
+- **HEALTH-F4 (Low, open):** starting a combine calls the synchronous
+  `ConversionUtils.compute_output_path` on the main thread
+  (`combine-window.vala:1255` and `1262`); with the Metadata naming mode that
+  runs `ffprobe` synchronously. The single-file path already uses
+  `compute_output_path_async`.
+- **HEALTH-F5 (Low, open):** eight worker threads are created with
+  `new Thread<void> (...)` (crop detect, logo detect, subtitle probe, four
+  subtitle operations, heap trim), which aborts the process if the thread
+  cannot be created. The other eleven sites use `new Thread<void>.try` and
+  report the error.
+- **HEALTH-F6 (Low, open, unmeasured):** `HeapTrim.request` is only called
+  when an input is replaced (`app-controller.vala:786`) and only acts above
+  1 GiB RSS. Closing the combine preview, the pop-out player or bulk
+  playback, and finishing a Smart Optimizer run, never ask for a trim.
+  Whether memory stays high after those was not measured.
+- **Limits:** memory was measured only at idle with no input. Loading a
+  file, playback, an encode in progress and long sessions were not measured,
+  because they need the window to be driven by hand. Nothing was profiled
+  with heaptrack, valgrind or perf (not installed). The review searched for
+  specific patterns; it is not a line-by-line read of 73 000 lines.
+- **Follow-up, 2026-11-14 16:22–16:36 America/Phoenix (Claude Code, Fable
+  5.2, TASK-20261114-app-health-fix): HEALTH-F1 to HEALTH-F6 fixed or partly
+  fixed, at the user's request ("do f1, f2, f3, f4, f5, and f6. all of
+  them"), plus a new crash found on the way (HEALTH-F7). Uncommitted.**
+  - **Two corrections to the entry above.** (1) The idle table was taken with
+    an empty shader cache, which inflates the heap. With a warm cache the same
+    build measured RSS 305 MB, PSS 188 MB, private memory 136 MB and heap
+    96 MB; those are the "before" figures used below. (2) HEALTH-F3 named the
+    pre-encode probes in `converter.vala:448–468` as the common unprotected
+    path. That was wrong: they pass `runner.execute_capture`, which is
+    cancellable. The unprotected callers were the ones that pass no capture
+    runner (logo detection, collage, the trim runner's probes, the subtitle
+    probes).
+  - **HEALTH-F7 (High, new, fixed):** every failed launch through
+    `SubprocessCompat.spawnv` crashed the app. The Vala binding
+    (`constants.vala:720`) marked `argv` null-terminated but not
+    `array_length = false`, so Vala also passed the array length; the
+    three-parameter C bridge received that integer as its `GError**`, and
+    GLib dereferenced it when a spawn failed. Evidence: the new test
+    `/ffprobe-utils/sync-capture-returns-output-and-status` segfaulted in
+    `g_set_error` under `ffcg_subprocess_launcher_spawnv_compat` before the
+    fix; the installed 2.1.0 (`/usr/bin/ffmpeg-converter-gtk`) exits with
+    SIGSEGV at startup when `[paths] ffmpeg` points to a file that does not
+    exist (isolated config). After adding `array_length = false`, no generated
+    call passes a length, the test passes and the development build stays up
+    with the same settings. Successful launches were never affected.
+  - **HEALTH-F1:** the per-segment stream copy runs through a new
+    `TrimTab.run_segment_copy_async` (`GSubprocess.wait_async` with the Smart
+    export's cancellable, output silenced). Cancelling kills the copy and ends
+    the export as cancelled. Not run on screen.
+  - **HEALTH-F2 (partly fixed):** measured per tab first (private memory at
+    construction): codec tabs about 8.6 MB each, Audio 5.4 MB, Crop & Trim
+    4.1 MB, Information 2.0 MB, General 1.6 MB, Subtitles 1.3 MB. About
+    50 MB more appeared when the window was laid out and mapped. Two changes
+    in `main.vala`: the `Adw.ViewStack` is no longer homogeneous, so hidden
+    pages are not measured, and each tab is put into its page the first time
+    the page is shown (`attach_deferred_page_content`). All tabs are still
+    constructed at startup, so every cross-tab reference works as before.
+
+    | Idle, warm cache | Before | After |
+    | --- | --- | --- |
+    | RSS | 305 MB | 255 MB |
+    | PSS | 188 MB | 154 MB |
+    | Private memory | 136 MB | 103 MB |
+    | Heap | 96 MB | 78 MB |
+    | Launch to last CPU activity | 0.85–0.98 s | 0.72–0.75 s |
+
+    The first visit to a tab took 27–41 ms for the codec tabs and 12–22 ms
+    for the others, against 10–11 ms for a revisit; visiting all ten brought
+    private memory to 134 MB, the old idle level. No GTK warning was logged
+    while every page was visited. Not done: building the codec tabs
+    themselves on first use.
+  - **HEALTH-F3:** new `FfprobeUtils.run_capture_with_timeout` runs the child
+    on a private main context with a 120 s limit, kills it on timeout and
+    gives it 2 s to be reaped. `run_ffprobe_sync` and the subtitle runner's
+    `probe_sync` and `probe_duration` use it. Callers that pass a capture
+    runner are unchanged.
+  - **HEALTH-F4:** with the Metadata naming mode the combine window resolves
+    the output path through `compute_output_path_async` and continues in
+    `continue_combine_with_output` if the reservation is still current; other
+    modes stay synchronous, as they never run `ffprobe`.
+  - **HEALTH-F5:** the eight sites use `new Thread<void>.try` and undo their
+    busy state or report the failure. `subtitles-runner.vala` shows a large
+    diff because the thread bodies moved one level in.
+  - **HEALTH-F6:** `HeapTrim.request (true)` is also called when the combine
+    preview closes, when an operation ends and when the Smart Optimizer
+    stops. It still only acts above 1 GiB RSS. The effect was not measured.
+  - **Verification:** development build exit 0, the same 3 pre-existing Vala
+    warnings. Full suite 29 OK, 0 failing, twice. New tests
+    `/ffprobe-utils/sync-capture-returns-output-and-status` and
+    `/ffprobe-utils/sync-capture-gives-up-after-timeout` pass (a `sleep 30`
+    with a 200 ms limit returns −1 in under 5 s). `preview-fullscreen-state`
+    passed in both runs here, although it failed at 4760b73 earlier today
+    (BASELINE-F2 stays open as intermittent).
+  - **Not covered:** nothing was clicked by hand. HEALTH-F1, F4, F5 and F6
+    have no automated test: they need the main window or a thread-creation
+    failure, and no test target compiles `main.vala`. The late tab attachment
+    was checked by a temporary hook that visited every page, since removed.
 
 ### AUD-20261114-x264-crf0-recheck — Review of Fable’s lossless subtitle correction
 

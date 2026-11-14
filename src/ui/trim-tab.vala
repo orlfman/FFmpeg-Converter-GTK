@@ -825,6 +825,29 @@ public class TrimTab : Box, ICodecTab {
      * When all surviving segments are analyzed, launches TrimRunner with
      * per-segment codec overrides.
      */
+    /**
+     * Run the per-segment stream copy without blocking the main loop.
+     * Returns FFmpeg's exit status, or -1 when it did not exit normally.
+     * Cancelling kills the copy and throws IOError.CANCELLED.
+     */
+    private async int run_segment_copy_async (string[] cmd, Cancellable cancel) throws Error {
+        var launcher = new SubprocessLauncher (
+            SubprocessFlags.STDOUT_SILENCE | SubprocessFlags.STDERR_SILENCE);
+        var proc = SubprocessCompat.spawnv (launcher, cmd);
+        try {
+            yield proc.wait_async (cancel);
+        } catch (Error e) {
+            proc.force_exit ();
+            try {
+                yield proc.wait_async (null);
+            } catch (Error wait_error) {
+                debug ("TrimTab: segment copy cleanup: %s", wait_error.message);
+            }
+            throw e;
+        }
+        return proc.get_if_exited () ? proc.get_exit_status () : -1;
+    }
+
     private async void run_smart_then_export (string input_file,
                                                string output_folder,
                                                StatusArea status_area,
@@ -1011,11 +1034,20 @@ public class TrimTab : Box, ICodecTab {
                     "-map_chapters", "-1",
                     tmp_seg
                 };
-                string stdout_buf, stderr_buf;
-                Process.spawn_sync (null, copy_cmd, null,
-                                    SpawnFlags.SEARCH_PATH,
-                                    null, out stdout_buf, out stderr_buf, out copy_exit);
+                // Asynchronous so the window keeps repainting during a long
+                // copy, and cancellable so Cancel does not wait for it.
+                copy_exit = yield run_segment_copy_async (copy_cmd, cancel);
             } catch (Error e) {
+                // The copy has exited by the time the error arrives, so the
+                // partial segment can go. Leaving it would also keep the
+                // temp directory, which is only removed when empty.
+                FileUtils.unlink (tmp_seg);
+                if (cancel.is_cancelled ()) {
+                    status_area.set_status ("Smart Optimizer cancelled.",
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                    cancelled = true;
+                    break;
+                }
                 console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — temp extract failed: %s"
                     .printf (seg_name, e.message));
                 skipped.add (seg_name);
@@ -1023,6 +1055,7 @@ public class TrimTab : Box, ICodecTab {
             }
 
             if (copy_exit != 0) {
+                FileUtils.unlink (tmp_seg);
                 console_tab.add_line ("[Smart Optimizer] ⏭️ Skipping %s — temp extract failed (exit %d)"
                     .printf (seg_name, copy_exit));
                 skipped.add (seg_name);

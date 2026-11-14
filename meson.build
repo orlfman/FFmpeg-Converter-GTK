@@ -720,6 +720,7 @@ if fs.exists('tests/combine-window-state-test.vala')
       'src/runners/audio-runner.vala',
       'src/util/video-file-constants.vala',
       'src/ui/combine-window.vala',
+      'src/util/heap-trim.vala',
       'src/runners/combine-runner.vala',
       'src/ui/collage-window.vala',
       'src/runners/collage-runner.vala',
@@ -761,6 +762,16 @@ if fs.exists('tests/combine-window-state-test.vala')
     args : ['-r', '/prepared-conversion/widgets'],
     env : display_gtk_test_env,
     is_parallel : false,
+  )
+  # The Metadata naming path waits on a real ffprobe subprocess with the
+  # window's widgets live, so it needs a display like the other widget suites.
+  test(
+    'combine-launch-snapshot',
+    combine_window_state_test,
+    args : ['-p', '/combine/widgets/metadata-naming-launches-request-captured-at-click'],
+    env : display_gtk_test_env,
+    is_parallel : false,
+    timeout : 60,
   )
   test('bulk-conversion', combine_window_state_test,
     args : ['-r', '/bulk-conversion'], env : headless_gtk_test_env, timeout : 180)

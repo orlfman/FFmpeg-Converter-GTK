@@ -143,61 +143,56 @@ public class SubtitlesRunner : Object {
     public GenericArray<SubtitleStream> probe_sync (string input_file) {
         var streams = new GenericArray<SubtitleStream> ();
 
-        try {
-            string[] cmd = {
-                AppSettings.get_default ().ffprobe_path,
-                "-v", "error",
-                "-show_streams",
-                "-select_streams", "s",
-                input_file
-            };
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "error",
+            "-show_streams",
+            "-select_streams", "s",
+            input_file
+        };
 
-            string stdout_buf, stderr_buf;
-            int status;
+        string stdout_buf, stderr_buf;
+        // Time-limited so a source on a stalled mount cannot leave the
+        // tab scanning forever.
+        int status = FfprobeUtils.run_capture_with_timeout (
+            cmd, out stdout_buf, out stderr_buf);
 
-            Process.spawn_sync (null, cmd, null,
-                                SpawnFlags.SEARCH_PATH,
-                                null, out stdout_buf, out stderr_buf, out status);
+        if (status != 0 || stdout_buf == null) return streams;
 
-            if (status != 0 || stdout_buf == null) return streams;
+        HashTable<string, string>? current = null;
+        int sub_idx = 0;
 
-            HashTable<string, string>? current = null;
-            int sub_idx = 0;
+        foreach (string raw in stdout_buf.split ("\n")) {
+            string line = raw.strip ();
 
-            foreach (string raw in stdout_buf.split ("\n")) {
-                string line = raw.strip ();
+            if (line == "[STREAM]") {
+                current = new HashTable<string, string> (str_hash, str_equal);
+            } else if (line == "[/STREAM]") {
+                if (current != null) {
+                    var s = new SubtitleStream ();
+                    s.sub_index    = sub_idx++;
+                    s.stream_index = int.parse (current.get ("index") ?? "-1");
+                    s.codec_name   = current.get ("codec_name") ?? "";
+                    s.language     = current.get ("TAG:language") ?? "";
+                    s.title        = current.get ("TAG:title") ?? "";
 
-                if (line == "[STREAM]") {
-                    current = new HashTable<string, string> (str_hash, str_equal);
-                } else if (line == "[/STREAM]") {
-                    if (current != null) {
-                        var s = new SubtitleStream ();
-                        s.sub_index    = sub_idx++;
-                        s.stream_index = int.parse (current.get ("index") ?? "-1");
-                        s.codec_name   = current.get ("codec_name") ?? "";
-                        s.language     = current.get ("TAG:language") ?? "";
-                        s.title        = current.get ("TAG:title") ?? "";
+                    string disp_default = current.get ("disposition:default") ?? "0";
+                    s.is_default = (disp_default == "1");
 
-                        string disp_default = current.get ("disposition:default") ?? "0";
-                        s.is_default = (disp_default == "1");
+                    string disp_forced = current.get ("disposition:forced") ?? "0";
+                    s.is_forced = (disp_forced == "1");
 
-                        string disp_forced = current.get ("disposition:forced") ?? "0";
-                        s.is_forced = (disp_forced == "1");
-
-                        streams.add (s);
-                    }
-                    current = null;
-                } else if (current != null) {
-                    int eq = line.index_of_char ('=');
-                    if (eq > 0) {
-                        string key = line.substring (0, eq).strip ();
-                        string val = line.substring (eq + 1).strip ();
-                        current.set (key, val);
-                    }
+                    streams.add (s);
+                }
+                current = null;
+            } else if (current != null) {
+                int eq = line.index_of_char ('=');
+                if (eq > 0) {
+                    string key = line.substring (0, eq).strip ();
+                    string val = line.substring (eq + 1).strip ();
+                    current.set (key, val);
                 }
             }
-        } catch (Error e) {
-            log_line ("ffprobe error: " + e.message);
         }
 
         return streams;
@@ -228,57 +223,20 @@ public class SubtitlesRunner : Object {
         report_status (@"Extracting subtitle track #$(stream.sub_index)…",
             StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
 
-        new Thread<void> ("subtitle-extract", () => {
-            string[] cmd = {
-                AppSettings.get_default ().ffmpeg_path, "-y",
-                "-i", input_file,
-                "-map", @"0:s:$(stream.sub_index)",
-                "-c:s", "copy",
-                output_path
-            };
-
-            log_line ("=== Subtitle Extract ===");
-            log_line (ConversionUtils.format_command_for_display (cmd));
-
-            int exit = runner.execute (cmd, (line) => {
-                log_line (line);
-            });
-
-            if (runner.is_cancelled ()) {
-                report_operation_cancelled ("Extraction cancelled.");
-                return;
-            }
-
-            if (exit != 0) {
-                string codec = stream.codec_name.down ();
-                string out_lower = output_path.down ();
-                bool text_output = out_lower.has_suffix (".srt")
-                                || out_lower.has_suffix (".ass")
-                                || out_lower.has_suffix (".ssa")
-                                || out_lower.has_suffix (".vtt");
-
-                if (is_bitmap_codec (codec) && text_output) {
-                    // No point retrying — bitmap → text requires OCR
-                    report_error (
-                        "Cannot extract bitmap subtitles to a text format.\n\n" +
-                        @"This track uses $(stream.codec_name), which is an image-based " +
-                        "format. Converting to SRT, ASS, or VTT would require OCR " +
-                        "(optical character recognition), which FFmpeg does not support.\n\n" +
-                        "Use \"Copy Original\" to extract the track in its native format (.sup)."
-                    );
-                    return;
-                }
-
-                // Retry without -c:s copy for codec mismatches (e.g. mov_text → srt)
-                report_status (@"Retrying extraction with codec conversion…",
-                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
-                string[] retry_cmd = {
+        try {
+            new Thread<void>.try ("subtitle-extract", () => {
+                string[] cmd = {
                     AppSettings.get_default ().ffmpeg_path, "-y",
                     "-i", input_file,
                     "-map", @"0:s:$(stream.sub_index)",
+                    "-c:s", "copy",
                     output_path
                 };
-                exit = runner.execute (retry_cmd, (line) => {
+
+                log_line ("=== Subtitle Extract ===");
+                log_line (ConversionUtils.format_command_for_display (cmd));
+
+                int exit = runner.execute (cmd, (line) => {
                     log_line (line);
                 });
 
@@ -286,44 +244,85 @@ public class SubtitlesRunner : Object {
                     report_operation_cancelled ("Extraction cancelled.");
                     return;
                 }
-            }
 
-            string result_path = output_path;
-            if (exit == 0) {
-                // Verify the output file isn't empty — FFmpeg can exit 0
-                // but produce an empty file when converting bitmap subs
-                // (PGS, VobSub, DVB) to text formats (SRT, ASS, VTT).
-                int64 file_size = 0;
-                try {
-                    var info = File.new_for_path (output_path)
-                        .query_info ("standard::size", FileQueryInfoFlags.NONE);
-                    file_size = info.get_size ();
-                } catch (Error e) {
-                    // File doesn't exist at all
-                }
+                if (exit != 0) {
+                    string codec = stream.codec_name.down ();
+                    string out_lower = output_path.down ();
+                    bool text_output = out_lower.has_suffix (".srt")
+                                    || out_lower.has_suffix (".ass")
+                                    || out_lower.has_suffix (".ssa")
+                                    || out_lower.has_suffix (".vtt");
 
-                if (file_size == 0) {
-                    // Clean up the empty file
-                    FileUtils.remove (output_path);
-                    report_error (
-                        "Extraction produced an empty file.\n\n" +
-                        "This usually means the source is a bitmap subtitle format " +
-                        "(PGS, VobSub, DVB) which cannot be converted to a text format " +
-                        "like SRT or ASS — that would require OCR.\n\n" +
-                        "Try extracting with \"Copy Original\" to preserve the original format."
-                    );
-                } else {
-                    report_status (@"Subtitle extracted!\n\nSaved to:\n$result_path",
-                        StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
-                    Idle.add (() => {
-                        operation_done (new OperationOutputResult.for_file (result_path));
-                        return Source.REMOVE;
+                    if (is_bitmap_codec (codec) && text_output) {
+                        // No point retrying — bitmap → text requires OCR
+                        report_error (
+                            "Cannot extract bitmap subtitles to a text format.\n\n" +
+                            @"This track uses $(stream.codec_name), which is an image-based " +
+                            "format. Converting to SRT, ASS, or VTT would require OCR " +
+                            "(optical character recognition), which FFmpeg does not support.\n\n" +
+                            "Use \"Copy Original\" to extract the track in its native format (.sup)."
+                        );
+                        return;
+                    }
+
+                    // Retry without -c:s copy for codec mismatches (e.g. mov_text → srt)
+                    report_status (@"Retrying extraction with codec conversion…",
+                        StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+                    string[] retry_cmd = {
+                        AppSettings.get_default ().ffmpeg_path, "-y",
+                        "-i", input_file,
+                        "-map", @"0:s:$(stream.sub_index)",
+                        output_path
+                    };
+                    exit = runner.execute (retry_cmd, (line) => {
+                        log_line (line);
                     });
+
+                    if (runner.is_cancelled ()) {
+                        report_operation_cancelled ("Extraction cancelled.");
+                        return;
+                    }
                 }
-            } else {
-                report_error (@"Extraction failed (exit code $exit).");
-            }
-        });
+
+                string result_path = output_path;
+                if (exit == 0) {
+                    // Verify the output file isn't empty — FFmpeg can exit 0
+                    // but produce an empty file when converting bitmap subs
+                    // (PGS, VobSub, DVB) to text formats (SRT, ASS, VTT).
+                    int64 file_size = 0;
+                    try {
+                        var info = File.new_for_path (output_path)
+                            .query_info ("standard::size", FileQueryInfoFlags.NONE);
+                        file_size = info.get_size ();
+                    } catch (Error e) {
+                        // File doesn't exist at all
+                    }
+
+                    if (file_size == 0) {
+                        // Clean up the empty file
+                        FileUtils.remove (output_path);
+                        report_error (
+                            "Extraction produced an empty file.\n\n" +
+                            "This usually means the source is a bitmap subtitle format " +
+                            "(PGS, VobSub, DVB) which cannot be converted to a text format " +
+                            "like SRT or ASS — that would require OCR.\n\n" +
+                            "Try extracting with \"Copy Original\" to preserve the original format."
+                        );
+                    } else {
+                        report_status (@"Subtitle extracted!\n\nSaved to:\n$result_path",
+                            StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                        Idle.add (() => {
+                            operation_done (new OperationOutputResult.for_file (result_path));
+                            return Source.REMOVE;
+                        });
+                    }
+                } else {
+                    report_error (@"Extraction failed (exit code $exit).");
+                }
+            });
+        } catch (Error e) {
+            report_error ("Could not start the subtitle extraction thread: " + e.message);
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -370,94 +369,98 @@ public class SubtitlesRunner : Object {
         for (int i = 0; i < streams.length; i++)
             snap.add (streams[i].snapshot ());
 
-        new Thread<void> ("subtitle-extract-all", () => {
-            int success = 0;
-            int failed = 0;
-            var extracted_paths = new GenericArray<string> ();
+        try {
+            new Thread<void>.try ("subtitle-extract-all", () => {
+                int success = 0;
+                int failed = 0;
+                var extracted_paths = new GenericArray<string> ();
 
-            for (int i = 0; i < snap.length; i++) {
+                for (int i = 0; i < snap.length; i++) {
+                    if (runner.is_cancelled ()) {
+                        report_operation_cancelled (
+                            @"Extraction cancelled after $success of $(snap.length) tracks.");
+                        return;
+                    }
+
+                    var s = snap[i];
+                    string ext = native_extension_for_codec (s.codec_name.down ());
+                    string lang_part = (s.language.length > 0 && s.language != "und")
+                        ? @".$(s.language)" : "";
+                    string out_path = Path.build_filename (
+                        output_dir, @"$(base_name)$(lang_part).track$(s.sub_index)$(ext)");
+
+                    report_status (@"Extracting track #$(s.sub_index) ($(i + 1)/$(snap.length))…",
+                        StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
+
+                    string[] cmd = {
+                        AppSettings.get_default ().ffmpeg_path, "-y",
+                        "-i", input_file,
+                        "-map", @"0:s:$(s.sub_index)",
+                        "-c:s", "copy",
+                        out_path
+                    };
+
+                    log_line (@"=== Extract All — Track #$(s.sub_index) ===");
+                    log_line (ConversionUtils.format_command_for_display (cmd));
+
+                    int exit = runner.execute (cmd, (line) => {
+                        log_line (line);
+                    });
+
+                    if (runner.is_cancelled ()) {
+                        report_operation_cancelled (
+                            @"Extraction cancelled after $success of $(snap.length) tracks.");
+                        return;
+                    }
+
+                    if (exit == 0) {
+                        success++;
+                        extracted_paths.add (out_path);
+                    } else {
+                        log_line (@"⚠ Track #$(s.sub_index) failed (exit $exit), skipping.");
+                        failed++;
+                    }
+                }
+
                 if (runner.is_cancelled ()) {
                     report_operation_cancelled (
                         @"Extraction cancelled after $success of $(snap.length) tracks.");
                     return;
                 }
 
-                var s = snap[i];
-                string ext = native_extension_for_codec (s.codec_name.down ());
-                string lang_part = (s.language.length > 0 && s.language != "und")
-                    ? @".$(s.language)" : "";
-                string out_path = Path.build_filename (
-                    output_dir, @"$(base_name)$(lang_part).track$(s.sub_index)$(ext)");
-
-                report_status (@"Extracting track #$(s.sub_index) ($(i + 1)/$(snap.length))…",
-                    StatusIcon.PROGRESS_ICON, StatusIcon.PROGRESS_CSS);
-
-                string[] cmd = {
-                    AppSettings.get_default ().ffmpeg_path, "-y",
-                    "-i", input_file,
-                    "-map", @"0:s:$(s.sub_index)",
-                    "-c:s", "copy",
-                    out_path
-                };
-
-                log_line (@"=== Extract All — Track #$(s.sub_index) ===");
-                log_line (ConversionUtils.format_command_for_display (cmd));
-
-                int exit = runner.execute (cmd, (line) => {
-                    log_line (line);
-                });
-
-                if (runner.is_cancelled ()) {
-                    report_operation_cancelled (
-                        @"Extraction cancelled after $success of $(snap.length) tracks.");
-                    return;
-                }
-
-                if (exit == 0) {
-                    success++;
-                    extracted_paths.add (out_path);
-                } else {
-                    log_line (@"⚠ Track #$(s.sub_index) failed (exit $exit), skipping.");
-                    failed++;
-                }
-            }
-
-            if (runner.is_cancelled ()) {
-                report_operation_cancelled (
-                    @"Extraction cancelled after $success of $(snap.length) tracks.");
-                return;
-            }
-
-            if (success == 0) {
-                report_error (
-                    @"Failed to extract any subtitle tracks from $(snap.length) attempted track$(snap.length == 1 ? "" : "s")."
-                );
-                return;
-            }
-
-            string msg = @"Extracted $success of $(snap.length) subtitle tracks";
-            if (failed > 0) msg += @" ($failed failed)";
-            if (extracted_paths.length == 1) {
-                msg += @"\n\nSaved to:\n$(extracted_paths[0])";
-            } else {
-                msg += @"\n\nSaved to:\n$output_dir";
-            }
-            report_status (msg, StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
-
-            Idle.add (() => {
-                OperationOutputResult result;
-                if (extracted_paths.length == 1) {
-                    result = new OperationOutputResult.for_file (extracted_paths[0]);
-                } else {
-                    result = OperationOutputResult.from_paths (
-                        OperationOutputResult.copy_paths (extracted_paths),
-                        output_dir
+                if (success == 0) {
+                    report_error (
+                        @"Failed to extract any subtitle tracks from $(snap.length) attempted track$(snap.length == 1 ? "" : "s")."
                     );
+                    return;
                 }
-                operation_done (result);
-                return Source.REMOVE;
+
+                string msg = @"Extracted $success of $(snap.length) subtitle tracks";
+                if (failed > 0) msg += @" ($failed failed)";
+                if (extracted_paths.length == 1) {
+                    msg += @"\n\nSaved to:\n$(extracted_paths[0])";
+                } else {
+                    msg += @"\n\nSaved to:\n$output_dir";
+                }
+                report_status (msg, StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+
+                Idle.add (() => {
+                    OperationOutputResult result;
+                    if (extracted_paths.length == 1) {
+                        result = new OperationOutputResult.for_file (extracted_paths[0]);
+                    } else {
+                        result = OperationOutputResult.from_paths (
+                            OperationOutputResult.copy_paths (extracted_paths),
+                            output_dir
+                        );
+                    }
+                    operation_done (result);
+                    return Source.REMOVE;
+                });
             });
-        });
+        } catch (Error e) {
+            report_error ("Could not start the subtitle extraction thread: " + e.message);
+        }
     }
 
     /** Map a subtitle codec name to its native file extension. */
@@ -526,12 +529,16 @@ public class SubtitlesRunner : Object {
         for (int i = 0; i < final_order.length; i++)
             snap_order.add (final_order[i]);
 
-        new Thread<void> ("subtitle-remux", () => {
-            run_remux (
-                operation_id,
-                input_file, output_path, snap_existing, snap_added, snap_order, tracker
-            );
-        });
+        try {
+            new Thread<void>.try ("subtitle-remux", () => {
+                run_remux (
+                    operation_id,
+                    input_file, output_path, snap_existing, snap_added, snap_order, tracker
+                );
+            });
+        } catch (Error e) {
+            report_apply_error (operation_id, "Could not start the subtitle remux thread: " + e.message);
+        }
     }
 
     private void run_remux (uint64 operation_id,
@@ -1081,13 +1088,71 @@ public class SubtitlesRunner : Object {
             tracker.show_pulse ();
         }
 
-        new Thread<void> ("subtitle-burn-in", () => {
-            // Probe duration for progress tracking
-            double duration = probe_duration (input_file);
-            string[] resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
-                profile, input_file);
+        try {
+            new Thread<void>.try ("subtitle-burn-in", () => {
+                // Probe duration for progress tracking
+                double duration = probe_duration (input_file);
+                string[] resolved_codec_args = CodecUtils.build_codec_args_from_snapshot (
+                    profile, input_file);
 
-            if (!prepare_peak_normalization (operation_id, input_file, profile, duration)) {
+                if (!prepare_peak_normalization (operation_id, input_file, profile, duration)) {
+                    if (tracker != null) {
+                        if (runner.is_cancelled ()) {
+                            tracker.hide_cancelled ();
+                        } else {
+                            tracker.hide ();
+                        }
+                    }
+                    return;
+                }
+
+                if (tracker != null) {
+                    if (duration > 0) {
+                        tracker.switch_to_determinate ();
+                    }
+                }
+
+                string[] cmd = build_burn_in_command (
+                    input_file,
+                    output_path,
+                    sub_stream_index,
+                    external_sub_path,
+                    is_bitmap,
+                    profile,
+                    duration,
+                    resolved_codec_args);
+
+                log_line ("=== Subtitle Burn-In ===");
+                string full_cmd = ConversionUtils.format_command_for_display (cmd);
+                log_line (full_cmd);
+                if (console_tab != null) {
+                    Idle.add (() => {
+                        console_tab.set_command (full_cmd);
+                        return Source.REMOVE;
+                    });
+                }
+
+                bool saw_format_mismatch = false;
+                int exit = runner.execute (cmd, (line) => {
+                    // Log interesting lines only
+                    if (ConversionUtils.should_log_ffmpeg_line (line)) {
+                        log_line (line);
+                    }
+
+                    if (line.contains ("only possible from text to text or bitmap to bitmap")) {
+                        saw_format_mismatch = true;
+                    }
+
+                    // Progress parsing
+                    if (tracker != null && duration > 0) {
+                        double current = parse_progress_time (line);
+                        if (current >= 0) {
+                            tracker.update_from_time (current, duration, 0.0, 100.0);
+                        }
+                    }
+                });
+
+                // Cleanup tracker
                 if (tracker != null) {
                     if (runner.is_cancelled ()) {
                         tracker.hide_cancelled ();
@@ -1095,94 +1160,40 @@ public class SubtitlesRunner : Object {
                         tracker.hide ();
                     }
                 }
-                return;
-            }
 
-            if (tracker != null) {
-                if (duration > 0) {
-                    tracker.switch_to_determinate ();
-                }
-            }
-
-            string[] cmd = build_burn_in_command (
-                input_file,
-                output_path,
-                sub_stream_index,
-                external_sub_path,
-                is_bitmap,
-                profile,
-                duration,
-                resolved_codec_args);
-
-            log_line ("=== Subtitle Burn-In ===");
-            string full_cmd = ConversionUtils.format_command_for_display (cmd);
-            log_line (full_cmd);
-            if (console_tab != null) {
-                Idle.add (() => {
-                    console_tab.set_command (full_cmd);
-                    return Source.REMOVE;
-                });
-            }
-
-            bool saw_format_mismatch = false;
-            int exit = runner.execute (cmd, (line) => {
-                // Log interesting lines only
-                if (ConversionUtils.should_log_ffmpeg_line (line)) {
-                    log_line (line);
+                if (runner.is_cancelled ()) {
+                    report_status ("Burn-in cancelled.",
+                        StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
+                    Idle.add (() => {
+                        apply_cancelled (operation_id);
+                        return Source.REMOVE;
+                    });
+                    return;
                 }
 
-                if (line.contains ("only possible from text to text or bitmap to bitmap")) {
-                    saw_format_mismatch = true;
-                }
-
-                // Progress parsing
-                if (tracker != null && duration > 0) {
-                    double current = parse_progress_time (line);
-                    if (current >= 0) {
-                        tracker.update_from_time (current, duration, 0.0, 100.0);
-                    }
+                if (exit == 0) {
+                    string result = output_path;
+                    report_status (@"Subtitles burned in!\n\nSaved to:\n$result",
+                        StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
+                    Idle.add (() => {
+                        apply_done (operation_id, new OperationOutputResult.for_file (result));
+                        return Source.REMOVE;
+                    });
+                } else if (saw_format_mismatch) {
+                    report_apply_error (
+                        operation_id,
+                        "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
+                        "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
+                        "are not interchangeable. For bitmap subtitles, make sure the burn-in track " +
+                        "is correctly detected as bitmap — the overlay filter will be used automatically."
+                    );
+                } else {
+                    report_apply_error (operation_id, @"Burn-in failed (exit code $exit).");
                 }
             });
-
-            // Cleanup tracker
-            if (tracker != null) {
-                if (runner.is_cancelled ()) {
-                    tracker.hide_cancelled ();
-                } else {
-                    tracker.hide ();
-                }
-            }
-
-            if (runner.is_cancelled ()) {
-                report_status ("Burn-in cancelled.",
-                    StatusIcon.CANCELLED_ICON, StatusIcon.CANCELLED_CSS);
-                Idle.add (() => {
-                    apply_cancelled (operation_id);
-                    return Source.REMOVE;
-                });
-                return;
-            }
-
-            if (exit == 0) {
-                string result = output_path;
-                report_status (@"Subtitles burned in!\n\nSaved to:\n$result",
-                    StatusIcon.SUCCESS_ICON, StatusIcon.SUCCESS_CSS);
-                Idle.add (() => {
-                    apply_done (operation_id, new OperationOutputResult.for_file (result));
-                    return Source.REMOVE;
-                });
-            } else if (saw_format_mismatch) {
-                report_apply_error (
-                    operation_id,
-                    "Subtitle format mismatch — cannot convert between text and bitmap formats.\n\n" +
-                    "Text formats (SRT, ASS, VTT) and bitmap formats (PGS, VobSub, DVB) " +
-                    "are not interchangeable. For bitmap subtitles, make sure the burn-in track " +
-                    "is correctly detected as bitmap — the overlay filter will be used automatically."
-                );
-            } else {
-                report_apply_error (operation_id, @"Burn-in failed (exit code $exit).");
-            }
-        });
+        } catch (Error e) {
+            report_apply_error (operation_id, "Could not start the subtitle burn-in thread: " + e.message);
+        }
     }
 
 #if TRIM_SUBTITLES_STATE_TEST_BUILD
@@ -1299,25 +1310,19 @@ public class SubtitlesRunner : Object {
 
     /** Probe video duration in seconds (runs synchronously — call from bg thread). */
     private double probe_duration (string input_file) {
-        try {
-            string[] cmd = {
-                AppSettings.get_default ().ffprobe_path,
-                "-v", "quiet",
-                "-print_format", "csv=p=0",
-                "-show_entries", "format=duration",
-                input_file
-            };
-            string stdout_buf, stderr_buf;
-            int status;
-            Process.spawn_sync (null, cmd, null,
-                                SpawnFlags.SEARCH_PATH,
-                                null, out stdout_buf, out stderr_buf, out status);
-            if (status == 0) {
-                double dur = double.parse (stdout_buf.strip ());
-                if (dur > 0) return dur;
-            }
-        } catch (Error e) {
-            log_line ("ffprobe duration error: " + e.message);
+        string[] cmd = {
+            AppSettings.get_default ().ffprobe_path,
+            "-v", "quiet",
+            "-print_format", "csv=p=0",
+            "-show_entries", "format=duration",
+            input_file
+        };
+        string stdout_buf, stderr_buf;
+        int status = FfprobeUtils.run_capture_with_timeout (
+            cmd, out stdout_buf, out stderr_buf);
+        if (status == 0) {
+            double dur = double.parse (stdout_buf.strip ());
+            if (dur > 0) return dur;
         }
         return 0.0;
     }
