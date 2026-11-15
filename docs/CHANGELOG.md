@@ -8,7 +8,7 @@ it does not require another entry about updating the log.
 
 ## Active work
 
-TASK-20261114-release-2.1.1 — Codex (GPT-6), 2026-11-14 America/Phoenix; main at 0195cf5, main checkout. Prepare and publish 2.1.1 to GitHub and AUR, as requested. Owns version constants, release notes, shared logs and AUR package metadata. In progress; build/tests passed, next: publish GitHub tag/release and build/publish AUR package.
+No active work.
 
 When claiming a task, replace the line above with an entry using these fields.
 Keep other agents' entries intact; restore the line only when none remain.
@@ -42,6 +42,19 @@ Dependencies / blockers / next action:
 - **Publication:** this version commit is intended for tag v2.1.1. GitHub
   release and AUR 2.1.1-1 publication follow; completion recorded below.
   No installation to the user's system or settings changes.
+- **Published:** release commit `c34c662`, annotated tag `v2.1.1`, and
+  [GitHub release](https://github.com/orlfman/FFmpeg-Converter-GTK/releases/tag/v2.1.1)
+  with the checked-in end-user notes. AUR commit `8fee240` publishes
+  `ffmpeg-converter-gtk` 2.1.1-1; confirmed the public package page and
+  cgit `.SRCINFO` show the new version (the RPC response initially cached
+  2.1.0-1). Both repositories pushed successfully.
+- **Package verification:** downloaded the published tag archive; SHA-256
+  `3521911f117af8a250263ccc9f0acccc375567c16a48dfd5bd9b94247c726587`.
+  `makepkg --verifysource` and `makepkg --noconfirm` succeed. Inspected
+  package metadata and binary/desktop/icon/license contents. PKGBUILD namcap
+  is clean; package namcap only suggests ffmpeg may be unnecessary, which
+  is expected because it is launched at runtime rather than linked.
+  Package built locally, not installed. Release task complete.
 
 ### TASK-20261114-health-publish — Commit and push of the health audit, fixes and reviews
 

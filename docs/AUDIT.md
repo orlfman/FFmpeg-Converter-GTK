@@ -71,6 +71,14 @@ fixed, verified, deferred or reopened; retain the history below.
   lack of an end-to-end cancelled segment-copy check and broader media
   calibration measurements. No new manual UI/performance pass. Package
   verification against the published tag will follow before AUR publication.
+- **Publication follow-up:** tagged `c34c662` as v2.1.1, published the
+  GitHub release, then downloaded and checksum-verified that tag archive.
+  The AUR recipe builds `ffmpeg-converter-gtk-2.1.1-1-x86_64.pkg.tar.zst`
+  successfully with makepkg; package contents and version are correct.
+  PKGBUILD namcap reports nothing; package namcap only flags the runtime
+  ffmpeg dependency as potentially unused (retained intentionally).
+  AUR commit `8fee240` pushed; public package page and `.SRCINFO` confirm
+  2.1.1-1. No new findings. No system installation performed.
 
 ### AUD-20261114-health-fix-recheck — Independent review of the two follow-up fixes
 
